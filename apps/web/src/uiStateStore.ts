@@ -449,8 +449,34 @@ export function reorderProjects(
   projectOrder.splice(insertIndex, 0, ...removed);
   return {
     ...state,
-    projectOrder,
+    projectOrder: mergeVisibleProjectOrder(state.projectOrder, currentProjectOrder, projectOrder),
   };
+}
+
+/**
+ * `currentProjectOrder` may be only the projects the environment filter shows.
+ * Saved slots of visible projects take the reordered keys in sequence, hidden
+ * projects keep their slots, and unsaved visible projects go last. Legacy cwd
+ * keys are dropped: they match by path across environments, so a kept one
+ * could override the new position.
+ */
+function mergeVisibleProjectOrder(
+  savedOrder: readonly string[],
+  visibleOrder: readonly string[],
+  reorderedVisible: readonly string[],
+): string[] {
+  const visibleSet = new Set(visibleOrder);
+  let next = 0;
+  const merged: string[] = [];
+  for (const key of savedOrder) {
+    if (visibleSet.has(key)) {
+      merged.push(reorderedVisible[next++]!);
+    } else if (!key.startsWith(LEGACY_PROJECT_CWD_PREFERENCE_PREFIX)) {
+      merged.push(key);
+    }
+  }
+  merged.push(...reorderedVisible.slice(next));
+  return merged;
 }
 
 interface UiStateStore extends UiState {

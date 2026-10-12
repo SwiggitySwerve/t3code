@@ -109,6 +109,45 @@ describe("uiStateStore pure functions", () => {
     expect(next.projectOrder).toEqual([keyB, keyC, keyALocal, keyARemote]);
   });
 
+  it("keeps projects hidden by the environment filter in their saved positions", () => {
+    const state = makeUiState({
+      projectOrder: [
+        "env-a:proj-1",
+        "env-b:proj-x",
+        "env-a:proj-2",
+        "env-b:proj-y",
+        "env-a:proj-3",
+      ],
+    });
+    const visibleOrder = ["env-a:proj-1", "env-a:proj-2", "env-a:proj-3"];
+
+    const next = reorderProjects(state, visibleOrder, ["env-a:proj-3"], ["env-a:proj-1"]);
+
+    expect(next.projectOrder).toEqual([
+      "env-a:proj-3",
+      "env-b:proj-x",
+      "env-a:proj-1",
+      "env-b:proj-y",
+      "env-a:proj-2",
+    ]);
+  });
+
+  it("appends visible projects missing from the saved order and drops legacy cwd keys", () => {
+    const state = makeUiState({
+      projectOrder: [legacyProjectCwdPreferenceKey("/repo/a"), "env-a:proj-1", "env-b:proj-x"],
+    });
+    const visibleOrder = ["env-a:proj-a", "env-a:proj-1", "env-a:proj-new"];
+
+    const next = reorderProjects(state, visibleOrder, ["env-a:proj-a"], ["env-a:proj-new"]);
+
+    expect(next.projectOrder).toEqual([
+      "env-a:proj-1",
+      "env-b:proj-x",
+      "env-a:proj-new",
+      "env-a:proj-a",
+    ]);
+  });
+
   it("does not reorder missing or identical groups", () => {
     const currentOrder = ["env-local:proj-a", "env-local:proj-b"];
     const state = makeUiState();
