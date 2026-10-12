@@ -29,3 +29,14 @@ export function resolveHomeEnvironmentSelection(
     isReady,
   );
 }
+
+/**
+ * The full-page empty state has no environment recovery, so a missing
+ * selection falls through to the list empty state that offers "Show all".
+ */
+export function homeShowsFullPageEmptyState(input: {
+  readonly hasAnyThreads: boolean;
+  readonly environmentMissing: boolean;
+}): boolean {
+  return !input.hasAnyThreads && !input.environmentMissing;
+}

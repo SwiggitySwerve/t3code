@@ -75,6 +75,7 @@ import {
   findHomeProjectScope,
   type HomeProjectSortOrder,
 } from "./homeThreadList";
+import { homeShowsFullPageEmptyState } from "./home-environment-selection";
 import { createSwipeRowActivation } from "./swipe-row-activation";
 import { SwipeableScrollGateProvider, useSwipeableScrollGate } from "./thread-swipe-actions";
 import { useMaterialFabScroll } from "./MaterialFabScrollContext";
@@ -934,7 +935,12 @@ export function HomeScreen(props: HomeScreenProps) {
     projectCount: props.projects.length,
   });
 
-  if (!hasAnyThreads) {
+  if (
+    homeShowsFullPageEmptyState({
+      hasAnyThreads,
+      environmentMissing: props.environmentMissing,
+    })
+  ) {
     return (
       <View className={containerClassName}>
         <View
