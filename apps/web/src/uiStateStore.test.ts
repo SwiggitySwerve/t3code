@@ -132,6 +132,20 @@ describe("uiStateStore pure functions", () => {
     ]);
   });
 
+  it("keeps unsaved hidden projects in place when given every environment's order", () => {
+    const state = makeUiState({ projectOrder: [] });
+    const fullOrder = ["env-b:proj-x", "env-b:proj-y", "env-a:proj-1", "env-a:proj-2"];
+
+    const next = reorderProjects(state, fullOrder, ["env-a:proj-2"], ["env-a:proj-1"]);
+
+    expect(next.projectOrder).toEqual([
+      "env-b:proj-x",
+      "env-b:proj-y",
+      "env-a:proj-2",
+      "env-a:proj-1",
+    ]);
+  });
+
   it("appends visible projects missing from the saved order and drops legacy cwd keys", () => {
     const state = makeUiState({
       projectOrder: [legacyProjectCwdPreferenceKey("/repo/a"), "env-a:proj-1", "env-b:proj-x"],

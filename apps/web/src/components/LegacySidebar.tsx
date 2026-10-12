@@ -88,7 +88,12 @@ import { isTerminalFocused } from "../lib/terminalFocus";
 import { isMacPlatform } from "../lib/utils";
 import { useSidebarPendingFileDropStore } from "../sidebarPendingFileDropStore";
 import { makeWorkspaceFileDropHandlers } from "./chat/workspaceFileDrop";
-import { readThreadShell, useThreadShells, useThreadShellsForProjectRefs } from "../state/entities";
+import {
+  readThreadShell,
+  useProjects,
+  useThreadShells,
+  useThreadShellsForProjectRefs,
+} from "../state/entities";
 import {
   useEnvironmentSelection,
   useSelectedEnvironmentProjects,
@@ -3251,9 +3256,25 @@ const SidebarProjectsContent = memo(function SidebarProjectsContent(
   );
 });
 
+function orderProjectsBySavedOrder<
+  T extends Parameters<typeof getProjectOrderKey>[0] & { readonly workspaceRoot: string },
+>(projects: readonly T[], projectOrder: readonly string[]): T[] {
+  return orderItemsByPreferredIds({
+    items: projects,
+    preferredIds: projectOrder,
+    getId: getProjectOrderKey,
+    getPreferenceIds: (project) => [
+      getProjectOrderKey(project),
+      legacyProjectCwdPreferenceKey(project.workspaceRoot),
+    ],
+  });
+}
+
 export default function LegacySidebar() {
   // Projects, their groups and their thread lists follow the environment filter.
   const projects = useSelectedEnvironmentProjects();
+  // Manual drag order is saved across environments.
+  const allProjects = useProjects();
   const sidebarThreads = useThreadShells();
   const projectExpandedById = useUiStateStore((store) => store.projectExpandedById);
   const projectOrder = useUiStateStore((store) => store.projectOrder);
@@ -3330,17 +3351,10 @@ export default function LegacySidebar() {
       ),
     [environments],
   );
-  const orderedProjects = useMemo(() => {
-    return orderItemsByPreferredIds({
-      items: projects,
-      preferredIds: projectOrder,
-      getId: getProjectOrderKey,
-      getPreferenceIds: (project) => [
-        getProjectOrderKey(project),
-        legacyProjectCwdPreferenceKey(project.workspaceRoot),
-      ],
-    });
-  }, [projectOrder, projects]);
+  const orderedProjects = useMemo(
+    () => orderProjectsBySavedOrder(projects, projectOrder),
+    [projectOrder, projects],
+  );
 
   // Build a mapping from physical project key → logical project key for
   // cross-environment grouping.  Projects that share a repositoryIdentity
@@ -3498,9 +3512,15 @@ export default function LegacySidebar() {
         (member) => member.physicalProjectKey,
       );
       const overMemberKeys = overProject.memberProjects.map((member) => member.physicalProjectKey);
-      reorderProjects(orderedProjects.map(getProjectOrderKey), activeMemberKeys, overMemberKeys);
+      // The saved order spans every environment, so reorder the full list, not
+      // only the projects the environment filter shows.
+      reorderProjects(
+        orderProjectsBySavedOrder(allProjects, projectOrder).map(getProjectOrderKey),
+        activeMemberKeys,
+        overMemberKeys,
+      );
     },
-    [orderedProjects, sidebarProjectSortOrder, reorderProjects, sidebarProjects],
+    [allProjects, projectOrder, sidebarProjectSortOrder, reorderProjects, sidebarProjects],
   );
 
   const handleProjectDragStart = useCallback(
