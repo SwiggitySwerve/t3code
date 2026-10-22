@@ -181,6 +181,12 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
       "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child.",
   }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+  resultSchema: Schema.optional(
+    Schema.Record(Schema.String, Schema.Unknown).annotate({
+      description:
+        "Optional JSON Schema for the child's result. The child is asked to end its final message with a fenced json block matching it; task_status and task_wait then return the parsed value as structuredResult, or structuredResultError when it is missing or does not match.",
+    }),
+  ),
   runtimeMode: Schema.optional(
     OrchestratorMcpRuntimeMode.annotate({
       description:
@@ -212,6 +218,14 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
     }),
   ),
   summary: Schema.NullOr(Schema.String),
+  structuredResult: Schema.optional(Schema.Unknown).annotate({
+    description:
+      "The parsed json result when the task was delegated with a resultSchema and it matches.",
+  }),
+  structuredResultError: Schema.optional(Schema.String).annotate({
+    description:
+      "Why a task delegated with a resultSchema has no structuredResult: no json block, invalid JSON, or a schema mismatch.",
+  }),
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   hasPendingQuestion: Schema.Boolean.annotate({
     description:
@@ -238,6 +252,7 @@ export const OrchestratorMcpDelegateTasksItem = Schema.Struct({
   title: OrchestratorMcpDelegateTaskInput.fields.title,
   role: OrchestratorMcpDelegateTaskInput.fields.role,
   isolation: OrchestratorMcpDelegateTaskInput.fields.isolation,
+  resultSchema: OrchestratorMcpDelegateTaskInput.fields.resultSchema,
   runtimeMode: OrchestratorMcpDelegateTaskInput.fields.runtimeMode,
   interactionMode: OrchestratorMcpDelegateTaskInput.fields.interactionMode,
   clientRequestId: Schema.optional(
@@ -296,6 +311,8 @@ export const OrchestratorMcpTaskWaitReady = Schema.Struct({
   childThreadId: ThreadId,
   status: OrchestratorMcpDelegatedTaskStatus,
   summary: Schema.NullOr(Schema.String),
+  structuredResult: OrchestratorMcpDelegateTaskResult.fields.structuredResult,
+  structuredResultError: OrchestratorMcpDelegateTaskResult.fields.structuredResultError,
   hasPendingQuestion: Schema.Boolean,
   pendingApproval: OrchestratorMcpDelegateTaskResult.fields.pendingApproval,
 });

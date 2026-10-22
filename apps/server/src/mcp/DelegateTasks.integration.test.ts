@@ -315,6 +315,29 @@ describe("task_wait", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("returns why a task asked for a json result has none", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const { tasks } = yield* decodeStarted(
+        (yield* invoke("delegate_tasks", {
+          tasks: [
+            { task: "Report a verdict.", resultSchema: { type: "object", required: ["verdict"] } },
+          ],
+        })).structuredContent,
+      );
+      const task = (yield* childTasks)[0]!;
+      expect(task.prompt).toContain('{"type":"object","required":["verdict"]}');
+      yield* stopChild(tasks[0]!.childThreadId);
+      const waited = yield* decodeWait(
+        (yield* invoke("task_wait", { taskIds: [tasks[0]!.taskId] })).structuredContent,
+      );
+      expect(waited.ready[0]).toMatchObject({
+        status: "interrupted",
+        structuredResultError: "The result has no fenced ```json block.",
+      });
+      expect(waited.ready[0]?.structuredResult).toBeUndefined();
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("rejects a task that belongs to another thread", () =>
     Effect.gen(function* () {
       yield* startParent;

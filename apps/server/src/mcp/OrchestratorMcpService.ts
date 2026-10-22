@@ -117,6 +117,12 @@ import {
 } from "./McpInvocationContext.ts";
 import * as Metrics from "../observability/Metrics.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import {
+  readStructuredResult,
+  resultSchemaOf,
+  withResultSchema,
+} from "./delegatedTaskResultFormat.ts";
+import { validateJsonSchema } from "./jsonSchemaValidation.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -829,10 +835,20 @@ function threadTitle(input: {
   return detail.length > 80 ? `${detail.slice(0, 77)}...` : detail;
 }
 
-function taskPrompt(input: OrchestratorMcpDelegateTaskInput): string {
-  return input.role === undefined || input.role === "general"
-    ? input.task
-    : `Act as the ${input.role} sub-agent for this task.\n\n${input.task}`;
+function structuredResultFor(prompt: string, summary: string | null) {
+  const schema = summary === null ? undefined : resultSchemaOf(prompt);
+  return schema === undefined || summary === null
+    ? {}
+    : readStructuredResult(summary, (value) => validateJsonSchema(schema, value));
+}
+
+function taskPrompt(input: OrchestratorMcpDelegateTasksItem): string {
+  return withResultSchema(
+    input.role === undefined || input.role === "general"
+      ? input.task
+      : `Act as the ${input.role} sub-agent for this task.\n\n${input.task}`,
+    input.resultSchema,
+  );
 }
 
 function threadSettlement(
@@ -1642,6 +1658,7 @@ const make = Effect.gen(function* () {
       model: modelSelection.model,
       options: modelSelection.options ?? [],
       summary: derivedResult,
+      ...structuredResultFor(task.prompt, isTerminalTaskStatus(status) ? derivedResult : null),
       resultContextTransferId,
       latestTerminalRunId: terminalRun?.id ?? null,
       latestTerminalStatus:
@@ -2508,6 +2525,12 @@ const make = Effect.gen(function* () {
             childThreadId: result.childThreadId,
             status: result.status,
             summary: result.summary,
+            ...(result.structuredResult === undefined
+              ? {}
+              : { structuredResult: result.structuredResult }),
+            ...(result.structuredResultError === undefined
+              ? {}
+              : { structuredResultError: result.structuredResultError }),
             hasPendingQuestion: result.hasPendingQuestion,
             pendingApproval: result.pendingApproval,
           };
