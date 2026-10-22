@@ -270,6 +270,7 @@ export function layerWithRegistry<Error>(
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
+    readonly maxRunningDelegatedTasks?: number;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
@@ -302,6 +303,9 @@ export function layerWithRegistry<Error>(
     ...(options.continueThreadsAfterServerUpdate === undefined
       ? {}
       : { continueThreadsAfterServerUpdate: options.continueThreadsAfterServerUpdate }),
+    ...(options.maxRunningDelegatedTasks === undefined
+      ? {}
+      : { maxRunningDelegatedTasks: options.maxRunningDelegatedTasks }),
   }).pipe(Layer.orDie);
   const layerStores = Layer.mergeAll(
     EventStore.layer,

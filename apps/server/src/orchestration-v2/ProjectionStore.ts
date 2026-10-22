@@ -555,6 +555,14 @@ export interface ProjectionStoreV2Shape {
   readonly getRecoveryThreadIds: (
     kind: ProjectionRecoveryKind,
   ) => Effect.Effect<ReadonlyArray<ThreadId>, ProjectionStoreV2Error>;
+  /** Running admitted delegated runs, and the runs waiting for a slot, oldest first. */
+  readonly getDelegatedRunAdmission: () => Effect.Effect<
+    {
+      readonly admitted: number;
+      readonly waiting: ReadonlyArray<{ readonly threadId: ThreadId; readonly runId: RunId }>;
+    },
+    ProjectionStoreV2Error
+  >;
   readonly getUnreadableThreadIds: () => Effect.Effect<
     ReadonlyArray<ThreadId>,
     ProjectionStoreV2Error
@@ -4024,6 +4032,39 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
     );
 
+    const getDelegatedRunAdmission = Effect.fn("ProjectionStore.getDelegatedRunAdmission")(
+      function* () {
+        // Active statuses are covered by the partial recovery index, so this
+        // reads only the environment's live runs.
+        const rows = yield* sql<{
+          readonly run_id: string;
+          readonly thread_id: string;
+          readonly status: string;
+          readonly admission: string;
+        }>`
+          SELECT run_id, thread_id, status, admission FROM (
+            SELECT run_id, thread_id, status, requested_at,
+              CASE WHEN json_valid(payload_json)
+                THEN json_extract(payload_json, '$.admission') END AS admission
+            FROM orchestration_v2_projection_runs
+            WHERE status IN ('preparing', 'starting', 'running', 'waiting')
+          )
+          WHERE admission IS NOT NULL
+          ORDER BY requested_at ASC, run_id ASC
+        `;
+        return {
+          admitted: rows.filter((row) => row.admission === "admitted").length,
+          waiting: rows
+            .filter((row) => row.admission === "waiting" && row.status === "preparing")
+            .map((row) => ({
+              threadId: ThreadId.make(row.thread_id),
+              runId: RunId.make(row.run_id),
+            })),
+        };
+      },
+      Effect.mapError((cause) => new ProjectionStoreSetupError({ cause })),
+    );
+
     const getUnreadableThreadIds = Effect.fn("ProjectionStore.getUnreadableThreadIds")(
       function* () {
         const actualThreadIds = new Set<ThreadId>();
@@ -6544,6 +6585,7 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
       getProviderControlContext,
       getLimitRecoveryCandidates,
       getRecoveryThreadIds,
+      getDelegatedRunAdmission,
       getUnreadableThreadIds,
       getThreadSnapshot,
       getThreadSnapshotWindow,
@@ -6751,6 +6793,26 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
               .toSorted((left, right) => left.id.localeCompare(right.id)),
           ),
         ),
+      getDelegatedRunAdmission: Effect.fn("ProjectionStore.getDelegatedRunAdmission")(function* () {
+        const projections = [...(yield* Ref.get(replayState)).projections.values()];
+        const live = projections
+          .flatMap((projection) => projection.runs)
+          .filter(
+            (run) =>
+              run.admission !== undefined &&
+              ["preparing", "starting", "running", "waiting"].includes(run.status),
+          )
+          .toSorted(
+            (left, right) =>
+              DateTime.toEpochMillis(left.requestedAt) - DateTime.toEpochMillis(right.requestedAt),
+          );
+        return {
+          admitted: live.filter((run) => run.admission === "admitted").length,
+          waiting: live
+            .filter((run) => run.admission === "waiting" && run.status === "preparing")
+            .map((run) => ({ threadId: run.threadId, runId: run.id })),
+        };
+      }),
       getRecoveryThreadIds: Effect.fn("ProjectionStore.getRecoveryThreadIds")(function* (kind) {
         const projections = (yield* Ref.get(replayState)).projections;
         return [...projections.values()]

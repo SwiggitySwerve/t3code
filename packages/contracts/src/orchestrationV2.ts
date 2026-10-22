@@ -554,6 +554,11 @@ export const OrchestrationV2Run = Schema.Struct({
   contextHandoffId: Schema.NullOr(ContextHandoffId),
   restartContinuationOfRunId: Schema.optional(RunId),
   delegatedTaskId: Schema.optional(NodeId),
+  /**
+   * Set on a delegated child's first run. "waiting" holds it as preparing until a slot
+   * under the environment's running-delegated-task limit is free.
+   */
+  admission: Schema.optional(Schema.Literals(["waiting", "admitted"])),
   workStartedAt: Schema.optional(Schema.DateTimeUtc),
   restartCancelledBackgroundWork: Schema.optional(
     Schema.Array(OrchestrationV2RestartCancelledBackgroundWork),

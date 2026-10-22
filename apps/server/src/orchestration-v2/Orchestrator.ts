@@ -77,6 +77,7 @@ import * as Path from "effect/Path";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
+import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
@@ -532,6 +533,7 @@ function pendingThreadTitleGenerationEffect(
 }
 
 const WORKSPACE_PREPARATION_INPUT = "Preparing workspace";
+const ADMISSION_WAIT_TITLE = "Waiting for a free agent slot";
 
 function withoutPreparationResult(
   item: Extract<OrchestrationV2TurnItem, { readonly type: "command_execution" }>,
@@ -1019,6 +1021,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         yield* Ref.update(events, (existing) => [...existing, withId]);
         return withId;
       });
+
+  const delegatedAdmissionFull = Effect.fnUntraced(function* () {
+    const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+    const admission = yield* projectionStore.getDelegatedRunAdmission();
+    return admission.waiting.length > 0 || admission.admitted >= settings.maxRunningDelegatedTasks;
+  });
 
   // This runs inside the write transaction for every command, so finished leaf
   // nodes of finished runs stay unread: busy threads hold thousands of them.
@@ -6961,6 +6969,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
         ),
       );
+      // A worktree child already waits for its checkout and starts when that is ready.
+      // Other children queue behind earlier waiting ones, so the order is fair.
+      const awaitsAdmission =
+        command.workspaceStrategy === undefined &&
+        (yield* delegatedAdmissionFull().pipe(mapDispatchError(command)));
 
       const now = command.createdAt ?? (yield* DateTime.now);
       const taskNodeId = idAllocator.derive.delegatedTaskNode({
@@ -7115,20 +7128,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         attachments: [],
         modelSelection: command.modelSelection,
         dispatchMode:
-          command.workspaceStrategy === undefined
-            ? { type: "start_immediately" }
-            : { type: "defer_start", workspaceStrategy: command.workspaceStrategy },
+          command.workspaceStrategy !== undefined
+            ? { type: "defer_start", workspaceStrategy: command.workspaceStrategy }
+            : awaitsAdmission
+              ? { type: "defer_start" }
+              : { type: "start_immediately" },
       } satisfies Extract<OrchestrationV2Command, { readonly type: "message.dispatch" }>;
       yield* dispatchMessage(childMessageCommand, events, effects);
 
-      const childProjection = yield* getProjectionWithPendingEvents(childThreadId, events);
-      const childRun = childProjection.runs[0];
-      if (childRun === undefined) {
+      const createdChild = yield* getProjectionWithPendingEvents(childThreadId, events);
+      const createdRun = createdChild.runs[0];
+      if (createdRun === undefined) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Delegated child thread ${childThreadId} did not create a run.`,
         });
+      }
+      const childRun: OrchestrationV2Run = {
+        ...createdRun,
+        admission: awaitsAdmission ? "waiting" : "admitted",
+      };
+      yield* emitEvent({
+        type: "run.updated",
+        threadId: childThreadId,
+        runId: childRun.id,
+        providerInstanceId: childRun.providerInstanceId,
+        occurredAt: now,
+        payload: childRun,
+      });
+      if (awaitsAdmission) {
+        const preparation = (yield* Ref.get(events)).findLast(
+          (event) =>
+            event.type === "turn-item.updated" &&
+            event.payload.runId === childRun.id &&
+            event.payload.type === "command_execution" &&
+            event.payload.input === WORKSPACE_PREPARATION_INPUT,
+        );
+        if (preparation?.type === "turn-item.updated") {
+          yield* emitEvent({
+            ...preparation,
+            payload: { ...preparation.payload, title: ADMISSION_WAIT_TITLE },
+          });
+        }
       }
       const spawnTransferId = yield* mapDispatchError(command)(
         idAllocator.allocate.contextTransfer({
@@ -8463,6 +8505,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: { ...state.rootNode, checkpointScopeId: checkpointScope.id },
       });
+      const admitted = state.run.admission === "waiting";
       yield* emitEvent({
         type: "turn-item.updated",
         threadId: command.threadId,
@@ -8473,8 +8516,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: {
           ...state.preparationItem,
           status: "completed",
-          title: "Workspace ready",
-          output: "Workspace preparation completed.",
+          title: admitted ? "Agent slot free" : "Workspace ready",
+          output: admitted
+            ? "A running delegated task finished, so this one starts."
+            : "Workspace preparation completed.",
           exitCode: 0,
           completedAt: now,
           updatedAt: now,
@@ -8487,7 +8532,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         nodeId: state.rootNode.id,
         providerInstanceId: state.run.providerInstanceId,
         occurredAt: now,
-        payload: { ...state.run, status: "starting" },
+        payload: {
+          ...state.run,
+          status: "starting",
+          ...(admitted ? { admission: "admitted" as const } : {}),
+        },
       });
       yield* Ref.update(effects, (existing) => [
         ...existing,
@@ -11274,8 +11323,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.auto-settle": {
         // Automatic settlement (#8600): the sweep evaluated a shell snapshot,
         // so re-check against the live thread before settling. Any change
-        // after the snapshot â€” or any explicit override, including the
-        // un-settle button's "active" â€” wins over the sweep.
+        // after the snapshot Ã¢â‚¬â€ or any explicit override, including the
+        // un-settle button's "active" Ã¢â‚¬â€ wins over the sweep.
         const thread = yield* projectionStore
           .getThread(command.threadId)
           .pipe(
@@ -11811,6 +11860,38 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       : threadDispatch.withLock(parentThreadId, dispatch);
   });
 
+  // One admission pass at a time, so two finishing runs cannot both fill the same slot.
+  const admissionLock = yield* Semaphore.make(1);
+  /** Starts waiting delegated runs, oldest first, while the running limit has room. */
+  const admitWaitingDelegatedRuns = admissionLock
+    .withPermits(1)(
+      Effect.gen(function* () {
+        const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
+        const admission = yield* projectionStore.getDelegatedRunAdmission();
+        const free = Math.max(0, settings.maxRunningDelegatedTasks - admission.admitted);
+        for (const waiting of admission.waiting.slice(0, free)) {
+          yield* dispatchWithReceipt({
+            type: "prepared-run.release",
+            commandId: CommandId.make(`command:system:delegated-admission:${waiting.runId}`),
+            threadId: waiting.threadId,
+            runId: waiting.runId,
+          }).pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Failed to start a waiting delegated task", {
+                runId: waiting.runId,
+                cause,
+              }),
+            ),
+          );
+        }
+      }),
+    )
+    .pipe(
+      Effect.catchCause((cause) =>
+        Effect.logWarning("Failed to read delegated task admission", { cause }),
+      ),
+    );
+
   const handleRunUpdate = Effect.fn("Orchestrator.handleRunUpdate")(
     function* (stored: OrchestrationV2StoredEvent) {
       if (stored.event.type !== "run.updated") return;
@@ -11847,6 +11928,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           parentThreadId,
           finalizeAppOwnedSubagent(threadId, { syncRunId: run.id }),
         );
+      }
+      if (run.admission !== undefined && delegatedTaskTerminalStatus(run.status) !== null) {
+        yield* admitWaitingDelegatedRuns;
       }
     },
     (effect, stored) =>
@@ -12025,6 +12109,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         }),
       ),
     );
+    // A run that finished while the server was down left its slot without a run update.
+    yield* admitWaitingDelegatedRuns;
   });
 
   const delegatedTaskResultPending = Effect.fn("Orchestrator.delegatedTaskResultPending")(

@@ -82,6 +82,12 @@ export type SidebarThreadPreviewCount = typeof SidebarThreadPreviewCount.Type;
 const DEFAULT_SIDEBAR_THREAD_PREVIEW_COUNT: SidebarThreadPreviewCount = 6;
 export const MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 1;
 export const MAX_SIDEBAR_AUTO_SETTLE_AFTER_DAYS = 90;
+/** Environment-wide cap on delegated child tasks that run at once; later ones wait to start. */
+export const DEFAULT_MAX_RUNNING_DELEGATED_TASKS = 16;
+export const MaxRunningDelegatedTasks = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: 256 }),
+);
+
 export const SidebarAutoSettleAfterDays = Schema.Number.check(
   Schema.isBetween({
     minimum: MIN_SIDEBAR_AUTO_SETTLE_AFTER_DAYS,
@@ -1156,6 +1162,9 @@ export const ServerSettings = Schema.Struct({
   continueThreadsAfterServerUpdate: Schema.Boolean.pipe(
     Schema.withDecodingDefault(Effect.succeed(true)),
   ),
+  maxRunningDelegatedTasks: MaxRunningDelegatedTasks.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_MAX_RUNNING_DELEGATED_TASKS)),
+  ),
 
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
@@ -1528,6 +1537,7 @@ export const ServerSettingsPatch = Schema.Struct({
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
+  maxRunningDelegatedTasks: Schema.optionalKey(MaxRunningDelegatedTasks),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),
