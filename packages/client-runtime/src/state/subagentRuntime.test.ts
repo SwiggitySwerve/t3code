@@ -9,7 +9,9 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
+  appWorkflowMemberThreads,
   deriveWorkflowGroups,
+  resolveAppWorkflowView,
   isWorkflowScriptMessage,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
@@ -261,5 +263,68 @@ describe("resolveWorkflowOpening", () => {
       false,
     );
     expect(isWorkflowScriptMessage({ role: "assistant", text: SCRIPT })).toBe(false);
+  });
+});
+
+describe("T3-run workflows", () => {
+  const codex = ProviderInstanceId.make("codex");
+  const claude = ProviderInstanceId.make("claude");
+  const workflow = {
+    ...subagent({
+      id: "workflow:w1",
+      title: "Review",
+      prompt: '// t3-workflow: {"budgetTokens":100}\nphase("Scan")\nreturn 1',
+      workflow: {
+        name: "review",
+        phases: [{ index: 0, title: "Scan" }],
+        agents: [
+          member({
+            index: 0,
+            label: "a",
+            phaseIndex: 0,
+            phaseTitle: "Scan",
+            childThreadId: ThreadId.make("thread:a"),
+            providerInstanceId: claude,
+            driver: ProviderDriverKind.make("claudeAgent"),
+          }),
+        ],
+      },
+    }),
+    origin: "app_owned" as const,
+    parentNodeId: "node:caller" as OrchestrationV2Subagent["parentNodeId"],
+    childThreadId: null,
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: codex,
+  };
+  const memberTask = (id: string, thread: string) => ({
+    ...subagent({ id, childThreadId: ThreadId.make(thread) }),
+    origin: "app_owned" as const,
+    parentNodeId: "workflow:w1" as OrchestrationV2Subagent["parentNodeId"],
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: codex,
+  });
+
+  it("lists each workflow's agent threads, in start order", () => {
+    const threads = appWorkflowMemberThreads([
+      workflow,
+      memberTask("node:a", "thread:a"),
+      memberTask("node:b", "thread:b"),
+    ]);
+    expect([...threads.entries()]).toEqual([["workflow:w1", ["thread:a", "thread:b"]]]);
+  });
+
+  it("shows the script without its settings line, and each agent's own provider", () => {
+    const view = resolveAppWorkflowView(workflow);
+    expect(view?.script).toBe('phase("Scan")\nreturn 1');
+    expect(view?.name).toBe("review");
+    const agent = view?.group?.phases[0]?.members[0];
+    expect(agent?.providerInstanceId).toBe(claude);
+    expect(agent?.driver).toBe("claudeAgent");
+  });
+
+  it("ignores Claude's own workflows, which run in a thread", () => {
+    expect(
+      resolveAppWorkflowView({ ...workflow, origin: "provider_native", childThreadId: "thread:c" }),
+    ).toBeNull();
   });
 });

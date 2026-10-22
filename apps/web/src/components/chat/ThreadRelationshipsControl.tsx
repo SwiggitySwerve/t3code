@@ -7,6 +7,8 @@ import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
+  appWorkflowMemberThreads,
+  isAppWorkflow,
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
   type RuntimeSubagent,
@@ -279,6 +281,27 @@ export function ThreadRelationshipsPanel(props: {
   const workflowGroupsById = new Map(
     deriveWorkflowGroups(runtimeSubagents).map((group) => [group.workflow.id, group]),
   );
+  // A T3-run workflow has no thread of its own: its first agent's row stands for the
+  // whole workflow, and the other agents' rows fold into it.
+  const foldedAppWorkflowThreads = new Set<string>();
+  for (const [workflowId, memberThreads] of appWorkflowMemberThreads(projected)) {
+    const [leadThread, ...rest] = memberThreads;
+    const workflow = projected.find((subagent) => subagent.id === workflowId);
+    if (leadThread === undefined || workflow === undefined) continue;
+    for (const thread of rest) foldedAppWorkflowThreads.add(thread);
+    subagentsByThreadId.set(leadThread as ThreadId, {
+      ...byId.get(workflow.id)!,
+      id: workflow.id,
+      threadId: workflow.threadId,
+      runId: workflow.runId,
+      nativeTaskRef: workflow.nativeTaskRef,
+      nativeStatus: workflow.status,
+      driver: workflow.driver,
+      providerInstanceId: workflow.providerInstanceId,
+      origin: workflow.origin,
+      modelSelection: workflow.modelSelection,
+    });
+  }
   const shells: ReadonlyArray<OrchestrationV2ThreadShell> = [
     ...relationshipShells,
     ...(archivedShells ?? []),
@@ -289,7 +312,9 @@ export function ThreadRelationshipsPanel(props: {
   const mergeTargetThreadId = resolveMergeBackTargetThreadId(projection);
   const relationshipRows = orderWebThreadLineageRows({
     graph,
-    rows: immediateThreadRelationships(graph, props.threadId),
+    rows: immediateThreadRelationships(graph, props.threadId).filter(
+      (row) => !foldedAppWorkflowThreads.has(row.threadId),
+    ),
     currentThreadId: props.threadId,
     mergeTargetThreadId,
   }).map((row) => {
@@ -325,7 +350,9 @@ export function ThreadRelationshipsPanel(props: {
   ];
   const runningCount =
     (projection?.subagents.filter(
-      (agent) => agent.childThreadId === null && agent.status === "running",
+      // A T3-run workflow is counted by its row below.
+      (agent) =>
+        agent.childThreadId === null && agent.status === "running" && !isAppWorkflow(agent),
     ).length ?? 0) + active.filter(({ edge }) => edge.status === "running").length;
 
   if (relationshipRows.length === 0 && runningCount === 0) {
@@ -485,8 +512,9 @@ export function ThreadRelationshipsPanel(props: {
               const canStopWorkflow =
                 canOperateWorkflow &&
                 workflowGroup?.workflow.status === "running" &&
-                agent?.origin === "provider_native" &&
-                providerDriver === "claudeAgent";
+                (agent?.origin === "app_owned" ||
+                  (agent?.origin === "provider_native" && providerDriver === "claudeAgent"));
+              const isAppWorkflowRow = workflowGroup !== undefined && agent?.origin === "app_owned";
               const trailingVisibilityClass = (workflowGroup ? canStopWorkflow : canStop)
                 ? "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0"
                 : "";
@@ -564,7 +592,10 @@ export function ThreadRelationshipsPanel(props: {
                         variant="ghost"
                         part={workflowGroup ? "primary" : "row"}
                         disabled={node?.missing === true}
-                        onClick={() => openThread(threadId)}
+                        onClick={() => {
+                          // A T3-run workflow has no thread; its agents open from the list.
+                          if (!isAppWorkflowRow) openThread(threadId);
+                        }}
                       />
                     }
                   >

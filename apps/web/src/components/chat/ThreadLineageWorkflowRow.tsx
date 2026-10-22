@@ -137,6 +137,15 @@ export function ThreadLineageWorkflowRow({
   const [phaseOpen, setPhaseOpen] = useState<ReadonlyMap<number, boolean>>(() => new Map());
   const label = group.workflow.workflowName ?? group.workflow.title;
   const phases = group.phases.filter((phase) => phase.members.length > 0);
+  // T3-run workflows record each agent's own provider; Claude's run on the workflow's.
+  const memberProvider = (member: RuntimeSubagent) =>
+    member.providerInstanceId === undefined
+      ? { providerInstanceId, provider, driver }
+      : {
+          providerInstanceId: member.providerInstanceId,
+          provider: providers?.find((entry) => entry.instanceId === member.providerInstanceId),
+          driver: member.driver ?? driver,
+        };
   return (
     <li className="group" data-workflow-expanded={expanded ? "" : undefined}>
       <div className={cn("relative", THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS)}>
@@ -221,10 +230,8 @@ export function ThreadLineageWorkflowRow({
                       <WorkflowMemberRow
                         key={member.id}
                         member={member}
-                        providerInstanceId={providerInstanceId}
-                        provider={provider}
+                        {...memberProvider(member)}
                         providers={providers}
-                        driver={driver}
                         onOpen={onOpenThread}
                         isThreadAvailable={isThreadAvailable}
                       />
@@ -238,10 +245,8 @@ export function ThreadLineageWorkflowRow({
             <WorkflowMemberRow
               key={member.id}
               member={member}
-              providerInstanceId={providerInstanceId}
-              provider={provider}
+              {...memberProvider(member)}
               providers={providers}
-              driver={driver}
               onOpen={onOpenThread}
               isThreadAvailable={isThreadAvailable}
             />

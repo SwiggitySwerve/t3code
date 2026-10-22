@@ -7,6 +7,7 @@ import type {
   OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive, isProviderNativeSubagentThread } from "@t3tools/contracts";
+import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -69,6 +70,9 @@ export interface RuntimeSubagent {
   readonly phases: ReadonlyArray<SubagentWorkflowPhase>;
   readonly runHandles: SubagentRunHandles | null;
   readonly childThreadId: string | null;
+  /** A workflow member's own provider, when it can differ from its workflow's. */
+  readonly providerInstanceId?: OrchestrationV2Subagent["providerInstanceId"] | undefined;
+  readonly driver?: OrchestrationV2Subagent["driver"] | undefined;
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
   readonly firstSeenAt: string;
   readonly startedAt: string | null;
@@ -163,6 +167,8 @@ function workflowMembersToRuntime(
       attempt: agent.attempt ?? null,
       phases: [],
       childThreadId: agent.childThreadId ?? null,
+      providerInstanceId: agent.providerInstanceId,
+      driver: agent.driver,
       recentActivity: [],
       firstSeenAt: isoFromEpochMillis(agent.queuedAt) ?? startedAt ?? coordinator.firstSeenAt,
       startedAt,
@@ -418,5 +424,62 @@ export function workflowOpeningHeadline(opening: WorkflowOpening): {
     description:
       opening.description !== null && opening.description !== title ? opening.description : null,
     agents,
+  };
+}
+
+type AppWorkflowCandidate = ProjectedSubagent &
+  Pick<OrchestrationV2Subagent, "origin" | "parentNodeId">;
+
+/**
+ * A workflow T3 itself runs (workflow_start): an app-owned row on the calling thread with no
+ * thread of its own. Its agents are app-owned tasks whose parent node is the row.
+ */
+export function isAppWorkflow(subagent: {
+  readonly origin: OrchestrationV2Subagent["origin"];
+  readonly childThreadId?: string | null | undefined;
+  readonly workflow?: OrchestrationV2SubagentWorkflow | undefined;
+}): boolean {
+  return (
+    subagent.origin === "app_owned" &&
+    subagent.workflow !== undefined &&
+    subagent.childThreadId == null
+  );
+}
+
+/** Each T3-run workflow's member threads, in the order the workflow started them. */
+export function appWorkflowMemberThreads(
+  subagents: ReadonlyArray<AppWorkflowCandidate>,
+): ReadonlyMap<string, ReadonlyArray<string>> {
+  const members = new Map<string, Array<string>>();
+  for (const workflow of subagents) {
+    if (!isAppWorkflow(workflow)) continue;
+    const threads = (workflow.workflow?.agents ?? []).flatMap((agent) =>
+      agent.childThreadId === undefined ? [] : [agent.childThreadId as string],
+    );
+    for (const task of subagents) {
+      if (
+        task.parentNodeId === workflow.id &&
+        task.childThreadId != null &&
+        !threads.includes(task.childThreadId)
+      ) {
+        threads.push(task.childThreadId);
+      }
+    }
+    members.set(workflow.id, threads);
+  }
+  return members;
+}
+
+/** A T3-run workflow drawn like a workflow opening: its plan, agents and script. */
+export function resolveAppWorkflowView(subagent: AppWorkflowCandidate): WorkflowOpening | null {
+  if (!isAppWorkflow(subagent)) return null;
+  return {
+    messageId: subagent.id,
+    script: storedWorkflowScriptSource(subagent.prompt),
+    name: subagent.workflow?.name ?? null,
+    description: subagent.title,
+    driver: subagent.driver,
+    providerInstanceId: subagent.providerInstanceId,
+    group: deriveWorkflowGroups(projectedSubagentsToRuntime([subagent]))[0] ?? null,
   };
 }

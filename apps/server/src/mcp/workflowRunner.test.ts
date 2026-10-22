@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   NodeId,
+  ProviderDriverKind,
+  ProviderInstanceId,
   type OrchestrationV2StoredEvent,
   type OrchestrationV2Subagent,
   ThreadId,
@@ -44,7 +46,13 @@ const makeHarness = Effect.gen(function* () {
         spawned += 1;
         const taskId = NodeId.make(`node:agent-${spawned}`);
         yield* Queue.offer(updates, finished(taskId));
-        return { taskId, childThreadId: ThreadId.make(`thread:agent-${spawned}`), model: null };
+        return {
+          taskId,
+          childThreadId: ThreadId.make(`thread:agent-${spawned}`),
+          model: null,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          driver: ProviderDriverKind.make("codex"),
+        };
       }),
     readAgent: () =>
       Effect.succeed({

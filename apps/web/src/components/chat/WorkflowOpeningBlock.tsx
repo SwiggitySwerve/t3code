@@ -11,7 +11,7 @@ import type {
   ProviderInstanceId,
   ServerProvider,
 } from "@t3tools/contracts";
-import { ChevronRightIcon, WorkflowIcon } from "lucide-react";
+import { ChevronRightIcon, LoaderCircleIcon, SquareIcon, WorkflowIcon } from "lucide-react";
 import { useState } from "react";
 
 import { cn } from "../../lib/utils";
@@ -40,23 +40,34 @@ export function WorkflowOpeningBlock(props: {
   readonly opening: WorkflowOpening;
   readonly environmentId: EnvironmentId;
   readonly onOpenThread: (threadId: string) => void;
+  /** Defaults to "Workflow started"; a T3-run workflow names its state instead. */
+  readonly heading?: string;
+  /** The script's latest log line, for a workflow T3 runs. */
+  readonly progress?: string | null;
+  readonly stop?: {
+    readonly onStop: () => void;
+    readonly stopping: boolean;
+    readonly disabled: boolean;
+  };
 }) {
   const { opening } = props;
   const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const headline = workflowOpeningHeadline(opening);
   const phases = opening.group?.phases.filter((phase) => phase.members.length > 0) ?? [];
-  const memberRow = (member: RuntimeSubagent) =>
-    opening.providerInstanceId === null ? null : (
+  const memberRow = (member: RuntimeSubagent) => {
+    const providerInstanceId = member.providerInstanceId ?? opening.providerInstanceId;
+    return providerInstanceId === null ? null : (
       <WorkflowMemberRow
         key={member.id}
         member={member}
         environmentId={props.environmentId}
-        providerInstanceId={opening.providerInstanceId}
+        providerInstanceId={providerInstanceId}
         providers={providers}
-        driver={opening.driver ?? undefined}
+        driver={member.driver ?? opening.driver ?? undefined}
         onOpenThread={props.onOpenThread}
       />
     );
+  };
   return (
     <section
       aria-label={`Workflow started: ${headline.title}`}
@@ -66,7 +77,9 @@ export function WorkflowOpeningBlock(props: {
       <header className="flex min-w-0 items-start gap-2">
         <WorkflowIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <p className="text-2xs font-medium text-muted-foreground">Workflow started</p>
+          <p className="text-2xs font-medium text-muted-foreground">
+            {props.heading ?? "Workflow started"}
+          </p>
           <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text="true">
             {headline.title}
           </h3>
@@ -81,7 +94,29 @@ export function WorkflowOpeningBlock(props: {
             {headline.agents}
           </span>
         ) : null}
+        {props.stop ? (
+          <Button
+            type="button"
+            size="xs"
+            variant="ghost-muted"
+            aria-label={`Stop workflow ${headline.title}`}
+            disabled={props.stop.disabled}
+            onClick={props.stop.onStop}
+          >
+            {props.stop.stopping ? (
+              <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+            ) : (
+              <SquareIcon aria-hidden className="size-3 fill-current" />
+            )}
+            Stop
+          </Button>
+        ) : null}
       </header>
+      {props.progress ? (
+        <p className="truncate px-2 text-2xs text-muted-foreground" data-thread-find-text="true">
+          {props.progress}
+        </p>
+      ) : null}
       {phases.map((phase) => (
         <section key={phase.index} aria-label={`${phase.title} phase`}>
           <h4 className="flex items-baseline gap-2 px-2 pb-0.5 text-2xs font-medium text-muted-foreground">
