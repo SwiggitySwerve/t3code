@@ -440,7 +440,9 @@ These follow the `omx graph` execution graph's protected verifiers
     Running a command needs the calling thread in full-access mode; otherwise the agent is
     refused before it starts.
   - `{ type: "structured", requiredPointers?, equals? }` reads JSON pointers from the
-    agent's structured result, so it needs `schema`.
+    agent's structured result, so it needs `schema`. With `outputId`, it reads that
+    declared output file's JSON instead and needs no `schema`; without pointers it only
+    requires the file to hold JSON.
   - `{ type: "judgment", rubric, target? }` starts a separate agent, labelled
     `check <label>`, that grades the result against the criteria and answers
     `{ outcome: "passed" | "failed", reasons }`. A judge can be wrong; its reasons are kept.
@@ -467,6 +469,10 @@ These follow the `omx graph` execution graph's protected verifiers
   - Outputs count as write scopes, so two agents never write the same output at once.
   - `agent()` then returns `{ result, outputs: { <id>: { path, sha256, sizeBytes } } }`,
     so a later agent can pin what an earlier one wrote.
+- `report: true` makes `agent()` always resolve to
+  `{ ok, result, outputs, attempts, verification, reason }`, failed or not, instead of
+  `null` on failure, so a script can record why an agent failed. A spent budget still
+  throws.
 
 #### Ultracode
 
@@ -504,6 +510,11 @@ own threads. The row stores the script with a settings line for its args and bud
 - **Stalls.** Every 30 seconds the runner checks each waited-on agent's thread.
   If its last update has not changed for `stallTimeoutMs` (default 20 minutes,
   at least 1 minute), the runner stops the agent and starts it again.
+- **Attempt deadlines.** `attemptTimeoutMs` (1 minute to 6 hours) bounds each
+  attempt, measured from the attempt's run start, so it holds across a restart.
+  The same sweep stops an attempt past its deadline; that counts as a failed
+  attempt and retries with a note asking the agent to finish within the budget.
+  It is separate from `stallTimeoutMs`, which measures inactivity.
 - **Budget.** `budgetTokens` counts the token usage providers report for
   finished agents, an estimate rather than a bill. Once it is spent, `agent()`
   throws for any agent that has not already started; agents already running
@@ -512,6 +523,92 @@ own threads. The row stores the script with a settings line for its args and bud
   `pipeline` call. The environment-wide running limit applies to every agent.
 - **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its
   own checkout of the calling thread's commit, like `delegate_task`.
+
+### Graphs: `graph_review`, `graph_start`
+
+A graph declares work as nodes with dependencies, files and checks instead of a
+script. It follows the `omx graph` execution graph (`~/.agents/graph`): review
+binds the inputs, the reviewed digest gates the start, and a graph completes only
+when every node passed its checks.
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "serial",
+  "nodes": {
+    "inventory": {
+      "subject": "Inventory fixed source data",
+      "description": "Read the input and publish its canonical JSON.",
+      "dependsOn": [],
+      "scopes": { "read": ["fixtures"], "write": ["artifacts"] },
+      "inputs": [
+        { "id": "source", "kind": "workspace_snapshot", "path": "fixtures/input/inventory.json" }
+      ],
+      "outputs": [{ "id": "inventory", "path": "artifacts/inventory.json", "maxBytes": 65536 }],
+      "verify": {
+        "type": "process",
+        "argv": ["node", "verify.mjs", "{{input:source}}", "{{output:inventory}}"]
+      },
+      "attemptBudget": "short"
+    },
+    "summary": {
+      "subject": "Summarize the published inventory",
+      "description": "Read the published inventory and publish its summary.",
+      "dependsOn": ["inventory"],
+      "inputs": [
+        { "id": "inventory", "kind": "task_output", "nodeId": "inventory", "outputId": "inventory" }
+      ],
+      "outputs": [{ "id": "summary", "path": "artifacts/summary.json" }],
+      "verify": { "type": "structured", "outputId": "summary", "requiredPointers": ["/item_count"] }
+    }
+  }
+}
+```
+
+- **Nodes.** `subject` is the agent's label and `description` its task. Optional:
+  `phase`, `target`, `role`, `schema`, `scopes`, `inputs`, `outputs`, `verify` (as
+  for workflow agents), `stallTimeoutMs`, and `attemptBudget`: `short`, `standard`
+  (default) or `long`, 30 minutes, 2 hours or 6 hours per attempt. `long` needs
+  `longBudgetApproved: true`.
+- **Inputs.** A `workspace_snapshot` names a file in the caller's checkout. A
+  `task_output` names an output another node declares; that node must be in
+  `dependsOn`.
+- **`graph_review({ graph })`** validates the graph and reports every problem as a
+  blocker: bad or duplicate ids, unknown or cyclic dependencies, unsafe paths, a
+  `task_output` naming an undeclared output or a node outside `dependsOn`, two
+  nodes declaring one output path, `long` without approval, a structured `outputId`
+  the node does not declare, and a missing or oversized input. It hashes every
+  `workspace_snapshot` input and returns the run order as `layers`, `writeConflicts`
+  between nodes with no path between them (the runner runs those one at a time), the
+  inputs it found, `ready`, and a `digest` over the normalized graph and the input
+  hashes. It starts and records nothing; Claude's read-only tool list includes it.
+- **`graph_start({ graph, acceptedDigest, budgetTokens?, title?, clientRequestId? })`**
+  reviews again and refuses blockers, a digest mismatch, or an input file that
+  changed since the review (naming the files, for reviews this server process
+  made). It then runs the graph as a workflow, so `workflow_status`,
+  `workflow_stop`, resume after a restart, the budget, the app's display and the one
+  completion wake work as for a script.
+- **Running.** The stored script is one fixed driver with the graph as its args.
+  A node starts once its own predecessors passed. Its snapshot inputs are pinned to
+  the reviewed hashes, and its `task_output` inputs to the path and hash its
+  producer published, so a node never reads bytes other than those reviewed or
+  produced. Each node runs with `report: true` and its attempt deadline. A node
+  whose predecessor did not pass is skipped, naming that predecessor.
+- **Result.** Per node: `status` (`passed`, `failed` or `skipped`), `attempts`,
+  `inputs` (id to sha256), `outputs` (id to path, sha256 and size), `verification`
+  and, unless it passed, `reason`. If every node passed the workflow completes with
+  `{ ok: true, nodes }`; otherwise it fails with `Graph failed: ` and the same record.
+- **Mapping to omx.** Field names are the omx `ProtectedExecutionContractV1` names in
+  camelCase: `depends_on` → `dependsOn`, `node_id` → `nodeId`, `output_id` →
+  `outputId`, `max_bytes` → `maxBytes`, `attempt_policy.budget` → `attemptBudget`,
+  a `structured_artifact` verifier → `verify: { type: "structured", outputId }`, and
+  an `independent_judgment` verifier → a `judgment` check (or a `process` check
+  when it is a command). Not carried over: content-addressed output snapshots (so
+  producers cannot use worktrees), publication supersession, staffing and worker
+  allocation.
+- **Owners.** `apps/server/src/mcp/workflowGraph.ts` owns graph parsing, review and
+  the driver script; `workflowChecks.ts` owns paths, files and checks;
+  `workflowRunner.ts` owns running agents.
 
 ### `create_threads`
 
@@ -757,6 +854,9 @@ Coverage includes:
   per-agent worktrees;
 - workflow schema results, script errors, and Stop through `workflow_stop`, `task_cancel`
   and the calling thread;
+- attempt deadlines, and graphs: review binding inputs without recording anything,
+  refusals of blockers, a wrong digest and a changed input, a passing graph's per-node
+  record and single wake, a failed node skipping its dependents, and Stop;
 - batch ordinary-thread creation;
 - thread listing and timeline reads, including another project's threads;
 - ordinary-thread send, wait, steering, and interruption;
