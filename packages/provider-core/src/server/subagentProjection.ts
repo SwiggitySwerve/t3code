@@ -43,6 +43,7 @@ export function subagentThreadTitle(input: {
 }
 
 export function makeSubagentChildThread(input: {
+  readonly workflowId?: NodeId;
   readonly parentThread: OrchestrationV2AppThread;
   readonly childThreadId: ThreadId;
   readonly parentNodeId: NodeId;
@@ -70,6 +71,7 @@ export function makeSubagentChildThread(input: {
       parentThreadId: input.parentThread.id,
       relationshipToParent: "subagent",
       rootThreadId: input.parentThread.lineage.rootThreadId,
+      ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
     },
     forkedFrom: {
       type: "node",

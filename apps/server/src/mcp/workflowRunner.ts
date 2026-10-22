@@ -18,6 +18,8 @@ import {
   type ProviderInstanceId,
   type OrchestratorMcpFailure,
   type ThreadId,
+  type WorkflowAgentOutcomeCategory,
+  type OrchestratorMcpWorkflowUsage,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
@@ -92,8 +94,23 @@ export interface WorkflowAgentOutcome {
   readonly structuredResultError?: string;
   /** The server stopped or restarted under it, so a new attempt is not a repeat of a judgment. */
   readonly cancelledByServerRestart: boolean;
-  /** Tokens its provider turns reported, as an estimate of its cost. */
-  readonly tokens: number;
+  readonly outcomeCategory: WorkflowAgentOutcomeCategory | null;
+  readonly usage: OrchestratorMcpWorkflowUsage;
+}
+
+/** Terminal task facts shared by live reads and persisted status after restart.
+ * Deadlines and check judgments are owned by the runner and persisted on its entry.
+ */
+export function workflowAgentOutcomeCategory(input: {
+  readonly status: string;
+  readonly started: boolean;
+  readonly checkFailed?: boolean;
+}): WorkflowAgentOutcomeCategory | null {
+  if (!TERMINAL_TASK_STATUSES.has(input.status)) return null;
+  if (!input.started) return "never_started";
+  if (input.status === "cancelled" || input.status === "interrupted") return "cancelled";
+  if (input.checkFailed) return "check_failed";
+  return input.status === "completed" ? "completed" : "provider_error";
 }
 
 /** A workspace file as the runner found it; `too_large` once it passes the caller's bound. */
@@ -178,6 +195,8 @@ export interface WorkflowRunnerDeps {
 const decodeItem = Schema.decodeUnknownExit(OrchestratorMcpDelegateTasksItem);
 
 const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
+
+const runnerTimeMillis = () => Effect.runSync(Clock.currentTimeMillis);
 
 function truncate(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
@@ -446,6 +465,12 @@ class WorkflowSession {
     const done = (value: unknown) => ({ value, entry, declaresOutputs: outputs.length > 0 });
     const settle = (status: "completed" | "failed", result: string | null) => {
       entry.state = status;
+      entry.runnerSettledAt = runnerTimeMillis();
+      const category = workflowAgentOutcomeCategory({
+        status,
+        started: entry.agentId !== undefined,
+      });
+      if (category !== null) entry.outcomeCategory ??= category;
       if (result !== null && result.trim().length > 0) {
         entry.result = truncate(result, RESULT_TEXT_LIMIT);
       }
@@ -609,6 +634,8 @@ class WorkflowSession {
         return null;
       }
       entry.agentId = started.value.taskId;
+      entry.attemptTaskIds = [...(entry.attemptTaskIds ?? []), started.value.taskId];
+      delete entry.outcomeCategory;
       entry.childThreadId = started.value.childThreadId;
       if (started.value.model !== null) entry.model = started.value.model;
       entry.providerInstanceId = started.value.providerInstanceId;
@@ -634,8 +661,12 @@ class WorkflowSession {
         return null;
       }
       const { status, summary, structuredResult, structuredResultError } = outcome.value;
-      this.spentTokens += outcome.value.tokens;
-      entry.totalTokens = (entry.totalTokens ?? 0) + outcome.value.tokens;
+      this.spentTokens += outcome.value.usage.totalTokens ?? 0;
+      if (outcome.value.usage.totalTokens !== null) {
+        entry.totalTokens = (entry.totalTokens ?? 0) + outcome.value.usage.totalTokens;
+      }
+      if (outcome.value.outcomeCategory !== null)
+        entry.outcomeCategory = outcome.value.outcomeCategory;
       if (status !== "completed" && this.timedOut.has(started.value.taskId)) {
         const passed = `passed its time budget of ${attemptTimeoutMs} ms and was stopped`;
         if (attempt + 1 < MAX_AGENT_ATTEMPTS) {
@@ -643,6 +674,7 @@ class WorkflowSession {
           this.progress = truncate(`agent "${label}" ${passed}; starting it again.`, PREVIEW_LIMIT);
           continue;
         }
+        entry.outcomeCategory = "timed_out";
         settle("failed", `Every attempt ${passed}.`);
         return null;
       }
@@ -694,6 +726,7 @@ class WorkflowSession {
       if (checked === undefined || checkType === undefined) {
         settle("completed", summary);
         if (options.schema !== undefined && structuredResultError !== undefined) {
+          entry.outcomeCategory = "check_failed";
           this.progress = truncate(`agent "${label}": ${structuredResultError}`, PREVIEW_LIMIT);
           return null;
         }
@@ -723,6 +756,7 @@ class WorkflowSession {
         this.scheduleUpdate();
         continue;
       }
+      entry.outcomeCategory = "check_failed";
       settle(
         "failed",
         `Its ${checkType} check ${checked.outcome === "error" ? "could not run" : "failed"}: ${checked.detail}`,

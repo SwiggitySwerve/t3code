@@ -7043,6 +7043,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           parentThread: parentProjection.thread,
           childThreadId,
           parentNodeId: taskNodeId,
+          ...(workflow === undefined ? {} : { workflowId: workflow.id }),
           activeProviderThreadId: null,
           providerInstanceId: command.modelSelection.instanceId,
           modelSelection: command.modelSelection,

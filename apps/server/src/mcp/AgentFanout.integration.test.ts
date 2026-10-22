@@ -21,6 +21,7 @@ import {
   ProviderInstanceId,
   ProviderTurnId,
   type ServerProvider,
+  type TurnTokenUsage,
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -225,13 +226,27 @@ const completeChild = (
   childThreadId: ThreadId,
   text: string,
   runPatch: Partial<OrchestrationV2Run> = { status: "completed" },
-  tokens?: number,
+  tokens?: number | ReadonlyArray<TurnTokenUsage>,
 ) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const sink = yield* EventSink.EventSinkV2;
     const child = yield* orchestrator.getThreadProjection(childThreadId);
     const run = child.runs.at(-1)!;
+    const usages: ReadonlyArray<TurnTokenUsage> =
+      typeof tokens === "number"
+        ? [
+            {
+              usageStatus: "complete",
+              usageScope: "main_agent",
+              hasSubagents: false,
+              inputTokens: tokens,
+              cachedInputTokens: Math.floor(tokens / 2),
+              cacheCreationTokens: 0,
+              outputTokens: 0,
+            },
+          ]
+        : (tokens ?? []);
     const now = yield* DateTime.now;
     yield* sink.commitCommand({
       commandId: CommandId.make(`command:test-complete:${run.id}`),
@@ -261,29 +276,33 @@ const completeChild = (
             updatedAt: now,
           },
         },
-        ...(tokens === undefined || run.providerThreadId === null || run.rootNodeId === null
-          ? []
-          : [
-              {
-                id: EventId.make(`event:test-turn:${run.id}`),
-                type: "provider-turn.updated" as const,
-                threadId: childThreadId,
-                runId: run.id,
-                occurredAt: now,
-                payload: {
-                  id: ProviderTurnId.make(`provider-turn:test:${run.id}`),
-                  providerThreadId: run.providerThreadId,
-                  nodeId: run.rootNodeId,
-                  runAttemptId: run.activeAttemptId,
-                  nativeTurnRef: null,
-                  ordinal: 1,
-                  status: "completed" as const,
-                  startedAt: now,
-                  completedAt: now,
-                  tokenUsage: { usedTokens: tokens, updatedAt: DateTime.formatIso(now) },
+        ...usages.flatMap((usage, index) =>
+          run.providerThreadId === null || run.rootNodeId === null
+            ? []
+            : [
+                {
+                  id: EventId.make(`event:test-turn:${run.id}:${index}`),
+                  type: "provider-turn.updated" as const,
+                  threadId: childThreadId,
+                  runId: run.id,
+                  occurredAt: now,
+                  payload: {
+                    id: ProviderTurnId.make(`provider-turn:test:${run.id}:${index}`),
+                    providerThreadId: run.providerThreadId,
+                    nodeId: run.rootNodeId,
+                    runAttemptId: run.activeAttemptId,
+                    nativeTurnRef: null,
+                    ordinal: index + 1,
+                    status: "completed" as const,
+                    startedAt: now,
+                    completedAt: now,
+                    // Context occupancy deliberately differs from cumulative response usage.
+                    tokenUsage: { usedTokens: 7, updatedAt: DateTime.formatIso(now) },
+                    turnTokenUsage: usage,
+                  },
                 },
-              },
-            ]),
+              ],
+        ),
         {
           id: EventId.make(`event:test-complete:${run.id}`),
           type: "run.updated",
@@ -483,7 +502,7 @@ describe("delegate_tasks over the running limit", () => {
  * Answers every agent a workflow starts, as its provider would, with `reply(prompt)`.
  * Agents whose reply is undefined are left running.
  */
-const answerWorkflowAgents = (reply: (prompt: string) => string | undefined) =>
+const answerWorkflowAgents = (reply: (prompt: string) => string | undefined, tokens?: number) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const answered = new Set<string>();
@@ -508,7 +527,7 @@ const answerWorkflowAgents = (reply: (prompt: string) => string | undefined) =>
             const text = reply(task.prompt);
             if (text === undefined) return;
             answered.add(task.id);
-            yield* completeChild(task.childThreadId, text);
+            yield* completeChild(task.childThreadId, text, { status: "completed" }, tokens);
           }),
         ),
         Effect.forkChild,
@@ -779,7 +798,26 @@ describe("workflow resume", () => {
         Effect.gen(function* () {
           const started = yield* service.workflowStart(invocation, { script: twoStepScript });
           const first = yield* awaitMember(started.workflowId, 1);
-          yield* completeChild(first.childThreadId!, "one");
+          yield* completeChild(first.childThreadId!, "one", { status: "completed" }, [
+            {
+              usageStatus: "complete",
+              usageScope: "main_agent",
+              hasSubagents: false,
+              inputTokens: 200,
+              cachedInputTokens: 100,
+              cacheCreationTokens: 0,
+              outputTokens: 50,
+            },
+            {
+              usageStatus: "complete",
+              usageScope: "main_agent",
+              hasSubagents: false,
+              inputTokens: 300,
+              cachedInputTokens: 150,
+              cacheCreationTokens: 0,
+              outputTokens: 50,
+            },
+          ]);
           yield* awaitMember(started.workflowId, 2);
           return started.workflowId;
         }),
@@ -789,12 +827,32 @@ describe("workflow resume", () => {
       const resumed = yield* withServerProcess((service) =>
         Effect.gen(function* () {
           expect(yield* service.resumeWorkflows).toBe(1);
-          yield* completeChild(second.childThreadId!, "two");
+          yield* completeChild(second.childThreadId!, "two", { status: "completed" }, 900);
           return yield* awaitWorkflowEnd(workflowId);
         }),
       );
       expect(resumed.status).toBe("completed");
       expect(JSON.parse(resumed.result!)).toEqual(["one", "two"]);
+      expect(resumed.usage).toMatchObject({
+        status: "complete",
+        inputTokens: 1400,
+        cachedInputTokens: 700,
+        uncachedInputTokens: 700,
+        outputTokens: 100,
+        totalTokens: 1500,
+      });
+      expect(resumed.agents.map((agent) => agent.usage.totalTokens)).toEqual([600, 900]);
+      const reread = yield* withServerProcess((service) =>
+        service.workflowStatus(invocation, { workflowId }),
+      );
+      expect(reread.usage).toEqual(resumed.usage);
+      expect(reread.agents.map((agent) => agent.usage)).toEqual(
+        resumed.agents.map((agent) => agent.usage),
+      );
+      expect(resumed.agents.map((agent) => agent.outcomeCategory)).toEqual([
+        "completed",
+        "completed",
+      ]);
       const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
         parentThreadId,
       );
@@ -836,6 +894,12 @@ describe("workflow resume", () => {
         expect(ended.status).toBe("completed");
         expect(JSON.parse(ended.result!)).toEqual(["one", null]);
         expect(ended.agents.map((agent) => agent.status)).toEqual(["completed", "cancelled"]);
+        expect(ended.agents.map((agent) => agent.outcomeCategory)).toEqual([
+          "completed",
+          "cancelled",
+        ]);
+        expect(ended.usage.status).toBe("unavailable");
+        expect(ended.tokensUsed).toBeNull();
       }).pipe(Effect.provide(layerTest)),
   );
 
@@ -849,6 +913,8 @@ describe("workflow resume", () => {
       }
       const ended = yield* awaitWorkflowEnd(started.workflowId);
       expect(JSON.parse(ended.result!)).toBeNull();
+      expect(ended.agents[0]?.outcomeCategory).toBe("provider_error");
+      expect(ended.usage.status).toBe("unavailable");
       const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
         parentThreadId,
       );
@@ -857,6 +923,28 @@ describe("workflow resume", () => {
       ).toHaveLength(3);
     }).pipe(Effect.provide(layerTest)),
   );
+  it.effect(
+    "reports an exhausted attempt deadline as timed_out after rereading persisted state",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const started = yield* startWorkflow(
+          'return await agent("slow", { attemptTimeoutMs: 60000 })',
+        );
+        for (const attempt of [1, 2, 3]) {
+          yield* awaitMember(started.workflowId, attempt);
+          yield* TestClock.adjust("2 minutes");
+        }
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(ended.agents[0]?.outcomeCategory).toBe("timed_out");
+        const reread = yield* withServerProcess((service) =>
+          service.workflowStatus(invocation, { workflowId: started.workflowId }),
+        );
+        expect(reread.agents[0]?.outcomeCategory).toBe("timed_out");
+        expect(reread.usage.status).toBe("unavailable");
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("stops an agent that records nothing for too long and starts it again", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -876,6 +964,52 @@ describe("workflow resume", () => {
       ).toBe("interrupted");
     }).pipe(Effect.provide(layerTest)),
   );
+  it.effect(
+    "uses cumulative provider usage for the runner budget and persisted workflow totals",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents(() => "done", 250);
+        const started = yield* startWorkflow('await agent("one"); return budget.spent');
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(JSON.parse(ended.result!)).toBe(250);
+        expect(ended.tokensUsed).toBe(250);
+        // A pre-accounting server persisted context occupancy in the workflow row.
+        // A restart must trust turn records rather than this obsolete derived counter.
+        const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        );
+        const workflow = parent.subagents.find((task) => task.id === started.workflowId)!;
+        const now = yield* DateTime.now;
+        yield* (yield* EventSink.EventSinkV2).write({
+          events: [
+            {
+              id: EventId.make("event:test-obsolete-workflow-counter"),
+              type: "subagent.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: {
+                ...workflow,
+                workflow: {
+                  ...workflow.workflow!,
+                  agents: workflow.workflow!.agents.map((agent) => {
+                    const legacy = { ...agent, totalTokens: 7, attempt: 1 };
+                    delete legacy.attemptTaskIds;
+                    return legacy;
+                  }),
+                },
+              },
+            },
+          ],
+        });
+        const reread = yield* withServerProcess((service) =>
+          service.workflowStatus(invocation, { workflowId: started.workflowId }),
+        );
+        expect(reread.tokensUsed).toBe(250);
+        expect(reread.agents[0]?.usage).toMatchObject({ status: "partial", totalTokens: 250 });
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("refuses new agents once finished agents spent the token budget", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -887,7 +1021,21 @@ describe("workflow resume", () => {
       const started = yield* decodeWorkflow(result.structuredContent);
       expect(started.budgetTokens).toBe(1500);
       const one = yield* awaitMember(started.workflowId, 1);
-      yield* completeChild(one.childThreadId!, "1", { status: "completed" }, 1000);
+      expect(
+        (yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(one.childThreadId!)).thread
+          .lineage.workflowId,
+      ).toBe(started.workflowId);
+      yield* completeChild(one.childThreadId!, "1", { status: "completed" }, [
+        {
+          usageStatus: "complete",
+          usageScope: "main_agent",
+          hasSubagents: false,
+          inputTokens: 800,
+          cachedInputTokens: 600,
+          cacheCreationTokens: 0,
+          outputTokens: 200,
+        },
+      ]);
       const two = yield* awaitMember(started.workflowId, 2);
       yield* completeChild(two.childThreadId!, "2", { status: "completed" }, 800);
       const ended = yield* awaitWorkflowEnd(started.workflowId);
@@ -898,6 +1046,24 @@ describe("workflow resume", () => {
         remaining: 0,
       });
       expect(ended.tokensUsed).toBe(1800);
+      expect(ended.usage).toMatchObject({
+        status: "complete",
+        inputTokens: 1600,
+        outputTokens: 200,
+      });
+      expect(ended.agents.map((agent) => agent.outcomeCategory)).toEqual([
+        "completed",
+        "completed",
+        "never_started",
+      ]);
+      expect(ended.agents[0]?.timings).toMatchObject({
+        createdAt: expect.any(Number),
+        runStartedAt: expect.any(Number),
+        providerTurnStartedAt: expect.any(Number),
+        providerTurnEndedAt: expect.any(Number),
+        completedAt: expect.any(Number),
+        runnerSettledAt: expect.any(Number),
+      });
       expect(ended.agents.map((agent) => agent.status)).toEqual([
         "completed",
         "completed",
@@ -991,7 +1157,11 @@ describe("workflow checks", () => {
           "passed",
           "failed",
         ]);
-        expect(ended.agents[1]).toMatchObject({ status: "failed", verification: { attempts: 3 } });
+        expect(ended.agents[1]).toMatchObject({
+          status: "failed",
+          outcomeCategory: "check_failed",
+          verification: { attempts: 3 },
+        });
         expect(ended.agents[1]?.verification?.detail).toContain("exit code 3");
       }).pipe(Effect.provide(layerTest)),
   );
@@ -1004,12 +1174,21 @@ describe("workflow checks", () => {
           return retried(prompt) ? "a haiku" : "a limerick";
         const passed = prompt.includes("Result:\na haiku");
         return `Checked.\n\`\`\`json\n${JSON.stringify({ outcome: passed ? "passed" : "failed", reasons: passed ? "It is a haiku." : "It is not a haiku." })}\n\`\`\``;
-      });
+      }, 400);
       const started = yield* startWorkflow(
         'return await agent("write a poem", { label: "poem", verify: { type: "judgment", rubric: ["The poem is a haiku."] } })',
       );
       const ended = yield* awaitWorkflowEnd(started.workflowId);
       expect(JSON.parse(ended.result!)).toBe("a haiku");
+      expect(ended.usage).toMatchObject({
+        status: "complete",
+        inputTokens: 1600,
+        cachedInputTokens: 800,
+        uncachedInputTokens: 800,
+        outputTokens: 0,
+        totalTokens: 1600,
+      });
+      expect(ended.agents.map((agent) => agent.usage.totalTokens)).toEqual([800, 400, 400]);
       expect(ended.agents.map((agent) => agent.label)).toEqual([
         "poem",
         "check poem",

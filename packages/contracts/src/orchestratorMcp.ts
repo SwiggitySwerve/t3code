@@ -32,6 +32,7 @@ import {
 } from "./threadPullRequest.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
+  WorkflowAgentOutcomeCategory,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
@@ -407,7 +408,30 @@ export const OrchestratorMcpWorkflowStopInput = Schema.Struct({
 });
 export type OrchestratorMcpWorkflowStopInput = typeof OrchestratorMcpWorkflowStopInput.Type;
 
+export const OrchestratorMcpWorkflowUsage = Schema.Struct({
+  status: Schema.Literals(["complete", "partial", "unavailable"]),
+  inputTokens: Schema.NullOr(NonNegativeInt),
+  cachedInputTokens: Schema.NullOr(NonNegativeInt),
+  cacheCreationTokens: Schema.NullOr(NonNegativeInt),
+  uncachedInputTokens: Schema.NullOr(NonNegativeInt),
+  outputTokens: Schema.NullOr(NonNegativeInt),
+  totalTokens: Schema.NullOr(NonNegativeInt),
+});
+export type OrchestratorMcpWorkflowUsage = typeof OrchestratorMcpWorkflowUsage.Type;
+
+const WorkflowTimings = Schema.Struct({
+  createdAt: Schema.NullOr(Schema.Number),
+  runStartedAt: Schema.NullOr(Schema.Number),
+  providerTurnStartedAt: Schema.NullOr(Schema.Number),
+  providerTurnEndedAt: Schema.NullOr(Schema.Number),
+  completedAt: Schema.NullOr(Schema.Number),
+  runnerSettledAt: Schema.NullOr(Schema.Number),
+});
+
 export const OrchestratorMcpWorkflowAgent = Schema.Struct({
+  usage: OrchestratorMcpWorkflowUsage,
+  outcomeCategory: Schema.NullOr(WorkflowAgentOutcomeCategory),
+  timings: WorkflowTimings,
   index: Schema.Number,
   label: Schema.String,
   phase: Schema.NullOr(Schema.String),
@@ -436,8 +460,10 @@ export const OrchestratorMcpWorkflowResult = Schema.Struct({
   phases: Schema.Array(Schema.String),
   agents: Schema.Array(OrchestratorMcpWorkflowAgent),
   progress: Schema.NullOr(Schema.String).annotate({ description: "The script's latest log line." }),
-  tokensUsed: Schema.Number.annotate({
-    description: "Tokens finished agents' providers reported; an estimate, not a bill.",
+  usage: OrchestratorMcpWorkflowUsage,
+  tokensUsed: Schema.NullOr(Schema.Number).annotate({
+    description:
+      "Known cumulative input plus output, including cache reads and writes; null when unavailable. Partial usage is a lower bound, not a bill.",
   }),
   budgetTokens: Schema.NullOr(Schema.Number),
   result: Schema.NullOr(Schema.String).annotate({

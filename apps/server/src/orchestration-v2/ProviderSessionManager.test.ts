@@ -4,6 +4,7 @@ import { assert, it } from "@effect/vitest";
 import { AgentScope } from "@t3tools/shared/AgentScope";
 import {
   EnvironmentId,
+  NodeId,
   type ModelSelection,
   type OrchestrationV2AppThread,
   type OrchestrationV2DomainEvent,
@@ -1502,7 +1503,7 @@ it.effect("ProviderSessionManagerV2 drains subscribers when the provider stops",
 );
 
 it.effect(
-  "ProviderSessionManagerV2 issues MCP credentials before opening and revokes them on close",
+  "ProviderSessionManagerV2 keeps orchestration for ordinary delegated children and revokes credentials on close",
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
@@ -1522,8 +1523,21 @@ it.effect(
           threadId,
         });
 
+        const created = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
         yield* eventSink.write({
-          events: [yield* makeThreadCreatedEvent({ idAllocator, threadId, now })],
+          events: [
+            {
+              ...created,
+              payload: {
+                ...created.payload,
+                lineage: {
+                  ...created.payload.lineage,
+                  parentThreadId: ThreadId.make("thread:parent"),
+                  relationshipToParent: "subagent",
+                },
+              },
+            },
+          ],
         });
         yield* manager.open({
           threadId,
@@ -1545,6 +1559,81 @@ it.effect(
           resolved?.capabilities,
           new Set(["preview", "orchestration", "worktree", "pull-requests"]),
         );
+
+        yield* manager.close(providerSessionId);
+        assert.isUndefined(yield* mcpSessions.read(threadId));
+        assert.isUndefined(yield* registry.resolve(token!));
+      });
+
+      yield* effect.pipe(
+        Effect.provide(
+          layerTest({
+            state,
+            idleTimeoutMs: 1_000,
+            mcpConfigs,
+          }),
+        ),
+      );
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 withholds orchestration from workflow members and replaces an overprivileged credential",
+  () =>
+    Effect.gen(function* () {
+      const state = yield* Ref.make(emptyState);
+      const mcpConfigs = yield* Ref.make<
+        ReadonlyArray<McpProviderSession.McpProviderSessionConfig | undefined>
+      >([]);
+      const effect = Effect.gen(function* () {
+        const eventSink = yield* EventSink.EventSinkV2;
+        const idAllocator = yield* IdAllocator.IdAllocatorV2;
+        const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+        const registry = yield* McpSessionRegistry.McpSessionRegistry;
+        const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
+        const now = yield* DateTime.now;
+        const threadId = ThreadId.make("thread-provider-session-manager-mcp");
+        const providerSessionId = yield* idAllocator.allocate.providerSession({
+          providerInstanceId: modelSelection.instanceId,
+          threadId,
+        });
+
+        const created = yield* makeThreadCreatedEvent({ idAllocator, threadId, now });
+        yield* eventSink.write({
+          events: [
+            {
+              ...created,
+              payload: {
+                ...created.payload,
+                lineage: { ...created.payload.lineage, workflowId: NodeId.make("workflow:test") },
+              },
+            },
+          ],
+        });
+        const old = yield* registry.issue({
+          threadId,
+          providerInstanceId: modelSelection.instanceId,
+          browserToolsAvailable: true,
+          capabilities: new Set(["preview", "orchestration", "worktree", "pull-requests"]),
+        });
+        yield* mcpSessions.set(old.config);
+        yield* manager.open({
+          threadId,
+          providerSessionId,
+          modelSelection,
+          runtimePolicy,
+        });
+
+        const captured = (yield* Ref.get(mcpConfigs))[0];
+        assert.isDefined(captured);
+        assert.equal(captured?.threadId, threadId);
+        assert.equal(captured?.providerInstanceId, modelSelection.instanceId);
+        assert.equal(captured?.endpoint, "http://127.0.0.1:43123/mcp");
+        const token = captured?.authorizationHeader.replace(/^Bearer\s+/, "");
+        assert.isDefined(token);
+        const resolved = yield* registry.resolve(token!);
+        assert.equal(resolved?.thread.threadId, threadId);
+        assert.deepEqual(resolved?.capabilities, new Set(["preview", "worktree", "pull-requests"]));
 
         yield* manager.close(providerSessionId);
         assert.isUndefined(yield* mcpSessions.read(threadId));

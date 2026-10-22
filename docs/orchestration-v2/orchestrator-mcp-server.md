@@ -45,7 +45,9 @@ Before `ProviderSessionManager` opens a new V2 provider session, it asks
 - the concrete provider instance; and
 - the provider session.
 
-The credential grants `preview` and `orchestration` capabilities. Credentials
+Workflow members (including judges) receive no `orchestration` capability, so they
+cannot delegate or start workflows. Ordinary delegated children retain orchestration
+access. Browser, device, worktree and pull-request access follow their existing settings. Credentials
 expire after a maximum lifetime, expire when idle, and are revoked when the
 provider session is released. The raw token is not persisted in orchestration
 state.
@@ -421,6 +423,34 @@ disposed, so only `workflow.complete` delivers to the caller. `workflow_status`
 returns the status, phases, each agent's status, model and summary, the latest
 log line, and the script's return value as JSON or why it failed.
 
+Each agent also reports cumulative `usage`, `outcomeCategory`, and `timings`. Usage
+is recomputed from persisted provider-turn totals across every child run and retry;
+workflow totals include every member, including independent judges and their retries.
+`inputTokens` includes cached reads (`cachedInputTokens`) and cache writes
+(`cacheCreationTokens`). `uncachedInputTokens` subtracts both from input; an omitted
+cache-write count contributes zero to that subtraction. Output includes reasoning.
+`totalTokens` and `tokensUsed` count input plus output, rather than context occupancy.
+
+Usage `status` is `complete`, `partial` (known counts are lower bounds), or
+`unavailable`. Unknown counts are null, never a measured zero. Cache breakdowns
+may be null even when input/output totals are complete. Cursor, Grok and Antigravity
+report no totals; interrupted or cancelled turns may also have none. Totals cover
+the provider's reported main-agent scope; unreported provider-native subagents are
+not measured. Older workflow rows without attempt IDs can attribute only their
+latest attempt to an agent (reported as partial when retries are known); the workflow
+total still includes all member tasks.
+
+Terminal outcome categories are `never_started`, `timed_out`, `cancelled`,
+`provider_error`, `check_failed`, and `completed`; active agents report null.
+Categories record runner facts, including a deadline stop or an unsuccessful check.
+
+Timing values are epoch milliseconds, or null when unrecorded: `createdAt`,
+`runStartedAt`, `providerTurnStartedAt`, `providerTurnEndedAt`, `completedAt`
+(after checkpoint capture), and `runnerSettledAt`. For retries they span the first
+creation/start through the last end/completion, including gaps. They do not sum
+parallel durations or separate individual model responses inside a provider turn.
+Checkpoint behavior is unchanged.
+
 `workflow_stop`, and `task_cancel` on a `workflowId`, stop the script, stop every
 running member as `task_cancel` would, and settle the workflow as cancelled.
 Stopping the calling thread does the same.
@@ -515,10 +545,13 @@ own threads. The row stores the script with a settings line for its args and bud
   The same sweep stops an attempt past its deadline; that counts as a failed
   attempt and retries with a note asking the agent to finish within the budget.
   It is separate from `stallTimeoutMs`, which measures inactivity.
-- **Budget.** `budgetTokens` counts the token usage providers report for
-  finished agents, an estimate rather than a bill. Once it is spent, `agent()`
-  throws for any agent that has not already started; agents already running
-  finish. `workflow_status` reports `tokensUsed` and `budgetTokens`.
+- **Budget.** `budgetTokens` counts cumulative input plus output for finished
+  attempts, including cached reads and writes, retries and judges. It is an estimate
+  rather than a bill. Once it is spent, `agent()` throws for any agent that has not
+  already started; agents already running finish. `workflow_status` reports
+  `tokensUsed`, `usage`, and `budgetTokens`. The script's `budget.spent` and remaining
+  allowance use known totals only; missing usage cannot enforce the cap. Completed
+  attempts are counted again from persisted records when the script resumes.
 - **Caps.** 1,000 agents per workflow and 4,096 items per `parallel` or
   `pipeline` call. The environment-wide running limit applies to every agent.
 - **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its

@@ -137,7 +137,8 @@ import {
   withResultSchema,
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
-import { makeWorkflowRunner } from "./workflowRunner.ts";
+import { makeWorkflowRunner, workflowAgentOutcomeCategory } from "./workflowRunner.ts";
+import { aggregateWorkflowUsage } from "./workflowUsage.ts";
 import { GRAPH_DRIVER_SCRIPT, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -2182,7 +2183,12 @@ const make = Effect.gen(function* () {
         status: task.status,
         summary: task.summary,
         cancelledByServerRestart: lastRun?.cancelledByServerRestart === true,
-        tokens: providerTurns.reduce((sum, turn) => sum + (turn.tokenUsage?.usedTokens ?? 0), 0),
+        outcomeCategory: workflowAgentOutcomeCategory({ status: task.status, started: true }),
+        usage: aggregateWorkflowUsage(
+          providerTurns.length === 0
+            ? [undefined]
+            : providerTurns.map((turn) => turn.turnTokenUsage),
+        ),
         ...(task.structuredResult === undefined ? {} : { structuredResult: task.structuredResult }),
         ...(task.structuredResultError === undefined
           ? {}
@@ -2319,7 +2325,7 @@ const make = Effect.gen(function* () {
         afterSequence,
       });
     }
-    return workflowResult(yield* loadProjection(scope.thread.threadId), started);
+    return yield* workflowResult(yield* loadProjection(scope.thread.threadId), started);
   });
 
   const findWorkflow = (
@@ -2342,16 +2348,44 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const workflowResult = (
+  const workflowResult = Effect.fn("OrchestratorMcpService.workflowResult")(function* (
     projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
     workflow: OrchestrationV2Subagent,
-  ): OrchestratorMcpWorkflowResult => {
+  ) {
     const members = new Map(
       projection.subagents
         .filter((task) => task.parentNodeId === workflow.id)
         .map((task) => [task.id as string, task]),
     );
     const agents = workflow.workflow?.agents ?? [];
+    const records = yield* Effect.forEach(
+      [...members.values()],
+      (member) =>
+        Effect.gen(function* () {
+          const child =
+            member.childThreadId === null
+              ? null
+              : yield* threadManagement
+                  .getThreadRecords(member.childThreadId, ["runs", "providerTurns"])
+                  .pipe(Effect.mapError(threadManagementFailure));
+          return {
+            member,
+            child,
+            usage:
+              child === null || child.providerTurns.length === 0
+                ? [undefined]
+                : child.providerTurns.map((turn) => turn.turnTokenUsage),
+          };
+        }),
+      { concurrency: 8 },
+    );
+    const usage = aggregateWorkflowUsage(records.flatMap((record) => record.usage));
+    const epoch = (value: DateTime.Utc | null | undefined) =>
+      value == null ? null : DateTime.toEpochMillis(value);
+    const edge = (values: ReadonlyArray<number | null>, latest = false) => {
+      const known = values.filter((value) => value !== null);
+      return known.length === 0 ? null : latest ? Math.max(...known) : Math.min(...known);
+    };
     return {
       workflowId: workflow.id,
       status:
@@ -2377,7 +2411,41 @@ const make = Effect.gen(function* () {
               : member.status === "pending" || member.status === "idle"
                 ? "queued"
                 : "running";
+        const ids = agent.attemptTaskIds ?? (agent.agentId === undefined ? [] : [agent.agentId]);
+        const attempts = records.filter((record) => ids.includes(record.member.id));
+        const runs = attempts.flatMap((record) => record.child?.runs ?? []);
+        const turns = attempts.flatMap((record) => record.child?.providerTurns ?? []);
+        const terminal = status !== "queued" && status !== "running";
         return {
+          usage: aggregateWorkflowUsage([
+            ...attempts.flatMap((record) => record.usage),
+            // Older rows retained only the latest attempt. Its known usage is a lower bound.
+            ...(ids.length < (agent.attempt ?? 0) + 1 ? [undefined] : []),
+          ]),
+          outcomeCategory: !terminal
+            ? null
+            : (agent.outcomeCategory ??
+              workflowAgentOutcomeCategory({
+                status,
+                started: member !== undefined,
+                checkFailed:
+                  agent.verification?.outcome === "failed" ||
+                  agent.verification?.outcome === "error",
+              })),
+          timings: {
+            createdAt: edge(attempts.map((record) => epoch(record.member.startedAt))),
+            runStartedAt: edge(runs.map((run) => epoch(run.startedAt))),
+            providerTurnStartedAt: edge(turns.map((turn) => epoch(turn.startedAt))),
+            providerTurnEndedAt: edge(
+              turns.map((turn) => epoch(turn.completedAt)),
+              true,
+            ),
+            completedAt: edge(
+              attempts.map((record) => epoch(record.member.completedAt)),
+              true,
+            ),
+            runnerSettledAt: agent.runnerSettledAt ?? null,
+          },
           index: agent.index,
           label: agent.label,
           phase: agent.phaseTitle ?? null,
@@ -2393,11 +2461,12 @@ const make = Effect.gen(function* () {
         };
       }),
       progress: workflow.progress ?? null,
-      tokensUsed: agents.reduce((sum, agent) => sum + (agent.totalTokens ?? 0), 0),
+      usage,
+      tokensUsed: usage.totalTokens,
       budgetTokens: storedBudget(workflow.prompt) ?? null,
       result: workflow.result,
-    };
-  };
+    } satisfies OrchestratorMcpWorkflowResult;
+  });
 
   // Agents act with the starting thread's authority, which comes from the thread itself;
   // the session that started the workflow is gone after a restart, so only the thread,
@@ -3127,7 +3196,7 @@ const make = Effect.gen(function* () {
             `Workflow ${input.workflowId} does not belong to thread ${scope.thread.threadId}.`,
           );
         }
-        return workflowResult(projection, workflow);
+        return yield* workflowResult(projection, workflow);
       },
     ),
     workflowStop: Effect.fn("OrchestratorMcpService.workflowStop")(function* (callerScope, input) {
@@ -3143,7 +3212,7 @@ const make = Effect.gen(function* () {
       }
       yield* stopWorkflowById(scope, input.workflowId);
       const projection = yield* loadProjection(scope.thread.threadId);
-      return workflowResult(projection, findWorkflow(projection, input.workflowId)!);
+      return yield* workflowResult(projection, findWorkflow(projection, input.workflowId)!);
     }),
     taskWait: Effect.fn("OrchestratorMcpService.taskWait")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "task_wait");

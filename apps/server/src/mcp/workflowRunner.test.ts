@@ -16,6 +16,7 @@ import * as TestClock from "effect/testing/TestClock";
 
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { makeWorkflowRunner, type WorkflowRunnerDeps } from "./workflowRunner.ts";
+import { aggregateWorkflowUsage } from "./workflowUsage.ts";
 
 const threadId = ThreadId.make("thread:workflow-runner");
 const workflowId = NodeId.make("workflow:runner-test");
@@ -79,7 +80,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
           status: statuses.get(taskId) ?? "running",
           summary: "ok",
           cancelledByServerRestart: false,
-          tokens: 0,
+          outcomeCategory: statuses.get(taskId) === "completed" ? "completed" : "cancelled",
+          usage: aggregateWorkflowUsage([]),
         }),
       agentStarted: () => Effect.succeed(false),
       canRunCommands: () => Effect.succeed(false),
