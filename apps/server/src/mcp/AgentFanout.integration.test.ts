@@ -1318,6 +1318,75 @@ describe("graphs", () => {
     ),
   );
 
+  it.effect("resumes a graph after a restart without starting a node twice", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+        const graph = serialGraph(dir);
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const reviewed = yield* service.graphReview(invocation, { graph });
+            const started = yield* service.graphStart(invocation, {
+              graph,
+              acceptedDigest: reviewed.digest!,
+            });
+            const producer = yield* awaitMember(started.workflowId, 1);
+            NodeFS.writeFileSync(NodePath.join(dir, "total.json"), '{"total":6}');
+            yield* completeChild(producer.childThreadId!, "made it");
+            yield* awaitMember(started.workflowId, 2);
+            return started.workflowId;
+          }),
+        );
+        const consumer = yield* awaitMember(workflowId, 2);
+        const resumed = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            yield* completeChild(consumer.childThreadId!, "used it");
+            return yield* awaitWorkflowEnd(workflowId);
+          }),
+        );
+        expect(resumed.status).toBe("completed");
+        expect(JSON.parse(resumed.result!)).toMatchObject({
+          ok: true,
+          nodes: { produce: { status: "passed" }, consume: { status: "passed" } },
+        });
+        const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        );
+        expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
+      }).pipe(Effect.provide(layerTest)),
+    ),
+  );
+
+  it.effect("fails the nodes a spent token budget refuses to start", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+        const graph = serialGraph(dir);
+        const reviewed = yield* reviewGraph(graph);
+        const started = yield* decodeWorkflow(
+          (yield* invoke("graph_start", {
+            graph,
+            acceptedDigest: reviewed.digest,
+            budgetTokens: 1000,
+          })).structuredContent,
+        );
+        const producer = yield* awaitMember(started.workflowId, 1);
+        NodeFS.writeFileSync(NodePath.join(dir, "total.json"), '{"total":6}');
+        yield* completeChild(producer.childThreadId!, "made it", { status: "completed" }, 1500);
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(ended.status).toBe("failed");
+        expect(ended.tokensUsed).toBe(1500);
+        expect(ended.result).toContain('"produce":{"status":"passed"');
+        expect(ended.result).toContain(
+          "The workflow's budget of 1000 tokens is spent (1500 used).",
+        );
+      }).pipe(Effect.provide(layerTest)),
+    ),
+  );
+
   it.effect("stops a graph with workflow_stop like any workflow", () =>
     withScratchDir((dir) =>
       Effect.gen(function* () {
