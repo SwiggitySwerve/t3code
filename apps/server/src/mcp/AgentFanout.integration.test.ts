@@ -623,6 +623,17 @@ return counted.lines + 1`,
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("caps a failed workflow's result like a successful one", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow('throw new Error("x".repeat(100000))');
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("failed");
+      expect(ended.result!.startsWith("The workflow failed: xxx")).toBe(true);
+      expect(ended.result!.length).toBe(16_000);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("refuses a script that does not compile and starts nothing", () =>
     Effect.gen(function* () {
       yield* startParent;

@@ -297,7 +297,7 @@ class WorkflowSession {
       status: outcome.ok ? "completed" : "failed",
       result: outcome.ok
         ? truncate(JSON.stringify(outcome.value ?? null, null, 2), WORKFLOW_RESULT_LIMIT)
-        : `The workflow failed: ${outcome.message}`,
+        : truncate(`The workflow failed: ${outcome.message}`, WORKFLOW_RESULT_LIMIT),
     });
   }
 
