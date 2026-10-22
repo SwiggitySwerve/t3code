@@ -688,7 +688,7 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
   /** The latest check of this agent's result, for T3-run workflows that asked for one. */
   verification: Schema.optional(
     Schema.Struct({
-      type: Schema.Literals(["process", "structured", "judgment"]),
+      type: Schema.Literals(["process", "structured", "judgment", "outputs"]),
       outcome: Schema.Literals(["passed", "failed", "error"]),
       attempts: NonNegativeInt,
       detail: Schema.optional(Schema.NonEmptyString),

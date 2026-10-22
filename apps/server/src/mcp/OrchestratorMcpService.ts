@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off -- workflow inputs and outputs are hashed with node:crypto, as attachments are.
+import * as NodeCrypto from "node:crypto";
+
 import {
   CommandId,
   EnvironmentId,
@@ -2008,7 +2011,7 @@ const make = Effect.gen(function* () {
         Effect.map((projection) => projection.thread.runtimeMode === "full-access"),
       ),
     runCommandCheck: Effect.fn("OrchestratorMcpService.runWorkflowCommandCheck")(
-      function* (workflow, childThreadId, check, result) {
+      function* (workflow, childThreadId, check, result, files) {
         const parent = yield* loadProjection(workflow.threadId);
         const child = yield* threadManagement
           .getThreadShell(childThreadId)
@@ -2030,12 +2033,19 @@ const make = Effect.gen(function* () {
           Effect.gen(function* () {
             const resultFile = yield* fileSystem.makeTempFileScoped({ prefix: "t3-check-" });
             yield* fileSystem.writeFileString(resultFile, result);
-            const expanded = args.map((arg) => arg.replaceAll("{{result}}", resultFile));
+            const expanded = args.map((arg) =>
+              arg
+                .replaceAll("{{result}}", resultFile)
+                .replace(/\{\{((?:input|output):[A-Za-z0-9._-]+)\}\}/g, (token, key: string) => {
+                  const relative = files[key];
+                  return relative === undefined ? token : path.join(root, relative);
+                }),
+            );
             const unknownToken = expanded.find((arg) => /\{\{[^}]*\}\}/.test(arg));
             if (unknownToken !== undefined) {
               return {
                 outcome: "error",
-                detail: `Unknown token in ${unknownToken}; checks support {{result}}.`,
+                detail: `Unknown token in ${unknownToken}; checks support {{result}}, and {{input:<id>}} and {{output:<id>}} for the agent's declared files.`,
               } satisfies CheckOutcome;
             }
             const ran = yield* processRunner
@@ -2086,6 +2096,39 @@ const make = Effect.gen(function* () {
             } satisfies CheckOutcome),
           ),
         );
+      },
+    ),
+    hashWorkspaceFile: Effect.fn("OrchestratorMcpService.hashWorkflowFile")(
+      function* (workflow, relativePath, maxBytes) {
+        const parent = yield* loadProjection(workflow.threadId);
+        // Agents with declared files share the caller's checkout.
+        const root =
+          parent.thread.worktreePath ??
+          (yield* requireProject(parent.thread.projectId)).workspaceRoot;
+        const filePath = path.join(root, relativePath);
+        const unreadable = (error: { readonly message: string }) =>
+          failure("orchestration_error", `Unable to read ${relativePath}: ${error.message}`);
+        const info = yield* fileSystem.stat(filePath).pipe(
+          Effect.catchTags({
+            PlatformError: (error) =>
+              error.reason._tag === "NotFound" ? Effect.succeed(null) : Effect.fail(error),
+          }),
+          Effect.mapError(unreadable),
+        );
+        if (info === null || info.type !== "File") return { status: "missing" } as const;
+        if (Number(info.size) > maxBytes) {
+          return { status: "too_large", sizeBytes: Number(info.size) } as const;
+        }
+        const bytes = yield* fileSystem.readFile(filePath).pipe(Effect.mapError(unreadable));
+        // The file can grow between the stat and the read.
+        if (bytes.byteLength > maxBytes) {
+          return { status: "too_large", sizeBytes: bytes.byteLength } as const;
+        }
+        return {
+          status: "found",
+          sha256: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
+          sizeBytes: bytes.byteLength,
+        } as const;
       },
     ),
     stopAgent: Effect.fn("OrchestratorMcpService.stopWorkflowAgent")(

@@ -64,6 +64,7 @@ const makeHarness = Effect.gen(function* () {
     agentStarted: () => Effect.succeed(false),
     canRunCommands: () => Effect.succeed(false),
     runCommandCheck: () => Effect.die("unused"),
+    hashWorkspaceFile: () => Effect.die("unused"),
     stopAgent: () => Effect.void,
   };
   return { runner: makeWorkflowRunner(deps), completed, spawned: () => spawned };

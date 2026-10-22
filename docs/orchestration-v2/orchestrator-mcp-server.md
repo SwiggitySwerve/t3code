@@ -454,6 +454,19 @@ These follow the `omx graph` execution graph's protected verifiers
   agent's task as instructions; they are not enforced on the file system. Two agents in
   the same checkout whose write scopes overlap (one path equals or contains the other)
   never run at once: the later one waits. Agents with `isolation: "worktree"` do not wait.
+- `inputs` and `outputs` declare the files an agent reads and must write, as
+  `[{ id, path, maxBytes?, sha256? }]` with workspace-relative paths (at most 32 each,
+  `maxBytes` default 256 KiB, at most 16 MiB). They need the shared checkout, so
+  `isolation: "worktree"` refuses them. Both are listed in the agent's task.
+  - Before each attempt, every input must exist within `maxBytes`, and an input with
+    `sha256` must still have those bytes; otherwise the agent fails without starting.
+  - After the turn, every output must exist within `maxBytes`. A missing or oversized
+    output fails an `outputs` check, which retries like any failed check; `verify`
+    runs only once the outputs pass, and a process check may name a declared file as
+    `{{input:<id>}}` or `{{output:<id>}}` (an absolute path in the checkout).
+  - Outputs count as write scopes, so two agents never write the same output at once.
+  - `agent()` then returns `{ result, outputs: { <id>: { path, sha256, sizeBytes } } }`,
+    so a later agent can pin what an earlier one wrote.
 
 #### Ultracode
 

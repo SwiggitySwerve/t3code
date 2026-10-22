@@ -338,7 +338,7 @@ export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult
 export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) and scopes ({ read?, write? } workspace-relative paths).",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }).",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -374,7 +374,7 @@ export const OrchestratorMcpWorkflowAgent = Schema.Struct({
   result: Schema.NullOr(Schema.String),
   verification: Schema.NullOr(
     Schema.Struct({
-      type: Schema.Literals(["process", "structured", "judgment"]),
+      type: Schema.Literals(["process", "structured", "judgment", "outputs"]),
       outcome: Schema.Literals(["passed", "failed", "error"]),
       attempts: Schema.Number,
       detail: Schema.NullOr(Schema.String),

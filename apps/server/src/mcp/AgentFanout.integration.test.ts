@@ -1,3 +1,8 @@
+// @effect-diagnostics nodeBuiltinImport:off -- tests write the declared files an agent would.
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -1018,6 +1023,96 @@ describe("workflow checks", () => {
       const ended = yield* awaitWorkflowEnd(started.workflowId);
       expect(JSON.parse(ended.result!)).toEqual(["1", "2"]);
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  // Declared files live in the test project's checkout, the working directory, under a scratch folder.
+  const withScratchDir = <A, E, R>(use: (dir: string) => Effect.Effect<A, E, R>) => {
+    const dir = `.t3-workflow-files-${NodeCrypto.randomUUID()}`;
+    NodeFS.mkdirSync(dir);
+    return use(dir).pipe(
+      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true }))),
+    );
+  };
+
+  it.effect(
+    "checks declared outputs, retries an agent that did not write them, and returns their hashes",
+    () =>
+      withScratchDir((dir) =>
+        Effect.gen(function* () {
+          yield* startParent;
+          NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+          const inputSha = NodeCrypto.createHash("sha256").update("source").digest("hex");
+          const outputPath = NodePath.join(dir, "out.txt");
+          yield* answerWorkflowAgents((prompt) => {
+            if (!retried(prompt)) return "skipped";
+            NodeFS.writeFileSync(outputPath, "hello");
+            return "wrote it";
+          });
+          const options = JSON.stringify({
+            inputs: [{ id: "source", path: `${dir}/in.txt`, sha256: inputSha }],
+            outputs: [{ id: "report", path: `${dir}/out.txt`, maxBytes: 100 }],
+            verify: {
+              type: "process",
+              argv: [
+                process.execPath,
+                "-e",
+                "process.exit(require('fs').readFileSync(process.argv[1], 'utf8') === 'hello' ? 0 : 3)",
+                "{{output:report}}",
+              ],
+            },
+          });
+          const started = yield* startWorkflow(`return await agent("summarize", ${options})`);
+          const ended = yield* awaitWorkflowEnd(started.workflowId);
+          expect(JSON.parse(ended.result!)).toEqual({
+            result: "wrote it",
+            outputs: {
+              report: {
+                path: `${dir}/out.txt`,
+                sha256: NodeCrypto.createHash("sha256").update("hello").digest("hex"),
+                sizeBytes: 5,
+              },
+            },
+          });
+          expect(ended.agents[0]?.verification).toMatchObject({
+            type: "process",
+            outcome: "passed",
+            attempts: 2,
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first.prompt).toContain(`- source: ${dir}/in.txt (sha256 ${inputSha})`);
+          expect(first.prompt).toContain(`- report: ${dir}/out.txt (at most 100 bytes)`);
+          const retry = yield* awaitMember(started.workflowId, 2);
+          expect(retry.prompt).toContain("did not pass its outputs check");
+          expect(retry.prompt).toContain("was not written");
+        }).pipe(Effect.provide(layerTest)),
+      ),
+  );
+
+  it.effect(
+    "fails an agent whose pinned input changed, and one given declared files in a worktree",
+    () =>
+      withScratchDir((dir) =>
+        Effect.gen(function* () {
+          yield* startParent;
+          NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "edited");
+          const pinned = JSON.stringify({
+            inputs: [{ id: "source", path: `${dir}/in.txt`, sha256: "0".repeat(64) }],
+          });
+          const isolated = JSON.stringify({
+            outputs: [{ id: "report", path: `${dir}/out.txt` }],
+            isolation: "worktree",
+          });
+          const started = yield* startWorkflow(
+            `return [await agent("a", ${pinned}), await agent("b", ${isolated})]`,
+          );
+          const ended = yield* awaitWorkflowEnd(started.workflowId);
+          expect(JSON.parse(ended.result!)).toEqual([null, null]);
+          expect(ended.agents[0]).toMatchObject({ status: "failed", taskId: null });
+          expect(ended.agents[0]?.result).toContain(`changed: expected sha256 ${"0".repeat(64)}`);
+          expect(ended.agents[1]).toMatchObject({ status: "failed", taskId: null });
+          expect(ended.agents[1]?.result).toContain("need the shared checkout");
+        }).pipe(Effect.provide(layerTest)),
+      ),
   );
 
   it.effect("rejects a malformed check before starting the agent", () =>

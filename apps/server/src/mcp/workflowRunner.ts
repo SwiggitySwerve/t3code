@@ -31,11 +31,14 @@ import type * as ThreadManagementService from "../orchestration-v2/ThreadManagem
 import {
   type CheckOutcome,
   checkFeedback,
+  type FileRef,
+  fileInstructions,
   type FileScopes,
   JUDGMENT_RESULT_SCHEMA,
   judgmentOutcome,
   judgmentPrompt,
   parseCheck,
+  parseFileRefs,
   parseScopes,
   type ProcessCheck,
   runStructuredCheck,
@@ -90,6 +93,19 @@ export interface WorkflowAgentOutcome {
   readonly tokens: number;
 }
 
+/** A workspace file as the runner found it; `too_large` once it passes the caller's bound. */
+export type WorkspaceFileHash =
+  | { readonly status: "found"; readonly sha256: string; readonly sizeBytes: number }
+  | { readonly status: "missing" }
+  | { readonly status: "too_large"; readonly sizeBytes: number };
+
+/** An output an agent wrote, as returned to the script. */
+interface ProducedFile {
+  readonly path: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+}
+
 export interface WorkflowRunnerDeps {
   readonly threads: ThreadManagementService.ThreadManagementService["Service"];
   readonly spawnAgent: (
@@ -110,13 +126,23 @@ export interface WorkflowRunnerDeps {
   readonly canRunCommands: (
     workflow: WorkflowContext,
   ) => Effect.Effect<boolean, OrchestratorMcpFailure>;
-  /** Runs a process check in the agent's workspace; `result` backs the {{result}} token. */
+  /**
+   * Runs a process check in the agent's workspace; `result` backs the {{result}} token and
+   * `files` maps `input:<id>` and `output:<id>` tokens to workspace-relative paths.
+   */
   readonly runCommandCheck: (
     workflow: WorkflowContext,
     childThreadId: ThreadId,
     check: ProcessCheck,
     result: string,
+    files: Readonly<Record<string, string>>,
   ) => Effect.Effect<CheckOutcome, OrchestratorMcpFailure>;
+  /** Hashes a workspace-relative file in the caller's checkout, reading at most `maxBytes`. */
+  readonly hashWorkspaceFile: (
+    workflow: WorkflowContext,
+    path: string,
+    maxBytes: number,
+  ) => Effect.Effect<WorkspaceFileHash, OrchestratorMcpFailure>;
   readonly stopAgent: (
     workflow: WorkflowContext,
     taskId: NodeId,
@@ -282,10 +308,18 @@ class WorkflowSession {
     const target = options.target ?? (model === undefined ? undefined : { model });
     let check: WorkflowCheck | undefined;
     let scopes: FileScopes | undefined;
+    let inputs: ReadonlyArray<FileRef> = [];
+    let outputs: ReadonlyArray<FileRef> = [];
     let invalid: string | undefined;
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);
+      if (options.inputs !== undefined) inputs = parseFileRefs(options.inputs, "inputs");
+      if (options.outputs !== undefined) outputs = parseFileRefs(options.outputs, "outputs");
+      // The runner reads declared files in the caller's checkout, which a worktree agent never writes.
+      if (inputs.length + outputs.length > 0 && options.isolation === "worktree") {
+        throw new Error('inputs and outputs need the shared checkout, not isolation "worktree".');
+      }
     } catch (error) {
       invalid = error instanceof Error ? error.message : String(error);
     }
@@ -303,6 +337,8 @@ class WorkflowSession {
           // Only present when used, so scripts without them keep their keys.
           ...(check === undefined ? [] : [{ verify: check }]),
           ...(scopes === undefined ? [] : [{ scopes }]),
+          ...(inputs.length === 0 ? [] : [{ inputs }]),
+          ...(outputs.length === 0 ? [] : [{ outputs }]),
         ]),
       )
       .digest("hex")
@@ -328,7 +364,7 @@ class WorkflowSession {
 
     const itemFor = (feedback: string) =>
       decodeItem({
-        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${feedback}`,
+        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(inputs, outputs)}${feedback}`,
         title: truncate(label, 500),
         ...(target === undefined ? {} : { target }),
         ...(options.isolation === undefined ? {} : { isolation: options.isolation }),
@@ -355,10 +391,10 @@ class WorkflowSession {
       );
       return null;
     }
-    // Agents sharing a checkout never write the same files at once.
-    const holdsWrites =
-      scopes !== undefined && scopes.write.length > 0 && options.isolation !== "worktree";
-    if (holdsWrites) await this.acquireWrites(entry.index, scopes!.write, label);
+    // Agents sharing a checkout never write the same files at once; an output is a write.
+    const writes = [...(scopes?.write ?? []), ...outputs.map((output) => output.path)];
+    const holdsWrites = writes.length > 0 && options.isolation !== "worktree";
+    if (holdsWrites) await this.acquireWrites(entry.index, writes, label);
     try {
       return await this.runAttempts({
         request,
@@ -370,6 +406,8 @@ class WorkflowSession {
         digest,
         occurrence,
         check,
+        inputs,
+        outputs,
         itemFor,
         settle,
       });
@@ -410,6 +448,8 @@ class WorkflowSession {
     readonly digest: string;
     readonly occurrence: number;
     readonly check: WorkflowCheck | undefined;
+    readonly inputs: ReadonlyArray<FileRef>;
+    readonly outputs: ReadonlyArray<FileRef>;
     readonly itemFor: (feedback: string) => ReturnType<typeof decodeItem>;
     readonly settle: (status: "completed" | "failed", result: string | null) => void;
   }): Promise<unknown> {
@@ -423,9 +463,15 @@ class WorkflowSession {
       digest,
       occurrence,
       check,
+      inputs,
+      outputs,
       itemFor,
       settle,
     } = input;
+    const files = Object.fromEntries([
+      ...inputs.map((ref) => [`input:${ref.id}`, ref.path] as const),
+      ...outputs.map((ref) => [`output:${ref.id}`, ref.path] as const),
+    ]);
     let feedback = "";
     for (let attempt = 0; ; attempt += 1) {
       const item = itemFor(feedback);
@@ -446,6 +492,12 @@ class WorkflowSession {
         const message = `The workflow's budget of ${budget} tokens is spent (${this.spentTokens} used).`;
         settle("failed", message);
         throw new Error(message);
+      }
+      // An input that changed since the script pinned it would make the work answer another question.
+      const inputProblem = await this.inputProblem(inputs);
+      if (inputProblem !== undefined) {
+        settle("failed", `agent "${label}": ${inputProblem}`);
+        return null;
       }
       const started = await Effect.runPromiseExit(
         this.deps.spawnAgent(this.workflow, item.value, key),
@@ -497,28 +549,44 @@ class WorkflowSession {
         settle("failed", summary ?? `The agent ended ${status}.`);
         return null;
       }
-      if (check === undefined) {
+      const value = options.schema === undefined ? summary : (structuredResult ?? null);
+      // Missing or oversized outputs fail before any other check, which would read them.
+      let produced: Readonly<Record<string, ProducedFile>> | undefined;
+      let checkType: WorkflowCheck["type"] | "outputs" | undefined;
+      let checked: CheckOutcome | undefined;
+      if (outputs.length > 0) {
+        const found = await this.outputFiles(outputs);
+        if ("files" in found) produced = found.files;
+        checkType = "outputs";
+        checked = found.outcome;
+      }
+      if (check !== undefined && (checked === undefined || checked.outcome === "passed")) {
+        checkType = check.type;
+        checked = await this.runCheck({
+          check,
+          prompt: request.prompt,
+          label,
+          phase,
+          target,
+          childThreadId: started.value.childThreadId,
+          summary,
+          structuredResult,
+          structuredResultError,
+          files,
+        });
+      }
+      const returned = (result: unknown) =>
+        produced === undefined ? result : { result, outputs: produced };
+      if (checked === undefined || checkType === undefined) {
         settle("completed", summary);
-        if (options.schema === undefined) return summary;
-        if (structuredResultError !== undefined) {
+        if (options.schema !== undefined && structuredResultError !== undefined) {
           this.progress = truncate(`agent "${label}": ${structuredResultError}`, PREVIEW_LIMIT);
           return null;
         }
-        return structuredResult ?? null;
+        return returned(value);
       }
-      const checked = await this.runCheck({
-        check,
-        prompt: request.prompt,
-        label,
-        phase,
-        target,
-        childThreadId: started.value.childThreadId,
-        summary,
-        structuredResult,
-        structuredResultError,
-      });
       entry.verification = {
-        type: check.type,
+        type: checkType,
         outcome: checked.outcome,
         attempts: attempt + 1,
         ...(checked.detail.trim().length === 0
@@ -527,14 +595,14 @@ class WorkflowSession {
       };
       if (checked.outcome === "passed") {
         settle("completed", summary);
-        return options.schema === undefined ? summary : (structuredResult ?? null);
+        return returned(value);
       }
       // A failed check is a judgment on the work, so the agent tries again with what the
       // check saw. A check that could not run is not, and retrying the agent would not fix it.
       if (checked.outcome === "failed" && attempt + 1 < MAX_AGENT_ATTEMPTS) {
-        feedback = checkFeedback(check, checked);
+        feedback = checkFeedback(checkType, checked);
         this.progress = truncate(
-          `agent "${label}" failed its ${check.type} check; starting it again.`,
+          `agent "${label}" failed its ${checkType} check; starting it again.`,
           PREVIEW_LIMIT,
         );
         entry.state = "running";
@@ -543,10 +611,67 @@ class WorkflowSession {
       }
       settle(
         "failed",
-        `Its ${check.type} check ${checked.outcome === "error" ? "could not run" : "failed"}: ${checked.detail}`,
+        `Its ${checkType} check ${checked.outcome === "error" ? "could not run" : "failed"}: ${checked.detail}`,
       );
       return null;
     }
+  }
+
+  private hashFile(ref: FileRef): Promise<WorkspaceFileHash | string> {
+    return Effect.runPromise(
+      this.deps
+        .hashWorkspaceFile(this.workflow, ref.path, ref.maxBytes)
+        .pipe(
+          Effect.catch((failure) =>
+            Effect.succeed(`${ref.path} could not be read: ${failure.message}`),
+          ),
+        ),
+    );
+  }
+
+  /** Why the declared inputs cannot be used as they are, or undefined when they can. */
+  private async inputProblem(inputs: ReadonlyArray<FileRef>): Promise<string | undefined> {
+    for (const input of inputs) {
+      const found = await this.hashFile(input);
+      if (typeof found === "string") return `input ${input.id}: ${found}`;
+      if (found.status === "missing") return `input ${input.id} (${input.path}) does not exist.`;
+      if (found.status === "too_large") {
+        return `input ${input.id} (${input.path}) is larger than its ${input.maxBytes}-byte bound.`;
+      }
+      if (input.sha256 !== undefined && found.sha256 !== input.sha256) {
+        return `input ${input.id} (${input.path}) changed: expected sha256 ${input.sha256}, found ${found.sha256}.`;
+      }
+    }
+    return undefined;
+  }
+
+  /** The written outputs, or the check outcome that says which are missing or too large. */
+  private async outputFiles(
+    outputs: ReadonlyArray<FileRef>,
+  ): Promise<
+    | { readonly outcome: CheckOutcome; readonly files: Readonly<Record<string, ProducedFile>> }
+    | { readonly outcome: CheckOutcome }
+  > {
+    const files: Record<string, ProducedFile> = {};
+    const problems: Array<string> = [];
+    for (const output of outputs) {
+      const found = await this.hashFile(output);
+      if (typeof found === "string") {
+        return { outcome: { outcome: "error", detail: `output ${output.id}: ${found}` } };
+      }
+      if (found.status === "missing") {
+        problems.push(`output ${output.id} (${output.path}) was not written.`);
+      } else if (found.status === "too_large") {
+        problems.push(
+          `output ${output.id} (${output.path}) is larger than its ${output.maxBytes}-byte bound.`,
+        );
+      } else {
+        files[output.id] = { path: output.path, sha256: found.sha256, sizeBytes: found.sizeBytes };
+      }
+    }
+    if (problems.length > 0) return { outcome: { outcome: "failed", detail: problems.join("\n") } };
+    const written = outputs.map((output) => `${output.id} ${files[output.id]!.sha256}`);
+    return { outcome: { outcome: "passed", detail: written.join("\n") }, files };
   }
 
   private async runCheck(input: {
@@ -559,6 +684,7 @@ class WorkflowSession {
     readonly summary: string | null;
     readonly structuredResult: unknown;
     readonly structuredResultError: string | undefined;
+    readonly files: Readonly<Record<string, string>>;
   }): Promise<CheckOutcome> {
     const { check } = input;
     if (check.type === "structured") {
@@ -571,7 +697,13 @@ class WorkflowSession {
       (input.structuredResult === undefined ? "" : JSON.stringify(input.structuredResult));
     if (check.type === "process") {
       const ran = await Effect.runPromiseExit(
-        this.deps.runCommandCheck(this.workflow, input.childThreadId, check, resultText),
+        this.deps.runCommandCheck(
+          this.workflow,
+          input.childThreadId,
+          check,
+          resultText,
+          input.files,
+        ),
       );
       return Exit.isFailure(ran)
         ? { outcome: "error", detail: failureMessage(ran, "The check could not run.") }

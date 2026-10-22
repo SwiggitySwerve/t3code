@@ -47,6 +47,14 @@ export interface CheckOutcome {
   readonly detail: string;
 }
 
+/** A workspace file an agent reads or must write; `sha256` pins an input's exact bytes. */
+export interface FileRef {
+  readonly id: string;
+  readonly path: string;
+  readonly maxBytes: number;
+  readonly sha256?: string;
+}
+
 export interface FileScopes {
   readonly read: ReadonlyArray<string>;
   readonly write: ReadonlyArray<string>;
@@ -157,6 +165,65 @@ export function parseCheck(value: unknown): WorkflowCheck {
     default:
       throw new Error('verify.type must be "process", "structured" or "judgment".');
   }
+}
+
+const FILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+const DEFAULT_FILE_BYTES = 256 * 1024;
+const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const MAX_FILE_REFS = 32;
+
+/** Throws with the reason when the inputs or outputs are malformed. */
+export function parseFileRefs(value: unknown, what: "inputs" | "outputs"): ReadonlyArray<FileRef> {
+  if (!Array.isArray(value)) throw new Error(`${what} must be an array.`);
+  if (value.length > MAX_FILE_REFS)
+    throw new Error(`${what} takes at most ${MAX_FILE_REFS} files.`);
+  const refs = value.map((entry, index) => {
+    const record = asRecord(entry);
+    if (record === undefined || typeof record.id !== "string" || !FILE_ID.test(record.id)) {
+      throw new Error(`${what}[${index}] needs an id of letters, digits, dot, dash or underscore.`);
+    }
+    if (typeof record.path !== "string") throw new Error(`${what}.${record.id} needs a path.`);
+    const sha256 = record.sha256;
+    if (sha256 !== undefined && (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256))) {
+      throw new Error(`${what}.${record.id}.sha256 must be 64 lowercase hex digits.`);
+    }
+    return {
+      id: record.id,
+      path: normalizeWorkspacePath(record.path, `${what}.${record.id}.path`),
+      maxBytes: boundedInt(
+        record.maxBytes,
+        `${what}.${record.id}.maxBytes`,
+        DEFAULT_FILE_BYTES,
+        MAX_FILE_BYTES,
+      ),
+      ...(sha256 === undefined ? {} : { sha256 }),
+    } satisfies FileRef;
+  });
+  const ids = refs.map((ref) => ref.id);
+  if (new Set(ids).size !== ids.length) throw new Error(`${what} ids must be unique.`);
+  return refs;
+}
+
+/** The task text that names an agent's input and output files. */
+export function fileInstructions(
+  inputs: ReadonlyArray<FileRef>,
+  outputs: ReadonlyArray<FileRef>,
+): string {
+  if (inputs.length === 0 && outputs.length === 0) return "";
+  const lines = [""];
+  if (inputs.length > 0) {
+    lines.push("", "Input files (read them; do not change them):");
+    for (const input of inputs) {
+      lines.push(`- ${input.id}: ${input.path}${input.sha256 ? ` (sha256 ${input.sha256})` : ""}`);
+    }
+  }
+  if (outputs.length > 0) {
+    lines.push("", "Output files you must write:");
+    for (const output of outputs) {
+      lines.push(`- ${output.id}: ${output.path} (at most ${output.maxBytes} bytes)`);
+    }
+  }
+  return lines.join("\n");
 }
 
 /** Throws with the reason when the scopes are malformed. */
@@ -282,15 +349,18 @@ export function judgmentOutcome(verdict: unknown): CheckOutcome {
 }
 
 /** Appended to the task for the next attempt after a failed check. */
-export function checkFeedback(check: WorkflowCheck, outcome: CheckOutcome): string {
+export function checkFeedback(
+  checkType: WorkflowCheck["type"] | "outputs",
+  outcome: CheckOutcome,
+): string {
   const detail =
     outcome.detail.length > FEEDBACK_LIMIT
-      ? `${outcome.detail.slice(0, FEEDBACK_LIMIT - 1)}â€¦`
+      ? `${outcome.detail.slice(0, FEEDBACK_LIMIT - 1)}…`
       : outcome.detail;
   return [
     "",
     "",
-    `Your previous attempt did not pass its ${check.type} check (${outcome.outcome}):`,
+    `Your previous attempt did not pass its ${checkType} check (${outcome.outcome}):`,
     detail,
     "Fix this and complete the task again.",
   ].join("\n");
