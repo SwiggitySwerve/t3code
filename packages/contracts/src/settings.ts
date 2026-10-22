@@ -250,7 +250,7 @@ export type FontFamilyPreference = typeof FontFamilyPreference.Type;
 
 /**
  * The environment's theme, set with `t3 theme set <id>`. Each client applies
- * it once per value â€” live when connected, on its next connect otherwise â€” so
+ * it once per value — live when connected, on its next connect otherwise — so
  * setting it switches every client, while a theme a user picks in Settings
  * afterwards sticks until the next set. Empty means "no environment theme",
  * which is also how it is cleared.
@@ -416,8 +416,8 @@ export const ClientSettingsSchema = Schema.Struct({
   fontFamilyTerminal: FontFamilyPreference.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
 
   fontSmoothing: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
-  // `null` alone does not mean "show the wizard" â€” every install that predates
-  // this field decodes to `null` â€” so the gate also requires an empty workspace
+  // `null` alone does not mean "show the wizard" — every install that predates
+  // this field decodes to `null` — so the gate also requires an empty workspace
   // before it treats the client as a fresh install.
   onboardingCompletedAt: Schema.NullOr(Schema.String).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),

@@ -11646,8 +11646,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.auto-settle": {
         // Automatic settlement (#8600): the sweep evaluated a shell snapshot,
         // so re-check against the live thread before settling. Any change
-        // after the snapshot ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â or any explicit override, including the
-        // un-settle button's "active" ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â wins over the sweep.
+        // after the snapshot — or any explicit override, including the
+        // un-settle button's "active" — wins over the sweep.
         const thread = yield* projectionStore
           .getThread(command.threadId)
           .pipe(

@@ -182,7 +182,7 @@ remain ordinary dynamic tool output.
 ### Provider Support
 
 A provider instance can run child tasks when its live `ProviderInstance`
-exposes a V2 `orchestrationAdapter` â€” the same registration the orchestrator
+exposes a V2 `orchestrationAdapter` — the same registration the orchestrator
 resolves when a `delegated_task.request` executes. That covers Codex, Claude
 Agent SDK, Cursor Agent SDK, Grok, generic registry agents over ACP, OpenCode,
 OpenCode 2, Pi, Antigravity, and any future driver that builds an adapter.
@@ -527,7 +527,7 @@ distinguishable from human-authored messages.
 Agents mention another thread as `[title](t3-thread://v1/<threadId>)`. The
 link carries only the id. Clients first resolve it in the message's environment,
 then use a unique match in another enabled environment. Ambiguous matches stay
-unresolved. Web and desktop show the resolved threadâ€™s current title. Mobile
+unresolved. Web and desktop show the resolved thread’s current title. Mobile
 relabels local matches; cross-environment links can retain the written label.
 
 List and read results report `snoozed` and `snoozedUntil`, and
