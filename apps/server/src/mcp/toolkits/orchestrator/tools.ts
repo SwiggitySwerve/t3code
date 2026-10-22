@@ -6,6 +6,8 @@ import {
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpDelegateTasksInput,
+  OrchestratorMcpDelegateTasksResult,
   OrchestratorMcpDeleteScheduledTaskInput,
   OrchestratorMcpDeleteScheduledTaskResult,
   OrchestratorMcpRequestSecretInput,
@@ -75,6 +77,19 @@ const DelegateTaskTool = Tool.make("delegate_task", {
   dependencies,
 })
   .annotate(Tool.Title, "Delegate a child task")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+const DelegateTasksTool = Tool.make("delegate_tasks", {
+  description:
+    "Needs an agent running inside a T3 thread. Start up to 100 delegated child tasks of THIS thread in one call, each with its own task prompt, target provider/model/options, isolation, title, role and modes, with the same rules as delegate_task. Use it instead of repeated delegate_task calls whenever you fan out more than one task. Every entry is checked before any starts, so an invalid entry starts nothing and the error names its index. Each entry's retry key is its own clientRequestId, or the batch clientRequestId plus its position; retrying the same call starts only the tasks that did not start. Tasks always run async: the result lists each taskId and childThreadId in request order, and each completion wakes this thread. Use task_wait to wait for any or all of them, task_status for one, and task_cancel to stop one.",
+  parameters: OrchestratorMcpDelegateTasksInput,
+  success: OrchestratorMcpDelegateTasksResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Delegate child tasks")
   .annotate(Tool.Destructive, true)
   .annotate(Tool.OpenWorld, true);
 
@@ -276,6 +291,7 @@ const ThreadInterruptTool = Tool.make("t3_thread_interrupt", {
 export const OrchestratorToolkit = Toolkit.make(
   OrchestratorCapabilitiesTool,
   DelegateTaskTool,
+  DelegateTasksTool,
   TaskStatusTool,
   TaskCancelTool,
   WorkflowStopTool,

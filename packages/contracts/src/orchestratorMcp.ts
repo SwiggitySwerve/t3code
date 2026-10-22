@@ -230,6 +230,49 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 
+export const ORCHESTRATOR_MCP_MAX_BATCH_TASKS = 100;
+
+export const OrchestratorMcpDelegateTasksItem = Schema.Struct({
+  task: OrchestratorMcpDelegateTaskInput.fields.task,
+  target: OrchestratorMcpDelegateTaskInput.fields.target,
+  title: OrchestratorMcpDelegateTaskInput.fields.title,
+  role: OrchestratorMcpDelegateTaskInput.fields.role,
+  isolation: OrchestratorMcpDelegateTaskInput.fields.isolation,
+  runtimeMode: OrchestratorMcpDelegateTaskInput.fields.runtimeMode,
+  interactionMode: OrchestratorMcpDelegateTaskInput.fields.interactionMode,
+  clientRequestId: Schema.optional(
+    OrchestratorMcpClientRequestId.annotate({
+      description:
+        "Retry key for this one task. Defaults to the batch clientRequestId plus the task's position. Reusing a delegate_task clientRequestId refers to that same task.",
+    }),
+  ),
+});
+export type OrchestratorMcpDelegateTasksItem = typeof OrchestratorMcpDelegateTasksItem.Type;
+
+export const OrchestratorMcpDelegateTasksInput = Schema.Struct({
+  tasks: Schema.Array(OrchestratorMcpDelegateTasksItem).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(ORCHESTRATOR_MCP_MAX_BATCH_TASKS),
+  ),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpDelegateTasksInput = typeof OrchestratorMcpDelegateTasksInput.Type;
+
+export const OrchestratorMcpDelegatedTaskStart = Schema.Struct({
+  taskId: NodeId,
+  childThreadId: ThreadId,
+  status: OrchestratorMcpDelegatedTaskStatus,
+  providerInstanceId: ProviderInstanceId,
+  model: Schema.NullOr(Schema.String),
+});
+export type OrchestratorMcpDelegatedTaskStart = typeof OrchestratorMcpDelegatedTaskStart.Type;
+
+export const OrchestratorMcpDelegateTasksResult = Schema.Struct({
+  tasks: Schema.Array(OrchestratorMcpDelegatedTaskStart).annotate({
+    description: "One entry per requested task, in request order.",
+  }),
+});
+export type OrchestratorMcpDelegateTasksResult = typeof OrchestratorMcpDelegateTasksResult.Type;
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
 });

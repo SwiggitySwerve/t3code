@@ -143,7 +143,20 @@ export function summarizeT3ToolCalls(
       break;
     }
     case "delegate":
-      label = phrase("Delegated", "delegate", quantity(countEntities(entityIds("taskId")), "task"));
+      label = phrase(
+        "Delegated",
+        "delegate",
+        quantity(
+          countEntities(
+            selected.flatMap((call) =>
+              Array.isArray(call.output?.tasks)
+                ? call.output.tasks.map((task) => id(asRecord(task)?.taskId))
+                : [id(call.output?.taskId) ?? id(call.input?.taskId)],
+            ),
+          ),
+          "task",
+        ),
+      );
       break;
     case "thread-read":
     case "thread-wait": {

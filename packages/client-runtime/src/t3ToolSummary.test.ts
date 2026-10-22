@@ -66,6 +66,12 @@ describe("summarizeT3ToolCalls", () => {
       failedCount: 0,
     });
     expect(
+      summarizeT3ToolCalls("delegate", [
+        completed({}, { tasks: [{ taskId: "task-1" }, { taskId: "task-2" }] }),
+        completed({}, { taskId: "task-3" }),
+      ]).label,
+    ).toBe("Delegated 3 tasks");
+    expect(
       summarizeT3ToolCalls(
         "task-status",
         Array.from({ length: 4 }, () => completed({ taskId: "task-1" }, failedChild)),
