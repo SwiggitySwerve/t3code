@@ -204,7 +204,15 @@ export const make = Effect.gen(function* () {
     ) {
       const now = yield* DateTime.now;
       const runs = [] as Array<OrchestrationV2ThreadProjection["runs"][number]>;
+      // A delegated run still waiting for a slot never reached a provider; admission
+      // starts it after recovery, so the restart leaves it and its items alone.
+      const admissionWaitingRunIds = new Set(
+        projection.runs
+          .filter((run) => run.status === "preparing" && run.admission === "waiting")
+          .map((run) => run.id),
+      );
       for (const run of nonterminalRuns(projection)) {
+        if (admissionWaitingRunIds.has(run.id)) continue;
         if (run.status === "waiting") {
           const checkpointEffects = yield* outbox
             .listByCommandId(CommandId.make(`command:effect:checkpoint.capture:${run.id}`))
@@ -485,7 +493,10 @@ export const make = Effect.gen(function* () {
       const recoveredNonterminalRunIds = new Set(runs.map((run) => run.id));
       const cancelledStaleNodeIds = new Set<string>();
       for (const item of projection.turnItems ?? []) {
-        if (item.runId !== null && recoveredNonterminalRunIds.has(item.runId)) {
+        if (
+          item.runId !== null &&
+          (recoveredNonterminalRunIds.has(item.runId) || admissionWaitingRunIds.has(item.runId))
+        ) {
           continue;
         }
         if (!isBackgroundCapableTurnItemType(item.type)) {
