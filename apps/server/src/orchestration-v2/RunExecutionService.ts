@@ -43,6 +43,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { applyUltracode } from "@t3tools/provider-core/server/ultracode";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
@@ -902,12 +903,10 @@ export const layer: Layer.Layer<
           failure,
           threadDisposition: "reusable",
         });
-        const responseStreamingMode = yield* Effect.gen(function* () {
-          const responseStreamingMode = yield* serverSettings.getSettings.pipe(
+        const runSettings = yield* Effect.gen(function* () {
+          const projectSettings = yield* serverSettings.getSettings.pipe(
             Effect.map(
-              (settings) =>
-                resolveProjectSettings(settings, input.appThread.projectId).settings
-                  .responseStreamingMode,
+              (settings) => resolveProjectSettings(settings, input.appThread.projectId).settings,
             ),
           );
           yield* checkpointService
@@ -931,7 +930,7 @@ export const layer: Layer.Layer<
           ) {
             return null;
           }
-          return responseStreamingMode;
+          return projectSettings;
         }).pipe(
           Effect.catchCause((cause) =>
             Effect.gen(function* () {
@@ -975,9 +974,10 @@ export const layer: Layer.Layer<
               }),
           ),
         );
-        if (responseStreamingMode === null) {
+        if (runSettings === null) {
           return;
         }
+        const responseStreamingMode = runSettings.responseStreamingMode;
         const terminalEvent = yield* Ref.make<ProviderTerminalEvent | null>(null);
         const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
         const latestProviderThread = yield* Ref.make(input.providerThread);
@@ -1626,7 +1626,15 @@ export const layer: Layer.Layer<
           attemptId: input.attemptId,
           rootNodeId: input.rootNode.id,
           providerThread: input.providerThread,
-          message: input.message,
+          message: {
+            ...input.message,
+            text: applyUltracode({
+              mode: runSettings.ultracode,
+              driver: input.providerThread.driver,
+              text: input.message.text,
+              createdBy: input.message.createdBy,
+            }),
+          },
           modelSelection: input.modelSelection,
           runtimePolicy: input.runtimePolicy,
           ...(appContext.length === 0 ? {} : { appContext }),

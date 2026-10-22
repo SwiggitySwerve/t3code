@@ -937,6 +937,13 @@ export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
+/**
+ * Ultracode asks agents to orchestrate substantive work as a workflow. "keyword" opts in a
+ * turn whose message contains the word ultracode, "always" opts in every turn, "off" never.
+ */
+export const UltracodeMode = Schema.Literals(["keyword", "always", "off"]);
+export type UltracodeMode = typeof UltracodeMode.Type;
+
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
 );
@@ -1000,6 +1007,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleKeepPullRequests",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
+  "ultracode",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1044,6 +1052,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
+  ultracode: Schema.optionalKey(UltracodeMode),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1165,6 +1174,7 @@ export const ServerSettings = Schema.Struct({
   maxRunningDelegatedTasks: MaxRunningDelegatedTasks.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_MAX_RUNNING_DELEGATED_TASKS)),
   ),
+  ultracode: UltracodeMode.pipe(Schema.withDecodingDefault(Effect.succeed("keyword" as const))),
 
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
@@ -1538,6 +1548,7 @@ export const ServerSettingsPatch = Schema.Struct({
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   maxRunningDelegatedTasks: Schema.optionalKey(MaxRunningDelegatedTasks),
+  ultracode: Schema.optionalKey(UltracodeMode),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),

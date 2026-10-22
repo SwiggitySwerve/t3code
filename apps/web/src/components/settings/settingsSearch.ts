@@ -386,6 +386,13 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["output token paragraph buffered wait turn legacy"],
   },
   {
+    id: "ultracode",
+    title: "Ultracode",
+    to: "/settings/general",
+    scope: "project-defaults",
+    searchTerms: ["workflow orchestration multi agent keyword parallel subagents"],
+  },
+  {
     id: "hide-whitespace-changes",
     title: "Hide whitespace changes",
     to: "/settings/general",

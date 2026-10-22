@@ -2732,6 +2732,21 @@ it.effect("stops a provider turn that starts after Stop settled its run", () =>
   }),
 );
 
+it.effect("sends an ultracode turn to the provider with the workflow note", () =>
+  Effect.gen(function* () {
+    const sent = yield* Ref.make<ReadonlyArray<string>>([]);
+    yield* captureRootRunTermination({
+      key: "ultracode-turn",
+      messageText: "Review the parser. ultracode",
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      startTurn: (turn) => Ref.update(sent, (texts) => [...texts, turn.message.text]),
+    });
+    const [text] = yield* Ref.get(sent);
+    assert.isTrue(text?.startsWith("Review the parser. ultracode\n\n<t3-ultracode>"));
+  }),
+);
+
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({
@@ -2771,6 +2786,7 @@ function captureRootRunTermination(input: {
     request: Parameters<EventSink.EventSinkV2["Service"]["writeIfRunCurrent"]>[0],
   ) => Effect.Effect<boolean, EventSink.EventSinkV2Error>;
   readonly afterStart?: (closed: Deferred.Deferred<void>) => Effect.Effect<void>;
+  readonly messageText?: string;
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
@@ -2938,7 +2954,7 @@ function captureRootRunTermination(input: {
             }),
         message: {
           messageId: MessageId.make(`message:${input.key}`),
-          text: "interrupt projection",
+          text: input.messageText ?? "interrupt projection",
           attachments: [],
           createdBy: "user",
           creationSource: "web",

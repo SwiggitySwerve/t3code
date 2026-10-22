@@ -425,6 +425,17 @@ log line, and the script's return value as JSON or why it failed.
 running member as `task_cancel` would, and settle the workflow as cancelled.
 Stopping the calling thread does the same.
 
+#### Ultracode
+
+The `ultracode` server setting (also a project override; Settings, General) asks agents
+to orchestrate substantive work as a workflow. `keyword`, the default, opts in a turn
+whose message contains the word ultracode; `always` opts in every user or agent turn;
+`off` never does. System turns, such as completion wakes, are never opted in. An opted-in
+turn reaches the provider with a `<t3-ultracode>` note asking for `workflow_start`; the
+stored message is unchanged. Claude Code has its own ultracode, which the keyword starts,
+so a Claude turn only gets the word ultracode added when `always` opts it in.
+`@t3tools/provider-core/server/ultracode` owns this rule, and run execution applies it.
+
 #### In the app
 
 The calling thread's timeline shows a T3-run workflow where it started: its state
