@@ -2685,6 +2685,53 @@ it.effect("does not start a turn whose run settled during the app context read",
   }),
 );
 
+it.effect("stops a provider turn that starts after Stop settled its run", () =>
+  Effect.gen(function* () {
+    const accepted = yield* Deferred.make<void>();
+    const current = yield* Ref.make(true);
+    const interrupted = yield* Ref.make<ReadonlyArray<ProviderTurnId>>([]);
+    const startedTurn = (ids: BackgroundScenarioIds, status: "running" | "interrupted") =>
+      ({
+        type: "provider_turn.updated",
+        driver,
+        threadId: ids.threadId,
+        providerTurn: {
+          id: ids.rootProviderTurnId,
+          providerThreadId: ids.providerThreadId,
+          nodeId: ids.rootNodeId,
+          runAttemptId: ids.attemptId,
+          status,
+        },
+      }) as ProviderAdapter.ProviderAdapterV2Event;
+    yield* captureRootRunTermination({
+      key: "late-turn-after-stop",
+      initialProviderTurnId: null,
+      shouldStartProviderTurn: () => Ref.get(current),
+      shouldFinalizeRun: () => Ref.get(current),
+      // Stop settles the run while the provider is still accepting the turn.
+      startTurn: () =>
+        Ref.set(current, false).pipe(Effect.andThen(Deferred.succeed(accepted, undefined))),
+      events: (ids) =>
+        Stream.unwrap(
+          Deferred.await(accepted).pipe(
+            Effect.as(
+              Stream.make(
+                startedTurn(ids, "running"),
+                startedTurn(ids, "running"),
+                rootTerminalEvent(ids, "interrupted"),
+              ),
+            ),
+          ),
+        ),
+      interruptTurn: (request) =>
+        Ref.update(interrupted, (turns) => [...turns, request.providerTurnId]),
+    });
+    assert.deepEqual(yield* Ref.get(interrupted), [
+      backgroundScenarioIds("late-turn-after-stop").rootProviderTurnId,
+    ]);
+  }),
+);
+
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({

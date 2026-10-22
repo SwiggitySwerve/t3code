@@ -982,6 +982,41 @@ export const layer: Layer.Layer<
         const latestTurnItemOrdinal = yield* Ref.make(input.providerTurnOrdinal * 100);
         const latestProviderThread = yield* Ref.make(input.providerThread);
         const latestRootProviderTurn = yield* Ref.make<OrchestrationV2ProviderTurn | null>(null);
+        const lateTurnInterrupted = yield* Ref.make(false);
+        // A Stop that lands while the provider accepts the turn settles the run before
+        // any provider turn exists, so nothing else would stop the turn that then starts.
+        const interruptTurnStartedAfterStop = Effect.fnUntraced(function* (
+          providerTurn: OrchestrationV2ProviderTurn,
+        ) {
+          if (
+            input.shouldStartProviderTurn === undefined ||
+            isTerminalProviderTurnStatus(providerTurn.status) ||
+            (yield* Ref.get(lateTurnInterrupted))
+          ) {
+            return;
+          }
+          const stillCurrent = yield* input
+            .shouldStartProviderTurn()
+            .pipe(Effect.orElseSucceed(() => true));
+          if (stillCurrent) return;
+          yield* Ref.set(lateTurnInterrupted, true);
+          yield* input.session
+            .interruptTurn({
+              providerThread: yield* Ref.get(latestProviderThread),
+              providerTurnId: providerTurn.id,
+            })
+            .pipe(
+              Effect.catchCause((cause) =>
+                Effect.logWarning(
+                  "orchestration V2 failed to stop a turn that started after Stop",
+                  {
+                    runId: input.run.id,
+                    cause,
+                  },
+                ),
+              ),
+            );
+        });
         const routeIdentity: ProviderEventRouteIdentity = {
           threadId: input.run.threadId,
           runId: input.run.id,
@@ -1344,6 +1379,7 @@ export const layer: Layer.Layer<
                 event.providerTurn.providerThreadId === input.providerThread.id
               ) {
                 yield* Ref.set(latestRootProviderTurn, event.providerTurn);
+                yield* interruptTurnStartedAfterStop(event.providerTurn);
               }
               let storedEventCount = 0;
               const deliveredEvent = filterAssistantEvent(
