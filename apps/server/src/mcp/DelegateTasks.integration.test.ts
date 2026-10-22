@@ -66,39 +66,46 @@ const provider: ServerProvider = {
 };
 
 const layerDatabase = SqlitePersistence.layerMemory;
-const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
-  { name: "delegate-tasks" },
-  ProviderAdapterRegistry.layerFromAdapters([adapter]),
-  { databaseLayer: layerDatabase, runEffectWorker: false },
-);
-const layerOrchestration = ThreadManagementService.layer.pipe(
-  Layer.provideMerge(layerOrchestrator),
-  Layer.provideMerge(ServerSettings.layerTest()),
-  Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
-);
-const layerSecretStore = Layer.sync(ServerSecretStore.ServerSecretStore, () =>
-  ServerSecretStore.ServerSecretStore.of({
-    get: () => Effect.succeed(Option.none()),
-    set: () => Effect.void,
-    create: () => Effect.void,
-    getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
-    remove: () => Effect.void,
-  }),
-);
-const layerTest = McpHttpServer.layerOrchestratorToolkit.pipe(
-  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-  Layer.provideMerge(McpServer.McpServer.layer),
-  Layer.provideMerge(layerOrchestration),
-  Layer.provide(ProviderAdapterRegistry.layerFromAdapters([adapter])),
-  Layer.provide(ProviderRegistryMock.layer([provider])),
-  Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-  Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
-  Layer.provideMerge(
-    SecretRequests.layer.pipe(Layer.provide(layerSecretStore), Layer.provide(layerOrchestration)),
-  ),
-  Layer.provide(NodeServices.layer),
-);
+const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
+  const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
+    { name: "delegate-tasks" },
+    ProviderAdapterRegistry.layerFromAdapters([adapter]),
+    {
+      databaseLayer: layerDatabase,
+      runEffectWorker: false,
+      ...(maxRunningDelegatedTasks === undefined ? {} : { maxRunningDelegatedTasks }),
+    },
+  );
+  const layerOrchestration = ThreadManagementService.layer.pipe(
+    Layer.provideMerge(layerOrchestrator),
+    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
+  );
+  const layerSecretStore = Layer.sync(ServerSecretStore.ServerSecretStore, () =>
+    ServerSecretStore.ServerSecretStore.of({
+      get: () => Effect.succeed(Option.none()),
+      set: () => Effect.void,
+      create: () => Effect.void,
+      getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
+      remove: () => Effect.void,
+    }),
+  );
+  return McpHttpServer.layerOrchestratorToolkit.pipe(
+    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(layerOrchestration),
+    Layer.provide(ProviderAdapterRegistry.layerFromAdapters([adapter])),
+    Layer.provide(ProviderRegistryMock.layer([provider])),
+    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+    Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+    Layer.provideMerge(
+      SecretRequests.layer.pipe(Layer.provide(layerSecretStore), Layer.provide(layerOrchestration)),
+    ),
+    Layer.provide(NodeServices.layer),
+  );
+};
+const layerTest = makeLayerTest();
 
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
@@ -345,5 +352,16 @@ describe("task_wait", () => {
       expect(result.isError).toBe(true);
       expect(errorText(result)).toContain("task_not_found");
     }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+describe("delegate_tasks over the running limit", () => {
+  it.effect("reports the tasks past the limit as queued", () =>
+    Effect.gen(function* () {
+      const { tasks } = yield* startThree;
+      expect(tasks.map((task) => task.status)).toEqual(["running", "running", "queued"]);
+      const status = yield* invoke("task_status", { taskId: tasks[2]!.taskId });
+      expect(status.structuredContent).toMatchObject({ status: "queued", workState: "working" });
+    }).pipe(Effect.provide(makeLayerTest(2))),
   );
 });

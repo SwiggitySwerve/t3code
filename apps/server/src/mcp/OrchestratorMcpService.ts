@@ -451,8 +451,13 @@ function invalidOptionSelections(
 }
 
 function taskStatusForRun(
-  run: Pick<OrchestrationV2Run, "status" | "restartCancelledBackgroundWork"> | undefined,
+  run:
+    | (Pick<OrchestrationV2Run, "status" | "restartCancelledBackgroundWork"> &
+        Partial<Pick<OrchestrationV2Run, "admission">>)
+    | undefined,
 ): OrchestratorMcpDelegateTaskResult["status"] {
+  // A child waiting for a slot under the running-delegated-task limit has not started.
+  if (run?.status === "preparing" && run.admission === "waiting") return "queued";
   switch (run === undefined ? undefined : runOutcome(run)) {
     case "queued":
       return "queued";
@@ -1880,12 +1885,18 @@ const make = Effect.gen(function* () {
           runId: childRunEvent.event.payload.id,
         });
       }
+      const childRun = result.storedEvents.findLast(
+        (stored) =>
+          (stored.event.type === "run.created" || stored.event.type === "run.updated") &&
+          stored.event.threadId === childThreadId,
+      );
       return {
         taskId,
         childThreadId,
         queued:
-          childRunEvent?.event.type === "run.created" &&
-          childRunEvent.event.payload.status === "queued",
+          (childRun?.event.type === "run.created" || childRun?.event.type === "run.updated") &&
+          (childRun.event.payload.status === "queued" ||
+            childRun.event.payload.admission === "waiting"),
       };
     },
   );
