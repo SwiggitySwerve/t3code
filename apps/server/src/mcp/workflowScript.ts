@@ -34,7 +34,8 @@ const MAX_STACK_BYTES = 1024 * 1024;
 const SYNC_SLICE_MS = 10_000;
 const MAX_ITEMS_PER_CALL = 4096;
 
-const META_EXPORT = /^\s*export\s+const\s+meta\s*=/m;
+// Leading spaces only: \s* would also take the blank lines above and shift error line numbers.
+const META_EXPORT = /^[ \t]*export\s+const\s+meta\s*=/m;
 
 function wrap(source: string): string {
   // The wrapper shares the script's first line, so error line numbers match the script.
@@ -64,7 +65,7 @@ const PRELUDE = `
   WorkflowDate.now = unavailable("Date.now()");
   globalThis.Date = WorkflowDate;
   Object.defineProperty(globalThis, "__t3meta", {
-    set(value) { host.meta(JSON.stringify(value === undefined ? null : value)); },
+    set(value) { host.meta(JSON.stringify(value) ?? "null"); },
   });
   const message = (error) => (error && error.message) || String(error);
   const agent = (prompt, options) => {
@@ -220,7 +221,8 @@ export async function runWorkflowScript(input: {
     input.host.agent(request).then(
       (value) =>
         settle(() => {
-          const handle = context.newString(JSON.stringify(value === undefined ? null : value));
+          // Functions and symbols have no JSON form; they reach the script as null.
+          const handle = context.newString(JSON.stringify(value) ?? "null");
           deferred.resolve(handle);
           handle.dispose();
         }),
@@ -244,7 +246,7 @@ export async function runWorkflowScript(input: {
     argsHandle.dispose();
     setSliceDeadline();
     const started = context.evalCode(
-      `${wrap(input.source)}.call(undefined, JSON.parse(__t3_args), __t3.agent, __t3.parallel, __t3.pipeline, __t3.phase, __t3.log, __t3.budget).then((value) => JSON.stringify(value === undefined ? null : value))`,
+      `${wrap(input.source)}.call(undefined, JSON.parse(__t3_args), __t3.agent, __t3.parallel, __t3.pipeline, __t3.phase, __t3.log, __t3.budget).then((value) => JSON.stringify(value) ?? "null")`,
       "workflow.js",
     );
     if (started.error !== undefined) {

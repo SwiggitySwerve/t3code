@@ -10,10 +10,9 @@ export interface StoredWorkflowSettings {
   readonly budgetTokens?: number;
 }
 
+/** Always writes the settings line, so a script that itself starts with it is not misread. */
 export function storedWorkflowScript(source: string, settings: StoredWorkflowSettings): string {
-  return settings.args === undefined && settings.budgetTokens === undefined
-    ? source
-    : `${SETTINGS_HEADER}${JSON.stringify(settings)}\n${source}`;
+  return `${SETTINGS_HEADER}${JSON.stringify(settings)}\n${source}`;
 }
 
 /** The script source alone, without reading the settings. */

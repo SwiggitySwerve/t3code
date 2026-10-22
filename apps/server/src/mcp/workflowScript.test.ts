@@ -128,4 +128,13 @@ return { scanned, reviewed }`,
     const result = await run("return [budget.total, budget.spent, budget.remaining()]", host());
     expect(result).toEqual([100, 40, 60]);
   });
+  it("returns null for a value with no JSON form", async () => {
+    expect(await run("return () => 1", host())).toBeNull();
+  });
+
+  it("keeps error line numbers when blank lines precede the meta export", async () => {
+    await expect(
+      run('\n\nexport const meta = { name: "x" }\nthrow new Error("boom")', host()),
+    ).rejects.toThrow(/workflow\.js:4/);
+  });
 });
