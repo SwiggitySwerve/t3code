@@ -244,7 +244,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 
-export const ORCHESTRATOR_MCP_MAX_BATCH_TASKS = 100;
+const ORCHESTRATOR_MCP_MAX_BATCH_TASKS = 100;
 
 export const OrchestratorMcpDelegateTasksItem = Schema.Struct({
   task: OrchestratorMcpDelegateTaskInput.fields.task,
