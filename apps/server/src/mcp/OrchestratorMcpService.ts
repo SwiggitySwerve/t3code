@@ -24,6 +24,8 @@ import {
   type OrchestratorMcpDelegateTasksItem,
   type OrchestratorMcpDelegateTasksResult,
   type OrchestratorMcpDelegatedTaskStart,
+  type OrchestratorMcpTaskWaitInput,
+  type OrchestratorMcpTaskWaitResult,
   type OrchestratorMcpDelegateTaskResult,
   type OrchestratorMcpInteractionMode,
   type OrchestratorMcpDeleteScheduledTaskInput,
@@ -154,6 +156,10 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTasksInput,
   ) => Effect.Effect<OrchestratorMcpDelegateTasksResult, OrchestratorMcpFailure>;
+  readonly taskWait: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpTaskWaitInput,
+  ) => Effect.Effect<OrchestratorMcpTaskWaitResult, OrchestratorMcpFailure>;
   readonly taskStatus: (
     scope: McpInvocationScope,
     taskId: NodeId,
@@ -2438,6 +2444,83 @@ const make = Effect.gen(function* () {
         return { tasks };
       },
     ),
+    taskWait: Effect.fn("OrchestratorMcpService.taskWait")(function* (callerScope, input) {
+      const scope = yield* requireThreadScope(callerScope, "task_wait");
+      const taskIds = [...new Set(input.taskIds)];
+      const timeoutMs = Math.min(
+        MAX_WAIT_TIMEOUT_MS,
+        Math.max(1, input.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS),
+      );
+      const streamError = (error: unknown) =>
+        failure("orchestration_error", `Unable to watch delegated tasks: ${errorMessage(error)}`);
+      // Taken before the first reads, so an update between a read and the
+      // stream's start is replayed rather than missed.
+      const afterSequence = yield* threadManagement
+        .getThreadEventSequence(scope.thread.threadId)
+        .pipe(Effect.mapError(streamError));
+      const latest = new Map<NodeId, OrchestratorMcpDelegateTaskResult>();
+      const read = (taskId: NodeId) =>
+        readTask(scope, taskId, false, true).pipe(
+          Effect.tap((result) => Effect.sync(() => latest.set(taskId, result))),
+        );
+      const isReady = (taskId: NodeId) => {
+        const result = latest.get(taskId);
+        return result !== undefined && endsTaskWait(result);
+      };
+      const satisfied = () =>
+        input.mode === "any" ? taskIds.some(isReady) : taskIds.every(isReady);
+      yield* Effect.forEach(taskIds, read, { discard: true });
+      // A delegated task's status, question and approval state all reach this
+      // thread as updates to its subagent row, so one stream covers the batch.
+      const timedOut = satisfied()
+        ? false
+        : Option.isNone(
+            yield* threadManagement
+              .streamStoredEventsFrom({
+                threadId: scope.thread.threadId,
+                afterSequence,
+                eventType: "subagent.updated",
+              })
+              .pipe(
+                Stream.mapError(streamError),
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "subagent.updated" &&
+                    taskIds.includes(stored.event.payload.id) &&
+                    !isReady(stored.event.payload.id),
+                ),
+                Stream.mapEffect((stored) =>
+                  stored.event.type === "subagent.updated"
+                    ? read(stored.event.payload.id)
+                    : Effect.void,
+                ),
+                Stream.filter(satisfied),
+                Stream.runHead,
+                Effect.timeoutOption(Duration.millis(timeoutMs)),
+                Effect.map(Option.flatten),
+              ),
+          );
+      return {
+        ready: taskIds.filter(isReady).map((taskId) => {
+          const result = latest.get(taskId)!;
+          return {
+            taskId,
+            childThreadId: result.childThreadId,
+            status: result.status,
+            summary: result.summary,
+            hasPendingQuestion: result.hasPendingQuestion,
+            pendingApproval: result.pendingApproval,
+          };
+        }),
+        pending: taskIds
+          .filter((taskId) => !isReady(taskId))
+          .map((taskId) => {
+            const result = latest.get(taskId)!;
+            return { taskId, status: result.status, workState: result.workState };
+          }),
+        timedOut,
+      } satisfies OrchestratorMcpTaskWaitResult;
+    }),
     taskStatus: Effect.fn("OrchestratorMcpService.taskStatus")(function* (callerScope, taskId) {
       const scope = yield* requireThreadScope(callerScope, "task_status");
       return yield* readTask(scope, taskId, false, true);

@@ -5,6 +5,7 @@ import {
   EnvironmentId,
   MessageId,
   OrchestratorMcpDelegateTasksResult,
+  OrchestratorMcpTaskWaitResult,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -13,6 +14,7 @@ import {
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -136,6 +138,7 @@ const invoke = (name: string, args: Record<string, unknown>) =>
   });
 
 const decodeStarted = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTasksResult);
+const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpTaskWaitResult);
 
 const errorText = (result: McpSchema.CallToolResult) =>
   result.content.map((part) => ("text" in part ? part.text : "")).join("");
@@ -252,6 +255,72 @@ describe("delegate_tasks", () => {
       expect(result.isError).toBe(true);
       expect(errorText(result)).toContain("tasks[1]:");
       expect(yield* childTasks).toHaveLength(0);
+    }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+const startThree = Effect.gen(function* () {
+  yield* startParent;
+  return yield* decodeStarted(
+    (yield* invoke("delegate_tasks", {
+      tasks: [{ task: "First." }, { task: "Second." }, { task: "Third." }],
+    })).structuredContent,
+  );
+});
+
+const stopChild = (childThreadId: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.stop",
+      commandId: CommandId.make(`command:delegate-tasks:stop:${childThreadId}`),
+      threadId: childThreadId,
+    });
+  });
+
+describe("task_wait", () => {
+  it.effect("any returns the tasks that are ready and lists the rest as pending", () =>
+    Effect.gen(function* () {
+      const { tasks } = yield* startThree;
+      yield* stopChild(tasks[1]!.childThreadId);
+      const waited = yield* decodeWait(
+        (yield* invoke("task_wait", {
+          taskIds: tasks.map((task) => task.taskId),
+          mode: "any",
+        })).structuredContent,
+      );
+      expect(waited.timedOut).toBe(false);
+      expect(waited.ready.map((task) => [task.taskId, task.status])).toEqual([
+        [tasks[1]!.taskId, "interrupted"],
+      ]);
+      expect(waited.pending.map((task) => task.taskId)).toEqual([
+        tasks[0]!.taskId,
+        tasks[2]!.taskId,
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("all returns once every task is ready, in request order", () =>
+    Effect.gen(function* () {
+      const { tasks } = yield* startThree;
+      const waiting = yield* invoke("task_wait", {
+        taskIds: tasks.map((task) => task.taskId),
+      }).pipe(Effect.forkChild);
+      for (const task of tasks.toReversed()) yield* stopChild(task.childThreadId);
+      const waited = yield* decodeWait((yield* Fiber.join(waiting)).structuredContent);
+      expect(waited.timedOut).toBe(false);
+      expect(waited.pending).toEqual([]);
+      expect(waited.ready.map((task) => task.taskId)).toEqual(tasks.map((task) => task.taskId));
+      expect(new Set(waited.ready.map((task) => task.status))).toEqual(new Set(["interrupted"]));
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("rejects a task that belongs to another thread", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const result = yield* invoke("task_wait", { taskIds: ["node:not-a-task"] });
+      expect(result.isError).toBe(true);
+      expect(errorText(result)).toContain("task_not_found");
     }).pipe(Effect.provide(layerTest)),
   );
 });

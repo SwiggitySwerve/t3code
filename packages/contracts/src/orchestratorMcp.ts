@@ -273,6 +273,51 @@ export const OrchestratorMcpDelegateTasksResult = Schema.Struct({
   }),
 });
 export type OrchestratorMcpDelegateTasksResult = typeof OrchestratorMcpDelegateTasksResult.Type;
+export const OrchestratorMcpTaskWaitInput = Schema.Struct({
+  taskIds: Schema.Array(NodeId).check(
+    Schema.isMinLength(1),
+    Schema.isMaxLength(ORCHESTRATOR_MCP_MAX_BATCH_TASKS),
+  ),
+  mode: Schema.optional(
+    Schema.Literals(["all", "any"]).annotate({
+      description:
+        "Defaults to all: return once every listed task is ready. any returns once at least one is ready, with every task ready at that moment.",
+    }),
+  ),
+  timeoutMs: Schema.optional(Schema.Finite).annotate({
+    description:
+      "Wait budget. Default 10 minutes, at most 60. Elapsing it returns timedOut=true and does not cancel anything.",
+  }),
+});
+export type OrchestratorMcpTaskWaitInput = typeof OrchestratorMcpTaskWaitInput.Type;
+
+export const OrchestratorMcpTaskWaitReady = Schema.Struct({
+  taskId: NodeId,
+  childThreadId: ThreadId,
+  status: OrchestratorMcpDelegatedTaskStatus,
+  summary: Schema.NullOr(Schema.String),
+  hasPendingQuestion: Schema.Boolean,
+  pendingApproval: OrchestratorMcpDelegateTaskResult.fields.pendingApproval,
+});
+export type OrchestratorMcpTaskWaitReady = typeof OrchestratorMcpTaskWaitReady.Type;
+
+export const OrchestratorMcpTaskWaitPending = Schema.Struct({
+  taskId: NodeId,
+  status: OrchestratorMcpDelegatedTaskStatus,
+  workState: OrchestratorMcpDelegateTaskResult.fields.workState,
+});
+export type OrchestratorMcpTaskWaitPending = typeof OrchestratorMcpTaskWaitPending.Type;
+
+export const OrchestratorMcpTaskWaitResult = Schema.Struct({
+  ready: Schema.Array(OrchestratorMcpTaskWaitReady).annotate({
+    description:
+      "Tasks that finished, or that wait on a question or approval, in request order. Reading a finished task here acknowledges its result, so its completion does not also wake this thread.",
+  }),
+  pending: Schema.Array(OrchestratorMcpTaskWaitPending),
+  timedOut: Schema.Boolean,
+});
+export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult.Type;
+
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
 });
