@@ -182,7 +182,7 @@ remain ordinary dynamic tool output.
 ### Provider Support
 
 A provider instance can run child tasks when its live `ProviderInstance`
-exposes a V2 `orchestrationAdapter` — the same registration the orchestrator
+exposes a V2 `orchestrationAdapter` â€” the same registration the orchestrator
 resolves when a `delegated_task.request` executes. That covers Codex, Claude
 Agent SDK, Cursor Agent SDK, Grok, generic registry agents over ACP, OpenCode,
 OpenCode 2, Pi, Antigravity, and any future driver that builds an adapter.
@@ -192,7 +192,7 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The orchestration toolkit includes the tools below.
 
 ### `orchestrator_capabilities`
 
@@ -304,6 +304,54 @@ type DelegateTaskResult = {
 };
 ```
 
+### `delegate_tasks`
+
+Starts up to 100 delegated tasks in one call. Each entry takes the same fields as
+`delegate_task` except `mode` and `timeoutMs`: batched tasks always run async.
+Every entry is resolved and checked before any starts, so an invalid entry starts
+nothing and the error names its index. An entry's retry key is its own
+`clientRequestId`, or the batch `clientRequestId` plus its position, and maps to
+the same command id `delegate_task` would use. Retrying a batch therefore starts
+only the entries that did not start. The result lists each `taskId`,
+`childThreadId`, status, provider and model in request order.
+
+A coordinator agent that fans out N tasks one `delegate_task` call at a time
+spends one model step per task and, in practice, does not start them all in one
+turn. One `delegate_tasks` call removes both costs.
+
+### Structured results
+
+`delegate_task` and `delegate_tasks` take an optional `resultSchema`, a JSON
+Schema. The child's prompt asks it to end its final message with a fenced json
+block matching the schema, between `<t3-result-schema>` markers that the server
+reads back. `task_status` and `task_wait` then return `structuredResult` when
+the last json block parses and matches (checked with ajv), or
+`structuredResultError` naming what is missing. The prompt is the only place
+the schema is stored, so a task's schema cannot drift from what its child saw.
+
+### Running limit
+
+`maxRunningDelegatedTasks` in server settings (default 16) caps delegated
+children that run at once across the environment. A child past the limit is
+created as a `preparing` run with `admission: "waiting"` and a "Waiting for a
+free agent slot" item, and reports `queued`. When an admitted child's run ends,
+and at server start, the oldest waiting runs are released through
+`prepared-run.release`. New children queue behind waiting ones, so order is
+first come, first served. Worktree children already wait for their checkout and
+are admitted when created. Concurrent delegations from different parents can
+briefly exceed the limit by the number of racing commands.
+
+### `task_wait`
+
+Waits for up to 100 delegated tasks of the calling thread. Mode `all` (the
+default) returns when every task is ready, `any` when at least one is. A task is
+ready when it is terminal or waits on a question or approval. Ready tasks come
+back with their summaries in request order and the rest as pending; a timeout
+returns `timedOut: true` and cancels nothing. Reading a finished task
+acknowledges its delivery like `task_status`, so the parent is not also woken
+for it. The wait follows the parent's `subagent.updated` events for status and
+each child's `runtime-request.updated` events for questions and approvals.
+
 ### `task_status`
 
 Reads a delegated task from the parent thread's durable projection. A task ID
@@ -393,7 +441,7 @@ distinguishable from human-authored messages.
 Agents mention another thread as `[title](t3-thread://v1/<threadId>)`. The
 link carries only the id. Clients first resolve it in the message's environment,
 then use a unique match in another enabled environment. Ambiguous matches stay
-unresolved. Web and desktop show the resolved thread’s current title. Mobile
+unresolved. Web and desktop show the resolved threadâ€™s current title. Mobile
 relabels local matches; cross-environment links can retain the written label.
 
 List and read results report `snoozed` and `snoozedUntil`, and

@@ -2498,35 +2498,51 @@ const make = Effect.gen(function* () {
       const satisfied = () =>
         input.mode === "any" ? taskIds.some(isReady) : taskIds.every(isReady);
       yield* Effect.forEach(taskIds, read, { discard: true });
-      // A delegated task's status, question and approval state all reach this
-      // thread as updates to its subagent row, so one stream covers the batch.
+      // Status changes reach this thread's subagent rows; questions and
+      // approvals arrive as runtime requests on each child thread.
+      const taskByChild = new Map(
+        taskIds.map((taskId) => [latest.get(taskId)!.childThreadId as string, taskId]),
+      );
+      const updates = Stream.mergeAll(
+        [
+          threadManagement
+            .streamStoredEventsFrom({
+              threadId: scope.thread.threadId,
+              afterSequence,
+              eventType: "subagent.updated",
+            })
+            .pipe(
+              Stream.map((stored) =>
+                stored.event.type === "subagent.updated" ? stored.event.payload.id : undefined,
+              ),
+            ),
+          ...[...taskByChild].map(([childThreadId, taskId]) =>
+            threadManagement
+              .streamStoredEventsFrom({
+                threadId: ThreadId.make(childThreadId),
+                afterSequence,
+                eventType: "runtime-request.updated",
+              })
+              .pipe(Stream.map(() => taskId)),
+          ),
+        ],
+        { concurrency: "unbounded" },
+      );
       const timedOut = satisfied()
         ? false
         : Option.isNone(
-            yield* threadManagement
-              .streamStoredEventsFrom({
-                threadId: scope.thread.threadId,
-                afterSequence,
-                eventType: "subagent.updated",
-              })
-              .pipe(
-                Stream.mapError(streamError),
-                Stream.filter(
-                  (stored) =>
-                    stored.event.type === "subagent.updated" &&
-                    taskIds.includes(stored.event.payload.id) &&
-                    !isReady(stored.event.payload.id),
-                ),
-                Stream.mapEffect((stored) =>
-                  stored.event.type === "subagent.updated"
-                    ? read(stored.event.payload.id)
-                    : Effect.void,
-                ),
-                Stream.filter(satisfied),
-                Stream.runHead,
-                Effect.timeoutOption(Duration.millis(timeoutMs)),
-                Effect.map(Option.flatten),
+            yield* updates.pipe(
+              Stream.mapError(streamError),
+              Stream.filter(
+                (taskId): taskId is NodeId =>
+                  taskId !== undefined && taskIds.includes(taskId) && !isReady(taskId),
               ),
+              Stream.mapEffect(read),
+              Stream.filter(satisfied),
+              Stream.runHead,
+              Effect.timeoutOption(Duration.millis(timeoutMs)),
+              Effect.map(Option.flatten),
+            ),
           );
       return {
         ready: taskIds.filter(isReady).map((taskId) => {
