@@ -8,20 +8,25 @@ import {
   OrchestratorMcpDelegateTasksResult,
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
+  type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderTurnId,
   type ServerProvider,
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as Context from "effect/Context";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
@@ -42,6 +47,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
 const model = "gpt-5.4";
@@ -96,18 +102,36 @@ const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
     }),
   );
   return McpHttpServer.layerOrchestratorToolkit.pipe(
-    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    // Enough checkout for isolation "worktree": the run preparation itself is not under test.
+    Layer.provideMerge(
+      Layer.mock(ThreadLaunchService.ThreadLaunchService)({ prepareRun: () => Effect.void }),
+    ),
+    Layer.provideMerge(
+      Layer.mock(GitVcsDriver.GitVcsDriver)({
+        resolveCommit: () => Effect.succeed({ commitSha: "0123456789abcdef" } as never),
+      }),
+    ),
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(layerOrchestration),
-    Layer.provide(ProviderAdapterRegistry.layerFromAdapters([adapter])),
-    Layer.provide(ProviderRegistryMock.layer([provider])),
-    Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-    Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+    Layer.provideMerge(ProviderAdapterRegistry.layerFromAdapters([adapter])),
+    Layer.provideMerge(ProviderRegistryMock.layer([provider])),
+    Layer.provideMerge(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+    Layer.provideMerge(
+      Layer.mock(ProjectService.ProjectService)({
+        getById: (projectId) =>
+          Effect.succeed(
+            Option.some({
+              id: projectId,
+              title: "Delegate tasks",
+              workspaceRoot: "/tmp/delegate-tasks",
+            } as never),
+          ),
+      }),
+    ),
     Layer.provideMerge(
       SecretRequests.layer.pipe(Layer.provide(layerSecretStore), Layer.provide(layerOrchestration)),
     ),
-    Layer.provide(NodeServices.layer),
+    Layer.provideMerge(NodeServices.layer),
   );
 };
 const layerTest = makeLayerTest();
@@ -190,7 +214,12 @@ const childTasks = Effect.gen(function* () {
 });
 
 /** Finishes a delegated child's run as if its provider replied with `text`. */
-const completeChild = (childThreadId: ThreadId, text: string) =>
+const completeChild = (
+  childThreadId: ThreadId,
+  text: string,
+  runPatch: Partial<OrchestrationV2Run> = { status: "completed" },
+  tokens?: number,
+) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const sink = yield* EventSink.EventSinkV2;
@@ -225,13 +254,36 @@ const completeChild = (childThreadId: ThreadId, text: string) =>
             updatedAt: now,
           },
         },
+        ...(tokens === undefined || run.providerThreadId === null || run.rootNodeId === null
+          ? []
+          : [
+              {
+                id: EventId.make(`event:test-turn:${run.id}`),
+                type: "provider-turn.updated" as const,
+                threadId: childThreadId,
+                runId: run.id,
+                occurredAt: now,
+                payload: {
+                  id: ProviderTurnId.make(`provider-turn:test:${run.id}`),
+                  providerThreadId: run.providerThreadId,
+                  nodeId: run.rootNodeId,
+                  runAttemptId: run.activeAttemptId,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status: "completed" as const,
+                  startedAt: now,
+                  completedAt: now,
+                  tokenUsage: { usedTokens: tokens, updatedAt: DateTime.formatIso(now) },
+                },
+              },
+            ]),
         {
           id: EventId.make(`event:test-complete:${run.id}`),
           type: "run.updated",
           threadId: childThreadId,
           runId: run.id,
           occurredAt: now,
-          payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+          payload: { ...run, status: "completed", ...runPatch, startedAt: now, completedAt: now },
         },
       ],
     });
@@ -657,6 +709,203 @@ return counted.lines + 1`,
       expect((yield* orchestrator.getThreadProjection(childThreadId!)).runs.at(-1)?.status).toBe(
         "interrupted",
       );
+    }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+/** Waits for the workflow's `count`-th agent task, in start order. */
+const awaitMember = (workflowId: string, count: number) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const seen: Array<OrchestrationV2Subagent> = [];
+    yield* orchestrator
+      .streamStoredEventsFrom({
+        threadId: parentThreadId,
+        afterSequence: 0,
+        eventType: "subagent.updated",
+      })
+      .pipe(
+        Stream.filter((stored) => {
+          if (stored.event.type !== "subagent.updated") return false;
+          const task = stored.event.payload;
+          if (task.parentNodeId !== workflowId || task.childThreadId === null) return false;
+          if (!seen.some((known) => known.id === task.id)) seen.push(task);
+          return seen.length >= count;
+        }),
+        Stream.runHead,
+      );
+    return seen[count - 1]!;
+  });
+
+/** Runs `use` against a fresh workflow service, then shuts it down as a server stop would. */
+const withServerProcess = <A, E, R>(
+  use: (
+    service: OrchestratorMcpService.OrchestratorMcpService["Service"],
+  ) => Effect.Effect<A, E, R>,
+) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const context = yield* Layer.build(Layer.fresh(OrchestratorMcpService.layer));
+      return yield* use(Context.get(context, OrchestratorMcpService.OrchestratorMcpService));
+    }),
+  );
+
+const twoStepScript =
+  'const first = await agent("first")\nconst second = await agent("second after " + first)\nreturn [first, second]';
+
+describe("workflow resume", () => {
+  it.effect("resumes a running workflow after a restart without starting its agents twice", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, { script: twoStepScript });
+          const first = yield* awaitMember(started.workflowId, 1);
+          yield* completeChild(first.childThreadId!, "one");
+          yield* awaitMember(started.workflowId, 2);
+          return started.workflowId;
+        }),
+      );
+      const second = yield* awaitMember(workflowId, 2);
+      // The resumed script re-attaches to the second agent instead of starting another.
+      const resumed = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          yield* completeChild(second.childThreadId!, "two");
+          return yield* awaitWorkflowEnd(workflowId);
+        }),
+      );
+      expect(resumed.status).toBe("completed");
+      expect(JSON.parse(resumed.result!)).toEqual(["one", "two"]);
+      const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+        parentThreadId,
+      );
+      expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
+      expect(
+        parent.runs.flatMap((run) => run.delegatedCompletion?.delivery?.taskIds ?? []),
+      ).toEqual([workflowId]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "starts again an agent that a server restart cancelled, but not one a user stopped",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const started = yield* service.workflowStart(invocation, { script: twoStepScript });
+            return started.workflowId;
+          }),
+        );
+        const first = yield* awaitMember(workflowId, 1);
+        yield* completeChild(first.childThreadId!, "", {
+          status: "cancelled",
+          cancelledByServerRestart: true,
+        });
+        const ended = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            yield* service.resumeWorkflows;
+            const retried = yield* awaitMember(workflowId, 2);
+            expect(retried.prompt).toBe("first");
+            yield* completeChild(retried.childThreadId!, "one");
+            const second = yield* awaitMember(workflowId, 3);
+            // A user's stop is a judgment the script sees, so it is not retried.
+            yield* completeChild(second.childThreadId!, "", { status: "cancelled" });
+            return yield* awaitWorkflowEnd(workflowId);
+          }),
+        );
+        expect(ended.status).toBe("completed");
+        expect(JSON.parse(ended.result!)).toEqual(["one", null]);
+        expect(ended.agents.map((agent) => agent.status)).toEqual(["completed", "cancelled"]);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("starts a failed agent again, up to three attempts in all", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow('return await agent("flaky")');
+      for (const attempt of [1, 2, 3]) {
+        const member = yield* awaitMember(started.workflowId, attempt);
+        yield* completeChild(member.childThreadId!, "", { status: "failed" });
+      }
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toBeNull();
+      const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+        parentThreadId,
+      );
+      expect(
+        parent.subagents.filter((task) => task.parentNodeId === started.workflowId),
+      ).toHaveLength(3);
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("stops an agent that records nothing for too long and starts it again", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("quiet", { stallTimeoutMs: 60000 })',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      yield* TestClock.adjust("2 minutes");
+      const second = yield* awaitMember(started.workflowId, 2);
+      expect(second.prompt).toBe("quiet");
+      yield* completeChild(second.childThreadId!, "spoke");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toBe("spoke");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      expect(
+        (yield* orchestrator.getThreadProjection(first.childThreadId!)).runs.at(-1)?.status,
+      ).toBe("interrupted");
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("refuses new agents once finished agents spent the token budget", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const result = yield* invoke("workflow_start", {
+        script:
+          'const a = await agent("one")\nconst b = await agent("two")\nlet refused = null\ntry { await agent("three") } catch (error) { refused = error.message }\nreturn { a, b, refused, remaining: budget.remaining() }',
+        budgetTokens: 1500,
+      });
+      const started = yield* decodeWorkflow(result.structuredContent);
+      expect(started.budgetTokens).toBe(1500);
+      const one = yield* awaitMember(started.workflowId, 1);
+      yield* completeChild(one.childThreadId!, "1", { status: "completed" }, 1000);
+      const two = yield* awaitMember(started.workflowId, 2);
+      yield* completeChild(two.childThreadId!, "2", { status: "completed" }, 800);
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toEqual({
+        a: "1",
+        b: "2",
+        refused: "The workflow's budget of 1500 tokens is spent (1800 used).",
+        remaining: 0,
+      });
+      expect(ended.tokensUsed).toBe(1800);
+      expect(ended.agents.map((agent) => agent.status)).toEqual([
+        "completed",
+        "completed",
+        "failed",
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("gives each agent asked for a worktree its own checkout", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents((prompt) => `done ${prompt}`);
+      const started = yield* startWorkflow(
+        'return await parallel([1, 2].map((n) => () => agent("edit " + n, { isolation: "worktree" })))',
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toEqual(["done edit 1", "done edit 2"]);
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      // Each child thread prepares its own checkout of the parent's commit.
+      expect(new Set(ended.agents.map((agent) => agent.childThreadId)).size).toBe(2);
+      for (const agent of ended.agents) {
+        const child = yield* orchestrator.getThreadProjection(agent.childThreadId!);
+        expect(child.runs[0]?.workspacePreparation).toMatchObject({
+          type: "worktree",
+          baseRef: "0123456789abcdef",
+        });
+      }
     }).pipe(Effect.provide(layerTest)),
   );
 });

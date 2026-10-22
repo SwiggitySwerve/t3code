@@ -343,6 +343,10 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
   }),
+  budgetTokens: Schema.optional(PositiveInt).annotate({
+    description:
+      "Token budget, counted from the usage providers report for finished agents. Once spent, starting another agent throws in the script; agents already running finish. The script reads it as budget.total, budget.spent and budget.remaining().",
+  }),
   title: Schema.optional(OrchestratorMcpTitle),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
@@ -378,6 +382,10 @@ export const OrchestratorMcpWorkflowResult = Schema.Struct({
   phases: Schema.Array(Schema.String),
   agents: Schema.Array(OrchestratorMcpWorkflowAgent),
   progress: Schema.NullOr(Schema.String).annotate({ description: "The script's latest log line." }),
+  tokensUsed: Schema.Number.annotate({
+    description: "Tokens finished agents' providers reported; an estimate, not a bill.",
+  }),
+  budgetTokens: Schema.NullOr(Schema.Number),
   result: Schema.NullOr(Schema.String).annotate({
     description: "The script's return value as JSON, or why it failed or stopped.",
   }),

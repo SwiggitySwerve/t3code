@@ -1,5 +1,6 @@
 import {
   CommandId,
+  EnvironmentId,
   type RunId,
   isProviderAvailable,
   MessageId,
@@ -127,7 +128,12 @@ import {
   withResultSchema,
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
-import { makeWorkflowRunner, storedWorkflowScript } from "./workflowRunner.ts";
+import {
+  makeWorkflowRunner,
+  parseStoredWorkflowScript,
+  storedWorkflowScript,
+} from "./workflowRunner.ts";
+import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { checkWorkflowScript } from "./workflowScript.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -180,6 +186,8 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpWorkflowStopInput,
   ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
+  /** Restarts the scripts of workflows a server stop left running; returns how many. */
+  readonly resumeWorkflows: Effect.Effect<number>;
   readonly taskWait: (
     scope: McpInvocationScope,
     input: OrchestratorMcpTaskWaitInput,
@@ -1972,15 +1980,43 @@ const make = Effect.gen(function* () {
         };
       },
     ),
+    agentStarted: Effect.fn("OrchestratorMcpService.workflowAgentStarted")(
+      function* (workflow, requestKey) {
+        const scope = workflowScopes.get(workflow.workflowId);
+        if (scope === undefined) return false;
+        return yield* threadManagement.hasReceipt(
+          stableCommandId({ scope, requestKey, operation: "delegate-task" }),
+        );
+      },
+    ),
+    stopAgent: Effect.fn("OrchestratorMcpService.stopWorkflowAgent")(
+      function* (workflow, taskId, childThreadId) {
+        const commandId = CommandId.make(`command:workflow-stall:${taskId}`);
+        const reason =
+          "The agent recorded no activity for too long, so its workflow starts it again.";
+        yield* threadManagement
+          .dispatch({ type: "thread.stop", commandId, threadId: childThreadId, reason })
+          .pipe(Effect.mapError(threadManagementFailure));
+        yield* threadManagement
+          .stopDelegatedTasks({ threadId: childThreadId, commandId, reason })
+          .pipe(Effect.mapError(threadManagementFailure));
+      },
+    ),
     readAgent: Effect.fn("OrchestratorMcpService.readWorkflowAgent")(function* (workflow, taskId) {
       const scope = workflowScopes.get(workflow.workflowId);
       if (scope === undefined) {
         return yield* failure("orchestration_error", "The workflow is not running here.");
       }
       const task = yield* readTask(scope, taskId);
+      const { runs, providerTurns } = yield* threadManagement
+        .getThreadRecords(task.childThreadId, ["runs", "providerTurns"])
+        .pipe(Effect.mapError(threadManagementFailure));
+      const lastRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
       return {
         status: task.status,
         summary: task.summary,
+        cancelledByServerRestart: lastRun?.cancelledByServerRestart === true,
+        tokens: providerTurns.reduce((sum, turn) => sum + (turn.tokenUsage?.usedTokens ?? 0), 0),
         ...(task.structuredResult === undefined ? {} : { structuredResult: task.structuredResult }),
         ...(task.structuredResultError === undefined
           ? {}
@@ -2000,6 +2036,14 @@ const make = Effect.gen(function* () {
         task.workflow !== undefined &&
         task.childThreadId === null,
     );
+
+  const storedBudget = (prompt: string) => {
+    try {
+      return parseStoredWorkflowScript(prompt).budgetTokens;
+    } catch {
+      return undefined;
+    }
+  };
 
   const workflowResult = (
     projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
@@ -2047,9 +2091,99 @@ const make = Effect.gen(function* () {
         };
       }),
       progress: workflow.progress ?? null,
+      tokensUsed: agents.reduce((sum, agent) => sum + (agent.totalTokens ?? 0), 0),
+      budgetTokens: storedBudget(workflow.prompt) ?? null,
       result: workflow.result,
     };
   };
+
+  // Agents act with the starting thread's authority, which comes from the thread itself;
+  // the session that started the workflow is gone after a restart, so only the thread,
+  // the namespace and the capability are real here.
+  const resumedWorkflowScope = (row: OrchestrationV2Subagent): McpThreadInvocationScope => ({
+    environmentId: EnvironmentId.make("environment:workflow-resume"),
+    capabilities: new Set(["orchestration"]),
+    issuedAt: 0,
+    requestNamespace: `workflow:${row.id}`,
+    thread: {
+      threadId: row.threadId,
+      providerSessionId: "workflow-resume",
+      providerInstanceId: row.providerInstanceId,
+    },
+    client: undefined,
+  });
+
+  const resumeWorkflow = Effect.fn("OrchestratorMcpService.resumeWorkflow")(function* (
+    row: OrchestrationV2Subagent,
+  ) {
+    const stored = yield* Effect.try({
+      try: () => parseStoredWorkflowScript(row.prompt),
+      catch: () => "unreadable" as const,
+    }).pipe(Effect.option);
+    if (stored._tag === "None") {
+      yield* threadManagement
+        .dispatch({
+          type: "workflow.complete",
+          commandId: CommandId.make(`command:workflow-complete:${row.id}`),
+          threadId: row.threadId,
+          workflowId: row.id,
+          status: "failed",
+          result: "The workflow could not resume: its stored arguments are unreadable.",
+        })
+        .pipe(Effect.ignore);
+      return false;
+    }
+    workflowScopes.set(row.id, resumedWorkflowScope(row));
+    // Replaying the thread's task updates from the start tells the script which of
+    // its agents already finished.
+    yield* workflowRunner.launch({
+      workflowId: row.id,
+      threadId: row.threadId,
+      source: stored.value.source,
+      args: stored.value.args,
+      ...(stored.value.budgetTokens === undefined
+        ? {}
+        : { budgetTokens: stored.value.budgetTokens }),
+      afterSequence: 0,
+    });
+    return true;
+  });
+
+  const resumeWorkflows = Effect.gen(function* () {
+    let resumed = 0;
+    for (const threadId of yield* threadManagement.getAppWorkflowThreadIds) {
+      const { subagents } = yield* threadManagement.getThreadRecords(threadId, ["subagents"]);
+      for (const row of subagents) {
+        if (
+          row.origin !== "app_owned" ||
+          row.workflow === undefined ||
+          row.childThreadId !== null ||
+          row.status !== "running" ||
+          workflowRunner.isRunning(row.id)
+        ) {
+          continue;
+        }
+        if (yield* resumeWorkflow(row)) resumed += 1;
+      }
+    }
+    return resumed;
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Effect.logWarning("Unable to resume workflows after a restart", { cause }).pipe(Effect.as(0)),
+    ),
+  );
+
+  // Workflows a stop left running resume once recovery has settled the agents the
+  // stop cancelled, so those count as cancelled by the restart.
+  const startup = yield* Effect.serviceOption(ServerRuntimeStartup.ServerRuntimeStartup);
+  if (startup._tag === "Some") {
+    yield* startup.value.awaitCommandReady.pipe(
+      Effect.andThen(resumeWorkflows),
+      Effect.ignore,
+      Effect.forkDetach,
+    );
+  }
+  yield* Effect.addFinalizer(() => workflowRunner.detachAll);
 
   const stopWorkflowById = Effect.fn("OrchestratorMcpService.stopWorkflowById")(function* (
     scope: McpThreadInvocationScope,
@@ -2186,6 +2320,7 @@ const make = Effect.gen(function* () {
   });
 
   return OrchestratorMcpService.of({
+    resumeWorkflows,
     scheduleTask: Effect.fn("OrchestratorMcpService.scheduleTask")(function* (scope, input) {
       const { parent, limits } = yield* loadCaller(scope);
       const projectId = yield* resolveProjectTarget(parent, input.projectId);
@@ -2664,7 +2799,10 @@ const make = Effect.gen(function* () {
             runId: parentRun.id,
             workflowId,
             title: input.title ?? "Workflow",
-            script: storedWorkflowScript(input.script, input.args),
+            script: storedWorkflowScript(input.script, {
+              ...(input.args === undefined ? {} : { args: input.args }),
+              ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+            }),
           })
           .pipe(
             Effect.mapError((error) =>
@@ -2685,6 +2823,7 @@ const make = Effect.gen(function* () {
             threadId: scope.thread.threadId,
             source: input.script,
             args: input.args ?? null,
+            ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
             afterSequence,
           });
         }

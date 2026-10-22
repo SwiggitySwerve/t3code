@@ -24,6 +24,8 @@ export interface WorkflowScriptHost {
   readonly log: (message: string) => void;
   readonly phase: (title: string) => void;
   readonly meta: (meta: unknown) => void;
+  /** `total` is null when the workflow has no token budget. */
+  readonly budget: () => { readonly total: number | null; readonly spent: number };
 }
 
 /** Limits that keep a script from starving the server; agents run outside them. */
@@ -45,8 +47,8 @@ function wrap(source: string): string {
 const PRELUDE = `
 "use strict";
 (() => {
-  const host = { agent: __host_agent, log: __host_log, phase: __host_phase, meta: __host_meta };
-  for (const name of ["__host_agent", "__host_log", "__host_phase", "__host_meta"]) delete globalThis[name];
+  const host = { agent: __host_agent, log: __host_log, phase: __host_phase, meta: __host_meta, budget: __host_budget };
+  for (const name of ["__host_agent", "__host_log", "__host_phase", "__host_meta", "__host_budget"]) delete globalThis[name];
   const unavailable = (name) => () => {
     throw new Error(name + " is unavailable in workflows: runs must be deterministic to resume.");
   };
@@ -107,7 +109,15 @@ const PRELUDE = `
   };
   const phase = (title) => { host.phase(String(title)); };
   const log = (...parts) => { host.log(parts.map((part) => typeof part === "string" ? part : JSON.stringify(part)).join(" ")); };
-  const budget = Object.freeze({ total: 0, remaining: () => Infinity });
+  const tokens = () => JSON.parse(host.budget());
+  const budget = Object.freeze({
+    get total() { return tokens().total; },
+    get spent() { return tokens().spent; },
+    remaining: () => {
+      const { total, spent } = tokens();
+      return total === null ? Infinity : Math.max(0, total - spent);
+    },
+  });
   globalThis.__t3 = Object.freeze({ agent, parallel, pipeline, phase, log, budget });
 })();
 `;
@@ -189,6 +199,7 @@ export async function runWorkflowScript(input: {
   define("__host_phase", (title) => {
     input.host.phase(context.getString(title));
   });
+  define("__host_budget", () => context.newString(JSON.stringify(input.host.budget())));
   define("__host_meta", (meta) => {
     input.host.meta(JSON.parse(context.getString(meta)));
   });

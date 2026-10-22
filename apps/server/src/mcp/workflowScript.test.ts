@@ -25,6 +25,7 @@ const host = (overrides: Partial<WorkflowScriptHost> = {}) => {
       log: (message) => logs.push(message),
       phase: (title) => phases.push(title),
       meta: (meta) => metas.push(meta),
+      budget: () => ({ total: 100, spent: 40 }),
       ...overrides,
     } satisfies WorkflowScriptHost,
   };
@@ -122,5 +123,9 @@ return { scanned, reviewed }`,
     });
     controller.abort();
     await expect(pending).rejects.toThrow("The workflow was stopped.");
+  });
+  it("exposes the workflow's token budget", async () => {
+    const result = await run("return [budget.total, budget.spent, budget.remaining()]", host());
+    expect(result).toEqual([100, 40, 60]);
   });
 });

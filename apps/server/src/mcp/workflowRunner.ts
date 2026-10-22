@@ -17,6 +17,8 @@ import {
   type OrchestratorMcpFailure,
   type ThreadId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -28,16 +30,27 @@ import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts"
 
 /** Claude Code's documented per-run ceiling. */
 const MAX_AGENTS_PER_WORKFLOW = 1000;
+/** A failed agent, or one a server restart cancelled, runs again up to this many times in all. */
+const MAX_AGENT_ATTEMPTS = 3;
+/**
+ * An agent whose thread records nothing for this long is stopped and started again.
+ * Generous, because a long tool call can be silent; `stallTimeoutMs` overrides it.
+ */
+const DEFAULT_STALL_MS = 20 * 60_000;
+const MIN_STALL_MS = 60_000;
+const STALL_SWEEP_INTERVAL = "30 seconds";
 const RESULT_TEXT_LIMIT = 2_000;
 const WORKFLOW_RESULT_LIMIT = 16_000;
 const PREVIEW_LIMIT = 500;
-const ARGS_HEADER = "// t3-workflow-args: ";
+const SETTINGS_HEADER = "// t3-workflow: ";
 
 export interface WorkflowContext {
   readonly workflowId: NodeId;
   readonly threadId: ThreadId;
   readonly source: string;
   readonly args: unknown;
+  /** New agents stop starting once finished agents used this many tokens. */
+  readonly budgetTokens?: number;
   /** Stored event sequence before the workflow row was created. */
   readonly afterSequence: number;
 }
@@ -53,6 +66,10 @@ export interface WorkflowAgentOutcome {
   readonly summary: string | null;
   readonly structuredResult?: unknown;
   readonly structuredResultError?: string;
+  /** The server stopped or restarted under it, so a new attempt is not a repeat of a judgment. */
+  readonly cancelledByServerRestart: boolean;
+  /** Tokens its provider turns reported, as an estimate of its cost. */
+  readonly tokens: number;
 }
 
 export interface WorkflowRunnerDeps {
@@ -66,11 +83,45 @@ export interface WorkflowRunnerDeps {
     workflow: WorkflowContext,
     taskId: NodeId,
   ) => Effect.Effect<WorkflowAgentOutcome, OrchestratorMcpFailure>;
+  /** Whether an agent with this retry key was already started, by this run or an earlier one. */
+  readonly agentStarted: (
+    workflow: WorkflowContext,
+    requestKey: string,
+  ) => Effect.Effect<boolean, OrchestratorMcpFailure>;
+  readonly stopAgent: (
+    workflow: WorkflowContext,
+    taskId: NodeId,
+    childThreadId: ThreadId,
+  ) => Effect.Effect<void, OrchestratorMcpFailure>;
 }
 
-/** The row stores the script and its args together, so a resumed run sees both. */
-export function storedWorkflowScript(source: string, args: unknown): string {
-  return args === undefined ? source : `${ARGS_HEADER}${JSON.stringify(args)}\n${source}`;
+export interface WorkflowSettings {
+  readonly args?: unknown;
+  readonly budgetTokens?: number;
+}
+
+/** The row stores the script with its args and budget, so a resumed run sees all three. */
+export function storedWorkflowScript(source: string, settings: WorkflowSettings): string {
+  return settings.args === undefined && settings.budgetTokens === undefined
+    ? source
+    : `${SETTINGS_HEADER}${JSON.stringify(settings)}\n${source}`;
+}
+
+export function parseStoredWorkflowScript(stored: string): {
+  readonly source: string;
+  readonly args: unknown;
+  readonly budgetTokens: number | undefined;
+} {
+  if (!stored.startsWith(SETTINGS_HEADER)) {
+    return { source: stored, args: null, budgetTokens: undefined };
+  }
+  const newline = stored.indexOf("\n");
+  const settings = asRecord(JSON.parse(stored.slice(SETTINGS_HEADER.length, newline)));
+  return {
+    source: stored.slice(newline + 1),
+    args: settings.args ?? null,
+    budgetTokens: typeof settings.budgetTokens === "number" ? settings.budgetTokens : undefined,
+  };
 }
 
 const decodeItem = Schema.decodeUnknownExit(OrchestratorMcpDelegateTasksItem);
@@ -92,9 +143,22 @@ function stringOption(options: Readonly<Record<string, unknown>>, key: string) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function numberOption(options: Readonly<Record<string, unknown>>, key: string) {
+  const value = options[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
 function failureMessage<A>(exit: Exit.Exit<A, OrchestratorMcpFailure>, fallback: string): string {
   const failure = Exit.isFailure(exit) ? Exit.findErrorOption(exit) : undefined;
   return failure?._tag === "Some" ? failure.value.message : fallback;
+}
+
+interface WaitingAgent {
+  readonly childThreadId: ThreadId;
+  readonly stallMs: number;
+  /** The thread's last recorded update, and when this runner first saw it. */
+  lastUpdatedAt?: number;
+  seenAt?: number;
 }
 
 type MutableAgent = {
@@ -111,6 +175,9 @@ class WorkflowSession {
   private progress: string | undefined;
   private readonly occurrences = new Map<string, number>();
   private readonly terminal = new Set<string>();
+  private readonly waiting = new Map<string, WaitingAgent>();
+  private readonly stalled = new Set<string>();
+  private spentTokens = 0;
   private readonly waiters = new Map<string, () => void>();
   private updating: Promise<void> | undefined;
   private updatePending = false;
@@ -120,6 +187,15 @@ class WorkflowSession {
   constructor(workflow: WorkflowContext, deps: WorkflowRunnerDeps) {
     this.workflow = workflow;
     this.deps = deps;
+  }
+
+  /** Agents being waited on, for the stall sweep. */
+  waitingAgents() {
+    return [...this.waiting.entries()];
+  }
+
+  markStalled(taskId: string): void {
+    this.stalled.add(taskId);
   }
 
   /** Members and the row itself report through the thread's subagent updates. */
@@ -174,6 +250,7 @@ class WorkflowSession {
         this.addPhase(title);
         this.scheduleUpdate();
       },
+      budget: () => ({ total: this.workflow.budgetTokens ?? null, spent: this.spentTokens }),
       meta: (meta) => {
         const record = asRecord(meta);
         if (typeof record.name === "string") this.name = record.name;
@@ -247,38 +324,77 @@ class WorkflowSession {
       settle("failed", `agent "${label}" has invalid options.`);
       return null;
     }
-    const started = await Effect.runPromiseExit(
-      this.deps.spawnAgent(this.workflow, item.value, `wf-${digest}-${occurrence}`),
-    );
-    if (Exit.isFailure(started)) {
-      settle("failed", failureMessage(started, "The agent could not start."));
-      return null;
+    for (let attempt = 0; ; attempt += 1) {
+      const key = `wf-${digest}-${occurrence}${attempt === 0 ? "" : `-r${attempt}`}`;
+      const budget = this.workflow.budgetTokens;
+      // An agent the budget allowed before a restart is re-attached, not refused.
+      if (
+        budget !== undefined &&
+        this.spentTokens >= budget &&
+        !(await Effect.runPromise(
+          this.deps.agentStarted(this.workflow, key).pipe(Effect.orElseSucceed(() => false)),
+        ))
+      ) {
+        const message = `The workflow's budget of ${budget} tokens is spent (${this.spentTokens} used).`;
+        settle("failed", message);
+        throw new Error(message);
+      }
+      const started = await Effect.runPromiseExit(
+        this.deps.spawnAgent(this.workflow, item.value, key),
+      );
+      if (Exit.isFailure(started)) {
+        settle("failed", failureMessage(started, "The agent could not start."));
+        return null;
+      }
+      entry.agentId = started.value.taskId;
+      entry.childThreadId = started.value.childThreadId;
+      if (started.value.model !== null) entry.model = started.value.model;
+      if (attempt > 0) entry.attempt = attempt;
+      entry.state = "running";
+      this.scheduleUpdate();
+      this.waiting.set(started.value.taskId, {
+        childThreadId: started.value.childThreadId,
+        stallMs: Math.max(
+          MIN_STALL_MS,
+          numberOption(options, "stallTimeoutMs") ?? DEFAULT_STALL_MS,
+        ),
+      });
+      await this.waitForTask(started.value.taskId);
+      this.waiting.delete(started.value.taskId);
+      const outcome = await Effect.runPromiseExit(
+        this.deps.readAgent(this.workflow, started.value.taskId),
+      );
+      if (Exit.isFailure(outcome)) {
+        settle("failed", failureMessage(outcome, "The agent's result could not be read."));
+        return null;
+      }
+      const { status, summary, structuredResult, structuredResultError } = outcome.value;
+      this.spentTokens += outcome.value.tokens;
+      entry.totalTokens = (entry.totalTokens ?? 0) + outcome.value.tokens;
+      if (status !== "completed") {
+        const retry =
+          attempt + 1 < MAX_AGENT_ATTEMPTS &&
+          (status === "failed" ||
+            ((status === "cancelled" || status === "interrupted") &&
+              (outcome.value.cancelledByServerRestart || this.stalled.has(started.value.taskId))));
+        if (retry) {
+          this.progress = truncate(
+            `agent "${label}" ended ${status}; starting it again.`,
+            PREVIEW_LIMIT,
+          );
+          continue;
+        }
+        settle("failed", summary ?? `The agent ended ${status}.`);
+        return null;
+      }
+      settle("completed", summary);
+      if (options.schema === undefined) return summary;
+      if (structuredResultError !== undefined) {
+        this.progress = truncate(`agent "${label}": ${structuredResultError}`, PREVIEW_LIMIT);
+        return null;
+      }
+      return structuredResult ?? null;
     }
-    entry.agentId = started.value.taskId;
-    entry.childThreadId = started.value.childThreadId;
-    if (started.value.model !== null) entry.model = started.value.model;
-    entry.state = "running";
-    this.scheduleUpdate();
-    await this.waitForTask(started.value.taskId);
-    const outcome = await Effect.runPromiseExit(
-      this.deps.readAgent(this.workflow, started.value.taskId),
-    );
-    if (Exit.isFailure(outcome)) {
-      settle("failed", failureMessage(outcome, "The agent's result could not be read."));
-      return null;
-    }
-    const { status, summary, structuredResult, structuredResultError } = outcome.value;
-    if (status !== "completed") {
-      settle("failed", summary ?? `The agent ended ${status}.`);
-      return null;
-    }
-    settle("completed", summary);
-    if (options.schema === undefined) return summary;
-    if (structuredResultError !== undefined) {
-      this.progress = truncate(`agent "${label}": ${structuredResultError}`, PREVIEW_LIMIT);
-      return null;
-    }
-    return structuredResult ?? null;
   }
 
   private waitForTask(taskId: string): Promise<void> {
@@ -351,7 +467,36 @@ class WorkflowSession {
 }
 
 export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
-  const running = new Set<NodeId>();
+  const running = new Map<NodeId, WorkflowSession>();
+
+  const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(function* (
+    session: WorkflowSession,
+    workflow: WorkflowContext,
+  ) {
+    const now = yield* Clock.currentTimeMillis;
+    for (const [taskId, agent] of session.waitingAgents()) {
+      const shell = yield* deps.threads
+        .getThreadShell(agent.childThreadId)
+        .pipe(Effect.orElseSucceed(() => null));
+      if (shell === null) continue;
+      // Measured only on this runner's clock: the thread's stamp just has to stop moving.
+      const updatedAt = DateTime.toEpochMillis(shell.updatedAt);
+      if (agent.seenAt === undefined || agent.lastUpdatedAt !== updatedAt) {
+        agent.lastUpdatedAt = updatedAt;
+        agent.seenAt = now;
+        continue;
+      }
+      if (now - agent.seenAt < agent.stallMs) continue;
+      session.markStalled(taskId);
+      yield* deps
+        .stopAgent(workflow, taskId as NodeId, agent.childThreadId)
+        .pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Unable to stop a stalled workflow agent", { taskId, cause }),
+          ),
+        );
+    }
+  });
 
   const run = Effect.fn("WorkflowRunner.run")(function* (
     session: WorkflowSession,
@@ -372,18 +517,32 @@ export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
         Effect.ignore,
         Effect.forkChild,
       );
+    const sweep = yield* Effect.sleep(STALL_SWEEP_INTERVAL).pipe(
+      Effect.andThen(stopStalledAgents(session, workflow)),
+      Effect.forever,
+      Effect.forkChild,
+    );
     yield* Effect.promise(() => session.run());
+    yield* Fiber.interrupt(sweep);
     yield* Fiber.interrupt(watcher);
   });
 
   return {
     isRunning: (workflowId: NodeId) => running.has(workflowId),
+    /**
+     * Ends every script without settling its workflow, as a server stop does: the rows
+     * stay running, and the next start resumes them.
+     */
+    detachAll: Effect.sync(() => {
+      for (const session of running.values()) session.abort.abort();
+    }),
     /** Starts the script once per process; a retried start finds it running. */
     launch: (workflow: WorkflowContext) =>
       Effect.suspend(() => {
         if (running.has(workflow.workflowId)) return Effect.void;
-        running.add(workflow.workflowId);
-        return run(new WorkflowSession(workflow, deps), workflow).pipe(
+        const session = new WorkflowSession(workflow, deps);
+        running.set(workflow.workflowId, session);
+        return run(session, workflow).pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("A workflow runner stopped unexpectedly", {
               workflowId: workflow.workflowId,

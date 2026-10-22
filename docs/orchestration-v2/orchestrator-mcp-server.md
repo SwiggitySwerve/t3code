@@ -394,8 +394,9 @@ may `await` and `return`. The script reads `args` (the JSON value passed to
   order. `pipeline(items, ...stages)` passes each item through the stages in turn,
   with all items running at once; a stage gets `(previous, item, index)`, and an
   item stops at the first stage that returns `null`. Both accept at most 4,096
-  items; a step that throws resolves to `null`. `budget` is a placeholder with no
-  limit until spend caps land.
+  items; a step that throws resolves to `null`.
+- `budget.total`, `budget.spent` and `budget.remaining()`: the token budget
+  passed as `budgetTokens`, or `null` and `Infinity` without one.
 - `phase(title)` and `log(...values)`: progress shown in `workflow_status` and the
   workflow row.
 
@@ -422,8 +423,30 @@ log line, and the script's return value as JSON or why it failed.
 
 `workflow_stop`, and `task_cancel` on a `workflowId`, stop the script, stop every
 running member as `task_cancel` would, and settle the workflow as cancelled.
-Stopping the calling thread does the same. Workflow rows are kept open across a
-server restart, but the script is not resumed yet.
+Stopping the calling thread does the same.
+
+#### Durability and limits
+
+- **Restart.** A server stop leaves running workflow rows open. Once startup
+  recovery has settled the runs the stop cancelled, the runner starts each
+  script again from the stored script, args and budget. Retry keys map every
+  `agent()` call back to its task, so finished agents return their stored
+  results at once and running ones are waited on again; no agent starts twice.
+  Recovery marks the runs it cancels with `cancelledByServerRestart`.
+- **Retries.** An agent runs at most three times in all. It runs again when it
+  failed, when a server restart cancelled it, or when it stalled. An agent a user
+  stopped is not retried; the script sees `null`.
+- **Stalls.** Every 30 seconds the runner checks each waited-on agent's thread.
+  If its last update has not changed for `stallTimeoutMs` (default 20 minutes,
+  at least 1 minute), the runner stops the agent and starts it again.
+- **Budget.** `budgetTokens` counts the token usage providers report for
+  finished agents, an estimate rather than a bill. Once it is spent, `agent()`
+  throws for any agent that has not already started; agents already running
+  finish. `workflow_status` reports `tokensUsed` and `budgetTokens`.
+- **Caps.** 1,000 agents per workflow and 4,096 items per `parallel` or
+  `pipeline` call. The environment-wide running limit applies to every agent.
+- **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its
+  own checkout of the calling thread's commit, like `delegate_task`.
 
 ### `create_threads`
 
@@ -664,7 +687,10 @@ Coverage includes:
 - cancellation;
 - batch delegation, task waits, structured results and the running limit;
 - workflow scripts: phases, parallel and pipeline steps, one completion delivery,
-  schema results, script errors, and Stop through `workflow_stop`, `task_cancel`
+  resume after a restart without duplicate agents, retries of failed,
+  restart-cancelled and stalled agents, the token budget, the agent cap, and
+  per-agent worktrees;
+- workflow schema results, script errors, and Stop through `workflow_stop`, `task_cancel`
   and the calling thread;
 - batch ordinary-thread creation;
 - thread listing and timeline reads, including another project's threads;
