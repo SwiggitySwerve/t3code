@@ -338,7 +338,7 @@ export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult
 export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }).",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -351,6 +351,50 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpWorkflowStartInput = typeof OrchestratorMcpWorkflowStartInput.Type;
+
+export const OrchestratorMcpGraphReviewInput = Schema.Struct({
+  graph: Schema.Unknown.annotate({
+    description:
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass the same graph and acceptedDigest to graph_start.",
+  }),
+});
+export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
+
+export const OrchestratorMcpGraphReviewResult = Schema.Struct({
+  digest: Schema.NullOr(Schema.String).annotate({
+    description:
+      "Covers the normalized graph and its input hashes; null when the graph cannot be read.",
+  }),
+  ready: Schema.Boolean,
+  layers: Schema.Array(Schema.Array(Schema.String)),
+  writeConflicts: Schema.Array(
+    Schema.Struct({
+      nodes: Schema.Array(Schema.String),
+      paths: Schema.Array(Schema.String),
+    }),
+  ),
+  inputs: Schema.Array(
+    Schema.Struct({
+      path: Schema.String,
+      status: Schema.Literals(["found", "missing", "too_large"]),
+      sha256: Schema.NullOr(Schema.String),
+      sizeBytes: Schema.NullOr(Schema.Number),
+    }),
+  ),
+  blockers: Schema.Array(Schema.String),
+});
+export type OrchestratorMcpGraphReviewResult = typeof OrchestratorMcpGraphReviewResult.Type;
+
+export const OrchestratorMcpGraphStartInput = Schema.Struct({
+  graph: OrchestratorMcpGraphReviewInput.fields.graph,
+  acceptedDigest: Schema.String.check(Schema.isPattern(/^sha256:[a-f0-9]{64}$/)).annotate({
+    description: "Digest returned by graph_review for the exact graph and input files to run.",
+  }),
+  budgetTokens: OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
+  title: Schema.optional(OrchestratorMcpTitle),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpGraphStartInput = typeof OrchestratorMcpGraphStartInput.Type;
 
 export const OrchestratorMcpWorkflowInput = Schema.Struct({
   workflowId: NodeId,

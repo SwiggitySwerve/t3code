@@ -11,6 +11,7 @@ import {
   EnvironmentId,
   MessageId,
   OrchestratorMcpDelegateTasksResult,
+  OrchestratorMcpGraphReviewResult,
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
   type OrchestrationV2Run,
@@ -916,6 +917,15 @@ describe("workflow resume", () => {
   );
 });
 
+// Declared files live in the test project's checkout, the working directory, under a scratch folder.
+const withScratchDir = <A, E, R>(use: (dir: string) => Effect.Effect<A, E, R>) => {
+  const dir = `.t3-workflow-files-${NodeCrypto.randomUUID()}`;
+  NodeFS.mkdirSync(dir);
+  return use(dir).pipe(
+    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true }))),
+  );
+};
+
 describe("workflow checks", () => {
   const retried = (prompt: string) => prompt.includes("did not pass its");
 
@@ -1025,15 +1035,6 @@ describe("workflow checks", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  // Declared files live in the test project's checkout, the working directory, under a scratch folder.
-  const withScratchDir = <A, E, R>(use: (dir: string) => Effect.Effect<A, E, R>) => {
-    const dir = `.t3-workflow-files-${NodeCrypto.randomUUID()}`;
-    NodeFS.mkdirSync(dir);
-    return use(dir).pipe(
-      Effect.ensuring(Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true }))),
-    );
-  };
-
   it.effect(
     "checks declared outputs, retries an agent that did not write them, and returns their hashes",
     () =>
@@ -1125,5 +1126,220 @@ describe("workflow checks", () => {
       expect(ended.agents[0]).toMatchObject({ status: "failed", taskId: null });
       expect(ended.agents[0]?.result).toContain("must stay inside the workspace");
     }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("stops an attempt past attemptTimeoutMs and starts it again", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("slow", { attemptTimeoutMs: 60000, stallTimeoutMs: 3600000 })',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      yield* TestClock.adjust("2 minutes");
+      const second = yield* awaitMember(started.workflowId, 2);
+      expect(second.prompt).toContain("passed its time budget of 60000 ms");
+      yield* completeChild(second.childThreadId!, "in time");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toBe("in time");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      expect(
+        (yield* orchestrator.getThreadProjection(first.childThreadId!)).runs.at(-1)?.status,
+      ).toBe("interrupted");
+    }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+const decodeReview = Schema.decodeUnknownEffect(OrchestratorMcpGraphReviewResult);
+const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
+const reviewGraph = (graph: unknown) =>
+  Effect.gen(function* () {
+    const result = yield* invoke("graph_review", { graph });
+    expect(result.isError).not.toBe(true);
+    return yield* decodeReview(result.structuredContent);
+  });
+
+/** A producer that writes a JSON output from a pinned input, and a consumer of that output. */
+const serialGraph = (dir: string) => ({
+  schemaVersion: 1,
+  name: "Serial",
+  nodes: {
+    produce: {
+      subject: "Produce",
+      description: "produce the total",
+      dependsOn: [],
+      inputs: [{ id: "source", kind: "workspace_snapshot", path: `${dir}/in.txt` }],
+      outputs: [{ id: "total", path: `${dir}/total.json`, maxBytes: 100 }],
+      verify: { type: "structured", outputId: "total", requiredPointers: ["/total"] },
+    },
+    consume: {
+      subject: "Consume",
+      description: "consume the total",
+      dependsOn: ["produce"],
+      inputs: [{ id: "upstream", kind: "task_output", nodeId: "produce", outputId: "total" }],
+    },
+  },
+});
+
+describe("graphs", () => {
+  it.effect("graph_review binds inputs, reports a missing one, and records nothing", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+        const threads = yield* ThreadManagementService.ThreadManagementService;
+        const before = yield* threads.getThreadEventSequence(parentThreadId);
+        const graph = serialGraph(dir);
+        graph.nodes.produce.inputs.push({
+          id: "gone",
+          kind: "workspace_snapshot",
+          path: `${dir}/missing.txt`,
+        });
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.ready).toBe(false);
+        expect(reviewed.layers).toEqual([["produce"], ["consume"]]);
+        expect(reviewed.inputs).toEqual([
+          { path: `${dir}/in.txt`, status: "found", sha256: sha256("source"), sizeBytes: 6 },
+          { path: `${dir}/missing.txt`, status: "missing", sha256: null, sizeBytes: null },
+        ]);
+        expect(reviewed.blockers).toEqual([`produce: input gone (${dir}/missing.txt) is missing.`]);
+        expect(yield* threads.getThreadEventSequence(parentThreadId)).toBe(before);
+        const refused = yield* invoke("graph_start", {
+          graph,
+          acceptedDigest: reviewed.digest,
+        });
+        expect(refused.isError).toBe(true);
+        expect(errorText(refused)).toContain("The graph has blockers");
+      }).pipe(Effect.provide(layerTest)),
+    ),
+  );
+
+  it.effect("graph_start refuses a wrong digest and an input changed since review", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+        const graph = serialGraph(dir);
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.ready).toBe(true);
+        const wrong = yield* invoke("graph_start", {
+          graph,
+          acceptedDigest: `sha256:${"0".repeat(64)}`,
+        });
+        expect(errorText(wrong)).toContain("changed since review (digest mismatch)");
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "edited");
+        const stale = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
+        expect(stale.isError).toBe(true);
+        expect(errorText(stale)).toContain(`Input files changed since review: ${dir}/in.txt.`);
+        const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        );
+        expect(parent.subagents).toEqual([]);
+      }).pipe(Effect.provide(layerTest)),
+    ),
+  );
+
+  it.effect(
+    "runs a reviewed graph as one workflow and returns each node's provenance, waking once",
+    () =>
+      withScratchDir((dir) =>
+        Effect.gen(function* () {
+          yield* startParent;
+          NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+          yield* answerWorkflowAgents((prompt) => {
+            if (!prompt.startsWith("produce")) return "used it";
+            NodeFS.writeFileSync(NodePath.join(dir, "total.json"), '{"total":6}');
+            return "made it";
+          });
+          const graph = serialGraph(dir);
+          const reviewed = yield* reviewGraph(graph);
+          const result = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
+          const started = yield* decodeWorkflow(result.structuredContent);
+          const ended = yield* awaitWorkflowEnd(started.workflowId);
+          expect(ended.status).toBe("completed");
+          expect(ended.name).toBe("Serial");
+          const totalSha = sha256('{"total":6}');
+          expect(JSON.parse(ended.result!)).toEqual({
+            ok: true,
+            nodes: {
+              produce: {
+                status: "passed",
+                attempts: 1,
+                inputs: { source: sha256("source") },
+                outputs: { total: { path: `${dir}/total.json`, sha256: totalSha, sizeBytes: 11 } },
+                verification: {
+                  type: "structured",
+                  outcome: "passed",
+                  attempts: 1,
+                  detail: "Every required value is present and equal.",
+                },
+              },
+              consume: {
+                status: "passed",
+                attempts: 1,
+                inputs: { upstream: totalSha },
+                outputs: {},
+                verification: null,
+              },
+            },
+          });
+          const consumer = yield* awaitMember(started.workflowId, 2);
+          expect(consumer.prompt).toContain(`- upstream: ${dir}/total.json (sha256 ${totalSha})`);
+          const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+            parentThreadId,
+          );
+          expect(
+            parent.runs.flatMap((run) => run.delegatedCompletion?.delivery?.taskIds ?? []),
+          ).toEqual([started.workflowId]);
+        }).pipe(Effect.provide(layerTest)),
+      ),
+  );
+
+  it.effect("fails the graph and skips dependents when a node does not pass", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+        // The producer never writes its output, so every attempt fails its outputs check.
+        yield* answerWorkflowAgents(() => "did nothing");
+        const graph = serialGraph(dir);
+        const reviewed = yield* reviewGraph(graph);
+        const started = yield* decodeWorkflow(
+          (yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest }))
+            .structuredContent,
+        );
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(ended.status).toBe("failed");
+        expect(ended.result).toContain("Graph failed: ");
+        expect(ended.result).toContain('"consume":{"status":"skipped"');
+        expect(ended.result).toContain("Predecessor produce did not pass.");
+        expect(ended.agents).toHaveLength(1);
+        expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 3 });
+      }).pipe(Effect.provide(layerTest)),
+    ),
+  );
+
+  it.effect("stops a graph with workflow_stop like any workflow", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+        const graph = serialGraph(dir);
+        const reviewed = yield* reviewGraph(graph);
+        const started = yield* decodeWorkflow(
+          (yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest }))
+            .structuredContent,
+        );
+        const first = yield* awaitMember(started.workflowId, 1);
+        yield* invoke("workflow_stop", { workflowId: started.workflowId });
+        const ended = yield* decodeWorkflow(
+          (yield* invoke("workflow_status", { workflowId: started.workflowId })).structuredContent,
+        );
+        expect(ended.status).toBe("cancelled");
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        expect(
+          (yield* orchestrator.getThreadProjection(first.childThreadId!)).runs.at(-1)?.status,
+        ).toBe("interrupted");
+      }).pipe(Effect.provide(layerTest)),
+    ),
   );
 });

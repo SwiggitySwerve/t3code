@@ -13,6 +13,9 @@ import {
   OrchestratorMcpRequestSecretInput,
   OrchestratorMcpRequestSecretResult,
   OrchestratorMcpFailure,
+  OrchestratorMcpGraphReviewInput,
+  OrchestratorMcpGraphReviewResult,
+  OrchestratorMcpGraphStartInput,
   OrchestratorMcpListScheduledTasksInput,
   OrchestratorMcpListScheduledTasksResult,
   OrchestratorMcpScheduleTaskInput,
@@ -129,7 +132,7 @@ const TaskWaitTool = Tool.make("task_wait", {
 
 const WorkflowStartTool = Tool.make("workflow_start", {
   description:
-    "Needs an agent running inside a T3 thread. Run a multi-agent workflow script in the background on the T3 server, for any provider. Use it when work splits into phases or many agents: the script, not your turns, drives the fan-out, and you get ONE completion wake when it ends. Script format is Claude Code's Workflow: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return a JSON value. agent(prompt, { label, phase, schema, target: { providerInstanceId, model, options }, isolation: 'worktree', role }) runs one delegated task and resolves with its final text, or the parsed object when `schema` (a JSON Schema) is given, or null if it failed. parallel([() => agent(...), ...]) runs functions concurrently and returns their results in order (null for failures). pipeline(items, (item, original, index) => ..., ...moreStages) runs each item through the stages. phase(title) sets the phase for later agents; log(...) reports progress. args is the JSON you pass. Scripts cannot read the clock, random numbers, files or the network, so a run can resume. Agents run under this thread's modes and the environment's running-agent limit. Returns the workflowId; end your turn and wait for the completion wake, or read workflow_status.",
+    "Needs an agent running inside a T3 thread. Run a multi-agent workflow script in the background on the T3 server, for any provider. Use it when work splits into phases or many agents: the script, not your turns, drives the fan-out, and you get ONE completion wake when it ends. Script format is Claude Code's Workflow: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return a JSON value. agent(prompt, { label, phase, schema, target: { providerInstanceId, model, options }, isolation: 'worktree', role }) runs one delegated task and resolves with its final text, or the parsed object when `schema` (a JSON Schema) is given, or null if it failed. More agent options (verify, scopes, inputs, outputs, attemptTimeoutMs, stallTimeoutMs, report) are described on the script parameter; report: true makes agent() resolve to { ok, result, outputs, attempts, verification, reason } even on failure. parallel([() => agent(...), ...]) runs functions concurrently and returns their results in order (null for failures). pipeline(items, (item, original, index) => ..., ...moreStages) runs each item through the stages. phase(title) sets the phase for later agents; log(...) reports progress. args is the JSON you pass. Scripts cannot read the clock, random numbers, files or the network, so a run can resume. Agents run under this thread's modes and the environment's running-agent limit. Returns the workflowId; end your turn and wait for the completion wake, or read workflow_status.",
   parameters: OrchestratorMcpWorkflowStartInput,
   success: OrchestratorMcpWorkflowResult,
   failure: OrchestratorMcpFailure,
@@ -165,6 +168,33 @@ const WorkflowRunStopTool = Tool.make("workflow_stop", {
 })
   .annotate(Tool.Title, "Stop a workflow")
   .annotate(Tool.Destructive, true);
+
+const GraphReviewTool = Tool.make("graph_review", {
+  description:
+    "Needs an agent running inside a T3 thread. Review a dependency graph before starting it. Validates the graph, hashes its workspace input files in the caller's shared checkout, and returns a digest, run order as dependency layers, write conflicts, input status and blockers. Review does not start agents. When ready, call graph_start with the same graph and acceptedDigest. Start refuses a digest mismatch, blockers, or inputs that changed since review. The graph runs as a workflow: workflow_status reads progress, workflow_stop stops it, and it sends one completion wake.",
+  parameters: OrchestratorMcpGraphReviewInput,
+  success: OrchestratorMcpGraphReviewResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Review a workflow graph")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const GraphStartTool = Tool.make("graph_start", {
+  description:
+    "Needs an agent running inside a T3 thread. Start a graph reviewed with graph_review, passing the same graph and its acceptedDigest. Review hashes workspace input files and returns a digest and run order. Start refuses a digest mismatch, blockers, or inputs that changed since review. Nodes run in dependency order in the caller's shared checkout, using workflow agents and their checks. Returns the existing workflow result with workflowId: use workflow_status for progress and workflow_stop to stop it. End your turn to receive the single completion wake when the workflow ends.",
+  parameters: OrchestratorMcpGraphStartInput,
+  success: OrchestratorMcpWorkflowResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Start a workflow graph")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
 
 const TaskCancelTool = Tool.make("task_cancel", {
   description:
@@ -355,6 +385,8 @@ export const OrchestratorToolkit = Toolkit.make(
   WorkflowStartTool,
   WorkflowStatusTool,
   WorkflowRunStopTool,
+  GraphReviewTool,
+  GraphStartTool,
   TaskStatusTool,
   TaskCancelTool,
   WorkflowStopTool,

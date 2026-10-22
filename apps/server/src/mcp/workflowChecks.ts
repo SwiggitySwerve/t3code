@@ -29,6 +29,8 @@ export interface ProcessCheck {
 
 export interface StructuredCheck {
   readonly type: "structured";
+  /** Reads this declared output file's JSON instead of the agent's structured result. */
+  readonly outputId?: string;
   readonly requiredPointers: ReadonlyArray<string>;
   readonly equals: Readonly<Record<string, unknown>>;
 }
@@ -145,11 +147,23 @@ export function parseCheck(value: unknown): WorkflowCheck {
       const required = stringList(record.requiredPointers ?? [], "verify.requiredPointers", 256);
       const equals = record.equals === undefined ? {} : asRecord(record.equals);
       if (equals === undefined) throw new Error("verify.equals must map JSON pointers to values.");
+      const outputId = record.outputId;
+      if (outputId !== undefined && (typeof outputId !== "string" || !FILE_ID.test(outputId))) {
+        throw new Error("verify.outputId must name one of the agent's outputs.");
+      }
       const pointers = [...required, ...Object.keys(equals)];
-      if (pointers.length === 0) throw new Error("A structured check needs at least one pointer.");
+      // An output check without pointers still requires the file to hold JSON.
+      if (pointers.length === 0 && outputId === undefined) {
+        throw new Error("A structured check needs at least one pointer.");
+      }
       const bad = pointers.find((pointer) => pointer !== "" && !pointer.startsWith("/"));
       if (bad !== undefined) throw new Error(`"${bad}" is not a JSON pointer.`);
-      return { type: "structured", requiredPointers: required, equals };
+      return {
+        type: "structured",
+        ...(outputId === undefined ? {} : { outputId }),
+        requiredPointers: required,
+        equals,
+      };
     }
     case "judgment": {
       const rubric = stringList(record.rubric, "verify.rubric", MAX_RUBRIC_CRITERIA);
@@ -167,7 +181,8 @@ export function parseCheck(value: unknown): WorkflowCheck {
   }
 }
 
-const FILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+/** Ids of files, and of graph nodes, which name their outputs the same way. */
+export const FILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULT_FILE_BYTES = 256 * 1024;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_FILE_REFS = 32;

@@ -29,6 +29,9 @@ import {
   type OrchestratorMcpDelegateTasksResult,
   type OrchestratorMcpDelegatedTaskStart,
   type OrchestratorMcpTaskWaitInput,
+  type OrchestratorMcpGraphReviewInput,
+  type OrchestratorMcpGraphReviewResult,
+  type OrchestratorMcpGraphStartInput,
   type OrchestratorMcpWorkflowInput,
   type OrchestratorMcpWorkflowResult,
   type OrchestratorMcpWorkflowStartInput,
@@ -135,6 +138,7 @@ import {
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
 import { makeWorkflowRunner } from "./workflowRunner.ts";
+import { GRAPH_DRIVER_SCRIPT, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -194,6 +198,16 @@ export interface OrchestratorMcpServiceShape {
   readonly workflowStop: (
     scope: McpInvocationScope,
     input: OrchestratorMcpWorkflowStopInput,
+  ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
+  /** Validates a graph and binds its input files; starts nothing and records nothing. */
+  readonly graphReview: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGraphReviewInput,
+  ) => Effect.Effect<OrchestratorMcpGraphReviewResult, OrchestratorMcpFailure>;
+  /** Runs a reviewed graph as a workflow, refusing it if it or its inputs changed. */
+  readonly graphStart: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpGraphStartInput,
   ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
   /** Restarts the scripts of workflows a server stop left running; returns how many. */
   readonly resumeWorkflows: Effect.Effect<number>;
@@ -1960,6 +1974,45 @@ const make = Effect.gen(function* () {
   ): McpThreadInvocationScope => ({ ...scope, requestNamespace: `workflow:${workflowId}` });
   const workflowScopes = new Map<NodeId, McpThreadInvocationScope>();
 
+  /**
+   * A workspace-relative file in the thread's own checkout, read and hashed up to maxBytes.
+   * Workflow agents with declared files, and graphs, share this checkout.
+   */
+  const readCallerFile = Effect.fn("OrchestratorMcpService.readCallerFile")(function* (
+    threadId: ThreadId,
+    relativePath: string,
+    maxBytes: number,
+  ) {
+    const parent = yield* loadProjection(threadId);
+    const root =
+      parent.thread.worktreePath ?? (yield* requireProject(parent.thread.projectId)).workspaceRoot;
+    const filePath = path.join(root, relativePath);
+    const unreadable = (error: { readonly message: string }) =>
+      failure("orchestration_error", `Unable to read ${relativePath}: ${error.message}`);
+    const info = yield* fileSystem.stat(filePath).pipe(
+      Effect.catchTags({
+        PlatformError: (error) =>
+          error.reason._tag === "NotFound" ? Effect.succeed(null) : Effect.fail(error),
+      }),
+      Effect.mapError(unreadable),
+    );
+    if (info === null || info.type !== "File") return { status: "missing" } as const;
+    if (Number(info.size) > maxBytes) {
+      return { status: "too_large", sizeBytes: Number(info.size) } as const;
+    }
+    const bytes = yield* fileSystem.readFile(filePath).pipe(Effect.mapError(unreadable));
+    // The file can grow between the stat and the read.
+    if (bytes.byteLength > maxBytes) {
+      return { status: "too_large", sizeBytes: bytes.byteLength } as const;
+    }
+    return {
+      status: "found",
+      sha256: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
+      sizeBytes: bytes.byteLength,
+      text: new TextDecoder().decode(bytes),
+    } as const;
+  });
+
   const workflowRunner = makeWorkflowRunner({
     threads: threadManagement,
     spawnAgent: Effect.fn("OrchestratorMcpService.spawnWorkflowAgent")(
@@ -2098,44 +2151,15 @@ const make = Effect.gen(function* () {
         );
       },
     ),
-    hashWorkspaceFile: Effect.fn("OrchestratorMcpService.hashWorkflowFile")(
-      function* (workflow, relativePath, maxBytes) {
-        const parent = yield* loadProjection(workflow.threadId);
-        // Agents with declared files share the caller's checkout.
-        const root =
-          parent.thread.worktreePath ??
-          (yield* requireProject(parent.thread.projectId)).workspaceRoot;
-        const filePath = path.join(root, relativePath);
-        const unreadable = (error: { readonly message: string }) =>
-          failure("orchestration_error", `Unable to read ${relativePath}: ${error.message}`);
-        const info = yield* fileSystem.stat(filePath).pipe(
-          Effect.catchTags({
-            PlatformError: (error) =>
-              error.reason._tag === "NotFound" ? Effect.succeed(null) : Effect.fail(error),
-          }),
-          Effect.mapError(unreadable),
-        );
-        if (info === null || info.type !== "File") return { status: "missing" } as const;
-        if (Number(info.size) > maxBytes) {
-          return { status: "too_large", sizeBytes: Number(info.size) } as const;
-        }
-        const bytes = yield* fileSystem.readFile(filePath).pipe(Effect.mapError(unreadable));
-        // The file can grow between the stat and the read.
-        if (bytes.byteLength > maxBytes) {
-          return { status: "too_large", sizeBytes: bytes.byteLength } as const;
-        }
-        return {
-          status: "found",
-          sha256: NodeCrypto.createHash("sha256").update(bytes).digest("hex"),
-          sizeBytes: bytes.byteLength,
-        } as const;
-      },
-    ),
+    readWorkspaceFile: (workflow, relativePath, maxBytes) =>
+      readCallerFile(workflow.threadId, relativePath, maxBytes),
     stopAgent: Effect.fn("OrchestratorMcpService.stopWorkflowAgent")(
-      function* (workflow, taskId, childThreadId) {
+      function* (workflow, taskId, childThreadId, why) {
         const commandId = CommandId.make(`command:workflow-stall:${taskId}`);
         const reason =
-          "The agent recorded no activity for too long, so its workflow starts it again.";
+          why === "timed_out"
+            ? "The agent passed its attempt's time budget, so its workflow stopped it."
+            : "The agent recorded no activity for too long, so its workflow starts it again.";
         yield* threadManagement
           .dispatch({ type: "thread.stop", commandId, threadId: childThreadId, reason })
           .pipe(Effect.mapError(threadManagementFailure));
@@ -2165,6 +2189,137 @@ const make = Effect.gen(function* () {
           : { structuredResultError: task.structuredResultError }),
       };
     }),
+  });
+
+  type GraphReview = ReturnType<typeof reviewGraph>;
+  // Input hashes of recent reviews by digest, so a refused start can name the files that changed.
+  const reviewedGraphInputs = new Map<string, GraphReview["inputs"]>();
+  const REVIEWED_GRAPHS_KEPT = 256;
+
+  /** Reviews a graph against the files in the caller's checkout as they are now. */
+  const reviewCallerGraph = Effect.fn("OrchestratorMcpService.reviewCallerGraph")(function* (
+    threadId: ThreadId,
+    graph: unknown,
+  ) {
+    const parsed = parseGraph(graph);
+    const hashes: Record<string, GraphReview["inputs"][string]> = {};
+    if (parsed.ok) {
+      // A file several nodes read is read once, under the largest bound; review checks each.
+      const bounds = new Map<string, number>();
+      for (const node of Object.values(parsed.graph.nodes)) {
+        for (const input of node.inputs) {
+          if (input.kind !== "workspace_snapshot") continue;
+          bounds.set(input.path, Math.max(bounds.get(input.path) ?? 0, input.maxBytes));
+        }
+      }
+      for (const [filePath, maxBytes] of [...bounds].toSorted(([a], [b]) => a.localeCompare(b))) {
+        const file = yield* readCallerFile(threadId, filePath, maxBytes);
+        hashes[filePath] =
+          file.status === "found"
+            ? { sha256: file.sha256, sizeBytes: file.sizeBytes }
+            : file.status;
+      }
+    }
+    const review = reviewGraph(graph, hashes);
+    if (review.digest !== null) {
+      reviewedGraphInputs.delete(review.digest);
+      reviewedGraphInputs.set(review.digest, review.inputs);
+      if (reviewedGraphInputs.size > REVIEWED_GRAPHS_KEPT) {
+        reviewedGraphInputs.delete(reviewedGraphInputs.keys().next().value!);
+      }
+    }
+    const compiled =
+      parsed.ok && review.blockers.length === 0
+        ? {
+            source: GRAPH_DRIVER_SCRIPT,
+            args: { graph: parsed.graph, inputs: review.inputs },
+            title: parsed.graph.name ?? "Graph",
+          }
+        : undefined;
+    return { review, compiled };
+  });
+
+  /** The input files whose hashes differ from an earlier review, or undefined if it is unknown. */
+  const changedGraphInputs = (
+    acceptedDigest: string,
+    current: GraphReview["inputs"],
+  ): ReadonlyArray<string> | undefined => {
+    const accepted = reviewedGraphInputs.get(acceptedDigest);
+    if (accepted === undefined) return undefined;
+    return [...new Set([...Object.keys(accepted), ...Object.keys(current)])]
+      .filter((file) => JSON.stringify(accepted[file]) !== JSON.stringify(current[file]))
+      .toSorted();
+  };
+
+  const graphReviewResult = (review: GraphReview): OrchestratorMcpGraphReviewResult => ({
+    digest: review.digest,
+    ready: review.digest !== null && review.blockers.length === 0,
+    layers: review.layers,
+    writeConflicts: review.writeConflicts,
+    inputs: Object.entries(review.inputs).map(([filePath, hash]) =>
+      typeof hash === "string"
+        ? { path: filePath, status: hash, sha256: null, sizeBytes: null }
+        : { path: filePath, status: "found", sha256: hash.sha256, sizeBytes: hash.sizeBytes },
+    ),
+    blockers: review.blockers,
+  });
+
+  /** Starts a workflow row for the caller and launches its script; workflows and graphs share it. */
+  const startWorkflow = Effect.fn("OrchestratorMcpService.startWorkflow")(function* (
+    scope: McpThreadInvocationScope,
+    parent: CallerProjection,
+    input: OrchestratorMcpWorkflowStartInput,
+  ) {
+    const parentRun = yield* requireDelegatingRun(scope, parent);
+    const compileError = yield* Effect.promise(() => checkWorkflowScript(input.script));
+    if (compileError !== null) {
+      return yield* failure(
+        "invalid_request",
+        `The workflow script does not compile: ${compileError}`,
+      );
+    }
+    const key = yield* requestKey(input.clientRequestId);
+    const commandId = stableCommandId({ scope, requestKey: key, operation: "workflow-start" });
+    const workflowId = NodeId.make(String(commandId).replace(/^command:/, "workflow:"));
+    const afterSequence = yield* threadManagement
+      .getThreadEventSequence(scope.thread.threadId)
+      .pipe(Effect.mapError(threadManagementFailure));
+    yield* threadManagement
+      .dispatch({
+        type: "workflow.start",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId,
+        threadId: scope.thread.threadId,
+        runId: parentRun.id,
+        workflowId,
+        title: input.title ?? "Workflow",
+        script: storedWorkflowScript(input.script, {
+          ...(input.args === undefined ? {} : { args: input.args }),
+          ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+        }),
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          failure("orchestration_error", `Unable to start the workflow: ${errorMessage(error)}`),
+        ),
+      );
+    const started = findWorkflow(yield* loadProjection(scope.thread.threadId), workflowId);
+    if (started === undefined) {
+      return yield* failure("orchestration_error", "The workflow did not start.");
+    }
+    if (started.status === "running" && !workflowRunner.isRunning(workflowId)) {
+      workflowScopes.set(workflowId, workflowScope(scope, workflowId));
+      yield* workflowRunner.launch({
+        workflowId,
+        threadId: scope.thread.threadId,
+        source: input.script,
+        args: input.args ?? null,
+        ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+        afterSequence,
+      });
+    }
+    return workflowResult(yield* loadProjection(scope.thread.threadId), started);
   });
 
   const findWorkflow = (
@@ -2922,61 +3077,43 @@ const make = Effect.gen(function* () {
     workflowStart: Effect.fn("OrchestratorMcpService.workflowStart")(
       function* (callerScope, input) {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "workflow_start");
-        const parentRun = yield* requireDelegatingRun(scope, parent);
-        const compileError = yield* Effect.promise(() => checkWorkflowScript(input.script));
-        if (compileError !== null) {
-          return yield* failure(
-            "invalid_request",
-            `The workflow script does not compile: ${compileError}`,
-          );
-        }
-        const key = yield* requestKey(input.clientRequestId);
-        const commandId = stableCommandId({ scope, requestKey: key, operation: "workflow-start" });
-        const workflowId = NodeId.make(String(commandId).replace(/^command:/, "workflow:"));
-        const afterSequence = yield* threadManagement
-          .getThreadEventSequence(scope.thread.threadId)
-          .pipe(Effect.mapError(threadManagementFailure));
-        yield* threadManagement
-          .dispatch({
-            type: "workflow.start",
-            createdBy: "agent",
-            creationSource: "mcp",
-            commandId,
-            threadId: scope.thread.threadId,
-            runId: parentRun.id,
-            workflowId,
-            title: input.title ?? "Workflow",
-            script: storedWorkflowScript(input.script, {
-              ...(input.args === undefined ? {} : { args: input.args }),
-              ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
-            }),
-          })
-          .pipe(
-            Effect.mapError((error) =>
-              failure(
-                "orchestration_error",
-                `Unable to start the workflow: ${errorMessage(error)}`,
-              ),
-            ),
-          );
-        const started = findWorkflow(yield* loadProjection(scope.thread.threadId), workflowId);
-        if (started === undefined) {
-          return yield* failure("orchestration_error", "The workflow did not start.");
-        }
-        if (started.status === "running" && !workflowRunner.isRunning(workflowId)) {
-          workflowScopes.set(workflowId, workflowScope(scope, workflowId));
-          yield* workflowRunner.launch({
-            workflowId,
-            threadId: scope.thread.threadId,
-            source: input.script,
-            args: input.args ?? null,
-            ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
-            afterSequence,
-          });
-        }
-        return workflowResult(yield* loadProjection(scope.thread.threadId), started);
+        return yield* startWorkflow(scope, parent, input);
       },
     ),
+    graphReview: Effect.fn("OrchestratorMcpService.graphReview")(function* (callerScope, input) {
+      const scope = yield* requireThreadScope(callerScope, "graph_review");
+      yield* requireCapability(scope);
+      const { review } = yield* reviewCallerGraph(scope.thread.threadId, input.graph);
+      return graphReviewResult(review);
+    }),
+    graphStart: Effect.fn("OrchestratorMcpService.graphStart")(function* (callerScope, input) {
+      const { scope, parent } = yield* loadThreadCaller(callerScope, "graph_start");
+      const { review, compiled } = yield* reviewCallerGraph(scope.thread.threadId, input.graph);
+      if (review.blockers.length > 0 || compiled === undefined) {
+        return yield* failure(
+          "invalid_request",
+          `The graph has blockers: ${review.blockers.join("; ")}`,
+        );
+      }
+      if (review.digest !== input.acceptedDigest) {
+        const changed = changedGraphInputs(input.acceptedDigest, review.inputs);
+        return yield* failure(
+          "invalid_request",
+          changed === undefined
+            ? "The graph or its input files changed since review (digest mismatch); review it again."
+            : changed.length > 0
+              ? `Input files changed since review: ${changed.join(", ")}. Review the graph again.`
+              : "The graph changed since review (digest mismatch); review it again.",
+        );
+      }
+      return yield* startWorkflow(scope, parent, {
+        script: compiled.source,
+        args: compiled.args,
+        title: input.title ?? compiled.title,
+        ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+        ...(input.clientRequestId === undefined ? {} : { clientRequestId: input.clientRequestId }),
+      });
+    }),
     workflowStatus: Effect.fn("OrchestratorMcpService.workflowStatus")(
       function* (callerScope, input) {
         const scope = yield* requireThreadScope(callerScope, "workflow_status");

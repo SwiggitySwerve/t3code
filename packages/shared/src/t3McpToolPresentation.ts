@@ -130,6 +130,8 @@ const T3_MCP_TOOLS: Readonly<Record<string, T3McpToolDefinition>> = {
   task_wait: tool(["Wait for", "Waiting for", "Waited for", "delegated tasks"], "task-status"),
   workflow_start: tool(["Start", "Starting", "Started", "a workflow"], "delegate"),
   workflow_status: tool(["Get", "Getting", "Got", "workflow status"], "task-status"),
+  graph_review: tool(["Review", "Reviewing", "Reviewed", "a workflow graph"], "task-status"),
+  graph_start: tool(["Start", "Starting", "Started", "a workflow graph"], "delegate"),
   workflow_stop: tool(["Stop", "Stopping", "Requested a stop for", "a workflow"], "workflow-stop"),
   task_cancel: tool(
     ["Cancel", "Canceling", "Requested cancellation of", "a delegated task"],

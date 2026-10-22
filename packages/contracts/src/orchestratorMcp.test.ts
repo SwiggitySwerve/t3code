@@ -4,12 +4,67 @@ import * as Schema from "effect/Schema";
 import {
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
+  OrchestratorMcpGraphReviewInput,
+  OrchestratorMcpGraphReviewResult,
+  OrchestratorMcpGraphStartInput,
 } from "./orchestratorMcp.ts";
 
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
+const decodeGraphReviewInput = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewInput);
+const decodeGraphReviewResult = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewResult);
+const decodeGraphStartInput = Schema.decodeUnknownSync(OrchestratorMcpGraphStartInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("leaves graph validation to the server while requiring a review digest to start", () => {
+    const graph = { schemaVersion: 999, nodes: { invalid: { unknownField: true } } };
+    const acceptedDigest = `sha256:${"a".repeat(64)}`;
+
+    expect(decodeGraphReviewInput({ graph })).toEqual({
+      graph,
+    });
+    expect(
+      decodeGraphStartInput({
+        graph,
+        acceptedDigest,
+        budgetTokens: 100,
+        title: "Graph",
+        clientRequestId: "g1",
+      }),
+    ).toEqual({ graph, acceptedDigest, budgetTokens: 100, title: "Graph", clientRequestId: "g1" });
+    for (const digest of [
+      undefined,
+      "",
+      "a".repeat(64),
+      `sha256:${"A".repeat(64)}`,
+      `sha256:${"a".repeat(63)}`,
+    ]) {
+      expect(() => decodeGraphStartInput({ graph, acceptedDigest: digest })).toThrow();
+    }
+    for (const budgetTokens of [0, -1, 1.5]) {
+      expect(() => decodeGraphStartInput({ graph, acceptedDigest, budgetTokens })).toThrow();
+    }
+  });
+
+  it("preserves graph review blockers and partial input facts", () => {
+    const review = {
+      digest: `sha256:${"a".repeat(64)}`,
+      ready: false,
+      layers: [["first", "second"], ["last"]],
+      writeConflicts: [{ nodes: ["first", "second"], paths: ["src/shared.ts"] }],
+      inputs: [
+        { path: "input.txt", status: "found", sha256: "a".repeat(64), sizeBytes: 12 },
+        { path: "missing.txt", status: "missing", sha256: null, sizeBytes: null },
+        { path: "large.txt", status: "too_large", sha256: null, sizeBytes: 1_000_000 },
+      ],
+      blockers: ["Missing workspace input"],
+    };
+    expect(decodeGraphReviewResult(review)).toEqual(review);
+    expect(() =>
+      decodeGraphReviewResult({ ...review, inputs: [{ ...review.inputs[0], status: "unknown" }] }),
+    ).toThrow();
+  });
+
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",

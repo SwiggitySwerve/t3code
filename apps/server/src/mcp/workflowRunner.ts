@@ -58,6 +58,9 @@ const MAX_AGENT_ATTEMPTS = 3;
  */
 const DEFAULT_STALL_MS = 20 * 60_000;
 const MIN_STALL_MS = 60_000;
+/** Per-attempt deadlines: at least a minute, at most the omx graph's "long" budget of 6 h. */
+const MIN_ATTEMPT_TIMEOUT_MS = 60_000;
+const MAX_ATTEMPT_TIMEOUT_MS = 6 * 60 * 60_000;
 const STALL_SWEEP_INTERVAL = "30 seconds";
 const RESULT_TEXT_LIMIT = 2_000;
 const WORKFLOW_RESULT_LIMIT = 16_000;
@@ -94,10 +97,31 @@ export interface WorkflowAgentOutcome {
 }
 
 /** A workspace file as the runner found it; `too_large` once it passes the caller's bound. */
-export type WorkspaceFileHash =
-  | { readonly status: "found"; readonly sha256: string; readonly sizeBytes: number }
+export type WorkspaceFile =
+  | {
+      readonly status: "found";
+      readonly sha256: string;
+      readonly sizeBytes: number;
+      /** The bytes read as UTF-8. */
+      readonly text: string;
+    }
   | { readonly status: "missing" }
   | { readonly status: "too_large"; readonly sizeBytes: number };
+
+/** What agent(prompt, { report: true }) resolves to, failed or not. */
+interface AgentReport {
+  readonly ok: boolean;
+  readonly result: unknown;
+  readonly attempts: number;
+  readonly outputs: Readonly<Record<string, ProducedFile>>;
+  readonly verification: {
+    readonly type: string;
+    readonly outcome: string;
+    readonly attempts: number;
+    readonly detail: string | null;
+  } | null;
+  readonly reason: string | null;
+}
 
 /** An output an agent wrote, as returned to the script. */
 interface ProducedFile {
@@ -137,16 +161,17 @@ export interface WorkflowRunnerDeps {
     result: string,
     files: Readonly<Record<string, string>>,
   ) => Effect.Effect<CheckOutcome, OrchestratorMcpFailure>;
-  /** Hashes a workspace-relative file in the caller's checkout, reading at most `maxBytes`. */
-  readonly hashWorkspaceFile: (
+  /** Reads and hashes a workspace-relative file in the caller's checkout, at most `maxBytes`. */
+  readonly readWorkspaceFile: (
     workflow: WorkflowContext,
     path: string,
     maxBytes: number,
-  ) => Effect.Effect<WorkspaceFileHash, OrchestratorMcpFailure>;
+  ) => Effect.Effect<WorkspaceFile, OrchestratorMcpFailure>;
   readonly stopAgent: (
     workflow: WorkflowContext,
     taskId: NodeId,
     childThreadId: ThreadId,
+    why: "stalled" | "timed_out",
   ) => Effect.Effect<void, OrchestratorMcpFailure>;
 }
 
@@ -182,9 +207,14 @@ function failureMessage<A>(exit: Exit.Exit<A, OrchestratorMcpFailure>, fallback:
 interface WaitingAgent {
   readonly childThreadId: ThreadId;
   readonly stallMs: number;
+  readonly attemptTimeoutMs?: number;
   /** The thread's last recorded update, and when this runner first saw it. */
   lastUpdatedAt?: number;
   seenAt?: number;
+  /** When this runner first saw the attempt, if its thread records no run start. */
+  firstSeenAt?: number;
+  /** Its deadline passed and the runner asked it to stop. */
+  timedOut?: boolean;
 }
 
 type MutableAgent = {
@@ -203,6 +233,7 @@ class WorkflowSession {
   private readonly terminal = new Set<string>();
   private readonly waiting = new Map<string, WaitingAgent>();
   private readonly stalled = new Set<string>();
+  private readonly timedOut = new Set<string>();
   private spentTokens = 0;
   private readonly writeHolds = new Map<number, ReadonlyArray<string>>();
   private readonly scopeWaiters = new Set<() => void>();
@@ -224,6 +255,10 @@ class WorkflowSession {
 
   markStalled(taskId: string): void {
     this.stalled.add(taskId);
+  }
+
+  markTimedOut(taskId: string): void {
+    this.timedOut.add(taskId);
   }
 
   /** Members and the row itself report through the thread's subagent updates. */
@@ -293,10 +328,44 @@ class WorkflowSession {
     };
   }
 
+  /**
+   * The script's agent(): the result, or null when the agent failed. With `report: true`
+   * it always resolves to an AgentReport, so a graph can record why a node failed.
+   */
   private async agent(request: {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
   }): Promise<unknown> {
+    const ran = await this.runAgent(request);
+    if (request.options.report !== true) return ran.value;
+    const { entry, value } = ran;
+    const completed = entry.state === "completed" && value !== null;
+    const withOutputs = completed && ran.declaresOutputs ? asRecord(value) : undefined;
+    return {
+      ok: completed,
+      result: withOutputs === undefined ? (completed ? value : null) : (withOutputs.result ?? null),
+      attempts: entry.agentId === undefined ? 0 : (entry.attempt ?? 0) + 1,
+      outputs: (withOutputs?.outputs ?? {}) as AgentReport["outputs"],
+      verification:
+        entry.verification === undefined
+          ? null
+          : { ...entry.verification, detail: entry.verification.detail ?? null },
+      reason: completed
+        ? null
+        : entry.state === "completed"
+          ? "The agent finished without a usable result."
+          : (entry.result ?? "The agent failed."),
+    } satisfies AgentReport;
+  }
+
+  private async runAgent(request: {
+    readonly prompt: string;
+    readonly options: Readonly<Record<string, unknown>>;
+  }): Promise<{
+    readonly value: unknown;
+    readonly entry: MutableAgent;
+    readonly declaresOutputs: boolean;
+  }> {
     if (this.agents.length >= MAX_AGENTS_PER_WORKFLOW) {
       throw new Error(`This workflow reached its limit of ${MAX_AGENTS_PER_WORKFLOW} agents.`);
     }
@@ -310,12 +379,31 @@ class WorkflowSession {
     let scopes: FileScopes | undefined;
     let inputs: ReadonlyArray<FileRef> = [];
     let outputs: ReadonlyArray<FileRef> = [];
+    let attemptTimeoutMs: number | undefined;
     let invalid: string | undefined;
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);
       if (options.inputs !== undefined) inputs = parseFileRefs(options.inputs, "inputs");
       if (options.outputs !== undefined) outputs = parseFileRefs(options.outputs, "outputs");
+      if (options.attemptTimeoutMs !== undefined) {
+        const value = options.attemptTimeoutMs;
+        if (
+          typeof value !== "number" ||
+          !Number.isInteger(value) ||
+          value < MIN_ATTEMPT_TIMEOUT_MS ||
+          value > MAX_ATTEMPT_TIMEOUT_MS
+        ) {
+          throw new Error(
+            `attemptTimeoutMs must be a whole number from ${MIN_ATTEMPT_TIMEOUT_MS} to ${MAX_ATTEMPT_TIMEOUT_MS}.`,
+          );
+        }
+        attemptTimeoutMs = value;
+      }
+      const outputId = check?.type === "structured" ? check.outputId : undefined;
+      if (outputId !== undefined && !outputs.some((output) => output.id === outputId)) {
+        throw new Error(`verify.outputId "${outputId}" is not one of this agent's outputs.`);
+      }
       // The runner reads declared files in the caller's checkout, which a worktree agent never writes.
       if (inputs.length + outputs.length > 0 && options.isolation === "worktree") {
         throw new Error('inputs and outputs need the shared checkout, not isolation "worktree".');
@@ -339,6 +427,7 @@ class WorkflowSession {
           ...(scopes === undefined ? [] : [{ scopes }]),
           ...(inputs.length === 0 ? [] : [{ inputs }]),
           ...(outputs.length === 0 ? [] : [{ outputs }]),
+          ...(attemptTimeoutMs === undefined ? [] : [{ attemptTimeoutMs }]),
         ]),
       )
       .digest("hex")
@@ -354,6 +443,7 @@ class WorkflowSession {
     };
     this.agents.push(entry);
     this.scheduleUpdate();
+    const done = (value: unknown) => ({ value, entry, declaresOutputs: outputs.length > 0 });
     const settle = (status: "completed" | "failed", result: string | null) => {
       entry.state = status;
       if (result !== null && result.trim().length > 0) {
@@ -373,11 +463,18 @@ class WorkflowSession {
       });
     if (invalid !== undefined || Exit.isFailure(itemFor(""))) {
       settle("failed", `agent "${label}" has invalid options${invalid ? `: ${invalid}` : "."}`);
-      return null;
+      return done(null);
     }
-    if (check?.type === "structured" && options.schema === undefined) {
-      settle("failed", `agent "${label}": a structured check needs a schema for the result.`);
-      return null;
+    if (
+      check?.type === "structured" &&
+      check.outputId === undefined &&
+      options.schema === undefined
+    ) {
+      settle(
+        "failed",
+        `agent "${label}": a structured check needs a schema for the result, or an outputId.`,
+      );
+      return done(null);
     }
     if (
       check?.type === "process" &&
@@ -389,28 +486,31 @@ class WorkflowSession {
         "failed",
         `agent "${label}": a process check runs a command, which needs the calling thread in full-access mode.`,
       );
-      return null;
+      return done(null);
     }
     // Agents sharing a checkout never write the same files at once; an output is a write.
     const writes = [...(scopes?.write ?? []), ...outputs.map((output) => output.path)];
     const holdsWrites = writes.length > 0 && options.isolation !== "worktree";
     if (holdsWrites) await this.acquireWrites(entry.index, writes, label);
     try {
-      return await this.runAttempts({
-        request,
-        options,
-        entry,
-        label,
-        phase,
-        target,
-        digest,
-        occurrence,
-        check,
-        inputs,
-        outputs,
-        itemFor,
-        settle,
-      });
+      return done(
+        await this.runAttempts({
+          request,
+          options,
+          entry,
+          label,
+          phase,
+          target,
+          digest,
+          occurrence,
+          check,
+          inputs,
+          outputs,
+          attemptTimeoutMs,
+          itemFor,
+          settle,
+        }),
+      );
     } finally {
       if (holdsWrites) this.releaseWrites(entry.index);
     }
@@ -450,6 +550,7 @@ class WorkflowSession {
     readonly check: WorkflowCheck | undefined;
     readonly inputs: ReadonlyArray<FileRef>;
     readonly outputs: ReadonlyArray<FileRef>;
+    readonly attemptTimeoutMs: number | undefined;
     readonly itemFor: (feedback: string) => ReturnType<typeof decodeItem>;
     readonly settle: (status: "completed" | "failed", result: string | null) => void;
   }): Promise<unknown> {
@@ -465,6 +566,7 @@ class WorkflowSession {
       check,
       inputs,
       outputs,
+      attemptTimeoutMs,
       itemFor,
       settle,
     } = input;
@@ -520,6 +622,7 @@ class WorkflowSession {
           MIN_STALL_MS,
           numberOption(options, "stallTimeoutMs") ?? DEFAULT_STALL_MS,
         ),
+        ...(attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs }),
       });
       await this.waitForTask(started.value.taskId);
       this.waiting.delete(started.value.taskId);
@@ -533,6 +636,16 @@ class WorkflowSession {
       const { status, summary, structuredResult, structuredResultError } = outcome.value;
       this.spentTokens += outcome.value.tokens;
       entry.totalTokens = (entry.totalTokens ?? 0) + outcome.value.tokens;
+      if (status !== "completed" && this.timedOut.has(started.value.taskId)) {
+        const passed = `passed its time budget of ${attemptTimeoutMs} ms and was stopped`;
+        if (attempt + 1 < MAX_AGENT_ATTEMPTS) {
+          feedback = `\n\nYour previous attempt ${passed}. Work more directly and finish within the budget.`;
+          this.progress = truncate(`agent "${label}" ${passed}; starting it again.`, PREVIEW_LIMIT);
+          continue;
+        }
+        settle("failed", `Every attempt ${passed}.`);
+        return null;
+      }
       if (status !== "completed") {
         const retry =
           attempt + 1 < MAX_AGENT_ATTEMPTS &&
@@ -573,6 +686,7 @@ class WorkflowSession {
           structuredResult,
           structuredResultError,
           files,
+          outputs,
         });
       }
       const returned = (result: unknown) =>
@@ -617,10 +731,10 @@ class WorkflowSession {
     }
   }
 
-  private hashFile(ref: FileRef): Promise<WorkspaceFileHash | string> {
+  private readFile(ref: FileRef): Promise<WorkspaceFile | string> {
     return Effect.runPromise(
       this.deps
-        .hashWorkspaceFile(this.workflow, ref.path, ref.maxBytes)
+        .readWorkspaceFile(this.workflow, ref.path, ref.maxBytes)
         .pipe(
           Effect.catch((failure) =>
             Effect.succeed(`${ref.path} could not be read: ${failure.message}`),
@@ -632,7 +746,7 @@ class WorkflowSession {
   /** Why the declared inputs cannot be used as they are, or undefined when they can. */
   private async inputProblem(inputs: ReadonlyArray<FileRef>): Promise<string | undefined> {
     for (const input of inputs) {
-      const found = await this.hashFile(input);
+      const found = await this.readFile(input);
       if (typeof found === "string") return `input ${input.id}: ${found}`;
       if (found.status === "missing") return `input ${input.id} (${input.path}) does not exist.`;
       if (found.status === "too_large") {
@@ -655,7 +769,7 @@ class WorkflowSession {
     const files: Record<string, ProducedFile> = {};
     const problems: Array<string> = [];
     for (const output of outputs) {
-      const found = await this.hashFile(output);
+      const found = await this.readFile(output);
       if (typeof found === "string") {
         return { outcome: { outcome: "error", detail: `output ${output.id}: ${found}` } };
       }
@@ -685,8 +799,32 @@ class WorkflowSession {
     readonly structuredResult: unknown;
     readonly structuredResultError: string | undefined;
     readonly files: Readonly<Record<string, string>>;
+    readonly outputs: ReadonlyArray<FileRef>;
   }): Promise<CheckOutcome> {
     const { check } = input;
+    const output =
+      check.type === "structured" && check.outputId !== undefined
+        ? input.outputs.find((ref) => ref.id === check.outputId)
+        : undefined;
+    if (check.type === "structured" && output !== undefined) {
+      const found = await this.readFile(output);
+      if (typeof found === "string") return { outcome: "error", detail: found };
+      if (found.status !== "found") {
+        return { outcome: "failed", detail: `output ${output.id} (${output.path}) is unreadable.` };
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(found.text);
+      } catch (error) {
+        return {
+          outcome: "failed",
+          detail: `output ${output.id} (${output.path}) is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+        };
+      }
+      return check.requiredPointers.length + Object.keys(check.equals).length === 0
+        ? { outcome: "passed", detail: `output ${output.id} holds JSON.` }
+        : runStructuredCheck(check, parsed);
+    }
     if (check.type === "structured") {
       return input.structuredResultError !== undefined
         ? { outcome: "failed", detail: input.structuredResultError }
@@ -805,6 +943,31 @@ export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
         .getThreadShell(agent.childThreadId)
         .pipe(Effect.orElseSucceed(() => null));
       if (shell === null) continue;
+      if (agent.timedOut === true) continue;
+      if (agent.attemptTimeoutMs !== undefined) {
+        // Each attempt is its own thread, so its run's start survives a server restart.
+        agent.firstSeenAt ??= now;
+        const startedAt = shell.latestRunStartedAt ?? shell.latestRunRequestedAt;
+        const recorded = startedAt == null ? undefined : DateTime.toEpochMillis(startedAt);
+        // A start stamped later than this runner's clock reads is not trusted.
+        const start =
+          recorded === undefined || recorded > now
+            ? agent.firstSeenAt
+            : Math.min(recorded, agent.firstSeenAt);
+        if (now - start >= agent.attemptTimeoutMs) {
+          agent.timedOut = true;
+          session.markTimedOut(taskId);
+          yield* deps.stopAgent(workflow, taskId as NodeId, agent.childThreadId, "timed_out").pipe(
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Unable to stop a workflow agent past its deadline", {
+                taskId,
+                cause,
+              }),
+            ),
+          );
+          continue;
+        }
+      }
       // Measured only on this runner's clock: the thread's stamp just has to stop moving.
       const updatedAt = DateTime.toEpochMillis(shell.updatedAt);
       if (agent.seenAt === undefined || agent.lastUpdatedAt !== updatedAt) {
@@ -815,7 +978,7 @@ export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
       if (now - agent.seenAt < agent.stallMs) continue;
       session.markStalled(taskId);
       yield* deps
-        .stopAgent(workflow, taskId as NodeId, agent.childThreadId)
+        .stopAgent(workflow, taskId as NodeId, agent.childThreadId, "stalled")
         .pipe(
           Effect.catchCause((cause) =>
             Effect.logWarning("Unable to stop a stalled workflow agent", { taskId, cause }),
