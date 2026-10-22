@@ -62,6 +62,8 @@ const makeHarness = Effect.gen(function* () {
         tokens: 0,
       }),
     agentStarted: () => Effect.succeed(false),
+    canRunCommands: () => Effect.succeed(false),
+    runCommandCheck: () => Effect.die("unused"),
     stopAgent: () => Effect.void,
   };
   return { runner: makeWorkflowRunner(deps), completed, spawned: () => spawned };
@@ -83,5 +85,21 @@ describe("workflow runner", () => {
       expect(result).toEqual([1000, "This workflow reached its limit of 1000 agents."]);
       expect(spawned()).toBe(1000);
     }),
+  );
+  it.effect(
+    "refuses a process check when the caller cannot run commands, without starting the agent",
+    () =>
+      Effect.gen(function* () {
+        const { runner, completed, spawned } = yield* makeHarness;
+        yield* runner.launch({
+          workflowId,
+          threadId,
+          source: 'return await agent("x", { verify: { type: "process", argv: ["node", "-v"] } })',
+          args: null,
+          afterSequence: 0,
+        });
+        expect(JSON.parse(yield* Deferred.await(completed))).toBeNull();
+        expect(spawned()).toBe(0);
+      }),
   );
 });

@@ -88,6 +88,9 @@ import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
+import * as Path from "effect/Path";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -129,6 +132,9 @@ import {
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
 import { makeWorkflowRunner } from "./workflowRunner.ts";
+import type { CheckOutcome } from "./workflowChecks.ts";
+import * as ProcessRunner from "../processRunner.ts";
+import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
   parseStoredWorkflowScript,
   storedWorkflowScript,
@@ -1129,6 +1135,9 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const processRunner = yield* ProcessRunner.ProcessRunner;
+  const fileSystem = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -1994,6 +2003,91 @@ const make = Effect.gen(function* () {
         );
       },
     ),
+    canRunCommands: (workflow) =>
+      loadProjection(workflow.threadId).pipe(
+        Effect.map((projection) => projection.thread.runtimeMode === "full-access"),
+      ),
+    runCommandCheck: Effect.fn("OrchestratorMcpService.runWorkflowCommandCheck")(
+      function* (workflow, childThreadId, check, result) {
+        const parent = yield* loadProjection(workflow.threadId);
+        const child = yield* threadManagement
+          .getThreadShell(childThreadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        const root =
+          child?.worktreePath ??
+          parent.thread.worktreePath ??
+          (yield* requireProject(parent.thread.projectId)).workspaceRoot;
+        const [command, ...args] = check.argv;
+        // Checks run without a shell, so no argument is ever read as a command.
+        const resolved = yield* resolveSpawnCommand(command, args);
+        if (resolved.shell) {
+          return {
+            outcome: "error",
+            detail: `${command} runs through a shell (a .cmd or .bat launcher); name the executable itself.`,
+          } satisfies CheckOutcome;
+        }
+        return yield* Effect.scoped(
+          Effect.gen(function* () {
+            const resultFile = yield* fileSystem.makeTempFileScoped({ prefix: "t3-check-" });
+            yield* fileSystem.writeFileString(resultFile, result);
+            const expanded = args.map((arg) => arg.replaceAll("{{result}}", resultFile));
+            const unknownToken = expanded.find((arg) => /\{\{[^}]*\}\}/.test(arg));
+            if (unknownToken !== undefined) {
+              return {
+                outcome: "error",
+                detail: `Unknown token in ${unknownToken}; checks support {{result}}.`,
+              } satisfies CheckOutcome;
+            }
+            const ran = yield* processRunner
+              .run({
+                command,
+                args: expanded,
+                cwd: path.join(root, check.cwd),
+                timeout: Duration.millis(check.timeoutMs),
+                maxOutputBytes: check.maxOutputBytes,
+                outputMode: "truncate",
+                timeoutBehavior: "timedOutResult",
+              })
+              .pipe(Effect.result);
+            if (ran._tag === "Failure") {
+              return { outcome: "error", detail: ran.failure.message } satisfies CheckOutcome;
+            }
+            const tail = (label: string, text: string) =>
+              text.trim().length === 0 ? [] : [`${label}:\n${text.trimEnd().slice(-2_000)}`];
+            const output = [
+              ...tail("stdout", ran.success.stdout),
+              ...tail("stderr", ran.success.stderr),
+            ];
+            if (
+              ran.success.timedOut ||
+              ran.success.stdoutTruncated ||
+              ran.success.stderrTruncated
+            ) {
+              return {
+                outcome: "error",
+                detail: ran.success.timedOut
+                  ? `The check timed out after ${check.timeoutMs} ms.`
+                  : `The check printed more than ${check.maxOutputBytes} bytes.`,
+              } satisfies CheckOutcome;
+            }
+            const passed =
+              ran.success.code !== null &&
+              check.successExitCodes.includes(Number(ran.success.code));
+            return {
+              outcome: passed ? "passed" : "failed",
+              detail: [`exit code ${ran.success.code ?? "none"}`, ...output].join("\n"),
+            } satisfies CheckOutcome;
+          }),
+        ).pipe(
+          Effect.catch((cause) =>
+            Effect.succeed({
+              outcome: "error",
+              detail: `The check could not run: ${errorMessage(cause)}`,
+            } satisfies CheckOutcome),
+          ),
+        );
+      },
+    ),
     stopAgent: Effect.fn("OrchestratorMcpService.stopWorkflowAgent")(
       function* (workflow, taskId, childThreadId) {
         const commandId = CommandId.make(`command:workflow-stall:${taskId}`);
@@ -2073,8 +2167,9 @@ const make = Effect.gen(function* () {
       phases: (workflow.workflow?.phases ?? []).map((phase) => phase.title),
       agents: agents.map((agent) => {
         const member = agent.agentId === undefined ? undefined : members.get(agent.agentId);
+        // A task can finish and still fail its check; the workflow's own record decides.
         const status =
-          member === undefined
+          member === undefined || (agent.state === "failed" && member.status === "completed")
             ? agent.state
             : member.status === "completed" ||
                 member.status === "failed" ||
@@ -2093,6 +2188,10 @@ const make = Effect.gen(function* () {
           childThreadId: agent.childThreadId ?? null,
           model: agent.model ?? null,
           result: agent.result ?? null,
+          verification:
+            agent.verification === undefined
+              ? null
+              : { ...agent.verification, detail: agent.verification.detail ?? null },
         };
       }),
       progress: workflow.progress ?? null,
@@ -3607,4 +3706,7 @@ export const layer: Layer.Layer<
   | ProjectService.ProjectService
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
-> = Layer.effect(OrchestratorMcpService, make);
+  | ChildProcessSpawner.ChildProcessSpawner
+  | FileSystem.FileSystem
+  | Path.Path
+> = Layer.effect(OrchestratorMcpService, make).pipe(Layer.provide(ProcessRunner.layer));

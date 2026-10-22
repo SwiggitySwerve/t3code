@@ -685,6 +685,15 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
   completedAt: Schema.optional(NonNegativeInt),
   prompt: Schema.optional(Schema.NonEmptyString),
   result: Schema.optional(Schema.NonEmptyString),
+  /** The latest check of this agent's result, for T3-run workflows that asked for one. */
+  verification: Schema.optional(
+    Schema.Struct({
+      type: Schema.Literals(["process", "structured", "judgment"]),
+      outcome: Schema.Literals(["passed", "failed", "error"]),
+      attempts: NonNegativeInt,
+      detail: Schema.optional(Schema.NonEmptyString),
+    }),
+  ),
 });
 export type OrchestrationV2WorkflowAgent = typeof OrchestrationV2WorkflowAgent.Type;
 

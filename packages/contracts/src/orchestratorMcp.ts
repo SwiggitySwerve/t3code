@@ -338,7 +338,7 @@ export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult
 export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget.",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) and scopes ({ read?, write? } workspace-relative paths).",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -372,6 +372,16 @@ export const OrchestratorMcpWorkflowAgent = Schema.Struct({
   childThreadId: Schema.NullOr(ThreadId),
   model: Schema.NullOr(Schema.String),
   result: Schema.NullOr(Schema.String),
+  verification: Schema.NullOr(
+    Schema.Struct({
+      type: Schema.Literals(["process", "structured", "judgment"]),
+      outcome: Schema.Literals(["passed", "failed", "error"]),
+      attempts: Schema.Number,
+      detail: Schema.NullOr(Schema.String),
+    }),
+  ).annotate({
+    description: "The latest check of the agent's result, when the script asked for one.",
+  }),
 });
 export type OrchestratorMcpWorkflowAgent = typeof OrchestratorMcpWorkflowAgent.Type;
 

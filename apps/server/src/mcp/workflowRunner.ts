@@ -28,6 +28,21 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import {
+  type CheckOutcome,
+  checkFeedback,
+  type FileScopes,
+  JUDGMENT_RESULT_SCHEMA,
+  judgmentOutcome,
+  judgmentPrompt,
+  parseCheck,
+  parseScopes,
+  type ProcessCheck,
+  runStructuredCheck,
+  scopeInstructions,
+  scopesOverlap,
+  type WorkflowCheck,
+} from "./workflowChecks.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 
 /** Claude Code's documented per-run ceiling. */
@@ -91,6 +106,17 @@ export interface WorkflowRunnerDeps {
     workflow: WorkflowContext,
     requestKey: string,
   ) => Effect.Effect<boolean, OrchestratorMcpFailure>;
+  /** Whether agents of this workflow may run commands: the caller must run in full access. */
+  readonly canRunCommands: (
+    workflow: WorkflowContext,
+  ) => Effect.Effect<boolean, OrchestratorMcpFailure>;
+  /** Runs a process check in the agent's workspace; `result` backs the {{result}} token. */
+  readonly runCommandCheck: (
+    workflow: WorkflowContext,
+    childThreadId: ThreadId,
+    check: ProcessCheck,
+    result: string,
+  ) => Effect.Effect<CheckOutcome, OrchestratorMcpFailure>;
   readonly stopAgent: (
     workflow: WorkflowContext,
     taskId: NodeId,
@@ -152,6 +178,8 @@ class WorkflowSession {
   private readonly waiting = new Map<string, WaitingAgent>();
   private readonly stalled = new Set<string>();
   private spentTokens = 0;
+  private readonly writeHolds = new Map<number, ReadonlyArray<string>>();
+  private readonly scopeWaiters = new Set<() => void>();
   private readonly waiters = new Map<string, () => void>();
   private updating: Promise<void> | undefined;
   private updatePending = false;
@@ -252,6 +280,15 @@ class WorkflowSession {
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
     const target = options.target ?? (model === undefined ? undefined : { model });
+    let check: WorkflowCheck | undefined;
+    let scopes: FileScopes | undefined;
+    let invalid: string | undefined;
+    try {
+      if (options.verify !== undefined) check = parseCheck(options.verify);
+      if (options.scopes !== undefined) scopes = parseScopes(options.scopes);
+    } catch (error) {
+      invalid = error instanceof Error ? error.message : String(error);
+    }
     // Keyed by content rather than call order, so a resumed script maps each call
     // back to the same task even when concurrent calls start in a different order.
     const digest = NodeCrypto.createHash("sha256")
@@ -263,6 +300,9 @@ class WorkflowSession {
           options.schema ?? null,
           target ?? null,
           options.isolation ?? null,
+          // Only present when used, so scripts without them keep their keys.
+          ...(check === undefined ? [] : [{ verify: check }]),
+          ...(scopes === undefined ? [] : [{ scopes }]),
         ]),
       )
       .digest("hex")
@@ -286,19 +326,113 @@ class WorkflowSession {
       this.scheduleUpdate();
     };
 
-    const item = decodeItem({
-      task: request.prompt,
-      title: truncate(label, 500),
-      ...(target === undefined ? {} : { target }),
-      ...(options.isolation === undefined ? {} : { isolation: options.isolation }),
-      ...(options.role === undefined ? {} : { role: options.role }),
-      ...(options.schema === undefined ? {} : { resultSchema: options.schema }),
-    });
-    if (Exit.isFailure(item)) {
-      settle("failed", `agent "${label}" has invalid options.`);
+    const itemFor = (feedback: string) =>
+      decodeItem({
+        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${feedback}`,
+        title: truncate(label, 500),
+        ...(target === undefined ? {} : { target }),
+        ...(options.isolation === undefined ? {} : { isolation: options.isolation }),
+        ...(options.role === undefined ? {} : { role: options.role }),
+        ...(options.schema === undefined ? {} : { resultSchema: options.schema }),
+      });
+    if (invalid !== undefined || Exit.isFailure(itemFor(""))) {
+      settle("failed", `agent "${label}" has invalid options${invalid ? `: ${invalid}` : "."}`);
       return null;
     }
+    if (check?.type === "structured" && options.schema === undefined) {
+      settle("failed", `agent "${label}": a structured check needs a schema for the result.`);
+      return null;
+    }
+    if (
+      check?.type === "process" &&
+      !(await Effect.runPromise(
+        this.deps.canRunCommands(this.workflow).pipe(Effect.orElseSucceed(() => false)),
+      ))
+    ) {
+      settle(
+        "failed",
+        `agent "${label}": a process check runs a command, which needs the calling thread in full-access mode.`,
+      );
+      return null;
+    }
+    // Agents sharing a checkout never write the same files at once.
+    const holdsWrites =
+      scopes !== undefined && scopes.write.length > 0 && options.isolation !== "worktree";
+    if (holdsWrites) await this.acquireWrites(entry.index, scopes!.write, label);
+    try {
+      return await this.runAttempts({
+        request,
+        options,
+        entry,
+        label,
+        phase,
+        target,
+        digest,
+        occurrence,
+        check,
+        itemFor,
+        settle,
+      });
+    } finally {
+      if (holdsWrites) this.releaseWrites(entry.index);
+    }
+  }
+
+  private async acquireWrites(index: number, paths: ReadonlyArray<string>, label: string) {
+    while ([...this.writeHolds.values()].some((held) => scopesOverlap(held, paths))) {
+      this.progress = truncate(
+        `agent "${label}" waits for files another agent is changing.`,
+        PREVIEW_LIMIT,
+      );
+      this.scheduleUpdate();
+      await new Promise<void>((resolve) => this.scopeWaiters.add(resolve));
+    }
+    this.writeHolds.set(index, paths);
+  }
+
+  private releaseWrites(index: number) {
+    this.writeHolds.delete(index);
+    const waiters = [...this.scopeWaiters];
+    this.scopeWaiters.clear();
+    for (const wake of waiters) wake();
+  }
+
+  private async runAttempts(input: {
+    readonly request: {
+      readonly prompt: string;
+      readonly options: Readonly<Record<string, unknown>>;
+    };
+    readonly options: Readonly<Record<string, unknown>>;
+    readonly entry: MutableAgent;
+    readonly label: string;
+    readonly phase: string | undefined;
+    readonly target: unknown;
+    readonly digest: string;
+    readonly occurrence: number;
+    readonly check: WorkflowCheck | undefined;
+    readonly itemFor: (feedback: string) => ReturnType<typeof decodeItem>;
+    readonly settle: (status: "completed" | "failed", result: string | null) => void;
+  }): Promise<unknown> {
+    const {
+      request,
+      options,
+      entry,
+      label,
+      phase,
+      target,
+      digest,
+      occurrence,
+      check,
+      itemFor,
+      settle,
+    } = input;
+    let feedback = "";
     for (let attempt = 0; ; attempt += 1) {
+      const item = itemFor(feedback);
+      if (Exit.isFailure(item)) {
+        settle("failed", `agent "${label}" has invalid options.`);
+        return null;
+      }
       const key = `wf-${digest}-${occurrence}${attempt === 0 ? "" : `-r${attempt}`}`;
       const budget = this.workflow.budgetTokens;
       // An agent the budget allowed before a restart is re-attached, not refused.
@@ -363,14 +497,98 @@ class WorkflowSession {
         settle("failed", summary ?? `The agent ended ${status}.`);
         return null;
       }
-      settle("completed", summary);
-      if (options.schema === undefined) return summary;
-      if (structuredResultError !== undefined) {
-        this.progress = truncate(`agent "${label}": ${structuredResultError}`, PREVIEW_LIMIT);
-        return null;
+      if (check === undefined) {
+        settle("completed", summary);
+        if (options.schema === undefined) return summary;
+        if (structuredResultError !== undefined) {
+          this.progress = truncate(`agent "${label}": ${structuredResultError}`, PREVIEW_LIMIT);
+          return null;
+        }
+        return structuredResult ?? null;
       }
-      return structuredResult ?? null;
+      const checked = await this.runCheck({
+        check,
+        prompt: request.prompt,
+        label,
+        phase,
+        target,
+        childThreadId: started.value.childThreadId,
+        summary,
+        structuredResult,
+        structuredResultError,
+      });
+      entry.verification = {
+        type: check.type,
+        outcome: checked.outcome,
+        attempts: attempt + 1,
+        ...(checked.detail.trim().length === 0
+          ? {}
+          : { detail: truncate(checked.detail, RESULT_TEXT_LIMIT) }),
+      };
+      if (checked.outcome === "passed") {
+        settle("completed", summary);
+        return options.schema === undefined ? summary : (structuredResult ?? null);
+      }
+      // A failed check is a judgment on the work, so the agent tries again with what the
+      // check saw. A check that could not run is not, and retrying the agent would not fix it.
+      if (checked.outcome === "failed" && attempt + 1 < MAX_AGENT_ATTEMPTS) {
+        feedback = checkFeedback(check, checked);
+        this.progress = truncate(
+          `agent "${label}" failed its ${check.type} check; starting it again.`,
+          PREVIEW_LIMIT,
+        );
+        entry.state = "running";
+        this.scheduleUpdate();
+        continue;
+      }
+      settle(
+        "failed",
+        `Its ${check.type} check ${checked.outcome === "error" ? "could not run" : "failed"}: ${checked.detail}`,
+      );
+      return null;
     }
+  }
+
+  private async runCheck(input: {
+    readonly check: WorkflowCheck;
+    readonly prompt: string;
+    readonly label: string;
+    readonly phase: string | undefined;
+    readonly target: unknown;
+    readonly childThreadId: ThreadId;
+    readonly summary: string | null;
+    readonly structuredResult: unknown;
+    readonly structuredResultError: string | undefined;
+  }): Promise<CheckOutcome> {
+    const { check } = input;
+    if (check.type === "structured") {
+      return input.structuredResultError !== undefined
+        ? { outcome: "failed", detail: input.structuredResultError }
+        : runStructuredCheck(check, input.structuredResult);
+    }
+    const resultText =
+      input.summary ??
+      (input.structuredResult === undefined ? "" : JSON.stringify(input.structuredResult));
+    if (check.type === "process") {
+      const ran = await Effect.runPromiseExit(
+        this.deps.runCommandCheck(this.workflow, input.childThreadId, check, resultText),
+      );
+      return Exit.isFailure(ran)
+        ? { outcome: "error", detail: failureMessage(ran, "The check could not run.") }
+        : ran.value;
+    }
+    // An agent of its own, so it is independent of the work it judges and shows in the workflow.
+    const target = check.target ?? input.target;
+    const verdict = await this.agent({
+      prompt: judgmentPrompt({ task: input.prompt, result: resultText, rubric: check.rubric }),
+      options: {
+        label: `check ${input.label}`,
+        ...(input.phase === undefined ? {} : { phase: input.phase }),
+        ...(target === undefined ? {} : { target }),
+        schema: JUDGMENT_RESULT_SCHEMA,
+      },
+    });
+    return judgmentOutcome(verdict);
   }
 
   private waitForTask(taskId: string): Promise<void> {

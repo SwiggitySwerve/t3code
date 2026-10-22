@@ -425,6 +425,36 @@ log line, and the script's return value as JSON or why it failed.
 running member as `task_cancel` would, and settle the workflow as cancelled.
 Stopping the calling thread does the same.
 
+#### Checks and file scopes
+
+These follow the `omx graph` execution graph's protected verifiers
+(`~/.agents/graph`), adapted to T3 agents.
+
+- `verify` checks an agent's result before `agent()` returns it:
+  - `{ type: "process", argv, cwd?, timeoutMs?, maxOutputBytes?, successExitCodes? }` runs
+    `argv` in the agent's workspace (its worktree, the caller's worktree, or the project
+    root) without a shell, and passes on an allowed exit code (default `[0]`).
+    `{{result}}` in an argument becomes the path of a file holding the agent's result.
+    Limits: 256 arguments, 64 KiB of arguments, 15 minutes (default 2), 1 MiB of output
+    (default 64 KiB). A `.cmd` or `.bat` launcher is refused, because it needs a shell.
+    Running a command needs the calling thread in full-access mode; otherwise the agent is
+    refused before it starts.
+  - `{ type: "structured", requiredPointers?, equals? }` reads JSON pointers from the
+    agent's structured result, so it needs `schema`.
+  - `{ type: "judgment", rubric, target? }` starts a separate agent, labelled
+    `check <label>`, that grades the result against the criteria and answers
+    `{ outcome: "passed" | "failed", reasons }`. A judge can be wrong; its reasons are kept.
+    A failed check starts the agent again with what the check saw appended to its task,
+    within the same three attempts. A check that cannot run (timeout, too much output, a
+    missing executable, no verdict) fails the agent without retrying. `workflow_status`
+    reports each agent's latest `verification` (type, outcome, attempts, detail), and an
+    agent that failed its check reports `failed`. Process checks run again when a workflow
+    resumes after a restart.
+- `scopes: { read?, write? }` lists workspace-relative paths. They are added to the
+  agent's task as instructions; they are not enforced on the file system. Two agents in
+  the same checkout whose write scopes overlap (one path equals or contains the other)
+  never run at once: the later one waits. Agents with `isolation: "worktree"` do not wait.
+
 #### Ultracode
 
 The `ultracode` server setting (also a project override; Settings, General) asks agents

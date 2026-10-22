@@ -123,7 +123,8 @@ const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
             Option.some({
               id: projectId,
               title: "Delegate tasks",
-              workspaceRoot: "/tmp/delegate-tasks",
+              // A real directory, so process checks have somewhere to run.
+              workspaceRoot: process.cwd(),
             } as never),
           ),
       }),
@@ -906,6 +907,128 @@ describe("workflow resume", () => {
           baseRef: "0123456789abcdef",
         });
       }
+    }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+describe("workflow checks", () => {
+  const retried = (prompt: string) => prompt.includes("did not pass its");
+
+  it.effect(
+    "starts an agent again with what a failed structured check saw, then returns the passing result",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents((prompt) =>
+          retried(prompt)
+            ? 'Recounted.\n```json\n{"count": 3}\n```'
+            : 'Counted.\n```json\n{"count": 2}\n```',
+        );
+        const started = yield* startWorkflow(
+          'return await agent("count", { schema: { type: "object", required: ["count"] }, verify: { type: "structured", equals: { "/count": 3 } } })',
+        );
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(JSON.parse(ended.result!)).toEqual({ count: 3 });
+        expect(ended.agents[0]?.verification).toMatchObject({
+          type: "structured",
+          outcome: "passed",
+          attempts: 2,
+        });
+        const retry = yield* awaitMember(started.workflowId, 2);
+        expect(retry.prompt).toContain("/count is 2, expected 3");
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "runs a process check on the result without a shell, and fails the agent after its attempts",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents((prompt) => (prompt.startsWith("good") ? "ok" : "nope"));
+        const check = (word: string) =>
+          JSON.stringify({
+            type: "process",
+            argv: [
+              process.execPath,
+              "-e",
+              "process.exit(require('fs').readFileSync(process.argv[1], 'utf8') === process.argv[2] ? 0 : 3)",
+              "{{result}}",
+              word,
+            ],
+          });
+        const started = yield* startWorkflow(
+          `return [await agent("good", { verify: ${check("ok")} }), await agent("bad", { verify: ${check("ok")} })]`,
+        );
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(JSON.parse(ended.result!)).toEqual(["ok", null]);
+        expect(ended.agents.map((agent) => agent.verification?.outcome)).toEqual([
+          "passed",
+          "failed",
+        ]);
+        expect(ended.agents[1]).toMatchObject({ status: "failed", verification: { attempts: 3 } });
+        expect(ended.agents[1]?.verification?.detail).toContain("exit code 3");
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("has a separate agent judge the result against a rubric", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents((prompt) => {
+        if (!prompt.includes("independent checker"))
+          return retried(prompt) ? "a haiku" : "a limerick";
+        const passed = prompt.includes("Result:\na haiku");
+        return `Checked.\n\`\`\`json\n${JSON.stringify({ outcome: passed ? "passed" : "failed", reasons: passed ? "It is a haiku." : "It is not a haiku." })}\n\`\`\``;
+      });
+      const started = yield* startWorkflow(
+        'return await agent("write a poem", { label: "poem", verify: { type: "judgment", rubric: ["The poem is a haiku."] } })',
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toBe("a haiku");
+      expect(ended.agents.map((agent) => agent.label)).toEqual([
+        "poem",
+        "check poem",
+        "check poem",
+      ]);
+      expect(ended.agents[0]?.verification).toMatchObject({
+        type: "judgment",
+        outcome: "passed",
+        attempts: 2,
+        detail: "It is a haiku.",
+      });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("never runs two agents that write the same files at once", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await parallel([() => agent("one", { scopes: { write: ["src"] } }), () => agent("two", { scopes: { write: ["./src/a.ts"] } })])',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      expect(first.prompt).toContain("Change files only within: src");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const running = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.filter(
+        (task) => task.parentNodeId === started.workflowId,
+      );
+      expect(running).toHaveLength(1);
+      yield* completeChild(first.childThreadId!, "1");
+      const second = yield* awaitMember(started.workflowId, 2);
+      expect(second.prompt).toContain("Change files only within: src/a.ts");
+      yield* completeChild(second.childThreadId!, "2");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toEqual(["1", "2"]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("rejects a malformed check before starting the agent", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("x", { verify: { type: "process", argv: ["node"], cwd: "../outside" } })',
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.agents[0]).toMatchObject({ status: "failed", taskId: null });
+      expect(ended.agents[0]?.result).toContain("must stay inside the workspace");
     }).pipe(Effect.provide(layerTest)),
   );
 });
