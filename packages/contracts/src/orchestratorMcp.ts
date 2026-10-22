@@ -335,6 +335,55 @@ export const OrchestratorMcpTaskWaitResult = Schema.Struct({
 });
 export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult.Type;
 
+export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
+  script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
+    description:
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget.",
+  }),
+  args: Schema.optional(Schema.Unknown).annotate({
+    description: "JSON value the script reads as `args`.",
+  }),
+  title: Schema.optional(OrchestratorMcpTitle),
+  clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
+});
+export type OrchestratorMcpWorkflowStartInput = typeof OrchestratorMcpWorkflowStartInput.Type;
+
+export const OrchestratorMcpWorkflowInput = Schema.Struct({
+  workflowId: NodeId,
+});
+export type OrchestratorMcpWorkflowInput = typeof OrchestratorMcpWorkflowInput.Type;
+
+export const OrchestratorMcpWorkflowStopInput = Schema.Struct({
+  workflowId: NodeId,
+  reason: Schema.optional(Schema.String.check(Schema.isMaxLength(2_000))),
+});
+export type OrchestratorMcpWorkflowStopInput = typeof OrchestratorMcpWorkflowStopInput.Type;
+
+export const OrchestratorMcpWorkflowAgent = Schema.Struct({
+  index: Schema.Number,
+  label: Schema.String,
+  phase: Schema.NullOr(Schema.String),
+  status: Schema.Literals(["queued", "running", "completed", "failed", "cancelled", "interrupted"]),
+  taskId: Schema.NullOr(NodeId),
+  childThreadId: Schema.NullOr(ThreadId),
+  model: Schema.NullOr(Schema.String),
+  result: Schema.NullOr(Schema.String),
+});
+export type OrchestratorMcpWorkflowAgent = typeof OrchestratorMcpWorkflowAgent.Type;
+
+export const OrchestratorMcpWorkflowResult = Schema.Struct({
+  workflowId: NodeId,
+  status: Schema.Literals(["running", "completed", "failed", "cancelled", "interrupted"]),
+  name: Schema.NullOr(Schema.String),
+  phases: Schema.Array(Schema.String),
+  agents: Schema.Array(OrchestratorMcpWorkflowAgent),
+  progress: Schema.NullOr(Schema.String).annotate({ description: "The script's latest log line." }),
+  result: Schema.NullOr(Schema.String).annotate({
+    description: "The script's return value as JSON, or why it failed or stopped.",
+  }),
+});
+export type OrchestratorMcpWorkflowResult = typeof OrchestratorMcpWorkflowResult.Type;
+
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
 });

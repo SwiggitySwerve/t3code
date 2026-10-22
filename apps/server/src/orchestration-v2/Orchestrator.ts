@@ -499,6 +499,10 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "thread.created.record":
       return command.parentThreadId;
     case "secret_request.record":
+    case "workflow.start":
+    case "workflow.update":
+    case "workflow.complete":
+    case "workflow.stop":
       return command.threadId;
     case "thread.fork":
     case "thread.merge_back":
@@ -623,7 +627,7 @@ function delegatedCompletionWakeDetail(
   return taskIds
     .map((taskId) => {
       const task = tasks.find((candidate) => candidate.id === taskId);
-      const label = `Delegated task ${taskId}${task?.title == null ? "" : ` (${task.title})`}${task === undefined ? " reached a terminal state" : ` [${task.status}]`}`;
+      const label = `${task?.workflow !== undefined && task.childThreadId === null ? "Workflow" : "Delegated task"} ${taskId}${task?.title == null ? "" : ` (${task.title})`}${task === undefined ? " reached a terminal state" : ` [${task.status}]`}`;
       if (task?.result != null) {
         const detail = `${label}:\n${task.result}`;
         const bytes = Buffer.byteLength(detail);
@@ -632,7 +636,9 @@ function delegatedCompletionWakeDetail(
           return detail;
         }
       }
-      return `${label}. Use task_status with taskId ${taskId} to read the result.`;
+      return task?.workflow !== undefined && task.childThreadId === null
+        ? `${label}. Use workflow_status with workflowId ${taskId} to read the result.`
+        : `${label}. Use task_status with taskId ${taskId} to read the result.`;
     })
     .join("\n\n");
 }
@@ -6931,14 +6937,49 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const parentRun = parentProjection.runs.find(
         (candidate) => candidate.id === command.parentRunId,
       );
-      if (parentRun === undefined || !isBlockingRun(parentRun)) {
+      // A workflow member is owned by its running workflow, which outlives the turn that
+      // started it, so the workflow row stands in for the active parent run.
+      const workflow =
+        command.workflowId === undefined
+          ? undefined
+          : parentProjection.subagents.find(
+              (candidate) =>
+                candidate.id === command.workflowId &&
+                candidate.origin === "app_owned" &&
+                candidate.workflow !== undefined,
+            );
+      if (command.workflowId !== undefined) {
+        if (
+          workflow === undefined ||
+          workflow.status !== "running" ||
+          parentRun === undefined ||
+          workflow.runId !== parentRun.id ||
+          command.parentNodeId !== workflow.id
+        ) {
+          return yield* new OrchestratorDispatchError({
+            commandId: command.commandId,
+            commandType: command.type,
+            cause: `Workflow ${command.workflowId} is not running.`,
+          });
+        }
+      } else if (parentRun === undefined || !isBlockingRun(parentRun)) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
           cause: `Parent run ${command.parentRunId} is not active.`,
         });
       }
-      if (yield* stopReachedRun(command, command.parentThreadId, parentRun.id)) {
+      if (parentRun === undefined) {
+        return yield* new OrchestratorDispatchError({
+          commandId: command.commandId,
+          commandType: command.type,
+          cause: `Parent run ${command.parentRunId} is not active.`,
+        });
+      }
+      if (
+        workflow === undefined &&
+        (yield* stopReachedRun(command, command.parentThreadId, parentRun.id))
+      ) {
         return yield* new OrchestratorDispatchError({
           commandId: command.commandId,
           commandType: command.type,
@@ -7028,6 +7069,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         title: command.title ?? null,
         model: command.modelSelection.model,
         ...(command.completionWake === undefined ? {} : { completionWake: command.completionWake }),
+        // The workflow reports one completion for all its members.
+        ...(workflow === undefined
+          ? {}
+          : { completionDelivery: { state: "disposed" as const, observedByRunId: null } }),
         status: "running",
         result: null,
         startedAt: now,
@@ -7106,16 +7151,19 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         occurredAt: now,
         payload: task,
       });
-      yield* emitEvent({
-        type: "turn-item.updated",
-        threadId: command.parentThreadId,
-        runId: parentRun.id,
-        nodeId: taskNodeId,
-        driver: targetAdapter.driver,
-        providerInstanceId: command.modelSelection.instanceId,
-        occurredAt: now,
-        payload: taskTurnItem,
-      });
+      // A workflow shows as one timeline item; its members appear in its agent list.
+      if (workflow === undefined) {
+        yield* emitEvent({
+          type: "turn-item.updated",
+          threadId: command.parentThreadId,
+          runId: parentRun.id,
+          nodeId: taskNodeId,
+          driver: targetAdapter.driver,
+          providerInstanceId: command.modelSelection.instanceId,
+          occurredAt: now,
+          payload: taskTurnItem,
+        });
+      }
 
       const childMessageCommand = {
         type: "message.dispatch",
@@ -7381,6 +7429,254 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   // the parent. Runs under the parent thread's dispatch lock, which is also
   // what finalize takes for its parent-side writes, so the two never interleave
   // on this row.
+  type WorkflowCommand = Extract<
+    OrchestrationV2ServerCommand,
+    { readonly type: "workflow.start" | "workflow.update" | "workflow.complete" | "workflow.stop" }
+  >;
+
+  const workflowDispatchError = (command: WorkflowCommand, cause: string) =>
+    new OrchestratorDispatchError({
+      commandId: command.commandId,
+      commandType: command.type,
+      cause,
+    });
+
+  const loadWorkflowProjection = (command: WorkflowCommand) =>
+    projectionStore
+      .getThreadRecords(
+        command.threadId,
+        ["runs", "nodes", "subagents", "providerTurns", "attempts", "messages", "turnItems"],
+        { messageRoles: ["user"], turnItemTypes: ["subagent"] },
+      )
+      .pipe(
+        Effect.mapError(
+          (cause) => new OrchestratorProjectionError({ threadId: command.threadId, cause }),
+        ),
+      );
+
+  const runningWorkflow = (
+    command: Exclude<WorkflowCommand, { readonly type: "workflow.start" }>,
+    projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
+  ) => {
+    const task = projection.subagents.find(
+      (candidate) =>
+        candidate.id === command.workflowId &&
+        candidate.origin === "app_owned" &&
+        candidate.workflow !== undefined,
+    );
+    return task === undefined
+      ? Effect.fail(
+          workflowDispatchError(command, `Workflow ${command.workflowId} does not exist.`),
+        )
+      : task.status !== "running"
+        ? Effect.fail(
+            workflowDispatchError(command, `Workflow ${command.workflowId} is ${task.status}.`),
+          )
+        : Effect.succeed(task);
+  };
+
+  const dispatchWorkflowStart = Effect.fn("Orchestrator.dispatchWorkflowStart")(function* (
+    command: Extract<WorkflowCommand, { readonly type: "workflow.start" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* loadWorkflowProjection(command);
+    const run = projection.runs.find((candidate) => candidate.id === command.runId);
+    if (run === undefined || !isBlockingRun(run) || run.rootNodeId === null) {
+      return yield* workflowDispatchError(command, `Run ${command.runId} is not active.`);
+    }
+    if (yield* stopReachedRun(command, command.threadId, run.id)) {
+      return yield* workflowDispatchError(command, `Run ${command.runId} is stopping.`);
+    }
+    if (projection.subagents.some((candidate) => candidate.id === command.workflowId)) {
+      return yield* workflowDispatchError(
+        command,
+        `Workflow ${command.workflowId} already exists.`,
+      );
+    }
+    const adapter = yield* providerAdapters.get(run.providerInstanceId).pipe(
+      Effect.mapError(
+        (cause) =>
+          new OrchestratorProviderAdapterError({
+            commandId: command.commandId,
+            providerInstanceId: run.providerInstanceId,
+            cause,
+          }),
+      ),
+    );
+    const now = yield* DateTime.now;
+    const task: OrchestrationV2Subagent = {
+      id: command.workflowId,
+      threadId: command.threadId,
+      runId: run.id,
+      parentNodeId: run.rootNodeId,
+      origin: "app_owned",
+      createdBy: command.createdBy,
+      driver: adapter.driver,
+      providerInstanceId: run.providerInstanceId,
+      providerThreadId: null,
+      childThreadId: null,
+      nativeTaskRef: null,
+      prompt: command.script,
+      title: command.title,
+      model: null,
+      completionWake: "always",
+      status: "running",
+      workflow: { phases: [], agents: [] },
+      result: null,
+      startedAt: now,
+      completedAt: null,
+      updatedAt: now,
+    };
+    const node: OrchestrationV2ExecutionNode = {
+      id: command.workflowId,
+      threadId: command.threadId,
+      runId: run.id,
+      parentNodeId: run.rootNodeId,
+      rootNodeId: run.rootNodeId,
+      kind: "subagent",
+      status: "running",
+      countsForRun: false,
+      providerThreadId: null,
+      providerTurnId: null,
+      nativeItemRef: null,
+      runtimeRequestId: null,
+      checkpointScopeId: null,
+      startedAt: now,
+      completedAt: null,
+    };
+    const turnItem: OrchestrationV2TurnItem = {
+      id: idAllocator.derive.delegatedTaskTurnItem({ commandId: command.commandId }),
+      threadId: command.threadId,
+      runId: run.id,
+      nodeId: command.workflowId,
+      providerThreadId: run.providerThreadId,
+      providerTurnId: providerTurnForRun(projection, run)?.id ?? null,
+      nativeItemRef: null,
+      parentItemId: null,
+      ordinal: yield* nextTurnItemOrdinal(projection),
+      status: "running",
+      title: command.title,
+      startedAt: now,
+      completedAt: null,
+      updatedAt: now,
+      type: "subagent",
+      subagentId: command.workflowId,
+      origin: "app_owned",
+      driver: adapter.driver,
+      providerInstanceId: run.providerInstanceId,
+      childThreadId: null,
+      prompt: command.script,
+      result: null,
+    };
+    const emitEvent = emit(events, command);
+    const scope = { threadId: command.threadId, runId: run.id, nodeId: command.workflowId };
+    yield* emitEvent({ ...scope, type: "node.updated", occurredAt: now, payload: node });
+    yield* emitEvent({ ...scope, type: "subagent.updated", occurredAt: now, payload: task });
+    yield* emitEvent({ ...scope, type: "turn-item.updated", occurredAt: now, payload: turnItem });
+  });
+
+  const dispatchWorkflowUpdate = Effect.fn("Orchestrator.dispatchWorkflowUpdate")(function* (
+    command: Extract<WorkflowCommand, { readonly type: "workflow.update" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* loadWorkflowProjection(command);
+    const task = yield* runningWorkflow(command, projection);
+    const now = yield* DateTime.now;
+    yield* emit(
+      events,
+      command,
+    )({
+      type: "subagent.updated",
+      threadId: command.threadId,
+      ...(task.runId === null ? {} : { runId: task.runId }),
+      nodeId: task.id,
+      occurredAt: now,
+      payload: {
+        ...task,
+        workflow: command.workflow,
+        ...(command.progress === undefined ? {} : { progress: command.progress }),
+        updatedAt: now,
+      },
+    });
+  });
+
+  const dispatchWorkflowStop = Effect.fn("Orchestrator.dispatchWorkflowStop")(function* (
+    command: Extract<WorkflowCommand, { readonly type: "workflow.stop" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* loadWorkflowProjection(command);
+    const task = yield* runningWorkflow(command, projection);
+    const now = yield* DateTime.now;
+    yield* writeAppOwnedTask({
+      command,
+      events,
+      task: { ...cancelledAppOwnedTask(task, now), result: command.reason ?? "Workflow stopped." },
+      nodes: projection.nodes,
+      turnItems: projection.turnItems,
+      now,
+    });
+  });
+
+  const dispatchWorkflowComplete = Effect.fn("Orchestrator.dispatchWorkflowComplete")(function* (
+    command: Extract<WorkflowCommand, { readonly type: "workflow.complete" }>,
+    events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+  ) {
+    const projection = yield* loadWorkflowProjection(command);
+    const task = yield* runningWorkflow(command, projection);
+    const now = yield* DateTime.now;
+    const updatedTask: OrchestrationV2Subagent = {
+      ...task,
+      status: command.status,
+      result: command.result,
+      completedAt: now,
+      updatedAt: now,
+    };
+    const parentRun =
+      task.runId === null ? undefined : projection.runs.find((run) => run.id === task.runId);
+    // The same cohort delivery as a delegated task: one wake for the whole workflow.
+    const plan = yield* planDelegatedCompletionDelivery({
+      parentProjection: projection,
+      parentRun,
+      task,
+      updatedTask,
+      now,
+    });
+    yield* writeAppOwnedTask({
+      command,
+      events,
+      task: plan.task,
+      nodes: projection.nodes,
+      turnItems: projection.turnItems.map((item) =>
+        item.type === "subagent" && item.subagentId === task.id
+          ? { ...item, result: command.result }
+          : item,
+      ),
+      now,
+    });
+    const emitEvent = emit(events, command);
+    if (plan.parentRun !== undefined) {
+      yield* emitEvent({
+        type: "run.updated",
+        threadId: command.threadId,
+        runId: plan.parentRun.id,
+        ...(plan.parentRun.rootNodeId === null ? {} : { nodeId: plan.parentRun.rootNodeId }),
+        providerInstanceId: plan.parentRun.providerInstanceId,
+        occurredAt: now,
+        payload: plan.parentRun,
+      });
+    }
+    if (plan.message !== undefined) {
+      yield* emitEvent({
+        type: "message.updated",
+        threadId: command.threadId,
+        ...(plan.message.runId === null ? {} : { runId: plan.message.runId }),
+        ...(plan.message.nodeId === null ? {} : { nodeId: plan.message.nodeId }),
+        occurredAt: now,
+        payload: plan.message,
+      });
+    }
+  });
+
   const dispatchDelegatedTaskWakePolicy = Effect.fn(
     "orchestrationV2.dispatch.delegatedTaskWakePolicy",
   )(function* (
@@ -9968,7 +10264,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const writeAppOwnedTask = Effect.fn("Orchestrator.writeAppOwnedTask")(function* (input: {
     readonly command: Extract<
       OrchestrationV2ServerCommand,
-      { readonly type: "run.interrupt" | "thread.stop" | "subagent.stop" }
+      {
+        readonly type:
+          | "run.interrupt"
+          | "thread.stop"
+          | "subagent.stop"
+          | "workflow.stop"
+          | "workflow.complete";
+      }
     >;
     readonly events: Ref.Ref<Array<OrchestrationV2DomainEvent>>;
     readonly task: OrchestrationV2Subagent;
@@ -10028,6 +10331,25 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           (event) => event.type === "subagent.updated" && event.payload.id === recorded.id,
         );
         const task = updated?.type === "subagent.updated" ? updated.payload : recorded;
+        // Stop ends a T3 workflow on this thread; its members stop with the thread's tasks.
+        if (
+          task.origin === "app_owned" &&
+          task.workflow !== undefined &&
+          task.childThreadId === null &&
+          isOrchestrationV2WorkActive(task.status)
+        ) {
+          const now = yield* DateTime.now;
+          nodes ??= (yield* projectionStore.getThreadRecords(command.threadId, ["nodes"])).nodes;
+          yield* writeAppOwnedTask({
+            command,
+            events,
+            task: { ...cancelledAppOwnedTask(task, now), result: "Workflow stopped." },
+            nodes,
+            turnItems: projection.turnItems,
+            now,
+          });
+          continue;
+        }
         if (
           task.origin !== "app_owned" ||
           task.childThreadId === null ||
@@ -11322,8 +11644,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.auto-settle": {
         // Automatic settlement (#8600): the sweep evaluated a shell snapshot,
         // so re-check against the live thread before settling. Any change
-        // after the snapshot Ã¢â‚¬â€ or any explicit override, including the
-        // un-settle button's "active" Ã¢â‚¬â€ wins over the sweep.
+        // after the snapshot ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â or any explicit override, including the
+        // un-settle button's "active" ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â wins over the sweep.
         const thread = yield* projectionStore
           .getThread(command.threadId)
           .pipe(
@@ -11618,6 +11940,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "secret_request.record":
         yield* dispatchSecretRequestRecord(command, events);
         break;
+      case "workflow.start":
+        yield* dispatchWorkflowStart(command, events);
+        break;
+      case "workflow.update":
+        yield* dispatchWorkflowUpdate(command, events);
+        break;
+      case "workflow.complete":
+        yield* dispatchWorkflowComplete(command, events);
+        break;
+      case "workflow.stop":
+        yield* dispatchWorkflowStop(command, events);
+        break;
       default:
         return yield* dispatchUnsupported(command);
     }
@@ -11829,6 +12163,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     if (command.type === "delegated_task.wake-policy") {
       yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.parentThreadId));
+    }
+    if (command.type === "workflow.complete") {
+      yield* mapDispatchError(command)(offerDelegatedCompletionDeliveries(command.threadId));
     }
 
     return {

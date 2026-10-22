@@ -2978,6 +2978,11 @@ export const OrchestrationV2Command = Schema.Union([
     // Omitted behaves as "settled_only" (no wake while the parent has a live
     // run); producers that want fire-and-forget wakes must set "always".
     completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+    /**
+     * A member of a running T3 workflow on the parent thread. The workflow owns the
+     * task instead of an active parent run, and only the workflow reports completion.
+     */
+    workflowId: Schema.optional(NodeId),
     createdAt: Schema.optional(Schema.DateTimeUtc),
   }),
   Schema.Struct({
@@ -3071,6 +3076,39 @@ const OrchestrationV2InternalCommand = Schema.Union([
    * Internal so no client can mark a request saved without the value being
    * stored.
    */
+  Schema.Struct({
+    type: Schema.Literal("workflow.start"),
+    ...OrchestrationV2CreationFields,
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    workflowId: NodeId,
+    title: TrimmedNonEmptyString,
+    script: TrimmedNonEmptyString,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("workflow.update"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    workflowId: NodeId,
+    workflow: OrchestrationV2SubagentWorkflow,
+    progress: Schema.optional(Schema.String),
+  }),
+  Schema.Struct({
+    type: Schema.Literal("workflow.complete"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    workflowId: NodeId,
+    status: Schema.Literals(["completed", "failed", "cancelled"]),
+    result: Schema.String,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("workflow.stop"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    workflowId: NodeId,
+    reason: Schema.optional(Schema.String),
+  }),
   Schema.Struct({
     type: Schema.Literal("secret_request.record"),
     commandId: CommandId,
