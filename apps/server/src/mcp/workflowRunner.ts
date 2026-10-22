@@ -14,6 +14,8 @@ import {
   type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2WorkflowAgent,
   OrchestratorMcpDelegateTasksItem,
+  type ProviderDriverKind,
+  type ProviderInstanceId,
   type OrchestratorMcpFailure,
   type ThreadId,
 } from "@t3tools/contracts";
@@ -42,7 +44,6 @@ const STALL_SWEEP_INTERVAL = "30 seconds";
 const RESULT_TEXT_LIMIT = 2_000;
 const WORKFLOW_RESULT_LIMIT = 16_000;
 const PREVIEW_LIMIT = 500;
-const SETTINGS_HEADER = "// t3-workflow: ";
 
 export interface WorkflowContext {
   readonly workflowId: NodeId;
@@ -59,6 +60,8 @@ export interface WorkflowAgentStart {
   readonly taskId: NodeId;
   readonly childThreadId: ThreadId;
   readonly model: string | null;
+  readonly providerInstanceId: ProviderInstanceId;
+  readonly driver: ProviderDriverKind;
 }
 
 export interface WorkflowAgentOutcome {
@@ -93,35 +96,6 @@ export interface WorkflowRunnerDeps {
     taskId: NodeId,
     childThreadId: ThreadId,
   ) => Effect.Effect<void, OrchestratorMcpFailure>;
-}
-
-export interface WorkflowSettings {
-  readonly args?: unknown;
-  readonly budgetTokens?: number;
-}
-
-/** The row stores the script with its args and budget, so a resumed run sees all three. */
-export function storedWorkflowScript(source: string, settings: WorkflowSettings): string {
-  return settings.args === undefined && settings.budgetTokens === undefined
-    ? source
-    : `${SETTINGS_HEADER}${JSON.stringify(settings)}\n${source}`;
-}
-
-export function parseStoredWorkflowScript(stored: string): {
-  readonly source: string;
-  readonly args: unknown;
-  readonly budgetTokens: number | undefined;
-} {
-  if (!stored.startsWith(SETTINGS_HEADER)) {
-    return { source: stored, args: null, budgetTokens: undefined };
-  }
-  const newline = stored.indexOf("\n");
-  const settings = asRecord(JSON.parse(stored.slice(SETTINGS_HEADER.length, newline)));
-  return {
-    source: stored.slice(newline + 1),
-    args: settings.args ?? null,
-    budgetTokens: typeof settings.budgetTokens === "number" ? settings.budgetTokens : undefined,
-  };
 }
 
 const decodeItem = Schema.decodeUnknownExit(OrchestratorMcpDelegateTasksItem);
@@ -349,6 +323,8 @@ class WorkflowSession {
       entry.agentId = started.value.taskId;
       entry.childThreadId = started.value.childThreadId;
       if (started.value.model !== null) entry.model = started.value.model;
+      entry.providerInstanceId = started.value.providerInstanceId;
+      entry.driver = started.value.driver;
       if (attempt > 0) entry.attempt = attempt;
       entry.state = "running";
       this.scheduleUpdate();

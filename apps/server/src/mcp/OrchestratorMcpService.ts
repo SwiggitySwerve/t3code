@@ -128,11 +128,11 @@ import {
   withResultSchema,
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
+import { makeWorkflowRunner } from "./workflowRunner.ts";
 import {
-  makeWorkflowRunner,
   parseStoredWorkflowScript,
   storedWorkflowScript,
-} from "./workflowRunner.ts";
+} from "@t3tools/shared/storedWorkflowScript";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { checkWorkflowScript } from "./workflowScript.ts";
 
@@ -1908,6 +1908,7 @@ const make = Effect.gen(function* () {
       }
       const taskId = taskEvent.event.payload.id;
       const childThreadId = taskEvent.event.payload.childThreadId;
+      const { driver, providerInstanceId } = taskEvent.event.payload;
       const childRunEvent = result.storedEvents.find(
         (stored) => stored.event.type === "run.created" && stored.event.threadId === childThreadId,
       );
@@ -1929,6 +1930,8 @@ const make = Effect.gen(function* () {
       return {
         taskId,
         childThreadId,
+        driver,
+        providerInstanceId,
         queued:
           (childRun?.event.type === "run.created" || childRun?.event.type === "run.updated") &&
           (childRun.event.payload.status === "queued" ||
@@ -1977,6 +1980,8 @@ const make = Effect.gen(function* () {
           taskId: started.taskId,
           childThreadId: started.childThreadId,
           model: prepared.target.modelSelection.model,
+          providerInstanceId: started.providerInstanceId,
+          driver: started.driver,
         };
       },
     ),
