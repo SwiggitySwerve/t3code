@@ -3100,7 +3100,8 @@ const make = Effect.gen(function* () {
         return yield* failure(
           "invalid_request",
           changed === undefined
-            ? "The graph or its input files changed since review (digest mismatch); review it again."
+            ? // Reviews live in memory, so a restart forgets them; the digest alone cannot say what changed.
+              "Review not found: no review with that digest is on record (reviews do not survive a server restart), and the graph or its input files no longer match it. Run graph_review again."
             : changed.length > 0
               ? `Input files changed since review: ${changed.join(", ")}. Review the graph again.`
               : "The graph changed since review (digest mismatch); review it again.",

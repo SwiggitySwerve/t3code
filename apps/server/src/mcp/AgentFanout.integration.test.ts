@@ -1236,7 +1236,7 @@ describe("graphs", () => {
           graph,
           acceptedDigest: `sha256:${"0".repeat(64)}`,
         });
-        expect(errorText(wrong)).toContain("changed since review (digest mismatch)");
+        expect(errorText(wrong)).toContain("Review not found");
         NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "edited");
         const stale = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
         expect(stale.isError).toBe(true);
@@ -1325,6 +1325,26 @@ describe("graphs", () => {
         expect(ended.result).toContain("Predecessor produce did not pass.");
         expect(ended.agents).toHaveLength(1);
         expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 3 });
+      }).pipe(Effect.provide(layerTest)),
+    ),
+  );
+
+  it.effect("graph_start says the review is gone when a restart dropped it", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+        const graph = serialGraph(dir);
+        const reviewed = yield* withServerProcess((service) =>
+          service.graphReview(invocation, { graph }),
+        );
+        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "edited");
+        const refused = yield* withServerProcess((service) =>
+          Effect.flip(service.graphStart(invocation, { graph, acceptedDigest: reviewed.digest! })),
+        );
+        expect(refused.message).toContain("Review not found");
+        expect(refused.message).toContain("Run graph_review again.");
+        expect(refused.message).not.toContain("digest mismatch");
       }).pipe(Effect.provide(layerTest)),
     ),
   );

@@ -585,7 +585,9 @@ when every node passed its checks.
 - **`graph_start({ graph, acceptedDigest, budgetTokens?, title?, clientRequestId? })`**
   reviews again and refuses blockers, a digest mismatch, or an input file that
   changed since the review (naming the files, for reviews this server process
-  made). It then runs the graph as a workflow, so `workflow_status`,
+  made). Reviews are kept in memory, so after a restart a mismatched digest is
+  refused as "Review not found"; run `graph_review` again. A digest that still
+  matches starts without the record. It then runs the graph as a workflow, so `workflow_status`,
   `workflow_stop`, resume after a restart, the budget, the app's display and the one
   completion wake work as for a script.
 - **Running.** The stored script is one fixed driver with the graph as its args.
