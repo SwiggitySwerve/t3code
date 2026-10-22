@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "@effect/vitest";
 
 import {
   readStructuredResult,
@@ -50,15 +50,21 @@ describe("delegated task result format", () => {
     expect(readStructuredResult('```json\n{"verdict":"maybe","issues":[]}\n```', validate)).toEqual(
       {
         structuredResultError:
-          'The result does not match the schema: $.verdict should be one of ["pass","fail"]',
+          "The result does not match the schema: $.verdict must be equal to one of the allowed values",
       },
     );
   });
 
+  it("reports an invalid schema instead of throwing", () => {
+    expect(validateJsonSchema({ type: "nonsense" }, 1)).toContain("the schema is invalid");
+  });
+
   it("checks required, extra, and nested keys", () => {
-    expect(validate({ verdict: "pass" })).toBe("$.issues is required");
-    expect(validate({ verdict: "pass", issues: [], note: "x" })).toBe("$.note is not allowed");
-    expect(validate({ verdict: "pass", issues: [1] })).toBe("$.issues[0] should be string");
+    expect(validate({ verdict: "pass" })).toBe("$ must have required property 'issues'");
+    expect(validate({ verdict: "pass", issues: [], note: "x" })).toBe(
+      "$ has unexpected property note",
+    );
+    expect(validate({ verdict: "pass", issues: [1] })).toBe("$.issues.0 must be string");
     expect(validate({ verdict: "pass", issues: ["a"] })).toBeNull();
   });
 });
