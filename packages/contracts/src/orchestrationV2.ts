@@ -563,6 +563,8 @@ export const OrchestrationV2Run = Schema.Struct({
   restartCancelledBackgroundWork: Schema.optional(
     Schema.Array(OrchestrationV2RestartCancelledBackgroundWork),
   ),
+  /** Cancelled because the server stopped or restarted before the run finished. */
+  cancelledByServerRestart: Schema.optional(Schema.Literal(true)),
   sourcePlanRef: Schema.optional(
     Schema.Struct({
       threadId: ThreadId,

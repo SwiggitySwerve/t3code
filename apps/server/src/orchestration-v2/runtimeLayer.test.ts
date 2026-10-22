@@ -4743,6 +4743,8 @@ it.layer(layerTest)("OrchestrationV2LayerLive lifecycle", (it) => {
           held.runs.map((run) => run.status),
           ["cancelled", "queued", "queued"],
         );
+        // A workflow tells a restart's cancellation from a user's Stop by this mark.
+        assert.isTrue(held.runs[0]?.cancelledByServerRestart);
         for (const run of queued) {
           assert.deepEqual(
             held.runs.find((row) => row.id === run.id),
