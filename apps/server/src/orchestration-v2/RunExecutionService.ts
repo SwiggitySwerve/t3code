@@ -1633,6 +1633,8 @@ export const layer: Layer.Layer<
               driver: input.providerThread.driver,
               text: input.message.text,
               createdBy: input.message.createdBy,
+              creationSource: input.message.creationSource,
+              delegatedThread: input.appThread.lineage?.relationshipToParent === "subagent",
             }),
           },
           modelSelection: input.modelSelection,

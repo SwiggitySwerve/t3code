@@ -2747,6 +2747,27 @@ it.effect("sends an ultracode turn to the provider with the workflow note", () =
   }),
 );
 
+it.effect("sends a delegated child's task text unchanged even when it says ultracode", () =>
+  Effect.gen(function* () {
+    const sent = yield* Ref.make<ReadonlyArray<string>>([]);
+    yield* captureRootRunTermination({
+      key: "ultracode-child-turn",
+      messageText: "Review the parser. ultracode",
+      // delegate_task and workflow agents dispatch the task as the calling agent, over MCP.
+      messageAuthor: { createdBy: "agent", creationSource: "mcp" },
+      appThreadLineage: {
+        parentThreadId: ThreadId.make("thread:ultracode-parent"),
+        relationshipToParent: "subagent",
+        rootThreadId: ThreadId.make("thread:ultracode-parent"),
+      },
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      startTurn: (turn) => Ref.update(sent, (texts) => [...texts, turn.message.text]),
+    });
+    assert.deepEqual(yield* Ref.get(sent), ["Review the parser. ultracode"]);
+  }),
+);
+
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({
@@ -2787,6 +2808,11 @@ function captureRootRunTermination(input: {
   ) => Effect.Effect<boolean, EventSink.EventSinkV2Error>;
   readonly afterStart?: (closed: Deferred.Deferred<void>) => Effect.Effect<void>;
   readonly messageText?: string;
+  readonly appThreadLineage?: OrchestrationV2AppThread["lineage"];
+  readonly messageAuthor?: {
+    readonly createdBy: "agent" | "user";
+    readonly creationSource: "mcp" | "web";
+  };
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
@@ -2879,7 +2905,10 @@ function captureRootRunTermination(input: {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;
       const start = runExecution.startRootRun({
         commandId: CommandId.make(`command:${input.key}`),
-        appThread: { id: ids.threadId } as OrchestrationV2AppThread,
+        appThread: {
+          id: ids.threadId,
+          ...(input.appThreadLineage === undefined ? {} : { lineage: input.appThreadLineage }),
+        } as OrchestrationV2AppThread,
         providerSessionId: ProviderSessionId.make(`session:${input.key}`),
         session: {
           events: Stream.empty,
@@ -2956,8 +2985,8 @@ function captureRootRunTermination(input: {
           messageId: MessageId.make(`message:${input.key}`),
           text: input.messageText ?? "interrupt projection",
           attachments: [],
-          createdBy: "user",
-          creationSource: "web",
+          createdBy: input.messageAuthor?.createdBy ?? "user",
+          creationSource: input.messageAuthor?.creationSource ?? "web",
         },
         modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
         runtimePolicy: {

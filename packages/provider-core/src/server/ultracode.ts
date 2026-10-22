@@ -3,8 +3,13 @@
  * orchestrate substantive work as a T3 workflow. Claude Code has its own ultracode, which the
  * keyword in the message already starts, so a Claude turn only gets the keyword added when the
  * setting opts it in without the user typing it.
+ *
+ * A delegated or workflow child thread never opts in on its own: its messages come from the
+ * agent that started it, so a setting or a keyword in that agent's text would let every child
+ * start another fan-out. Only a person typing the keyword into the child opts it in.
  */
 import type { ProviderDriverKind } from "@t3tools/contracts";
+import type { OrchestrationV2CreationSource } from "@t3tools/contracts";
 import type { UltracodeMode } from "@t3tools/contracts/settings";
 
 const KEYWORD = /\bultracode\b/i;
@@ -27,13 +32,27 @@ export function applyUltracode(input: {
   readonly driver: ProviderDriverKind;
   readonly text: string;
   readonly createdBy: "agent" | "system" | "user";
+  readonly creationSource: OrchestrationV2CreationSource;
+  /** The thread is a delegated task or workflow member (persisted lineage: a subagent child). */
+  readonly delegatedThread: boolean;
 }): string {
   // System turns (completion wakes, restart continuations) report back; they do not start work.
   if (input.mode === "off" || input.createdBy === "system") return input.text;
   const typed = KEYWORD.test(input.text);
+  if (input.delegatedThread && !(typed && typedByPerson(input))) return input.text;
   if (input.mode === "keyword" && !typed) return input.text;
   if (input.driver === CLAUDE_DRIVER) {
     return typed ? input.text : `${input.text}\n\nultracode`;
   }
   return `${input.text}\n\n${ULTRACODE_TURN_NOTE}`;
+}
+
+function typedByPerson(input: {
+  readonly createdBy: "agent" | "system" | "user";
+  readonly creationSource: OrchestrationV2CreationSource;
+}): boolean {
+  return (
+    input.createdBy === "user" &&
+    (input.creationSource === "web" || input.creationSource === "mobile")
+  );
 }
