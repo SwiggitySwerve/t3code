@@ -97,6 +97,7 @@ import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
 import { notificationTurnItem } from "@t3tools/provider-core/server/notification";
 import {
   cancelledBeforeStart,
+  delegatedRunOutcome,
   isRestartContinuationSource,
   runOutcome,
 } from "./RestartBackgroundNote.ts";
@@ -10665,15 +10666,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             : undefined
           : taskRuns.toSorted((a, b) => b.ordinal - a.ordinal)[0];
       if (childRun === undefined) return;
-      // Stop reaches a turn that already ended while the task waits for the tasks it
-      // delegated; those settle as interrupted, and the task was cancelled, not completed.
-      const stoppedWhileWaiting =
+      const stopRequested =
         childRun.status === "completed" &&
         (yield* projectionStore.getThreadRecords(childThreadId, ["turnItems"], {
           turnItemTypes: ["run_interrupt_request"],
           turnItemRunIds: [childRun.id],
         })).turnItems.length > 0;
-      const outcome = stoppedWhileWaiting ? "cancelled" : runOutcome(childRun);
+      const outcome = delegatedRunOutcome(childRun, stopRequested);
       const terminalStatus = delegatedTaskTerminalStatus(outcome);
       if (terminalStatus === null) {
         if (childRun.delegatedTaskId === undefined || childRun.id !== options.syncRunId) return;

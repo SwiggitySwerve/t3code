@@ -99,7 +99,7 @@ import {
   DispatchModeLimit,
   type DispatchModeRefusal,
 } from "../orchestration-v2/DispatchModeLimit.ts";
-import { runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
+import { delegatedRunOutcome, runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -455,10 +455,11 @@ function taskStatusForRun(
     | (Pick<OrchestrationV2Run, "status" | "restartCancelledBackgroundWork"> &
         Partial<Pick<OrchestrationV2Run, "admission">>)
     | undefined,
+  stopRequested = false,
 ): OrchestratorMcpDelegateTaskResult["status"] {
   // A child waiting for a slot under the running-delegated-task limit has not started.
   if (run?.status === "preparing" && run.admission === "waiting") return "queued";
-  switch (run === undefined ? undefined : runOutcome(run)) {
+  switch (run === undefined ? undefined : delegatedRunOutcome(run, stopRequested)) {
     case "queued":
       return "queued";
     case "waiting":
@@ -1586,9 +1587,14 @@ const make = Effect.gen(function* () {
         messageRoles: ["assistant"],
         messageRunIds: resultRunIds,
         turnItemRunIds: resultRunIds,
-        turnItemTypes: ["assistant_message", "error"],
+        turnItemTypes: ["assistant_message", "error", "run_interrupt_request"],
       })
       .pipe(Effect.mapError(threadManagementFailure));
+    // Finalization can trail a Stop; until it lands, the status follows the same rule.
+    const resultRun = taskResultRun ?? childRun;
+    const resultRunStopRequested = resultRecords.turnItems.some(
+      (item) => item.type === "run_interrupt_request" && item.runId === resultRun?.id,
+    );
     const childProjection = {
       ...childControls,
       messages: [...childControls.messages, ...resultRecords.messages],
@@ -1613,8 +1619,8 @@ const make = Effect.gen(function* () {
               : childRun,
           )
         : workState === "result_available"
-          ? taskStatusForRun(taskResultRun ?? childRun)
-          : taskStatusForRun(taskResultRun ?? childRun) === "queued"
+          ? taskStatusForRun(resultRun, resultRunStopRequested)
+          : taskStatusForRun(resultRun) === "queued"
             ? "queued"
             : "running";
     const derivedResult =

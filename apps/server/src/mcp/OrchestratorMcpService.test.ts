@@ -88,6 +88,7 @@ describe("OrchestratorMcpService", () => {
             completionDelivery: { state: "pending" },
           },
         ],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const childProjection = {
         thread: { id: childThreadId },
@@ -112,6 +113,7 @@ describe("OrchestratorMcpService", () => {
         subagents: [],
         providerThreads: [],
         runtimeRequests: [],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       let hasNestedWork = true;
       const layerDependencies = Layer.mergeAll(
@@ -223,6 +225,7 @@ describe("OrchestratorMcpService", () => {
             completionDelivery: { state: "pending" },
           },
         ],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const childProjection = {
         thread: { id: childThreadId },
@@ -317,6 +320,7 @@ describe("OrchestratorMcpService", () => {
             completionDelivery: { state: "pending" },
           },
         ],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const childProjection = {
         thread: { id: childThreadId },
@@ -326,6 +330,7 @@ describe("OrchestratorMcpService", () => {
         subagents: [],
         providerThreads: [],
         runtimeRequests: [],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -401,6 +406,7 @@ describe("OrchestratorMcpService", () => {
                 completionDelivery: { state: "pending" },
               },
             ],
+            turnItems: [],
           }) as unknown as OrchestrationV2ThreadProjection;
         // A finished run whose binding to the follow-up was lost (#19002).
         const childProjection = {
@@ -506,6 +512,7 @@ describe("OrchestratorMcpService", () => {
             completionDelivery: { state: "pending" },
           },
         ],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const childProjection = {
         thread: { id: childThreadId },
@@ -515,6 +522,7 @@ describe("OrchestratorMcpService", () => {
         subagents: [],
         providerThreads: [],
         runtimeRequests: [],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -587,6 +595,7 @@ describe("OrchestratorMcpService", () => {
             completionDelivery: { state: "pending" },
           },
         ],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const childProjection = {
         thread: { id: childThreadId },
@@ -596,6 +605,7 @@ describe("OrchestratorMcpService", () => {
         subagents: [],
         providerThreads: [],
         runtimeRequests: [],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -674,6 +684,7 @@ describe("OrchestratorMcpService", () => {
             completionDelivery: { state: "pending" },
           },
         ],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const childProjection = {
         thread: { id: childThreadId },
@@ -683,6 +694,7 @@ describe("OrchestratorMcpService", () => {
         subagents: [],
         providerThreads: [],
         runtimeRequests: [],
+        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
@@ -781,6 +793,7 @@ describe("OrchestratorMcpService", () => {
             ],
             providerThreads: [],
             runtimeRequests: [],
+            turnItems: [],
           },
         ],
         [
@@ -793,6 +806,7 @@ describe("OrchestratorMcpService", () => {
             subagents: [],
             providerThreads: [],
             runtimeRequests: [],
+            turnItems: [],
           },
         ],
       ]) as unknown as ReadonlyMap<ThreadId, OrchestrationV2ThreadProjection>;
@@ -997,6 +1011,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       ],
       contextTransfers: [],
       subagents,
+      turnItems: [],
     }) as unknown as OrchestrationV2ThreadProjection;
 
   const childProjection = {
@@ -2323,6 +2338,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                             },
                           ]
                         : [],
+                      turnItems: [],
                     } as unknown as OrchestrationV2ThreadProjection),
               ),
           }),

@@ -175,6 +175,18 @@ export function runOutcome(
 }
 
 /**
+ * The outcome a delegated task takes from its run. A Stop can reach a run whose turn
+ * already ended while its task waited for the tasks it delegated; those settle as
+ * interrupted, and the task was cancelled, not completed.
+ */
+export function delegatedRunOutcome(
+  run: Pick<OrchestrationV2Run, "status" | "restartCancelledBackgroundWork">,
+  stopRequested: boolean,
+): OrchestrationV2Run["status"] {
+  return run.status === "completed" && stopRequested ? "cancelled" : runOutcome(run);
+}
+
+/**
  * A run that never reached its provider, such as a provider wake the restart
  * cut while it was starting: it lost no work and has no turn to continue. A
  * prepared restart continuation still counts, since it carries its source.
