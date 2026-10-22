@@ -1,11 +1,13 @@
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
+  EventId,
   EnvironmentId,
   MessageId,
   OrchestratorMcpDelegateTasksResult,
   OrchestratorMcpTaskWaitResult,
+  OrchestratorMcpWorkflowResult,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -13,16 +15,19 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
+import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
@@ -144,9 +149,6 @@ const invoke = (name: string, args: Record<string, unknown>) =>
       );
   });
 
-const decodeStarted = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTasksResult);
-const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpTaskWaitResult);
-
 const errorText = (result: McpSchema.CallToolResult) =>
   result.content.map((part) => ("text" in part ? part.text : "")).join("");
 
@@ -186,6 +188,58 @@ const childTasks = Effect.gen(function* () {
     (task) => task.origin === "app_owned",
   );
 });
+
+/** Finishes a delegated child's run as if its provider replied with `text`. */
+const completeChild = (childThreadId: ThreadId, text: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const child = yield* orchestrator.getThreadProjection(childThreadId);
+    const run = child.runs.at(-1)!;
+    const now = yield* DateTime.now;
+    yield* sink.commitCommand({
+      commandId: CommandId.make(`command:test-complete:${run.id}`),
+      threadId: childThreadId,
+      commandType: "test.complete",
+      acceptedAt: now,
+      effects: [],
+      events: [
+        {
+          id: EventId.make(`event:test-reply:${run.id}`),
+          type: "message.updated",
+          threadId: childThreadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: {
+            id: MessageId.make(`message:test-reply:${run.id}`),
+            threadId: childThreadId,
+            runId: run.id,
+            nodeId: run.rootNodeId,
+            role: "assistant",
+            text,
+            attachments: [],
+            streaming: false,
+            createdBy: "agent",
+            creationSource: "provider",
+            createdAt: now,
+            updatedAt: now,
+          },
+        },
+        {
+          id: EventId.make(`event:test-complete:${run.id}`),
+          type: "run.updated",
+          threadId: childThreadId,
+          runId: run.id,
+          occurredAt: now,
+          payload: { ...run, status: "completed", startedAt: now, completedAt: now },
+        },
+      ],
+    });
+  });
+
+const decodeStarted = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTasksResult);
+const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpTaskWaitResult);
+const decodeWorkflow = Schema.decodeUnknownEffect(OrchestratorMcpWorkflowResult);
 
 describe("delegate_tasks", () => {
   it.effect("starts every task in one call, in request order, and retries without duplicates", () =>
@@ -363,5 +417,246 @@ describe("delegate_tasks over the running limit", () => {
       const status = yield* invoke("task_status", { taskId: tasks[2]!.taskId });
       expect(status.structuredContent).toMatchObject({ status: "queued", workState: "working" });
     }).pipe(Effect.provide(makeLayerTest(2))),
+  );
+});
+
+/**
+ * Answers every agent a workflow starts, as its provider would, with `reply(prompt)`.
+ * Agents whose reply is undefined are left running.
+ */
+const answerWorkflowAgents = (reply: (prompt: string) => string | undefined) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const answered = new Set<string>();
+    return yield* orchestrator
+      .streamStoredEventsFrom({
+        threadId: parentThreadId,
+        afterSequence: 0,
+        eventType: "subagent.updated",
+      })
+      .pipe(
+        Stream.runForEach((stored) =>
+          Effect.gen(function* () {
+            if (stored.event.type !== "subagent.updated") return;
+            const task = stored.event.payload;
+            if (
+              task.childThreadId === null ||
+              task.status !== "running" ||
+              answered.has(task.id) ||
+              !String(task.parentNodeId).startsWith("workflow:")
+            )
+              return;
+            const text = reply(task.prompt);
+            if (text === undefined) return;
+            answered.add(task.id);
+            yield* completeChild(task.childThreadId, text);
+          }),
+        ),
+        Effect.forkChild,
+      );
+  });
+
+const awaitWorkflowEnd = (workflowId: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator
+      .streamStoredEventsFrom({
+        threadId: parentThreadId,
+        afterSequence: 0,
+        eventType: "subagent.updated",
+      })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "subagent.updated" &&
+            stored.event.payload.id === workflowId &&
+            stored.event.payload.status !== "running",
+        ),
+        Stream.runHead,
+      );
+    return yield* decodeWorkflow(
+      (yield* invoke("workflow_status", { workflowId })).structuredContent,
+    );
+  });
+
+const startWorkflow = (script: string, args?: unknown) =>
+  Effect.gen(function* () {
+    const result = yield* invoke("workflow_start", {
+      script,
+      title: "Test workflow",
+      ...(args === undefined ? {} : { args }),
+    });
+    return yield* decodeWorkflow(result.structuredContent);
+  });
+
+describe("workflow_start", () => {
+  it.effect("runs phases of parallel and pipelined agents and wakes the caller once", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents((prompt) => `done(${prompt})`);
+      const started = yield* startWorkflow(
+        `export const meta = { name: "review", phases: [{ title: "Scan" }, { title: "Review" }] }
+const scanned = await parallel(args.files.map((file) => () => agent("scan " + file, { label: file, phase: "Scan" })))
+log("scanned", scanned.length)
+const reviewed = await pipeline(scanned, (text) => agent("review " + text, { label: "review", phase: "Review" }))
+return { scanned, reviewed }`,
+        { files: ["a", "b", "c"] },
+      );
+      expect(started.status).toBe("running");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended).toMatchObject({
+        status: "completed",
+        name: "review",
+        phases: ["Scan", "Review"],
+      });
+      expect(JSON.parse(ended.result!)).toEqual({
+        scanned: ["done(scan a)", "done(scan b)", "done(scan c)"],
+        reviewed: [
+          "done(review done(scan a))",
+          "done(review done(scan b))",
+          "done(review done(scan c))",
+        ],
+      });
+      expect(ended.agents).toHaveLength(6);
+      expect(new Set(ended.agents.map((agent) => agent.status))).toEqual(new Set(["completed"]));
+      expect(ended.agents.filter((agent) => agent.phase === "Review")).toHaveLength(3);
+
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      const members = parent.subagents.filter((task) => task.parentNodeId === started.workflowId);
+      expect(members).toHaveLength(6);
+      expect(new Set(members.map((task) => task.completionDelivery?.state))).toEqual(
+        new Set(["disposed"]),
+      );
+      // One timeline item for the workflow, none for its members.
+      expect(
+        parent.turnItems
+          .filter((item) => item.type === "subagent")
+          .map((item) => item.type === "subagent" && item.subagentId),
+      ).toEqual([started.workflowId]);
+      const deliveries = parent.runs.flatMap(
+        (run) => run.delegatedCompletion?.delivery?.taskIds ?? [],
+      );
+      expect(deliveries).toEqual([started.workflowId]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("returns structured results for agents given a schema", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents(() => 'Counted.\n```json\n{"lines": 42}\n```');
+      const started = yield* startWorkflow(
+        `const counted = await agent("count lines", { schema: { type: "object", required: ["lines"], properties: { lines: { type: "integer" } } } })
+return counted.lines + 1`,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended).toMatchObject({ status: "completed", result: "43" });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("reports a script error as a failed workflow", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow('if (!args) throw new Error("args are required")');
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("failed");
+      expect(ended.result).toContain("args are required");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("refuses a script that does not compile and starts nothing", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const result = yield* invoke("workflow_start", { script: "const = 1" });
+      expect(result.isError).toBe(true);
+      expect(errorText(result)).toContain("does not compile");
+      expect(yield* childTasks).toHaveLength(0);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect.each(["workflow_stop", "task_cancel"] as const)(
+    "%s stops the script and every running agent, with no completion wake",
+    (tool) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents((prompt) => (prompt === "quick" ? "quick done" : undefined));
+        const started = yield* startWorkflow(
+          'await agent("quick")\nreturn await parallel([() => agent("slow one"), () => agent("slow two")])',
+        );
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentThreadId,
+            afterSequence: 0,
+            eventType: "subagent.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.prompt === "slow two" &&
+                stored.event.payload.status === "running",
+            ),
+            Stream.runHead,
+          );
+        yield* invoke(
+          tool,
+          tool === "workflow_stop"
+            ? { workflowId: started.workflowId }
+            : { taskId: started.workflowId },
+        );
+        const ended = yield* decodeWorkflow(
+          (yield* invoke("workflow_status", { workflowId: started.workflowId })).structuredContent,
+        );
+        expect(ended.status).toBe("cancelled");
+        const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+        const slow = parent.subagents.filter((task) => task.prompt.startsWith("slow"));
+        expect(slow).toHaveLength(2);
+        for (const task of slow) {
+          const child = yield* orchestrator.getThreadProjection(task.childThreadId!);
+          expect(child.runs.at(-1)?.status).toBe("interrupted");
+        }
+        expect(
+          parent.runs.flatMap((run) => run.delegatedCompletion?.delivery?.taskIds ?? []),
+        ).toEqual([]);
+        const refused = yield* invoke("workflow_stop", { workflowId: started.workflowId });
+        expect(refused.isError).not.toBe(true);
+      }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("stopping the calling thread stops its workflow and the workflow's agents", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow('return await agent("slow")');
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const member = yield* orchestrator
+        .streamStoredEventsFrom({
+          threadId: parentThreadId,
+          afterSequence: 0,
+          eventType: "subagent.updated",
+        })
+        .pipe(
+          Stream.filter(
+            (stored) =>
+              stored.event.type === "subagent.updated" &&
+              stored.event.payload.prompt === "slow" &&
+              stored.event.payload.childThreadId !== null,
+          ),
+          Stream.runHead,
+        );
+      const commandId = CommandId.make("command:stop-workflow-caller");
+      yield* orchestrator.dispatch({ type: "thread.stop", commandId, threadId: parentThreadId });
+      yield* threads.stopDelegatedTasks({ threadId: parentThreadId, commandId });
+      // The caller's own turn stopped too, so its MCP calls are refused; read the row.
+      const workflow = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (task) => task.id === started.workflowId,
+      );
+      expect(workflow).toMatchObject({ status: "cancelled", result: "Workflow stopped." });
+      const event = Option.getOrThrow(member).event;
+      const childThreadId = event.type === "subagent.updated" ? event.payload.childThreadId! : null;
+      expect((yield* orchestrator.getThreadProjection(childThreadId!)).runs.at(-1)?.status).toBe(
+        "interrupted",
+      );
+    }).pipe(Effect.provide(layerTest)),
   );
 });

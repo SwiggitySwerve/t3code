@@ -22,6 +22,10 @@ import {
   OrchestratorMcpUpdateScheduledTaskInput,
   OrchestratorMcpTaskStatusInput,
   OrchestratorMcpTaskWaitInput,
+  OrchestratorMcpWorkflowInput,
+  OrchestratorMcpWorkflowResult,
+  OrchestratorMcpWorkflowStartInput,
+  OrchestratorMcpWorkflowStopInput,
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpThreadInterruptInput,
   OrchestratorMcpThreadInterruptResult,
@@ -122,6 +126,45 @@ const TaskWaitTool = Tool.make("task_wait", {
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true);
+
+const WorkflowStartTool = Tool.make("workflow_start", {
+  description:
+    "Needs an agent running inside a T3 thread. Run a multi-agent workflow script in the background on the T3 server, for any provider. Use it when work splits into phases or many agents: the script, not your turns, drives the fan-out, and you get ONE completion wake when it ends. Script format is Claude Code's Workflow: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return a JSON value. agent(prompt, { label, phase, schema, target: { providerInstanceId, model, options }, isolation: 'worktree', role }) runs one delegated task and resolves with its final text, or the parsed object when `schema` (a JSON Schema) is given, or null if it failed. parallel([() => agent(...), ...]) runs functions concurrently and returns their results in order (null for failures). pipeline(items, (item, original, index) => ..., ...moreStages) runs each item through the stages. phase(title) sets the phase for later agents; log(...) reports progress. args is the JSON you pass. Scripts cannot read the clock, random numbers, files or the network, so a run can resume. Agents run under this thread's modes and the environment's running-agent limit. Returns the workflowId; end your turn and wait for the completion wake, or read workflow_status.",
+  parameters: OrchestratorMcpWorkflowStartInput,
+  success: OrchestratorMcpWorkflowResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Start a workflow")
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.OpenWorld, true);
+
+const WorkflowStatusTool = Tool.make("workflow_status", {
+  description:
+    "Needs an agent running inside a T3 thread. Read a workflow this thread started: its status, phases, each agent's status and result, the latest log line, and the script's result once it ends.",
+  parameters: OrchestratorMcpWorkflowInput,
+  success: OrchestratorMcpWorkflowResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Get workflow status")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true);
+
+const WorkflowRunStopTool = Tool.make("workflow_stop", {
+  description:
+    "Needs an agent running inside a T3 thread. Stop a workflow this thread started: the script stops and every agent it started is stopped. No completion wake follows.",
+  parameters: OrchestratorMcpWorkflowStopInput,
+  success: OrchestratorMcpWorkflowResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Stop a workflow")
+  .annotate(Tool.Destructive, true);
 
 const TaskCancelTool = Tool.make("task_cancel", {
   description:
@@ -309,6 +352,9 @@ export const OrchestratorToolkit = Toolkit.make(
   DelegateTaskTool,
   DelegateTasksTool,
   TaskWaitTool,
+  WorkflowStartTool,
+  WorkflowStatusTool,
+  WorkflowRunStopTool,
   TaskStatusTool,
   TaskCancelTool,
   WorkflowStopTool,

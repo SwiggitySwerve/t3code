@@ -25,6 +25,10 @@ import {
   type OrchestratorMcpDelegateTasksResult,
   type OrchestratorMcpDelegatedTaskStart,
   type OrchestratorMcpTaskWaitInput,
+  type OrchestratorMcpWorkflowInput,
+  type OrchestratorMcpWorkflowResult,
+  type OrchestratorMcpWorkflowStartInput,
+  type OrchestratorMcpWorkflowStopInput,
   type OrchestratorMcpTaskWaitResult,
   type OrchestratorMcpDelegateTaskResult,
   type OrchestratorMcpInteractionMode,
@@ -123,6 +127,8 @@ import {
   withResultSchema,
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
+import { makeWorkflowRunner, storedWorkflowScript } from "./workflowRunner.ts";
+import { checkWorkflowScript } from "./workflowScript.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -162,6 +168,18 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpDelegateTasksInput,
   ) => Effect.Effect<OrchestratorMcpDelegateTasksResult, OrchestratorMcpFailure>;
+  readonly workflowStart: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpWorkflowStartInput,
+  ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
+  readonly workflowStatus: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpWorkflowInput,
+  ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
+  readonly workflowStop: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpWorkflowStopInput,
+  ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
   readonly taskWait: (
     scope: McpInvocationScope,
     input: OrchestratorMcpTaskWaitInput,
@@ -1544,7 +1562,9 @@ const make = Effect.gen(function* () {
     if (task === undefined || task.childThreadId === null) {
       return yield* failure(
         "task_not_found",
-        `Delegated task ${taskId} does not belong to thread ${scope.thread.threadId}.`,
+        task?.workflow !== undefined
+          ? `${taskId} is a workflow; use workflow_status or workflow_stop.`
+          : `Delegated task ${taskId} does not belong to thread ${scope.thread.threadId}.`,
       );
     }
     const childControls = yield* threadManagement
@@ -1826,9 +1846,10 @@ const make = Effect.gen(function* () {
   const dispatchDelegation = Effect.fn("OrchestratorMcpService.dispatchDelegation")(
     function* (input: {
       readonly scope: McpThreadInvocationScope;
-      readonly parentRun: Effect.Success<ReturnType<typeof requireDelegatingRun>>;
+      readonly parentRun: { readonly id: RunId; readonly rootNodeId: NodeId };
       readonly prepared: Effect.Success<ReturnType<typeof prepareDelegation>>;
       readonly completionWake: "always" | "settled_only";
+      readonly workflowId?: NodeId;
     }) {
       const { scope, parentRun, prepared } = input;
       // ThreadManagementService.dispatch is the chokepoint for this command
@@ -1852,6 +1873,7 @@ const make = Effect.gen(function* () {
             ? {}
             : { workspaceStrategy: prepared.workspaceStrategy }),
           completionWake: input.completionWake,
+          ...(input.workflowId === undefined ? {} : { workflowId: input.workflowId }),
         })
         .pipe(
           Effect.mapError((error) =>
@@ -1906,6 +1928,143 @@ const make = Effect.gen(function* () {
       };
     },
   );
+
+  // A workflow's agents act with the starting thread's authority; this scope only
+  // namespaces their command ids so each workflow derives its own.
+  const workflowScope = (
+    scope: McpThreadInvocationScope,
+    workflowId: NodeId,
+  ): McpThreadInvocationScope => ({ ...scope, requestNamespace: `workflow:${workflowId}` });
+  const workflowScopes = new Map<NodeId, McpThreadInvocationScope>();
+
+  const workflowRunner = makeWorkflowRunner({
+    threads: threadManagement,
+    spawnAgent: Effect.fn("OrchestratorMcpService.spawnWorkflowAgent")(
+      function* (workflow, item, key) {
+        const scope = workflowScopes.get(workflow.workflowId);
+        if (scope === undefined) {
+          return yield* failure("orchestration_error", "The workflow is not running here.");
+        }
+        const parent = yield* loadProjection(workflow.threadId);
+        const row = parent.subagents.find((task) => task.id === workflow.workflowId);
+        if (row?.runId == null) {
+          return yield* failure("orchestration_error", "The workflow row is missing.");
+        }
+        const prepared = yield* prepareDelegation({
+          scope,
+          parent,
+          providers: yield* loadProviders,
+          item,
+          requestKey: key,
+          parentCommit: yield* makeParentCommitResolver(parent),
+        });
+        const started = yield* dispatchDelegation({
+          scope,
+          parentRun: { id: row.runId, rootNodeId: workflow.workflowId },
+          prepared,
+          completionWake: "always",
+          workflowId: workflow.workflowId,
+        });
+        return {
+          taskId: started.taskId,
+          childThreadId: started.childThreadId,
+          model: prepared.target.modelSelection.model,
+        };
+      },
+    ),
+    readAgent: Effect.fn("OrchestratorMcpService.readWorkflowAgent")(function* (workflow, taskId) {
+      const scope = workflowScopes.get(workflow.workflowId);
+      if (scope === undefined) {
+        return yield* failure("orchestration_error", "The workflow is not running here.");
+      }
+      const task = yield* readTask(scope, taskId);
+      return {
+        status: task.status,
+        summary: task.summary,
+        ...(task.structuredResult === undefined ? {} : { structuredResult: task.structuredResult }),
+        ...(task.structuredResultError === undefined
+          ? {}
+          : { structuredResultError: task.structuredResultError }),
+      };
+    }),
+  });
+
+  const findWorkflow = (
+    projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
+    workflowId: NodeId,
+  ) =>
+    projection.subagents.find(
+      (task) =>
+        task.id === workflowId &&
+        task.origin === "app_owned" &&
+        task.workflow !== undefined &&
+        task.childThreadId === null,
+    );
+
+  const workflowResult = (
+    projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
+    workflow: OrchestrationV2Subagent,
+  ): OrchestratorMcpWorkflowResult => {
+    const members = new Map(
+      projection.subagents
+        .filter((task) => task.parentNodeId === workflow.id)
+        .map((task) => [task.id as string, task]),
+    );
+    const agents = workflow.workflow?.agents ?? [];
+    return {
+      workflowId: workflow.id,
+      status:
+        workflow.status === "completed" ||
+        workflow.status === "failed" ||
+        workflow.status === "cancelled" ||
+        workflow.status === "interrupted"
+          ? workflow.status
+          : "running",
+      name: workflow.workflow?.name ?? workflow.title,
+      phases: (workflow.workflow?.phases ?? []).map((phase) => phase.title),
+      agents: agents.map((agent) => {
+        const member = agent.agentId === undefined ? undefined : members.get(agent.agentId);
+        const status =
+          member === undefined
+            ? agent.state
+            : member.status === "completed" ||
+                member.status === "failed" ||
+                member.status === "cancelled" ||
+                member.status === "interrupted"
+              ? member.status
+              : member.status === "pending" || member.status === "idle"
+                ? "queued"
+                : "running";
+        return {
+          index: agent.index,
+          label: agent.label,
+          phase: agent.phaseTitle ?? null,
+          status,
+          taskId: member?.id ?? null,
+          childThreadId: agent.childThreadId ?? null,
+          model: agent.model ?? null,
+          result: agent.result ?? null,
+        };
+      }),
+      progress: workflow.progress ?? null,
+      result: workflow.result,
+    };
+  };
+
+  const stopWorkflowById = Effect.fn("OrchestratorMcpService.stopWorkflowById")(function* (
+    scope: McpThreadInvocationScope,
+    workflowId: NodeId,
+  ) {
+    yield* threadManagement
+      .stopWorkflow({ threadId: scope.thread.threadId, subagentId: workflowId })
+      .pipe(
+        Effect.catchIf(
+          (error) => error.reason === "not-running",
+          () => Effect.void,
+        ),
+        Effect.mapError((error) => failure("orchestration_error", error.message)),
+      );
+  });
 
   const waitForTask = Effect.fn("OrchestratorMcpService.waitForTask")(
     function* (scope: McpThreadInvocationScope, taskId: NodeId, _timeoutMs: number) {
@@ -2478,6 +2637,90 @@ const make = Effect.gen(function* () {
         return { tasks };
       },
     ),
+    workflowStart: Effect.fn("OrchestratorMcpService.workflowStart")(
+      function* (callerScope, input) {
+        const { scope, parent } = yield* loadThreadCaller(callerScope, "workflow_start");
+        const parentRun = yield* requireDelegatingRun(scope, parent);
+        const compileError = yield* Effect.promise(() => checkWorkflowScript(input.script));
+        if (compileError !== null) {
+          return yield* failure(
+            "invalid_request",
+            `The workflow script does not compile: ${compileError}`,
+          );
+        }
+        const key = yield* requestKey(input.clientRequestId);
+        const commandId = stableCommandId({ scope, requestKey: key, operation: "workflow-start" });
+        const workflowId = NodeId.make(String(commandId).replace(/^command:/, "workflow:"));
+        const afterSequence = yield* threadManagement
+          .getThreadEventSequence(scope.thread.threadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        yield* threadManagement
+          .dispatch({
+            type: "workflow.start",
+            createdBy: "agent",
+            creationSource: "mcp",
+            commandId,
+            threadId: scope.thread.threadId,
+            runId: parentRun.id,
+            workflowId,
+            title: input.title ?? "Workflow",
+            script: storedWorkflowScript(input.script, input.args),
+          })
+          .pipe(
+            Effect.mapError((error) =>
+              failure(
+                "orchestration_error",
+                `Unable to start the workflow: ${errorMessage(error)}`,
+              ),
+            ),
+          );
+        const started = findWorkflow(yield* loadProjection(scope.thread.threadId), workflowId);
+        if (started === undefined) {
+          return yield* failure("orchestration_error", "The workflow did not start.");
+        }
+        if (started.status === "running" && !workflowRunner.isRunning(workflowId)) {
+          workflowScopes.set(workflowId, workflowScope(scope, workflowId));
+          yield* workflowRunner.launch({
+            workflowId,
+            threadId: scope.thread.threadId,
+            source: input.script,
+            args: input.args ?? null,
+            afterSequence,
+          });
+        }
+        return workflowResult(yield* loadProjection(scope.thread.threadId), started);
+      },
+    ),
+    workflowStatus: Effect.fn("OrchestratorMcpService.workflowStatus")(
+      function* (callerScope, input) {
+        const scope = yield* requireThreadScope(callerScope, "workflow_status");
+        yield* requireCapability(scope);
+        const projection = yield* loadProjection(scope.thread.threadId);
+        const workflow = findWorkflow(projection, input.workflowId);
+        if (workflow === undefined) {
+          return yield* failure(
+            "task_not_found",
+            `Workflow ${input.workflowId} does not belong to thread ${scope.thread.threadId}.`,
+          );
+        }
+        return workflowResult(projection, workflow);
+      },
+    ),
+    workflowStop: Effect.fn("OrchestratorMcpService.workflowStop")(function* (callerScope, input) {
+      const scope = yield* requireThreadScope(callerScope, "workflow_stop");
+      yield* requireCapability(scope);
+      if (
+        findWorkflow(yield* loadProjection(scope.thread.threadId), input.workflowId) === undefined
+      ) {
+        return yield* failure(
+          "task_not_found",
+          `Workflow ${input.workflowId} does not belong to thread ${scope.thread.threadId}.`,
+        );
+      }
+      yield* stopWorkflowById(scope, input.workflowId);
+      const projection = yield* loadProjection(scope.thread.threadId);
+      return workflowResult(projection, findWorkflow(projection, input.workflowId)!);
+    }),
     taskWait: Effect.fn("OrchestratorMcpService.taskWait")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "task_wait");
       const taskIds = [...new Set(input.taskIds)];
@@ -2583,6 +2826,18 @@ const make = Effect.gen(function* () {
     }),
     cancelTask: Effect.fn("OrchestratorMcpService.cancelTask")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "task_cancel");
+      const owner = yield* loadProjection(scope.thread.threadId);
+      if (findWorkflow(owner, input.taskId) !== undefined) {
+        yield* stopWorkflowById(scope, input.taskId);
+        const stopped = findWorkflow(yield* loadProjection(scope.thread.threadId), input.taskId);
+        return {
+          taskId: input.taskId,
+          status:
+            stopped?.status === "completed" || stopped?.status === "failed"
+              ? stopped.status
+              : "cancelled",
+        } satisfies OrchestratorMcpTaskCancelResult;
+      }
       const current = yield* readTask(scope, input.taskId);
       const key = yield* requestKey(input.clientRequestId);
       const parentProjection = yield* loadProjection(scope.thread.threadId);

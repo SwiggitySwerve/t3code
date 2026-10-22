@@ -373,6 +373,58 @@ returns its existing status, and its child thread still stops, including later
 runs and watch wakes. Published task results remain available. It accepts an
 optional cancellation reason.
 
+### Workflows: `workflow_start`, `workflow_status`, `workflow_stop`
+
+`workflow_start` runs a script that starts and combines delegated tasks, so one
+call covers fan-out, phases and follow-up steps that would otherwise take one
+model step each. It returns a `workflowId` at once; the calling thread is woken
+once, when the script ends. Any provider can call it.
+
+Scripts use the Claude Code Workflow format: an optional
+`export const meta = { name, description, phases: [{ title }] }`, then a body that
+may `await` and `return`. The script reads `args` (the JSON value passed to
+`workflow_start`) and can call:
+
+- `agent(prompt, options)`: starts one delegated task and resolves to its summary,
+  or to the parsed `structuredResult` when `options.schema` is set. Options are
+  `label`, `phase`, `model` or `target` (provider instance, model, options),
+  `isolation`, `role` and `schema`. A failed or cancelled agent resolves to
+  `null`, and the failure is recorded on the agent.
+- `parallel(functions)`: runs every function and resolves to their results in
+  order. `pipeline(items, ...stages)` passes each item through the stages in turn,
+  with all items running at once; a stage gets `(previous, item, index)`, and an
+  item stops at the first stage that returns `null`. Both accept at most 4,096
+  items; a step that throws resolves to `null`. `budget` is a placeholder with no
+  limit until spend caps land.
+- `phase(title)` and `log(...values)`: progress shown in `workflow_status` and the
+  workflow row.
+
+Every `agent()` call is an ordinary delegated task under the workflow, so model
+options, worktree isolation, mode ceilings, the running limit and structured
+results apply unchanged. Its retry key is a hash of its phase, label, prompt,
+schema, target and isolation plus how many identical calls came before it, so a
+re-run maps each call back to the same task. A workflow may start at most 1,000
+agents.
+
+The script runs in a QuickJS sandbox (`quickjs-emscripten`), one module per run,
+with no filesystem, network, process or timer access. `Date.now()`,
+`Math.random()` and `new Date()` throw, because a resumed script must make the
+same calls in the same order. Memory is capped at 256 MB and each synchronous
+slice at 10 seconds. A script that fails to compile is rejected before anything
+starts.
+
+The workflow is an app-owned subagent row on the calling thread whose `workflow`
+field holds its phases and agents; the existing workflow view renders it.
+Member tasks hang under that row, and their own completion deliveries are
+disposed, so only `workflow.complete` delivers to the caller. `workflow_status`
+returns the status, phases, each agent's status, model and summary, the latest
+log line, and the script's return value as JSON or why it failed.
+
+`workflow_stop`, and `task_cancel` on a `workflowId`, stop the script, stop every
+running member as `task_cancel` would, and settle the workflow as cancelled.
+Stopping the calling thread does the same. Workflow rows are kept open across a
+server restart, but the script is not resumed yet.
+
 ### `create_threads`
 
 Creates between one and twenty ordinary top-level T3 threads:
@@ -610,6 +662,10 @@ Coverage includes:
 - spawn and result context transfers;
 - async status polling;
 - cancellation;
+- batch delegation, task waits, structured results and the running limit;
+- workflow scripts: phases, parallel and pipeline steps, one completion delivery,
+  schema results, script errors, and Stop through `workflow_stop`, `task_cancel`
+  and the calling thread;
 - batch ordinary-thread creation;
 - thread listing and timeline reads, including another project's threads;
 - ordinary-thread send, wait, steering, and interruption;
