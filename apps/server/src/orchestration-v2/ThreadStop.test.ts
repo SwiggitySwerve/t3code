@@ -20,6 +20,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Option from "effect/Option";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -1116,6 +1117,49 @@ it.effect.each([
     }).pipe(Effect.provide(layerTest)),
 );
 
+it.effect("cancelling a task that waits on its delegated tasks reports it cancelled", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threads = yield* ThreadManagementService.ThreadManagementService;
+    const parentThreadId = ThreadId.make("thread:cancel-waiting-parent");
+    yield* createWatchingThread(parentThreadId, 12);
+    yield* send(parentThreadId, "coordinate", "start_immediately");
+    const coordinatorThreadId = yield* delegate(parentThreadId, "coordinator task");
+    const workerThreadId = yield* delegate(coordinatorThreadId, "worker task");
+    // The coordinator's own turn ends while its worker still runs.
+    const coordinatorRun = (yield* orchestrator.getThreadProjection(coordinatorThreadId)).runs[0]!;
+    const now = yield* DateTime.now;
+    yield* projections.apply({
+      id: EventId.make("event:cancel-waiting:coordinator-completed"),
+      type: "run.updated",
+      threadId: coordinatorThreadId,
+      runId: coordinatorRun.id,
+      occurredAt: now,
+      payload: { ...coordinatorRun, status: "completed", completedAt: now },
+    });
+    const afterSequence = yield* orchestrator.getThreadEventSequence(parentThreadId);
+
+    const commandId = CommandId.make("cancel-waiting");
+    yield* orchestrator.dispatch({ type: "thread.stop", commandId, threadId: coordinatorThreadId });
+    yield* threads.stopDelegatedTasks({ threadId: coordinatorThreadId, commandId });
+    assert.deepEqual((yield* threadState(workerThreadId)).runs, ["interrupted"]);
+
+    const settled = yield* orchestrator
+      .streamStoredEventsFrom({ threadId: parentThreadId, afterSequence })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "subagent.updated" &&
+            stored.event.payload.childThreadId === coordinatorThreadId &&
+            stored.event.payload.completedAt !== null,
+        ),
+        Stream.runHead,
+      );
+    const event = Option.getOrThrow(settled).event;
+    assert.equal(event.type === "subagent.updated" ? event.payload.status : null, "cancelled");
+  }).pipe(Effect.provide(layerTest)),
+);
 it.effect("a delegated task that cannot be stopped fails the walk after its siblings stop", () =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;

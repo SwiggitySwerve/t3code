@@ -10616,7 +10616,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             : undefined
           : taskRuns.toSorted((a, b) => b.ordinal - a.ordinal)[0];
       if (childRun === undefined) return;
-      const outcome = runOutcome(childRun);
+      // Stop reaches a turn that already ended while the task waits for the tasks it
+      // delegated; those settle as interrupted, and the task was cancelled, not completed.
+      const stoppedWhileWaiting =
+        childRun.status === "completed" &&
+        (yield* projectionStore.getThreadRecords(childThreadId, ["turnItems"], {
+          turnItemTypes: ["run_interrupt_request"],
+          turnItemRunIds: [childRun.id],
+        })).turnItems.length > 0;
+      const outcome = stoppedWhileWaiting ? "cancelled" : runOutcome(childRun);
       const terminalStatus = delegatedTaskTerminalStatus(outcome);
       if (terminalStatus === null) {
         if (childRun.delegatedTaskId === undefined || childRun.id !== options.syncRunId) return;
@@ -11266,8 +11274,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "thread.auto-settle": {
         // Automatic settlement (#8600): the sweep evaluated a shell snapshot,
         // so re-check against the live thread before settling. Any change
-        // after the snapshot — or any explicit override, including the
-        // un-settle button's "active" — wins over the sweep.
+        // after the snapshot â€” or any explicit override, including the
+        // un-settle button's "active" â€” wins over the sweep.
         const thread = yield* projectionStore
           .getThread(command.threadId)
           .pipe(
