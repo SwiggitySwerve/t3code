@@ -429,10 +429,14 @@ export function judgmentPrompt(input: {
   readonly task: string;
   readonly result: string;
   readonly rubric: ReadonlyArray<string>;
+  /** False when the work happened in a checkout the judge cannot see. */
+  readonly workspaceVisible: boolean;
 }): string {
   return [
     "You are an independent checker. Another agent did the task below. Judge its result",
-    "against every criterion. Read the workspace if a criterion needs it; do not change files.",
+    input.workspaceVisible
+      ? "against every criterion. Read the workspace if a criterion needs it; do not change files."
+      : "against every criterion. It worked in a separate checkout you cannot see, so judge from the result alone and do not read files.",
     "Pass only if every criterion holds; otherwise fail and say which criteria do not hold.",
     "",
     "Task:",

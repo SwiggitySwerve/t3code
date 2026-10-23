@@ -327,6 +327,7 @@ class WorkflowSession {
   private async agent(request: {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
+    readonly keyLabel?: string | null;
   }): Promise<unknown> {
     const ran = await this.runAgent(request);
     if (request.options.report !== true) return ran.value;
@@ -353,6 +354,8 @@ class WorkflowSession {
   private async runAgent(request: {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
+    /** The label its retry key uses, when not the script's own; null keys it by content alone. */
+    readonly keyLabel?: string | null;
   }): Promise<{
     readonly value: unknown;
     readonly entry: MutableAgent;
@@ -410,7 +413,9 @@ class WorkflowSession {
         JSON.stringify([
           phase ?? null,
           // A generated label numbers calls in start order, which a resume can change.
-          stringOption(options, "label") ?? null,
+          request.keyLabel !== undefined
+            ? request.keyLabel
+            : (stringOption(options, "label") ?? null),
           request.prompt,
           options.schema ?? null,
           target ?? null,
@@ -698,6 +703,7 @@ class WorkflowSession {
           structuredResultError,
           files,
           outputs,
+          isolation: options.isolation,
         });
       }
       const returned = (result: unknown) =>
@@ -763,6 +769,7 @@ class WorkflowSession {
     readonly structuredResultError: string | undefined;
     readonly files: Readonly<Record<string, string>>;
     readonly outputs: ReadonlyArray<FileRef>;
+    readonly isolation: unknown;
   }): Promise<CheckOutcome> {
     const { check } = input;
     const output =
@@ -799,7 +806,14 @@ class WorkflowSession {
     // An agent of its own, so it is independent of the work it judges and shows in the workflow.
     const target = check.target ?? input.target;
     const verdict = await this.agent({
-      prompt: judgmentPrompt({ task: input.prompt, result: resultText, rubric: check.rubric }),
+      prompt: judgmentPrompt({
+        task: input.prompt,
+        result: resultText,
+        rubric: check.rubric,
+        workspaceVisible: input.isolation !== "worktree",
+      }),
+      // Its prompt already pins the work it judges; a generated worker label would not.
+      keyLabel: null,
       options: {
         label: `check ${input.label}`,
         ...(input.phase === undefined ? {} : { phase: input.phase }),

@@ -50,8 +50,11 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
     if (agent.attemptTimeoutMs !== undefined) {
       // Each attempt is its own thread, so its run's start survives a server restart.
       agent.firstSeenAt ??= now;
-      const startedAt = shell.latestRunStartedAt ?? shell.latestRunRequestedAt;
-      const recorded = startedAt == null ? undefined : DateTime.toEpochMillis(startedAt);
+      // Never from the request: a run admitted from the queue starts long after it.
+      const recorded =
+        shell.latestRunStartedAt == null
+          ? undefined
+          : DateTime.toEpochMillis(shell.latestRunStartedAt);
       // A start stamped later than this runner's clock reads is not trusted.
       const start =
         recorded === undefined || recorded > now

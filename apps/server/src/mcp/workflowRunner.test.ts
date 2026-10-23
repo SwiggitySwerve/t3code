@@ -7,6 +7,7 @@ import {
   type OrchestrationV2Subagent,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -32,6 +33,11 @@ interface HarnessOptions {
   readonly runCommandCheck?: WorkflowRunnerDeps["runCommandCheck"];
   /** Whether the agents' runs have started, rather than waiting for a running slot. */
   readonly started?: boolean;
+  /**
+   * When (test clock ms) a queued run is released: before it the run is preparing, after it
+   * starting, with no start stamp yet and a request stamp from the epoch.
+   */
+  readonly releasedAt?: number;
 }
 
 /** A runner whose agents finish as told, recording what it dispatches and stops. */
@@ -42,6 +48,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const statuses = new Map<string, string>();
     const stops: Array<string> = [];
     const keys = new Map<string, string>();
+    const firstSpawn = yield* Deferred.make<void>();
     let spawned = 0;
     const update = (id: string, status: string) => {
       statuses.set(id, status);
@@ -61,11 +68,18 @@ const makeHarness = (options: HarnessOptions = {}) =>
           : Effect.succeed({} as never),
       // Every attempt's run started at the epoch, which is where the test clock starts.
       getThreadShell: () =>
-        Effect.succeed({
-          updatedAt: DateTime.makeUnsafe(0),
-          latestRunStartedAt: options.started === false ? null : DateTime.makeUnsafe(0),
-          ...(options.started === false ? { activityRunStatus: "preparing" } : {}),
-        }),
+        options.releasedAt !== undefined
+          ? Effect.map(Clock.currentTimeMillis, (now) => ({
+              updatedAt: DateTime.makeUnsafe(0),
+              latestRunStartedAt: null,
+              latestRunRequestedAt: DateTime.makeUnsafe(0),
+              activityRunStatus: now < options.releasedAt! ? "preparing" : "starting",
+            }))
+          : Effect.succeed({
+              updatedAt: DateTime.makeUnsafe(0),
+              latestRunStartedAt: options.started === false ? null : DateTime.makeUnsafe(0),
+              ...(options.started === false ? { activityRunStatus: "preparing" } : {}),
+            }),
     } as unknown as ThreadManagementService.ThreadManagementService["Service"];
     const deps: WorkflowRunnerDeps = {
       threads,
@@ -73,6 +87,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
         Effect.gen(function* () {
           spawned += 1;
           keys.set(item.task, requestKey);
+          yield* Deferred.succeed(firstSpawn, undefined);
           const taskId = NodeId.make(`node:agent-${spawned}`);
           const finish = options.finish?.(spawned) ?? "completed";
           if (finish !== "hang") yield* update(taskId, finish);
@@ -118,6 +133,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
       spawned: () => spawned,
       stops,
       keys,
+      firstSpawn,
       /** Ends the workflow row as a stop would. */
       stopWorkflow: () => update(workflowId, "cancelled"),
     };
@@ -361,5 +377,41 @@ describe("workflow runner", () => {
       expect(yield* Deferred.isDone(completed)).toBe(false);
       expect(stops).toEqual([]);
     }),
+  );
+
+  it.effect("keys a judge by what it judges, not by its worker's generated label", () =>
+    Effect.gen(function* () {
+      const judged = (order: string) =>
+        `return await parallel([${order}].map((p) => () => agent(p, { verify: { type: "judgment", rubric: ["It is right."] } })))`;
+      const first = yield* makeHarness();
+      yield* launch(first.runner, judged('"a", "b"'));
+      yield* Deferred.await(first.completed);
+      const second = yield* makeHarness();
+      yield* launch(second.runner, judged('"b", "a"'));
+      yield* Deferred.await(second.completed);
+      const judges = [...first.keys.keys()].filter((task) => task.includes("independent checker"));
+      expect(judges.length).toBeGreaterThan(0);
+      for (const task of judges) expect(second.keys.get(task)).toBe(first.keys.get(task));
+    }),
+  );
+
+  it.effect(
+    "starts an admitted agent's deadline when it leaves the queue, not at its request",
+    () =>
+      Effect.gen(function* () {
+        const { runner, stops, firstSpawn } = yield* makeHarness({
+          releasedAt: 10 * 60_000,
+          finish: () => "hang",
+        });
+        yield* launch(runner, 'return await agent("x", { attemptTimeoutMs: 60000, report: true })');
+        yield* Deferred.await(firstSpawn);
+        // Ten minutes queued, then the first sweep that sees it starting.
+        for (let step = 0; step < 21; step += 1) yield* TestClock.adjust("30 seconds");
+        expect(stops).toEqual([]);
+        for (let step = 0; step < 20 && stops.length === 0; step += 1) {
+          yield* TestClock.adjust("30 seconds");
+        }
+        expect(stops[0]).toBe("node:agent-1:timed_out");
+      }),
   );
 });
