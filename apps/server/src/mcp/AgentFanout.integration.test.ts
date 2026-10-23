@@ -1306,6 +1306,35 @@ describe("workflow checks", () => {
       ),
   );
 
+  it.effect(
+    "moves on once a member's turn completes, without waiting for its checkpoint capture",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const started = yield* startWorkflow('return await agent("summarize the notes")');
+        const member = yield* awaitMember(started.workflowId, 1);
+        // "waiting" is how a completed turn persists until its checkpoint capture lands.
+        yield* completeChild(member.childThreadId!, "the notes say hello", { status: "waiting" });
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(ended.status).toBe("completed");
+        expect(JSON.parse(ended.result!)).toBe("the notes say hello");
+        expect(ended.agents[0]).toMatchObject({ status: "completed" });
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const child = yield* orchestrator.getThreadProjection(member.childThreadId!);
+        expect(child.runs.at(-1)?.status).toBe("waiting");
+
+        // An ordinary delegated task still reports running until its capture lands.
+        const delegated = yield* decodeStarted(
+          (yield* invoke("delegate_tasks", { tasks: [{ task: "Count the files." }] }))
+            .structuredContent,
+        );
+        yield* completeChild(delegated.tasks[0]!.childThreadId, "3 files", { status: "waiting" });
+        const status = (yield* invoke("task_status", { taskId: delegated.tasks[0]!.taskId }))
+          .structuredContent as { readonly status: string };
+        expect(status.status).toBe("running");
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("rejects a malformed check before starting the agent", () =>
     Effect.gen(function* () {
       yield* startParent;
