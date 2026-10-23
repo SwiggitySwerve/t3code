@@ -39,6 +39,10 @@ import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import {
+  CLAUDE_PROVIDER,
+  ClaudeProviderCapabilitiesV2,
+} from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -85,11 +89,30 @@ const provider: ServerProvider = {
   skills: [],
 };
 
+const claudeInstanceId = ProviderInstanceId.make("claude-test");
+const claudeModel = "claude-sonnet-4-6";
+const claudeAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+  ...adapter,
+  instanceId: claudeInstanceId,
+  driver: CLAUDE_PROVIDER,
+  getCapabilities: () => Effect.succeed(ClaudeProviderCapabilitiesV2),
+};
+const claudeProvider: ServerProvider = {
+  ...provider,
+  instanceId: claudeInstanceId,
+  driver: claudeAdapter.driver,
+  models: [{ slug: claudeModel, name: claudeModel, isCustom: false, capabilities: null }],
+};
+
 const layerDatabase = SqlitePersistence.layerMemory;
-const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
+const makeLayerTest = (
+  maxRunningDelegatedTasks?: number,
+  providers: ReadonlyArray<ServerProvider> = [provider, claudeProvider],
+) => {
+  const layerAdapters = ProviderAdapterRegistry.layerFromAdapters([adapter, claudeAdapter]);
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "delegate-tasks" },
-    ProviderAdapterRegistry.layerFromAdapters([adapter]),
+    layerAdapters,
     {
       databaseLayer: layerDatabase,
       runEffectWorker: false,
@@ -98,7 +121,20 @@ const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
   );
   const layerOrchestration = ThreadManagementService.layer.pipe(
     Layer.provideMerge(layerOrchestrator),
-    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(
+      ServerSettings.layerTest({
+        providerInstances: Object.fromEntries(
+          providers.map((provider) => [
+            provider.instanceId,
+            {
+              driver: provider.driver,
+              enabled: provider.enabled,
+              config: {},
+            },
+          ]),
+        ),
+      }),
+    ),
     Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
   );
   const layerSecretStore = Layer.sync(ServerSecretStore.ServerSecretStore, () =>
@@ -122,8 +158,8 @@ const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
     ),
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(layerOrchestration),
-    Layer.provideMerge(ProviderAdapterRegistry.layerFromAdapters([adapter])),
-    Layer.provideMerge(ProviderRegistryMock.layer([provider])),
+    Layer.provideMerge(layerAdapters),
+    Layer.provideMerge(ProviderRegistryMock.layer(providers)),
     Layer.provideMerge(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
     Layer.provideMerge(
       Layer.mock(ProjectService.ProjectService)({
@@ -320,6 +356,28 @@ const completeChild = (
 const decodeStarted = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTasksResult);
 const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpTaskWaitResult);
 const decodeWorkflow = Schema.decodeUnknownEffect(OrchestratorMcpWorkflowResult);
+
+const refusedTargets = [
+  {
+    name: "unregistered provider",
+    target: { providerInstanceId: "missing-provider", model },
+    reason: "Provider instance missing-provider is not registered.",
+  },
+  {
+    name: "disabled provider",
+    target: { providerInstanceId: claudeInstanceId, model: claudeModel },
+    reason: `Provider ${claudeInstanceId} cannot run a child task:`,
+  },
+  {
+    name: "unknown model",
+    target: { providerInstanceId: instanceId, model: "unknown-model" },
+    reason: `Model unknown-model is not advertised by provider ${instanceId}.`,
+  },
+];
+const layerRefusedTargets = makeLayerTest(undefined, [
+  provider,
+  { ...claudeProvider, enabled: false },
+]);
 
 describe("delegate_tasks", () => {
   it.effect("starts every task in one call, in request order, and retries without duplicates", () =>
@@ -570,6 +628,178 @@ const startWorkflow = (script: string, args?: unknown) =>
   });
 
 describe("workflow_start", () => {
+  it.effect.each(refusedTargets)(
+    "records a refused $name without substituting a worker",
+    ({ target, reason }) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents(() => "unexpected dispatch");
+        const started = yield* startWorkflow(
+          `return await agent("refused worker", { target: ${JSON.stringify(target)} })`,
+        );
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        // Scripts receive null for an agent that could not start; the failed attempt stays visible.
+        expect(ended.status).toBe("completed");
+        expect(JSON.parse(ended.result!)).toBeNull();
+        expect(ended.agents).toHaveLength(1);
+        expect(ended.agents[0]).toMatchObject({
+          status: "failed",
+          taskId: null,
+          outcomeCategory: "never_started",
+        });
+        expect(ended.agents[0]?.result).toContain(reason);
+        expect((yield* childTasks).map((task) => task.id)).toEqual([started.workflowId]);
+      }).pipe(Effect.provide(layerRefusedTargets)),
+  );
+
+  it.effect("persists each mixed-provider worker's selected model and options", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents(() => "mixed reply");
+      const targets = [
+        { providerInstanceId: instanceId, model, options: { reasoningEffort: "high" } },
+        {
+          providerInstanceId: claudeInstanceId,
+          model: claudeModel,
+          options: { effort: "max", fastMode: true },
+        },
+      ];
+      const started = yield* startWorkflow(
+        `return await parallel(args.map((target) => () => agent("mixed worker", { target })))`,
+        targets,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("completed");
+      expect(JSON.parse(ended.result!)).toEqual(["mixed reply", "mixed reply"]);
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const members = (yield* childTasks).filter(
+        (task) => task.parentNodeId === started.workflowId,
+      );
+      expect(members).toHaveLength(2);
+      expect(new Set(members.map((task) => task.childThreadId)).size).toBe(2);
+      for (const [index, target] of targets.entries()) {
+        const member = members.find(
+          (task) => task.providerInstanceId === target.providerInstanceId,
+        )!;
+        const driver = index === 0 ? adapter.driver : claudeAdapter.driver;
+        expect(member).toMatchObject({ driver, model: target.model });
+        const child = yield* orchestrator.getThreadProjection(member.childThreadId!);
+        const expectedSelection = {
+          instanceId: target.providerInstanceId,
+          model: target.model,
+          options: Object.entries(target.options).map(([id, value]) => ({ id, value })),
+        };
+        expect(child.thread.modelSelection).toEqual(expectedSelection);
+        expect(child.runs).toHaveLength(1);
+        expect(child.runs[0]?.modelSelection).toEqual(expectedSelection);
+      }
+      expect(ended.agents.map((agent) => [agent.model, agent.status])).toEqual(
+        targets.map((target) => [target.model, "completed"]),
+      );
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      expect(parent.thread.modelSelection).toEqual(modelSelection);
+      const row = parent.subagents.find((task) => task.id === started.workflowId);
+      expect(
+        row?.workflow?.agents.map((agent) => [
+          agent.providerInstanceId,
+          agent.driver,
+          agent.model,
+          agent.state,
+        ]),
+      ).toEqual(
+        targets.map((target, index) => [
+          target.providerInstanceId,
+          index === 0 ? adapter.driver : claudeAdapter.driver,
+          target.model,
+          "completed",
+        ]),
+      );
+      expect(
+        parent.subagents.filter((task) => task.parentNodeId === started.workflowId),
+      ).toHaveLength(2);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "keeps concurrent workflows on one parent independent through completion and wake",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const [first, second] = yield* Effect.all(
+          [startWorkflow(twoStepScript), startWorkflow(twoStepScript)],
+          { concurrency: "unbounded" },
+        );
+        expect(first.workflowId).not.toBe(second.workflowId);
+        const firstMember = yield* awaitMember(first.workflowId, 1);
+        const secondMember = yield* awaitMember(second.workflowId, 1);
+        expect(firstMember.id).not.toBe(secondMember.id);
+        expect(firstMember.childThreadId).not.toBe(secondMember.childThreadId);
+        expect(firstMember.prompt).toBe(secondMember.prompt);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        expect(
+          (yield* childTasks).filter(
+            (task) =>
+              task.parentNodeId === first.workflowId || task.parentNodeId === second.workflowId,
+          ),
+        ).toHaveLength(2);
+
+        yield* completeChild(secondMember.childThreadId!, "second one");
+        const secondNext = yield* awaitMember(second.workflowId, 2);
+        expect(secondNext.prompt).toBe("second after second one");
+        yield* completeChild(secondNext.childThreadId!, "second two");
+        const secondEnded = yield* awaitWorkflowEnd(second.workflowId);
+        expect(JSON.parse(secondEnded.result!)).toEqual(["second one", "second two"]);
+        expect(secondEnded.status).toBe("completed");
+        const firstPending = yield* decodeWorkflow(
+          (yield* invoke("workflow_status", { workflowId: first.workflowId })).structuredContent,
+        );
+        expect(firstPending.status).toBe("running");
+        expect(firstPending.agents).toHaveLength(1);
+        expect(firstPending.agents[0]).toMatchObject({ taskId: firstMember.id, status: "running" });
+        const midway = yield* orchestrator.getThreadProjection(parentThreadId);
+        expect(
+          midway.runs.flatMap((run) => run.delegatedCompletion?.delivery?.taskIds ?? []),
+        ).toEqual([second.workflowId]);
+
+        yield* completeChild(firstMember.childThreadId!, "first one");
+        const firstNext = yield* awaitMember(first.workflowId, 2);
+        expect(firstNext.prompt).toBe("second after first one");
+        yield* completeChild(firstNext.childThreadId!, "first two");
+        const firstEnded = yield* awaitWorkflowEnd(first.workflowId);
+        expect(firstEnded.status).toBe("completed");
+        expect(JSON.parse(firstEnded.result!)).toEqual(["first one", "first two"]);
+        const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+        const members = parent.subagents.filter(
+          (task) =>
+            task.parentNodeId === first.workflowId || task.parentNodeId === second.workflowId,
+        );
+        expect(members).toHaveLength(4);
+        expect(new Set(members.map((task) => task.id)).size).toBe(4);
+        expect(new Set(members.map((task) => task.childThreadId)).size).toBe(4);
+        for (const [ended, owned] of [
+          [firstEnded, [firstMember, firstNext]],
+          [secondEnded, [secondMember, secondNext]],
+        ] as const) {
+          expect(ended.agents.map((agent) => agent.taskId)).toEqual(owned.map((task) => task.id));
+          expect(ended.agents.map((agent) => agent.status)).toEqual(["completed", "completed"]);
+          expect(
+            members
+              .filter((task) => task.parentNodeId === ended.workflowId)
+              .map((task) => task.completionDelivery?.state),
+          ).toEqual(["disposed", "disposed"]);
+        }
+        expect(
+          parent.runs.flatMap((run) => run.delegatedCompletion?.delivery?.taskIds ?? []),
+        ).toEqual([second.workflowId, first.workflowId]);
+        expect(
+          parent.turnItems
+            .filter((item) => item.type === "subagent")
+            .map((item) => item.type === "subagent" && item.subagentId),
+        ).toEqual(expect.arrayContaining([first.workflowId, second.workflowId]));
+        expect(parent.turnItems.filter((item) => item.type === "subagent")).toHaveLength(2);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("runs phases of parallel and pipelined agents and wakes the caller once", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -1402,6 +1632,53 @@ const serialGraph = (dir: string) => ({
 });
 
 describe("graphs", () => {
+  it.effect.each(refusedTargets)(
+    "reviews a graph targeting $name then records refused dispatch",
+    ({ target, reason }) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents(() => "unexpected dispatch");
+        const graph = {
+          schemaVersion: 1,
+          name: "Refused target",
+          nodes: {
+            worker: { subject: "Worker", description: "refused worker", dependsOn: [], target },
+            downstream: {
+              subject: "Downstream",
+              description: "must not run",
+              dependsOn: ["worker"],
+            },
+          },
+        };
+        // Current review validates the graph, but target availability is checked at dispatch.
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.ready).toBe(true);
+        const result = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
+        expect(result.isError).not.toBe(true);
+        const started = yield* decodeWorkflow(result.structuredContent);
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(ended.status).toBe("failed");
+        expect(ended.agents).toHaveLength(1);
+        expect(ended.agents[0]).toMatchObject({
+          status: "failed",
+          taskId: null,
+          outcomeCategory: "never_started",
+        });
+        expect(ended.agents[0]?.result).toContain(reason);
+        expect(ended.result).toContain(reason);
+        const tasks = yield* childTasks;
+        expect(tasks.map((task) => task.id)).toEqual([started.workflowId]);
+        expect(tasks[0]?.workflow?.nodeOutcomes).toMatchObject({
+          worker: { status: "failed" },
+          downstream: {
+            status: "skipped",
+            attempts: 0,
+            reason: "Predecessor worker did not pass.",
+          },
+        });
+      }).pipe(Effect.provide(layerRefusedTargets)),
+  );
+
   it.effect("graph_review binds inputs, reports a missing one, and records nothing", () =>
     withScratchDir((dir) =>
       Effect.gen(function* () {
