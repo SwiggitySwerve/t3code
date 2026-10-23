@@ -374,9 +374,12 @@ function driver(
   value: unknown,
   reports: Record<string, unknown> = {},
   inputs: Record<string, { sha256: string; sizeBytes: number } | "missing" | "too_large"> = {},
+  /** False for a graph started before plans existed, whose host has no node(). */
+  recordsNodes = true,
 ) {
   const calls: Array<{ prompt: string; options: Readonly<Record<string, unknown>> }> = [];
   const phases: string[] = [];
+  const outcomes: Array<[string, unknown]> = [];
   const result = runWorkflowScript({
     source: GRAPH_DRIVER_SCRIPT,
     args: { graph: normalized(value), inputs },
@@ -401,9 +404,12 @@ function driver(
       },
       meta: () => {},
       budget: () => ({ total: null, spent: 0 }),
+      ...(recordsNodes
+        ? { node: (key: string, outcome: unknown) => outcomes.push([key, outcome]) }
+        : {}),
     } satisfies WorkflowScriptHost,
   });
-  return { calls, phases, result };
+  return { calls, phases, outcomes, result };
 }
 
 /** A graph with a node that did not pass ends the workflow as failed, keeping its record. */
@@ -548,6 +554,41 @@ describe("graph driver in QuickJS", () => {
       },
     });
     expect(run.calls.map((call) => call.prompt)).toEqual(["fails", "works"]);
+    expect(run.calls.map((call) => call.options.node)).toEqual(["a", "independent"]);
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      a: { status: "failed", attempts: 3, reason: "check failed" },
+      b: { status: "skipped", attempts: 0, reason: "Predecessor a did not pass." },
+      c: { status: "skipped", attempts: 0, reason: "Predecessor b did not pass." },
+      independent: { status: "passed", attempts: 1 },
+    });
+    // Each node is recorded once.
+    expect(run.outcomes).toHaveLength(4);
+  });
+
+  it("records nodes that fail or skip before any agent starts", async () => {
+    const run = driver(
+      graph({
+        reader: node({
+          description: "read",
+          inputs: [{ id: "source", kind: "workspace_snapshot", path: "src/file" }],
+        }),
+        after: node({ description: "after", dependsOn: ["reader"] }),
+      }),
+      {},
+      { "src/file": "missing" },
+    );
+    await failedRecord(run.result);
+    expect(run.calls).toEqual([]);
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      reader: { status: "failed", attempts: 0, reason: "Input source has no reviewed hash." },
+      after: { status: "skipped", attempts: 0, reason: "Predecessor reader did not pass." },
+    });
+  });
+
+  it("still runs a graph resumed without node(), untagged", async () => {
+    const run = driver(graph({ a: node({ description: "only" }) }), {}, {}, false);
+    expect(await run.result).toMatchObject({ ok: true, nodes: { a: { status: "passed" } } });
+    expect(run.calls[0]?.options.node).toBeUndefined();
   });
 
   it("pins workspace snapshots and returned task outputs with exact hashes", async () => {

@@ -1,6 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 import {
   NodeId,
+  type OrchestrationV2SubagentWorkflow,
+  type OrchestrationV2WorkflowPlan,
   ProviderDriverKind,
   ProviderInstanceId,
   type OrchestrationV2StoredEvent,
@@ -49,6 +51,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const stops: Array<string> = [];
     const keys = new Map<string, string>();
     const firstSpawn = yield* Deferred.make<void>();
+    const workflowUpdates: Array<OrchestrationV2SubagentWorkflow> = [];
     let spawned = 0;
     const update = (id: string, status: string) => {
       statuses.set(id, status);
@@ -62,10 +65,18 @@ const makeHarness = (options: HarnessOptions = {}) =>
     };
     const threads = {
       streamStoredEventsFrom: () => Stream.fromQueue(updates),
-      dispatch: (command: { readonly type: string; readonly result?: string }) =>
-        command.type === "workflow.complete"
+      dispatch: (command: {
+        readonly type: string;
+        readonly result?: string;
+        readonly workflow?: OrchestrationV2SubagentWorkflow;
+      }) => {
+        if (command.type === "workflow.update" && command.workflow !== undefined) {
+          workflowUpdates.push(command.workflow);
+        }
+        return command.type === "workflow.complete"
           ? Deferred.succeed(completed, command.result ?? "").pipe(Effect.as({} as never))
-          : Effect.succeed({} as never),
+          : Effect.succeed({} as never);
+      },
       // Every attempt's run started at the epoch, which is where the test clock starts.
       getThreadShell: () =>
         options.releasedAt !== undefined
@@ -134,6 +145,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
       stops,
       keys,
       firstSpawn,
+      /** Every row update the runner sent, oldest first. */
+      workflowUpdates,
       /** Ends the workflow row as a stop would. */
       stopWorkflow: () => update(workflowId, "cancelled"),
     };
@@ -147,8 +160,26 @@ const sweepUntilDone = (completed: Deferred.Deferred<string>) =>
     }
   });
 
-const launch = (runner: ReturnType<typeof makeWorkflowRunner>, source: string) =>
-  runner.launch({ workflowId, threadId, source, args: null, afterSequence: 0 });
+const launch = (
+  runner: ReturnType<typeof makeWorkflowRunner>,
+  source: string,
+  plan?: OrchestrationV2WorkflowPlan,
+) =>
+  runner.launch({
+    workflowId,
+    threadId,
+    source,
+    args: null,
+    afterSequence: 0,
+    ...(plan === undefined ? {} : { plan }),
+  });
+
+const twoNodePlan: OrchestrationV2WorkflowPlan = {
+  nodes: [
+    { key: "a", label: "Node A", wave: 0, dependsOn: [] },
+    { key: "b", label: "Node B", wave: 1, dependsOn: ["a"] },
+  ],
+};
 
 describe("workflow runner", () => {
   it.effect("refuses the agent past the per-workflow limit of 1000", () =>
@@ -414,4 +445,131 @@ describe("workflow runner", () => {
         expect(stops[0]).toBe("node:agent-1:timed_out");
       }),
   );
+
+  describe("graph plan", () => {
+    it.effect("sends the plan from the first update, then node outcomes and node keys", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness();
+        yield* launch(
+          runner,
+          'node("a", { status: "skipped", reason: "Predecessor x did not pass." }); return await agent("b", { node: "b" })',
+          twoNodePlan,
+        );
+        yield* Deferred.await(completed);
+        expect(workflowUpdates[0]?.plan).toEqual(twoNodePlan);
+        const last = workflowUpdates.at(-1)!;
+        expect(last.nodeOutcomes).toEqual({
+          a: { status: "skipped", reason: "Predecessor x did not pass." },
+        });
+        expect(last.agents.map((agent) => agent.graphNodeKey)).toEqual(["b"]);
+      }),
+    );
+
+    it.effect("gives a plain script no node() and refuses agent({ node })", () =>
+      Effect.gen(function* () {
+        const { runner, completed, spawned, workflowUpdates } = yield* makeHarness();
+        yield* launch(
+          runner,
+          'const kind = typeof node; try { await agent("x", { node: "a" }) } catch (error) { return [kind, error.message] }',
+        );
+        expect(JSON.parse(yield* Deferred.await(completed))).toEqual([
+          "undefined",
+          "agent() takes a graph node only in a workflow started from a reviewed graph.",
+        ]);
+        expect(spawned()).toBe(0);
+        expect(workflowUpdates.every((update) => update.plan === undefined)).toBe(true);
+      }),
+    );
+
+    it.effect("refuses a node outside the plan and an invalid outcome", () =>
+      Effect.gen(function* () {
+        const { runner, completed, spawned } = yield* makeHarness();
+        yield* launch(
+          runner,
+          `const errors = [];
+for (const call of [
+  () => node("zz", { status: "passed" }),
+  () => node("a", { status: "done" }),
+]) { try { call(); errors.push(null) } catch (error) { errors.push(error.message) } }
+try { await agent("x", { node: "zz" }) } catch (error) { errors.push(error.message) }
+return errors`,
+          twoNodePlan,
+        );
+        expect(JSON.parse(yield* Deferred.await(completed))).toEqual([
+          'node() got node "zz", which is not in this graph.',
+          "node() needs an outcome with status passed, failed or skipped.",
+          'agent() got node "zz", which is not in this graph.',
+        ]);
+        expect(spawned()).toBe(0);
+      }),
+    );
+
+    it.effect("caps a node's reason and lets a later record replace it", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness();
+        yield* launch(
+          runner,
+          'node("a", { status: "failed", reason: "x".repeat(5000) }); node("b", { status: "failed", reason: "first" }); node("b", { status: "passed", attempts: 1 }); return 1',
+          twoNodePlan,
+        );
+        yield* Deferred.await(completed);
+        const outcomes = workflowUpdates.at(-1)!.nodeOutcomes!;
+        expect(outcomes.a?.reason?.length).toBeLessThanOrEqual(500);
+        expect(outcomes.b).toEqual({ status: "passed", attempts: 1 });
+      }),
+    );
+
+    it.effect("tags the worker with its node but not the agent that checks it", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness();
+        yield* launch(
+          runner,
+          'return await agent("x", { node: "a", verify: { type: "judgment", rubric: ["It is right."] }, report: true })',
+          twoNodePlan,
+        );
+        yield* Deferred.await(completed);
+        const agents = workflowUpdates.at(-1)!.agents;
+        expect(agents.length).toBeGreaterThan(1);
+        expect(agents.map((agent) => agent.graphNodeKey ?? null)).toEqual([
+          "a",
+          ...agents.slice(1).map(() => null),
+        ]);
+      }),
+    );
+
+    it.effect("keeps a 30-node graph's row update under 64 KB", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness({
+          finish: (n) => (n % 3 === 0 ? "failed" : "completed"),
+        });
+        const plan: OrchestrationV2WorkflowPlan = {
+          nodes: Array.from({ length: 30 }, (_, index) => ({
+            key: `node-${String(index).padStart(2, "0")}`,
+            label: `Audit package number ${index} for token usage`,
+            wave: Math.floor(index / 5),
+            dependsOn: index < 5 ? [] : [`node-${String(index - 5).padStart(2, "0")}`],
+          })),
+        };
+        // Prompts at the preview limit and reasons past it: the largest a row gets from these fields.
+        yield* launch(
+          runner,
+          `await parallel(${JSON.stringify(plan.nodes.map((node) => node.key))}.map((key) => async () => {
+  await agent(key + " " + "p".repeat(800), { node: key, label: key });
+  node(key, { status: "failed", reason: "r".repeat(2000), attempts: 3 });
+}))`,
+          plan,
+        );
+        yield* Deferred.await(completed);
+        const sizes = workflowUpdates.map((update) => JSON.stringify(update).length);
+        const planBytes = JSON.stringify({
+          plan: workflowUpdates.at(-1)!.plan,
+          nodeOutcomes: workflowUpdates.at(-1)!.nodeOutcomes,
+        }).length;
+        expect(Object.keys(workflowUpdates.at(-1)!.nodeOutcomes ?? {})).toHaveLength(30);
+        expect(Math.max(...sizes)).toBeLessThan(64 * 1024);
+        // The plan and outcomes stay a minority of the row.
+        expect(planBytes).toBeLessThan(24 * 1024);
+      }),
+    );
+  });
 });

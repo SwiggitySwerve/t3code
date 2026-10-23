@@ -5,9 +5,22 @@ import type {
   OrchestrationV2Subagent,
   OrchestrationV2SubagentWorkflow,
   OrchestrationV2TurnItem,
+  OrchestrationV2WorkflowNodeOutcome,
+  OrchestrationV2WorkflowPlan,
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive, isProviderNativeSubagentThread } from "@t3tools/contracts";
 import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript";
+
+import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
+
+export {
+  WORKFLOW_GRAPH_STATE_LABEL,
+  workflowGraphHeadline,
+  workflowGraphNodeDetail,
+  type WorkflowGraphNodeState,
+  type WorkflowGraphNodeView,
+  type WorkflowGraphView,
+} from "./workflowGraphView.ts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -74,6 +87,15 @@ export interface RuntimeSubagent {
   readonly providerInstanceId?: OrchestrationV2Subagent["providerInstanceId"] | undefined;
   readonly driver?: OrchestrationV2Subagent["driver"] | undefined;
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
+  /** A graph workflow's plan and the outcomes recorded so far; only on the workflow itself. */
+  readonly graph?:
+    | {
+        readonly plan: OrchestrationV2WorkflowPlan;
+        readonly nodeOutcomes: Readonly<Record<string, OrchestrationV2WorkflowNodeOutcome>>;
+      }
+    | undefined;
+  /** The graph node a workflow member runs. */
+  readonly graphNodeKey?: string | undefined;
   readonly firstSeenAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -109,6 +131,8 @@ export interface SubagentWorkflowGroup {
     readonly settledCount: number;
   }>;
   readonly unphasedMembers: ReadonlyArray<RuntimeSubagent>;
+  /** Node by node, for a workflow started from a reviewed graph; null for scripts. */
+  readonly graph: WorkflowGraphView<RuntimeSubagent> | null;
 }
 
 function workflowUsage(source: {
@@ -170,6 +194,8 @@ function workflowMembersToRuntime(
       providerInstanceId: agent.providerInstanceId,
       driver: agent.driver,
       recentActivity: [],
+      graph: undefined,
+      graphNodeKey: agent.graphNodeKey,
       firstSeenAt: isoFromEpochMillis(agent.queuedAt) ?? startedAt ?? coordinator.firstSeenAt,
       startedAt,
       completedAt,
@@ -227,6 +253,10 @@ export function projectedSubagentsToRuntime(
       runHandles,
       childThreadId: subagent.childThreadId ?? null,
       recentActivity: [],
+      graph:
+        workflow?.plan === undefined
+          ? undefined
+          : { plan: workflow.plan, nodeOutcomes: workflow.nodeOutcomes ?? {} },
       firstSeenAt,
       startedAt,
       completedAt: subagent.completedAt === null ? null : DateTime.formatIso(subagent.completedAt),
@@ -294,7 +324,17 @@ export function deriveWorkflowGroups(
       .filter((member) => member.phaseIndex === null)
       .sort((a, b) => (a.agentIndex ?? 0) - (b.agentIndex ?? 0));
 
-    return { workflow, phases, unphasedMembers };
+    const graph =
+      workflow.graph === undefined
+        ? null
+        : deriveWorkflowGraph({
+            plan: workflow.graph.plan,
+            nodeOutcomes: workflow.graph.nodeOutcomes,
+            members: [...workflowMembers].sort((a, b) => (a.agentIndex ?? 0) - (b.agentIndex ?? 0)),
+            active: !isTerminalSubagentStatus(workflow.status),
+          });
+
+    return { workflow, phases, unphasedMembers, graph };
   });
 }
 

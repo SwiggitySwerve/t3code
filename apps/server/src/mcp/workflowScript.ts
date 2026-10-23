@@ -26,6 +26,11 @@ export interface WorkflowScriptHost {
   readonly meta: (meta: unknown) => void;
   /** `total` is null when the workflow has no token budget. */
   readonly budget: () => { readonly total: number | null; readonly spent: number };
+  /**
+   * Records how a graph node ended; throws when the key or outcome is not valid. Only a
+   * workflow started from a reviewed graph has it, so plain scripts see no `node` at all.
+   */
+  readonly node?: (key: string, outcome: unknown) => void;
 }
 
 /** Limits that keep a script from starving the server; agents run outside them. */
@@ -37,9 +42,9 @@ const MAX_ITEMS_PER_CALL = 4096;
 // Leading spaces only: \s* would also take the blank lines above and shift error line numbers.
 const META_EXPORT = /^[ \t]*export\s+const\s+meta\s*=/m;
 
-function wrap(source: string): string {
+function wrap(source: string, graph = false): string {
   // The wrapper shares the script's first line, so error line numbers match the script.
-  return `(async function (args, agent, parallel, pipeline, phase, log, budget) {${source.replace(
+  return `(async function (args, agent, parallel, pipeline, phase, log, budget${graph ? ", node" : ""}) {${source.replace(
     META_EXPORT,
     "const meta = globalThis.__t3meta =",
   )}\n})`;
@@ -48,8 +53,8 @@ function wrap(source: string): string {
 const PRELUDE = `
 "use strict";
 (() => {
-  const host = { agent: __host_agent, log: __host_log, phase: __host_phase, meta: __host_meta, budget: __host_budget };
-  for (const name of ["__host_agent", "__host_log", "__host_phase", "__host_meta", "__host_budget"]) delete globalThis[name];
+  const host = { agent: __host_agent, log: __host_log, phase: __host_phase, meta: __host_meta, budget: __host_budget, node: globalThis.__host_node };
+  for (const name of ["__host_agent", "__host_log", "__host_phase", "__host_meta", "__host_budget", "__host_node"]) delete globalThis[name];
   const unavailable = (name) => () => {
     throw new Error(name + " is unavailable in workflows: runs must be deterministic to resume.");
   };
@@ -119,7 +124,10 @@ const PRELUDE = `
       return total === null ? Infinity : Math.max(0, total - spent);
     },
   });
-  globalThis.__t3 = Object.freeze({ agent, parallel, pipeline, phase, log, budget });
+  const node = host.node === undefined
+    ? undefined
+    : (key, outcome) => { host.node(String(key), JSON.stringify(outcome ?? null)); };
+  globalThis.__t3 = Object.freeze({ agent, parallel, pipeline, phase, log, budget, node });
 })();
 `;
 
@@ -204,6 +212,12 @@ export async function runWorkflowScript(input: {
   define("__host_meta", (meta) => {
     input.host.meta(JSON.parse(context.getString(meta)));
   });
+  const recordNode = input.host.node;
+  if (recordNode !== undefined) {
+    define("__host_node", (key, outcome) => {
+      recordNode(context.getString(key), JSON.parse(context.getString(outcome)));
+    });
+  }
   define("__host_agent", (requestHandle) => {
     const request = JSON.parse(context.getString(requestHandle)) as {
       prompt: string;
@@ -246,7 +260,7 @@ export async function runWorkflowScript(input: {
     argsHandle.dispose();
     setSliceDeadline();
     const started = context.evalCode(
-      `${wrap(input.source)}.call(undefined, JSON.parse(__t3_args), __t3.agent, __t3.parallel, __t3.pipeline, __t3.phase, __t3.log, __t3.budget).then((value) => JSON.stringify(value) ?? "null")`,
+      `${wrap(input.source, recordNode !== undefined)}.call(undefined, JSON.parse(__t3_args), __t3.agent, __t3.parallel, __t3.pipeline, __t3.phase, __t3.log, __t3.budget, __t3.node).then((value) => JSON.stringify(value) ?? "null")`,
       "workflow.js",
     );
     if (started.error !== undefined) {

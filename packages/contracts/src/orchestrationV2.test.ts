@@ -369,6 +369,78 @@ describe("orchestration V2 contracts", () => {
     },
   );
 
+  describe("workflow plans", () => {
+    const coordinator = () =>
+      decodeOrchestrationV2Subagent({
+        id: "workflow-1",
+        threadId: "thread-1",
+        runId: "run-1",
+        parentNodeId: "node-root-1",
+        origin: "app_owned",
+        createdBy: "agent",
+        driver: "codex",
+        providerInstanceId: "codex",
+        providerThreadId: null,
+        childThreadId: null,
+        nativeTaskRef: null,
+        prompt: "graph",
+        title: null,
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: now,
+        completedAt: null,
+        updatedAt: now,
+      });
+    const planned = {
+      phases: [{ index: 0, title: "Layer 1" }],
+      agents: [{ index: 0, label: "Build", state: "failed" as const, graphNodeKey: "build" }],
+      plan: {
+        nodes: [
+          { key: "build", label: "Build", wave: 0, dependsOn: [] },
+          { key: "test", label: "Test", wave: 1, dependsOn: ["build"] },
+        ],
+      },
+      nodeOutcomes: {
+        build: { status: "failed" as const, reason: "exit code 2", attempts: 3 },
+        test: { status: "skipped" as const, reason: "build did not pass" },
+      },
+    };
+
+    it("round-trips a planned workflow through stored and wire JSON", () => {
+      const subagent = { ...coordinator(), workflow: planned };
+      for (const codec of [
+        OrchestrationV2SubagentJson,
+        Schema.toCodecJson(OrchestrationV2Subagent),
+      ]) {
+        const json: unknown = JSON.parse(JSON.stringify(Schema.encodeSync(codec)(subagent)));
+        expect(Schema.decodeUnknownSync(codec)(json).workflow).toEqual(planned);
+      }
+    });
+
+    it("still decodes a workflow recorded before plans existed", () => {
+      const legacy = {
+        ...encodeOrchestrationV2SubagentJson(coordinator()),
+        workflow: { phases: [], agents: [{ index: 0, label: "Member", state: "completed" }] },
+      };
+      const decoded = Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(legacy).workflow;
+      expect(decoded?.plan).toBeUndefined();
+      expect(decoded?.nodeOutcomes).toBeUndefined();
+      expect(decoded?.agents[0]?.graphNodeKey).toBeUndefined();
+    });
+
+    it.each([
+      ["an unknown outcome", { nodeOutcomes: { build: { status: "done" } } }],
+      ["a negative wave", { plan: { nodes: [{ key: "a", label: "A", wave: -1, dependsOn: [] }] } }],
+    ])("refuses %s", (_name, patch) => {
+      const subagent = {
+        ...encodeOrchestrationV2SubagentJson(coordinator()),
+        workflow: { ...planned, ...patch },
+      };
+      expect(() => Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(subagent)).toThrow();
+    });
+  });
+
   it("decodes historical provider-thread JSON without pendingBackgroundTasks as empty roster", () => {
     const providerThread = decodeOrchestrationV2ProviderThreadJson({
       id: "provider-thread-1",

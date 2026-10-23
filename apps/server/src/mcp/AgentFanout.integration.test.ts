@@ -10,6 +10,7 @@ import {
   EventId,
   EnvironmentId,
   MessageId,
+  NodeId,
   OrchestratorMcpDelegateTasksResult,
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpTaskWaitResult,
@@ -25,6 +26,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { storedWorkflowScript } from "@t3tools/shared/storedWorkflowScript";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
@@ -1533,6 +1535,15 @@ describe("graphs", () => {
         expect(ended.result).toContain("Predecessor produce did not pass.");
         expect(ended.agents).toHaveLength(1);
         expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 3 });
+        // The row itself records both nodes, including the one that never started an agent.
+        const row = (yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        )).subagents.find((task) => task.id === started.workflowId);
+        expect(row?.workflow?.agents.map((agent) => agent.graphNodeKey)).toEqual(["produce"]);
+        expect(row?.workflow?.nodeOutcomes).toMatchObject({
+          produce: { status: "failed", attempts: 3 },
+          consume: { status: "skipped", attempts: 0, reason: "Predecessor produce did not pass." },
+        });
       }).pipe(Effect.provide(layerTest)),
     ),
   );
@@ -1555,6 +1566,30 @@ describe("graphs", () => {
         expect(refused.message).not.toContain("digest mismatch");
       }).pipe(Effect.provide(layerTest)),
     ),
+  );
+
+  it.effect("fails a resumed workflow whose stored plan is unreadable", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      const workflowId = NodeId.make("workflow:bad-plan");
+      yield* orchestrator.dispatch({
+        type: "workflow.start",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("command:workflow-start:bad-plan"),
+        threadId: parentThreadId,
+        runId: parent.runs.at(-1)!.id,
+        workflowId,
+        title: "Bad plan",
+        script: storedWorkflowScript("return 1", { plan: { nodes: "not a list" } }),
+      });
+      yield* withServerProcess((service) => service.resumeWorkflows);
+      const ended = yield* awaitWorkflowEnd(workflowId);
+      expect(ended.status).toBe("failed");
+      expect(ended.result).toContain("its stored arguments are unreadable");
+    }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect("resumes a graph after a restart without starting a node twice", () =>
@@ -1594,6 +1629,14 @@ describe("graphs", () => {
           parentThreadId,
         );
         expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
+        // The plan comes back from the stored settings, so the resumed row still shows the graph.
+        const row = parent.subagents.find((task) => task.id === workflowId);
+        expect(
+          row?.workflow?.plan?.nodes.map((node) => [node.key, node.wave, node.dependsOn]),
+        ).toEqual([
+          ["produce", 0, []],
+          ["consume", 1, ["produce"]],
+        ]);
       }).pipe(Effect.provide(layerTest)),
     ),
   );

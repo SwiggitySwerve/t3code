@@ -676,7 +676,32 @@ export const WorkflowAgentOutcomeCategory = Schema.Literals([
 ]);
 export type WorkflowAgentOutcomeCategory = typeof WorkflowAgentOutcomeCategory.Type;
 
+/** A node of a reviewed graph, as the app shows it: no prompts or inputs, so updates stay small. */
+export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
+  key: TrimmedNonEmptyString,
+  label: TrimmedNonEmptyString,
+  /** Dependency depth: 0 for nodes with no dependencies. A layout column, not a barrier. */
+  wave: NonNegativeInt,
+  dependsOn: Schema.Array(TrimmedNonEmptyString),
+});
+export type OrchestrationV2WorkflowPlanNode = typeof OrchestrationV2WorkflowPlanNode.Type;
+
+export const OrchestrationV2WorkflowPlan = Schema.Struct({
+  nodes: Schema.Array(OrchestrationV2WorkflowPlanNode),
+});
+export type OrchestrationV2WorkflowPlan = typeof OrchestrationV2WorkflowPlan.Type;
+
+/** How a graph node ended, as its workflow recorded it. */
+export const OrchestrationV2WorkflowNodeOutcome = Schema.Struct({
+  status: Schema.Literals(["passed", "failed", "skipped"]),
+  reason: Schema.optional(Schema.NonEmptyString),
+  attempts: Schema.optional(NonNegativeInt),
+});
+export type OrchestrationV2WorkflowNodeOutcome = typeof OrchestrationV2WorkflowNodeOutcome.Type;
+
 export const OrchestrationV2WorkflowAgent = Schema.Struct({
+  /** The graph node this agent runs, for workflows started from a reviewed graph. */
+  graphNodeKey: Schema.optional(TrimmedNonEmptyString),
   attemptTaskIds: Schema.optional(Schema.Array(NodeId)),
   outcomeCategory: Schema.optional(WorkflowAgentOutcomeCategory),
   runnerSettledAt: Schema.optional(NonNegativeInt),
@@ -724,6 +749,12 @@ export const OrchestrationV2SubagentWorkflow = Schema.Struct({
   runHandles: Schema.optional(OrchestrationV2WorkflowRunHandles),
   phases: Schema.Array(OrchestrationV2WorkflowPhase),
   agents: Schema.Array(OrchestrationV2WorkflowAgent),
+  /** The reviewed graph, for workflows started from one; scripts declare no dependencies. */
+  plan: Schema.optional(OrchestrationV2WorkflowPlan),
+  /** Outcomes by plan node key, recorded as each node ends. */
+  nodeOutcomes: Schema.optional(
+    Schema.Record(TrimmedNonEmptyString, OrchestrationV2WorkflowNodeOutcome),
+  ),
   totalTokens: Schema.optional(NonNegativeInt),
   toolCalls: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),

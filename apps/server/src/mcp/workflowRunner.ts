@@ -13,6 +13,8 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2WorkflowAgent,
+  OrchestrationV2WorkflowNodeOutcome,
+  type OrchestrationV2WorkflowPlan,
   OrchestratorMcpDelegateTasksItem,
   type ProviderDriverKind,
   type ProviderInstanceId,
@@ -82,6 +84,8 @@ export interface WorkflowContext {
   readonly budgetTokens?: number;
   /** Stored event sequence before the workflow row was created. */
   readonly afterSequence: number;
+  /** The reviewed graph's plan; only then may the script tag agents and record node outcomes. */
+  readonly plan?: OrchestrationV2WorkflowPlan;
 }
 
 export interface WorkflowAgentStart {
@@ -209,6 +213,8 @@ function failureMessage<A>(exit: Exit.Exit<A, OrchestratorMcpFailure>, fallback:
   return failure?._tag === "Some" ? failure.value.message : fallback;
 }
 
+const decodeNodeOutcome = Schema.decodeUnknownExit(OrchestrationV2WorkflowNodeOutcome);
+
 type MutableAgent = {
   -readonly [Key in keyof OrchestrationV2WorkflowAgent]: OrchestrationV2WorkflowAgent[Key];
 };
@@ -222,6 +228,7 @@ class WorkflowSession {
   private readonly agents: Array<MutableAgent> = [];
   private progress: string | undefined;
   private readonly occurrences = new Map<string, number>();
+  private readonly nodeOutcomes: Record<string, OrchestrationV2WorkflowNodeOutcome> = {};
   private readonly terminal = new Set<string>();
   private readonly waiting = new Map<string, WaitingAgent>();
   private readonly stalled = new Set<string>();
@@ -317,7 +324,38 @@ class WorkflowSession {
         }
         this.scheduleUpdate();
       },
+      ...(this.workflow.plan === undefined
+        ? {}
+        : { node: (key: string, outcome: unknown) => this.recordNode(key, outcome) }),
     };
+  }
+
+  /** The plan node a script names, refusing names outside a reviewed graph's plan. */
+  private planNodeKey(key: unknown, caller: string): string {
+    const plan = this.workflow.plan;
+    if (plan === undefined) {
+      throw new Error(
+        `${caller} takes a graph node only in a workflow started from a reviewed graph.`,
+      );
+    }
+    if (typeof key !== "string" || !plan.nodes.some((node) => node.key === key)) {
+      throw new Error(`${caller} got node ${JSON.stringify(key)}, which is not in this graph.`);
+    }
+    return key;
+  }
+
+  private recordNode(key: string, outcome: unknown): void {
+    const nodeKey = this.planNodeKey(key, "node()");
+    const decoded = decodeNodeOutcome(outcome);
+    if (Exit.isFailure(decoded)) {
+      throw new Error("node() needs an outcome with status passed, failed or skipped.");
+    }
+    const { reason } = decoded.value;
+    this.nodeOutcomes[nodeKey] =
+      reason === undefined
+        ? decoded.value
+        : { ...decoded.value, reason: truncate(reason, PREVIEW_LIMIT) };
+    this.scheduleUpdate();
   }
 
   /**
@@ -365,6 +403,9 @@ class WorkflowSession {
       throw new Error(`This workflow reached its limit of ${MAX_AGENTS_PER_WORKFLOW} agents.`);
     }
     const options = request.options;
+    // Kept out of the retry key: the node a call runs does not change what it asks for.
+    const graphNodeKey =
+      options.node === undefined ? undefined : this.planNodeKey(options.node, "agent()");
     const phase = stringOption(options, "phase") ?? this.currentPhase;
     if (phase !== undefined) this.addPhase(phase);
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
@@ -435,6 +476,7 @@ class WorkflowSession {
     const entry: MutableAgent = {
       index: this.agents.length,
       label,
+      ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
       state: "queued",
       ...(phase === undefined ? {} : { phaseIndex: this.phases.indexOf(phase), phaseTitle: phase }),
       prompt: truncate(request.prompt, PREVIEW_LIMIT),
@@ -839,6 +881,9 @@ class WorkflowSession {
       ...(this.name === undefined ? {} : { name: this.name }),
       phases: this.phases.map((title, index) => ({ index, title })),
       agents: this.agents.map((agent) => ({ ...agent })),
+      ...(this.workflow.plan === undefined
+        ? {}
+        : { plan: this.workflow.plan, nodeOutcomes: { ...this.nodeOutcomes } }),
     };
   }
 

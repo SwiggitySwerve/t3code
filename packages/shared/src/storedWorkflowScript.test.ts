@@ -16,6 +16,14 @@ describe("stored workflow scripts", () => {
     });
   });
 
+  it("round-trips a graph's plan, so a resumed graph keeps it", () => {
+    const plan = { nodes: [{ key: "a", label: "A", wave: 0, dependsOn: [] }] };
+    expect(parseStoredWorkflowScript(storedWorkflowScript("return 1", { plan })).plan).toEqual(
+      plan,
+    );
+    expect(parseStoredWorkflowScript(storedWorkflowScript("return 1", {})).plan).toBeUndefined();
+  });
+
   it("keeps a script that itself starts like the settings line", () => {
     const source = "// t3-workflow: not settings\nreturn 1";
     const stored = storedWorkflowScript(source, {});
