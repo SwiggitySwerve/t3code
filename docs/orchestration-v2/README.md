@@ -14,6 +14,7 @@ V2 is designed around the real provider behavior observed in the Codex app-serve
 - [Thread Lineage And Context Transfer](./thread-lineage-and-context-transfer.md)
 - [Provider Switching And Context Handoff](./provider-switching-and-context.md)
 - [Orchestrator MCP Server](./orchestrator-mcp-server.md)
+- [Workflow Runner: Measured Costs And Next Steps](./workflow-design-next.md)
 - [Provider Capability System](./provider-capability-system.md)
 - [Testing Strategy](./testing-strategy.md)
 
