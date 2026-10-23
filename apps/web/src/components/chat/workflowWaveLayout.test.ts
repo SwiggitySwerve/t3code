@@ -10,13 +10,13 @@ import {
 } from "./workflowWaveLayout";
 
 const waves = [
-  [{ key: "a", wave: 0 }],
+  [{ key: "a", wave: 0, dependsOn: [] }],
   [
-    { key: "b", wave: 1 },
-    { key: "c", wave: 1 },
-    { key: "d", wave: 1 },
+    { key: "b", wave: 1, dependsOn: ["a"] },
+    { key: "c", wave: 1, dependsOn: ["a"] },
+    { key: "d", wave: 1, dependsOn: ["a"] },
   ],
-  [{ key: "e", wave: 2 }],
+  [{ key: "e", wave: 2, dependsOn: ["a", "c"] }],
 ];
 
 describe("workflowWaveLayout", () => {
@@ -55,6 +55,30 @@ describe("workflowWaveLayout", () => {
 
   it("is the same for the same waves, and empty for none", () => {
     expect(workflowWaveLayout(waves)).toEqual(workflowWaveLayout(waves));
-    expect(workflowWaveLayout([])).toEqual({ width: 0, height: 0, columns: [], cards: new Map() });
+    expect(workflowWaveLayout([])).toEqual({
+      width: 0,
+      height: 0,
+      columns: [],
+      cards: new Map(),
+      edges: [],
+    });
+  });
+
+  it("draws each dependency from its node's right edge to its dependent's left edge", () => {
+    const layout = workflowWaveLayout(waves);
+    expect(layout.edges.map((edge) => `${edge.from}>${edge.to}`)).toEqual([
+      "a>b",
+      "a>c",
+      "a>d",
+      "a>e",
+      "c>e",
+    ]);
+    for (const edge of layout.edges) {
+      const from = layout.cards.get(edge.from)!;
+      const to = layout.cards.get(edge.to)!;
+      const numbers = edge.path.match(/-?\d+(\.\d+)?/g)!.map(Number);
+      expect(numbers.slice(0, 2)).toEqual([from.x + from.width, from.y + from.height / 2]);
+      expect(numbers.slice(-2)).toEqual([to.x, to.y + to.height / 2]);
+    }
   });
 });

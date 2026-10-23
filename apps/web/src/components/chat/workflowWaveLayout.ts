@@ -16,15 +16,29 @@ export interface WaveBox {
   readonly height: number;
 }
 
+/** A dependency line, from the right edge of the node depended on to the left edge of its dependent. */
+export interface WaveEdge {
+  readonly from: string;
+  readonly to: string;
+  readonly path: string;
+}
+
 export interface WaveLayout {
   readonly width: number;
   readonly height: number;
   readonly columns: ReadonlyArray<{ readonly wave: number; readonly x: number }>;
   readonly cards: ReadonlyMap<string, WaveBox>;
+  readonly edges: ReadonlyArray<WaveEdge>;
 }
 
 export function workflowWaveLayout(
-  waves: ReadonlyArray<ReadonlyArray<{ readonly key: string; readonly wave: number }>>,
+  waves: ReadonlyArray<
+    ReadonlyArray<{
+      readonly key: string;
+      readonly wave: number;
+      readonly dependsOn?: ReadonlyArray<string>;
+    }>
+  >,
 ): WaveLayout {
   const cards = new Map<string, WaveBox>();
   const columns = waves.map((nodes, column) => {
@@ -39,6 +53,24 @@ export function workflowWaveLayout(
     });
     return { wave: nodes[0]?.wave ?? column, x };
   });
+  const edges: Array<WaveEdge> = [];
+  for (const node of waves.flat()) {
+    const to = cards.get(node.key);
+    for (const dep of node.dependsOn ?? []) {
+      const from = cards.get(dep);
+      if (from === undefined || to === undefined) continue;
+      const x1 = from.x + from.width;
+      const y1 = from.y + from.height / 2;
+      const x2 = to.x;
+      const y2 = to.y + to.height / 2;
+      const bend = (x2 - x1) / 2;
+      edges.push({
+        from: dep,
+        to: node.key,
+        path: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`,
+      });
+    }
+  }
   const rows = Math.max(0, ...waves.map((nodes) => nodes.length));
   return {
     width:
@@ -49,5 +81,6 @@ export function workflowWaveLayout(
       rows === 0 ? 0 : WAVE_HEADER_HEIGHT + rows * WAVE_CARD_HEIGHT + (rows - 1) * WAVE_ROW_GAP,
     columns,
     cards,
+    edges,
   };
 }
