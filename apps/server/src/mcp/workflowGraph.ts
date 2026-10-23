@@ -357,6 +357,8 @@ const hashes = args.inputs;
 const layers = (${graphLayers.toString()})(graph);
 const budgets = ${JSON.stringify(ATTEMPT_BUDGETS)};
 const results = Object.create(null);
+// Graphs started before plans existed resume without node(); they still run, untagged.
+const recordsNodes = typeof node === "function";
 const failedNode = (reason, inputs = {}) => ({
   status: "failed", attempts: 0, inputs, outputs: {}, verification: null, reason,
 });
@@ -404,6 +406,7 @@ const runNode = async (key) => {
       label: node.subject, phase: node.phase ?? layerLabel, inputs, outputs: node.outputs,
       attemptTimeoutMs: budgets[node.attemptBudget], report: true,
     };
+    if (recordsNodes) options.node = key;
     for (const field of ["target", "role", "schema", "scopes", "verify", "stallTimeoutMs"]) {
       if (node[field] !== undefined) options[field] = node[field];
     }
@@ -428,6 +431,11 @@ const run = (key) =>
       results[key] = await runNode(key);
     } catch (error) {
       results[key] = failedNode(String(error));
+    }
+    // Once per node, including those that never reached agent(), so the app can show every node.
+    if (recordsNodes) {
+      const { status, attempts, reason } = results[key];
+      node(key, reason ? { status, attempts, reason } : { status, attempts });
     }
     settled += 1;
     log(settled + "/" + total + " nodes finished; " + key + " " + results[key].status + ".");

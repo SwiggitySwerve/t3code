@@ -1533,6 +1533,15 @@ describe("graphs", () => {
         expect(ended.result).toContain("Predecessor produce did not pass.");
         expect(ended.agents).toHaveLength(1);
         expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 3 });
+        // The row itself records both nodes, including the one that never started an agent.
+        const row = (yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        )).subagents.find((task) => task.id === started.workflowId);
+        expect(row?.workflow?.agents.map((agent) => agent.graphNodeKey)).toEqual(["produce"]);
+        expect(row?.workflow?.nodeOutcomes).toMatchObject({
+          produce: { status: "failed", attempts: 3 },
+          consume: { status: "skipped", attempts: 0, reason: "Predecessor produce did not pass." },
+        });
       }).pipe(Effect.provide(layerTest)),
     ),
   );
