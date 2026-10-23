@@ -81,4 +81,40 @@ describe("workflowWaveLayout", () => {
       expect(numbers.slice(-2)).toEqual([to.x, to.y + to.height / 2]);
     }
   });
+
+  it("skips lines to nodes it has no card for", () => {
+    const layout = workflowWaveLayout([[{ key: "a", wave: 0, dependsOn: ["gone"] }]]);
+    expect(layout.edges).toEqual([]);
+  });
+
+  it("routes a line that skips a wave between cards, never across one", () => {
+    // a -> e skips wave 1, whose three cards sit level with a.
+    const layout = workflowWaveLayout(waves);
+    const skip = layout.edges.find((edge) => edge.from === "a" && edge.to === "e")!;
+    const lane = Number(skip.path.match(/ L -?[\d.]+ (-?[\d.]+)/)![1]);
+    for (const key of ["b", "c", "d"]) {
+      const box = layout.cards.get(key)!;
+      expect(lane <= box.y || lane >= box.y + box.height).toBe(true);
+    }
+    expect(lane).toBeLessThanOrEqual(layout.height);
+  });
+
+  it("grows a one-row canvas so a line that skips a wave can run below the cards", () => {
+    const skipping = workflowWaveLayout([
+      [{ key: "a", wave: 0 }],
+      [{ key: "b", wave: 1, dependsOn: ["a"] }],
+      [{ key: "c", wave: 2, dependsOn: ["a", "b"] }],
+    ]);
+    const plain = workflowWaveLayout([
+      [{ key: "a", wave: 0 }],
+      [{ key: "b", wave: 1, dependsOn: ["a"] }],
+      [{ key: "c", wave: 2, dependsOn: ["b"] }],
+    ]);
+    expect(skipping.height).toBe(plain.height + WAVE_ROW_GAP);
+    const skip = skipping.edges.find((edge) => edge.from === "a" && edge.to === "c")!;
+    const lane = Number(skip.path.match(/ L -?[\d.]+ (-?[\d.]+)/)![1]);
+    const b = skipping.cards.get("b")!;
+    expect(lane).toBeGreaterThanOrEqual(b.y + b.height);
+    expect(lane).toBeLessThanOrEqual(skipping.height);
+  });
 });

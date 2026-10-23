@@ -10,6 +10,7 @@ import {
   EventId,
   EnvironmentId,
   MessageId,
+  NodeId,
   OrchestratorMcpDelegateTasksResult,
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpTaskWaitResult,
@@ -25,6 +26,7 @@ import {
   ThreadId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import { storedWorkflowScript } from "@t3tools/shared/storedWorkflowScript";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
@@ -1564,6 +1566,30 @@ describe("graphs", () => {
         expect(refused.message).not.toContain("digest mismatch");
       }).pipe(Effect.provide(layerTest)),
     ),
+  );
+
+  it.effect("fails a resumed workflow whose stored plan is unreadable", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      const workflowId = NodeId.make("workflow:bad-plan");
+      yield* orchestrator.dispatch({
+        type: "workflow.start",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("command:workflow-start:bad-plan"),
+        threadId: parentThreadId,
+        runId: parent.runs.at(-1)!.id,
+        workflowId,
+        title: "Bad plan",
+        script: storedWorkflowScript("return 1", { plan: { nodes: "not a list" } }),
+      });
+      yield* withServerProcess((service) => service.resumeWorkflows);
+      const ended = yield* awaitWorkflowEnd(workflowId);
+      expect(ended.status).toBe("failed");
+      expect(ended.result).toContain("its stored arguments are unreadable");
+    }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect("resumes a graph after a restart without starting a node twice", () =>

@@ -423,6 +423,65 @@ describe("graph workflows", () => {
     expect(graph?.counts).toEqual({ failed: 1, skipped: 3 });
   });
 
+  it("counts every waiting node behind a blocker, through chains", () => {
+    const chain = {
+      nodes: [
+        { key: "a", label: "A", wave: 0, dependsOn: [] },
+        { key: "b", label: "B", wave: 1, dependsOn: ["a"] },
+        { key: "c", label: "C", wave: 2, dependsOn: ["b"] },
+        { key: "d", label: "D", wave: 2, dependsOn: ["b"] },
+        { key: "e", label: "E", wave: 3, dependsOn: ["c", "d"] },
+        { key: "solo", label: "Solo", wave: 0, dependsOn: [] },
+      ],
+    };
+    const graph = graphOf("running", {
+      plan: chain,
+      agents: [
+        member({ index: 0, state: "running", graphNodeKey: "a" }),
+        member({ index: 1, state: "running", graphNodeKey: "solo" }),
+      ],
+    });
+    // b, c, d and e all wait on a; e is counted once though it waits on two of them.
+    expect(graph?.waitingOn).toEqual({ key: "a", label: "A", blocked: 4 });
+  });
+
+  it("names no blocker when nothing waits, and puts agents for unknown nodes aside", () => {
+    const graph = graphOf("running", {
+      plan,
+      nodeOutcomes: { a: { status: "passed", attempts: 1 } },
+      agents: [
+        member({ index: 1, state: "running", graphNodeKey: "b" }),
+        member({ index: 2, state: "running", graphNodeKey: "c" }),
+        member({ index: 3, state: "queued", graphNodeKey: "zz", label: "stray" }),
+      ],
+    });
+    expect(states(graph).d).toEqual(["waiting", null]);
+    expect(graph?.otherMembers.map((agent) => agent.title)).toEqual(["stray"]);
+    const done = graphOf("running", {
+      plan,
+      nodeOutcomes: {
+        a: { status: "passed" },
+        b: { status: "passed" },
+        c: { status: "passed" },
+      },
+      agents: [member({ index: 3, state: "running", graphNodeKey: "d" })],
+    });
+    expect(done?.waitingOn).toBeNull();
+  });
+
+  it("uses the latest agent for a node, and shows a node retrying as running", () => {
+    const graph = graphOf("running", {
+      plan,
+      agents: [
+        member({ index: 0, state: "failed", graphNodeKey: "a", label: "first try" }),
+        member({ index: 1, state: "running", graphNodeKey: "a", label: "second try", attempt: 2 }),
+      ],
+    });
+    const a = graph?.waves[0]?.[0];
+    expect(a?.state).toBe("running");
+    expect(a?.member?.title).toBe("second try");
+  });
+
   it("words the status line and each node's detail", () => {
     const graph = graphOf("running", {
       plan,

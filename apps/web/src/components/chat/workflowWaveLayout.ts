@@ -6,7 +6,8 @@
 export const WAVE_CARD_WIDTH = 208;
 export const WAVE_CARD_HEIGHT = 52;
 export const WAVE_COLUMN_GAP = 28;
-export const WAVE_ROW_GAP = 8;
+/** Wide enough for a line that skips a wave to run between two cards. */
+export const WAVE_ROW_GAP = 12;
 export const WAVE_HEADER_HEIGHT = 22;
 
 export interface WaveBox {
@@ -53,6 +54,12 @@ export function workflowWaveLayout(
     });
     return { wave: nodes[0]?.wave ?? column, x };
   });
+  const rows = Math.max(0, ...waves.map((nodes) => nodes.length));
+  // Every column shares one row grid, so the gaps between rows (and the strip below the last
+  // row) are free in every column; a line that skips a wave runs along one of them.
+  const laneY = (row: number) =>
+    WAVE_HEADER_HEIGHT + row * (WAVE_CARD_HEIGHT + WAVE_ROW_GAP) - WAVE_ROW_GAP / 2;
+  let usesBottomLane = false;
   const edges: Array<WaveEdge> = [];
   for (const node of waves.flat()) {
     const to = cards.get(node.key);
@@ -63,22 +70,44 @@ export function workflowWaveLayout(
       const y1 = from.y + from.height / 2;
       const x2 = to.x;
       const y2 = to.y + to.height / 2;
-      const bend = (x2 - x1) / 2;
+      if (x2 - x1 <= WAVE_COLUMN_GAP) {
+        const bend = (x2 - x1) / 2;
+        edges.push({
+          from: dep,
+          to: node.key,
+          path: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`,
+        });
+        continue;
+      }
+      // Bend into the lane inside the gap after the source column, run along it past the
+      // cards in between, and bend out inside the gap before the target column.
+      const middle = (y1 + y2) / 2;
+      let lane = 1;
+      for (let row = 2; row <= rows; row += 1) {
+        if (Math.abs(laneY(row) - middle) < Math.abs(laneY(lane) - middle)) lane = row;
+      }
+      if (lane === rows) usesBottomLane = true;
+      const y = laneY(lane);
+      const half = WAVE_COLUMN_GAP / 2;
       edges.push({
         from: dep,
         to: node.key,
-        path: `M ${x1} ${y1} C ${x1 + bend} ${y1}, ${x2 - bend} ${y2}, ${x2} ${y2}`,
+        path: `M ${x1} ${y1} C ${x1 + half} ${y1}, ${x1 + half} ${y}, ${x1 + WAVE_COLUMN_GAP} ${y} L ${x2 - WAVE_COLUMN_GAP} ${y} C ${x2 - half} ${y}, ${x2 - half} ${y2}, ${x2} ${y2}`,
       });
     }
   }
-  const rows = Math.max(0, ...waves.map((nodes) => nodes.length));
   return {
     width:
       waves.length === 0
         ? 0
         : waves.length * WAVE_CARD_WIDTH + (waves.length - 1) * WAVE_COLUMN_GAP,
     height:
-      rows === 0 ? 0 : WAVE_HEADER_HEIGHT + rows * WAVE_CARD_HEIGHT + (rows - 1) * WAVE_ROW_GAP,
+      rows === 0
+        ? 0
+        : WAVE_HEADER_HEIGHT +
+          rows * WAVE_CARD_HEIGHT +
+          (rows - 1) * WAVE_ROW_GAP +
+          (usesBottomLane ? WAVE_ROW_GAP : 0),
     columns,
     cards,
     edges,

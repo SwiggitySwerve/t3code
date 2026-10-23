@@ -504,6 +504,39 @@ return errors`,
       }),
     );
 
+    it.effect("caps a node's reason and lets a later record replace it", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness();
+        yield* launch(
+          runner,
+          'node("a", { status: "failed", reason: "x".repeat(5000) }); node("b", { status: "failed", reason: "first" }); node("b", { status: "passed", attempts: 1 }); return 1',
+          twoNodePlan,
+        );
+        yield* Deferred.await(completed);
+        const outcomes = workflowUpdates.at(-1)!.nodeOutcomes!;
+        expect(outcomes.a?.reason?.length).toBeLessThanOrEqual(500);
+        expect(outcomes.b).toEqual({ status: "passed", attempts: 1 });
+      }),
+    );
+
+    it.effect("tags the worker with its node but not the agent that checks it", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness();
+        yield* launch(
+          runner,
+          'return await agent("x", { node: "a", verify: { type: "judgment", rubric: ["It is right."] }, report: true })',
+          twoNodePlan,
+        );
+        yield* Deferred.await(completed);
+        const agents = workflowUpdates.at(-1)!.agents;
+        expect(agents.length).toBeGreaterThan(1);
+        expect(agents.map((agent) => agent.graphNodeKey ?? null)).toEqual([
+          "a",
+          ...agents.slice(1).map(() => null),
+        ]);
+      }),
+    );
+
     it.effect("keeps a 30-node graph's row update under 64 KB", () =>
       Effect.gen(function* () {
         const { runner, completed, workflowUpdates } = yield* makeHarness({
