@@ -328,3 +328,96 @@ describe("T3-run workflows", () => {
     ).toBeNull();
   });
 });
+
+describe("graph workflows", () => {
+  const plan = {
+    nodes: [
+      { key: "a", label: "Schema", wave: 0, dependsOn: [] },
+      { key: "b", label: "Build API", wave: 1, dependsOn: ["a"] },
+      { key: "c", label: "Build UI", wave: 1, dependsOn: ["a"] },
+      { key: "d", label: "End to end", wave: 2, dependsOn: ["b", "c"] },
+    ],
+  };
+  const graphOf = (
+    status: OrchestrationV2Subagent["status"],
+    workflow: Omit<OrchestrationV2SubagentWorkflow, "phases"> &
+      Partial<Pick<OrchestrationV2SubagentWorkflow, "phases">>,
+  ) => groupsOf([subagent({ status, workflow: { phases: [], ...workflow } })])[0]?.graph;
+  const states = (graph: ReturnType<typeof graphOf>) =>
+    Object.fromEntries(
+      (graph?.waves ?? []).flat().map((node) => [node.key, [node.state, node.reason]]),
+    );
+
+  it("leaves a script workflow without a graph", () => {
+    expect(graphOf("running", { agents: [member()] })).toBeNull();
+  });
+
+  it("shows waiting nodes and the started node they wait on", () => {
+    const graph = graphOf("running", {
+      plan,
+      nodeOutcomes: { a: { status: "passed", attempts: 1 } },
+      agents: [
+        member({ index: 0, label: "Schema", state: "completed", graphNodeKey: "a" }),
+        member({ index: 1, label: "Build API", state: "running", graphNodeKey: "b" }),
+        member({ index: 2, label: "Build UI", state: "queued", graphNodeKey: "c" }),
+        member({ index: 3, label: "check Build API", state: "running" }),
+      ],
+    });
+    expect(states(graph)).toEqual({
+      a: ["passed", null],
+      b: ["running", null],
+      c: ["queued", null],
+      d: ["waiting", null],
+    });
+    expect(graph?.waves.map((wave) => wave.map((node) => node.key))).toEqual([
+      ["a"],
+      ["b", "c"],
+      ["d"],
+    ]);
+    expect(graph?.waves[0]?.[0]?.dependents).toEqual(["b", "c"]);
+    expect(graph?.waves[1]?.[0]?.member?.title).toBe("Build API");
+    expect(graph?.counts).toEqual({ passed: 1, running: 1, queued: 1, waiting: 1 });
+    // Both block d; the first in plan order is named.
+    expect(graph?.waitingOn).toEqual({ key: "b", label: "Build API", blocked: 1 });
+    expect(graph?.otherMembers.map((agent) => agent.title)).toEqual(["check Build API"]);
+  });
+
+  it("marks nodes a stopped run never finished", () => {
+    const graph = graphOf("cancelled", {
+      plan,
+      nodeOutcomes: { a: { status: "passed", attempts: 1 } },
+      agents: [
+        member({ index: 0, state: "completed", graphNodeKey: "a" }),
+        member({ index: 1, state: "running", graphNodeKey: "b" }),
+      ],
+    });
+    expect(states(graph)).toEqual({
+      a: ["passed", null],
+      b: ["interrupted", null],
+      c: ["not_run", null],
+      d: ["not_run", null],
+    });
+    expect(graph?.waitingOn).toBeNull();
+  });
+
+  it("shows a node that failed before starting an agent, and its skipped dependents", () => {
+    const graph = graphOf("failed", {
+      plan,
+      nodeOutcomes: {
+        a: { status: "failed", attempts: 0, reason: "Input source has no reviewed hash." },
+        b: { status: "skipped", attempts: 0, reason: "Predecessor a did not pass." },
+        c: { status: "skipped", attempts: 0, reason: "Predecessor a did not pass." },
+        d: { status: "skipped", attempts: 0, reason: "Predecessor b did not pass." },
+      },
+      agents: [],
+    });
+    expect(states(graph)).toEqual({
+      a: ["failed", "Input source has no reviewed hash."],
+      b: ["skipped", "Predecessor a did not pass."],
+      c: ["skipped", "Predecessor a did not pass."],
+      d: ["skipped", "Predecessor b did not pass."],
+    });
+    expect(graph?.waves[0]?.[0]?.member).toBeNull();
+    expect(graph?.counts).toEqual({ failed: 1, skipped: 3 });
+  });
+});
