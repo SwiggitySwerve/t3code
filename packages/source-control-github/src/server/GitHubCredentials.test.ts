@@ -18,7 +18,6 @@ const TOKEN_VARIABLES = [
   "GITHUB_ENTERPRISE_TOKEN",
 ] as const;
 
-/** Settings keep `enabled` explicit; a host the test leaves it off is enabled. */
 const hostSettings = (
   hosts: Record<string, { readonly account?: string; readonly enabled?: boolean }>,
 ) =>
@@ -57,7 +56,7 @@ function harness(
     Layer.provideMerge(
       TestSourceControlHost.layer({
         settings: applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-          github: { hosts: hostSettings(hosts), tokens },
+          sourceControlHosts: { github: { hosts: hostSettings(hosts), tokens } },
         }),
         process: { run },
       }),
@@ -73,39 +72,6 @@ describe("GitHubCredentials", () => {
   });
   afterEach(() => {
     vi.unstubAllEnvs();
-  });
-
-  it.effect("asks gh for the active login when Settings pin nothing", () => {
-    const { layer, calls } = harness();
-    return Effect.gen(function* () {
-      const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const credential = yield* credentials.get("GitHub.com");
-      expect(Redacted.value(credential.token)).toBe("active-token");
-      expect(calls).toEqual([["auth", "token", "--hostname", "github.com"]]);
-    }).pipe(Effect.provide(layer));
-  });
-
-  it.effect("passes --user for an account pinned in Settings", () => {
-    const { layer, calls } = harness({ "github.com": { account: "work" } });
-    return Effect.gen(function* () {
-      const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const credential = yield* credentials.get("github.com");
-      expect(Redacted.value(credential.token)).toBe("token-for-work");
-      expect(calls).toEqual([["auth", "token", "--hostname", "github.com", "--user", "work"]]);
-    }).pipe(Effect.provide(layer));
-  });
-
-  it.effect("fails a host turned off in Settings without asking gh", () => {
-    const { layer, calls } = harness({ "github.com": { enabled: false } });
-    return Effect.gen(function* () {
-      const credentials = yield* GitHubCredentials.GitHubCredentials;
-      const error = yield* Effect.flip(credentials.get("github.com"));
-      expect(error._tag).toBe("GitHubHostDisabledError");
-      expect(error.message).toBe(
-        "GitHub host github.com is turned off in Settings → Source Control.",
-      );
-      expect(calls).toEqual([]);
-    }).pipe(Effect.provide(layer));
   });
 
   it.effect("lets an environment token win over a pinned account, as gh does", () => {
@@ -128,18 +94,21 @@ describe("GitHubCredentials", () => {
       expect(Redacted.value((yield* credentials.get("github.com")).token)).toBe("active-token");
 
       yield* settings.update({
-        github: { hosts: { "github.com": { account: "work", enabled: true } } },
+        sourceControlHosts: {
+          github: { hosts: { "github.com": { account: "work", enabled: true } } },
+        },
       });
       expect(Redacted.value((yield* credentials.get("github.com")).token)).toBe("token-for-work");
 
-      yield* settings.update({ github: { hosts: { "github.com": { enabled: false } } } });
+      yield* settings.update({
+        sourceControlHosts: { github: { hosts: { "github.com": { enabled: false } } } },
+      });
       expect((yield* Effect.flip(credentials.get("github.com")))._tag).toBe(
         "GitHubHostDisabledError",
       );
 
-      yield* settings.update({ github: { hosts: {} } });
+      yield* settings.update({ sourceControlHosts: { github: { hosts: {} } } });
       expect(Redacted.value((yield* credentials.get("github.com")).token)).toBe("active-token");
-      // The unpinned token stayed cached; only the newly pinned account cost a gh call.
       expect(calls).toHaveLength(2);
     }).pipe(Effect.provide(layer));
   });

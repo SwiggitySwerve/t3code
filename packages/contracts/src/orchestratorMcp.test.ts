@@ -2,26 +2,69 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Schema from "effect/Schema";
 
 import {
-  OrchestratorMcpCreateThreadsInput,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
-  OrchestratorMcpThreadInterruptInput,
-  OrchestratorMcpThreadListInput,
-  OrchestratorMcpThreadReadInput,
-  OrchestratorMcpThreadSendInput,
-  OrchestratorMcpThreadWaitInput,
+  OrchestratorMcpGraphReviewInput,
+  OrchestratorMcpGraphReviewResult,
+  OrchestratorMcpGraphStartInput,
 } from "./orchestratorMcp.ts";
 
-const decodeCreateThreadsInput = Schema.decodeUnknownSync(OrchestratorMcpCreateThreadsInput);
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
 const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskResult);
-const decodeThreadInterruptInput = Schema.decodeUnknownSync(OrchestratorMcpThreadInterruptInput);
-const decodeThreadListInput = Schema.decodeUnknownSync(OrchestratorMcpThreadListInput);
-const decodeThreadReadInput = Schema.decodeUnknownSync(OrchestratorMcpThreadReadInput);
-const decodeThreadSendInput = Schema.decodeUnknownSync(OrchestratorMcpThreadSendInput);
-const decodeThreadWaitInput = Schema.decodeUnknownSync(OrchestratorMcpThreadWaitInput);
+const decodeGraphReviewInput = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewInput);
+const decodeGraphReviewResult = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewResult);
+const decodeGraphStartInput = Schema.decodeUnknownSync(OrchestratorMcpGraphStartInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("leaves graph validation to the server while requiring a review digest to start", () => {
+    const graph = { schemaVersion: 999, nodes: { invalid: { unknownField: true } } };
+    const acceptedDigest = `sha256:${"a".repeat(64)}`;
+
+    expect(decodeGraphReviewInput({ graph })).toEqual({
+      graph,
+    });
+    expect(
+      decodeGraphStartInput({
+        graph,
+        acceptedDigest,
+        budgetTokens: 100,
+        title: "Graph",
+        clientRequestId: "g1",
+      }),
+    ).toEqual({ graph, acceptedDigest, budgetTokens: 100, title: "Graph", clientRequestId: "g1" });
+    for (const digest of [
+      undefined,
+      "",
+      "a".repeat(64),
+      `sha256:${"A".repeat(64)}`,
+      `sha256:${"a".repeat(63)}`,
+    ]) {
+      expect(() => decodeGraphStartInput({ graph, acceptedDigest: digest })).toThrow();
+    }
+    for (const budgetTokens of [0, -1, 1.5]) {
+      expect(() => decodeGraphStartInput({ graph, acceptedDigest, budgetTokens })).toThrow();
+    }
+  });
+
+  it("preserves graph review blockers and partial input facts", () => {
+    const review = {
+      digest: `sha256:${"a".repeat(64)}`,
+      ready: false,
+      layers: [["first", "second"], ["last"]],
+      writeConflicts: [{ nodes: ["first", "second"], paths: ["src/shared.ts"] }],
+      inputs: [
+        { path: "input.txt", status: "found", sha256: "a".repeat(64), sizeBytes: 12 },
+        { path: "missing.txt", status: "missing", sha256: null, sizeBytes: null },
+        { path: "large.txt", status: "too_large", sha256: null, sizeBytes: 1_000_000 },
+      ],
+      blockers: ["Missing workspace input"],
+    };
+    expect(decodeGraphReviewResult(review)).toEqual(review);
+    expect(() =>
+      decodeGraphReviewResult({ ...review, inputs: [{ ...review.inputs[0], status: "unknown" }] }),
+    ).toThrow();
+  });
+
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",
@@ -51,116 +94,31 @@ describe("orchestrator MCP contracts", () => {
       latestTerminalStatus: "completed",
       latestTerminalSummary: "Workspace inspected.",
       latestTerminalResultContextTransferId: "context-transfer-result-1",
+      hasPendingQuestion: false,
+      pendingApproval: null,
       waitTimedOut: false,
     });
 
     expect(request.target?.providerInstanceId).toBe("claudeAgent");
     expect(result.status).toBe("completed");
     expect(result.summary).toBe("Workspace inspected.");
-  });
-
-  it("decodes target model options in canonical and shorthand shapes", () => {
-    const canonical = decodeDelegateTaskInput({
-      task: "Say hello.",
-      target: {
-        providerInstanceId: "codex",
-        model: "gpt-5.6-luna",
-        options: [{ id: "reasoning", value: "low" }],
-      },
-    });
-    const shorthand = decodeDelegateTaskInput({
-      task: "Say hello.",
-      target: {
-        providerInstanceId: "codex",
-        model: "gpt-5.6-luna",
-        options: { reasoning: "low", fastMode: true },
-      },
-    });
-
-    expect(canonical.target?.options).toEqual([{ id: "reasoning", value: "low" }]);
-    expect(shorthand.target?.options).toEqual([
-      { id: "reasoning", value: "low" },
-      { id: "fastMode", value: true },
-    ]);
-  });
-
-  it("rejects target model options that are not strings or booleans", () => {
+    expect(result.pendingApproval).toBeNull();
+    const pendingApproval = {
+      requestId: "request-approval-1",
+      kind: "command",
+      runId: "run-child-1",
+    };
+    expect(
+      decodeDelegateTaskResult({
+        ...result,
+        pendingApproval: { ...pendingApproval, input: { command: "private command" } },
+      }).pendingApproval,
+    ).toEqual(pendingApproval);
     expect(() =>
-      decodeDelegateTaskInput({
-        task: "Say hello.",
-        target: {
-          providerInstanceId: "codex",
-          model: "gpt-5.6-luna",
-          // Must fail loudly instead of being dropped like legacy persistence.
-          options: { reasoning: 3 },
-        },
+      decodeDelegateTaskResult({
+        ...result,
+        pendingApproval: { ...pendingApproval, kind: "user_input" },
       }),
     ).toThrow();
-    expect(() =>
-      decodeDelegateTaskInput({
-        task: "Say hello.",
-        target: {
-          providerInstanceId: "codex",
-          model: "gpt-5.6-luna",
-          options: [{ id: "reasoning", value: null }],
-        },
-      }),
-    ).toThrow();
-  });
-
-  it("decodes mixed prompted and empty thread batches", () => {
-    const request = decodeCreateThreadsInput({
-      clientRequestId: "threads-1",
-      threads: [
-        { title: "Inherited empty thread" },
-        {
-          prompt: "Review the API.",
-          target: { driverKind: "claudeAgent" },
-          runtimeMode: "approval-required",
-        },
-      ],
-    });
-
-    expect(request.threads).toHaveLength(2);
-    expect(request.threads[0]?.prompt).toBeUndefined();
-    expect(request.threads[1]?.target?.driverKind).toBe("claudeAgent");
-  });
-
-  it("decodes project-scoped thread orchestration requests", () => {
-    expect(
-      decodeThreadListInput({
-        statuses: ["running", "completed"],
-        includeSubagents: false,
-        limit: 25,
-      }).statuses,
-    ).toEqual(["running", "completed"]);
-    expect(
-      decodeThreadReadInput({
-        threadId: "thread-loop-1",
-        view: "activity",
-        afterPosition: 10,
-      }).afterPosition,
-    ).toBe(10);
-    expect(
-      decodeThreadSendInput({
-        threadId: "thread-loop-1",
-        message: "Continue with the next iteration.",
-        mode: "steer",
-        clientRequestId: "send-loop-2",
-      }).mode,
-    ).toBe("steer");
-    expect(
-      decodeThreadWaitInput({
-        threadId: "thread-loop-1",
-        runId: "run-loop-2",
-        timeoutMs: 5_000,
-      }).runId,
-    ).toBe("run-loop-2");
-    expect(
-      decodeThreadInterruptInput({
-        threadId: "thread-loop-1",
-        reason: "Loop converged.",
-      }).reason,
-    ).toBe("Loop converged.");
   });
 });

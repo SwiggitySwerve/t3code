@@ -87,6 +87,10 @@
       "types": "./src/server/notification.ts",
       "import": "./src/server/notification.ts"
     },
+    "./server/ultracode": {
+      "types": "./src/server/ultracode.ts",
+      "import": "./src/server/ultracode.ts"
+    },
     "./server/orchestrationInstructions": {
       "types": "./src/server/orchestrationInstructions.ts",
       "import": "./src/server/orchestrationInstructions.ts"

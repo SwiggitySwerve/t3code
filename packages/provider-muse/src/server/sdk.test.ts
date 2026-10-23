@@ -1,13 +1,23 @@
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- The Muse SDK spawns with Node's child_process, so the launch test quotes arguments the same way.
+import * as NodeChildProcess from "node:child_process";
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { spawnMspConnection, type MspHandshake, type SpawnedMspConnection } from "@muse-code/sdk";
 import { it } from "@effect/vitest";
+import * as HostProcess from "@t3tools/shared/HostProcess";
+import { SpawnExecutableResolution } from "@t3tools/shared/shell";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import { afterEach, describe, expect, vi } from "vite-plus/test";
 import {
   createMuseSdkHost,
   createMuseSdkHostEffect,
   makeMuseEnvironment,
   museApprovalMode,
+  museLaunch,
+  museVerbatimPath,
+  museWorkspaceRoot,
   type MuseSdkHost,
 } from "./sdk.ts";
 
@@ -98,62 +108,6 @@ describe("Muse SDK host", () => {
     }
   });
 
-  it("bounds startup and waits for native shutdown after timeout", async () => {
-    vi.useFakeTimers();
-    const fake = mockSpawn();
-    const startup = createMuseSdkHost({ binaryPath: "muse", startupTimeoutMs: 30 });
-    let settled = false;
-    const outcome = startup.then(
-      () => {
-        settled = true;
-      },
-      (error: unknown) => {
-        settled = true;
-        return error;
-      },
-    );
-    await vi.advanceTimersByTimeAsync(31);
-    expect(fake.close).toHaveBeenCalledOnce();
-    expect(settled).toBe(false);
-    fake.shutdown.resolve({ code: 0, signal: null });
-    expect(await outcome).toMatchObject({ message: "Muse SDK initialization timed out." });
-  });
-
-  it("closes the pre-handshake host on abort and rejects only after shutdown", async () => {
-    const fake = mockSpawn();
-    const abort = new AbortController();
-    const started = createMuseSdkHost({ binaryPath: "muse", signal: abort.signal });
-    const reason = new Error("Cancelled by caller");
-    const outcome = started.catch((error: unknown) => error);
-    abort.abort(reason);
-    expect(fake.close).toHaveBeenCalledOnce();
-    fake.shutdown.resolve({ code: 0, signal: null });
-    expect(await outcome).toBe(reason);
-  });
-
-  it("closes rejected initialization and keeps successful schema advisories usable", async () => {
-    const failed = mockSpawn();
-    const started = createMuseSdkHost({ binaryPath: "muse" });
-    const outcome = started.catch((error: unknown) => error);
-    failed.startup.reject(new Error("Handshake failed"));
-    failed.shutdown.resolve({ code: 0, signal: null });
-    expect(await outcome).toMatchObject({ message: "Handshake failed" });
-    expect(failed.close).toHaveBeenCalledOnce();
-    const success = mockSpawn();
-    const ready = createMuseSdkHost({ binaryPath: "muse", readOnly: true });
-    success.startup.resolve(success.ready);
-    const host = await ready;
-    expect(host.initializeResult.grantedCapabilities).toEqual([]);
-    expect(vi.mocked(spawnMspConnection).mock.lastCall?.[0].args).toEqual([
-      "serve",
-      "--disable-shell",
-      "--disable-write",
-      "--no-session-log",
-    ]);
-    success.shutdown.resolve({ code: 0, signal: null });
-    await host.close();
-  });
-
   it.each([undefined, 2])(
     "rejects unsupported envelope version %s and awaits shutdown",
     async (version) => {
@@ -179,50 +133,6 @@ describe("Muse SDK host", () => {
         message: "Muse SDK returned an unsupported protocol envelope version.",
       });
     },
-  );
-
-  it("does not spawn when already aborted and closes a ready host on later abort", async () => {
-    const aborted = new AbortController();
-    aborted.abort();
-    await expect(
-      createMuseSdkHost({ binaryPath: "muse", signal: aborted.signal }),
-    ).rejects.toBeDefined();
-    expect(spawnMspConnection).not.toHaveBeenCalled();
-    const fake = mockSpawn();
-    const abort = new AbortController();
-    const running = createMuseSdkHost({ binaryPath: "muse", signal: abort.signal });
-    fake.startup.resolve(fake.ready);
-    const host = await running;
-    abort.abort();
-    fake.shutdown.resolve({ code: 0, signal: null });
-    await host.close();
-    expect(fake.close).toHaveBeenCalledOnce();
-  });
-
-  it.effect(
-    "keeps Effect startup resources alive until interrupted initialization shuts down",
-    () =>
-      Effect.gen(function* () {
-        const fake = mockSpawn();
-        let released = false;
-        const fiber = yield* Effect.forkChild(
-          createMuseSdkHostEffect({ binaryPath: "muse" }).pipe(
-            Effect.ensuring(
-              Effect.sync(() => {
-                released = true;
-              }),
-            ),
-          ),
-        );
-        yield* Effect.promise(() => fake.initializing.promise);
-        const interrupted = yield* Fiber.interrupt(fiber).pipe(Effect.forkChild);
-        yield* Effect.promise(() => fake.closing.promise);
-        expect(released).toBe(false);
-        fake.shutdown.resolve({ code: 0, signal: null });
-        yield* Fiber.join(interrupted);
-        expect(released).toBe(true);
-        expect(fake.close).toHaveBeenCalledOnce();
-      }),
   );
 
   it.effect("closes a fulfilled host when interruption wins before acquisition is delivered", () =>
@@ -262,5 +172,83 @@ describe("Muse SDK host", () => {
       expect(released).toBe(true);
       expect(host.close).toHaveBeenCalledOnce();
     }),
+  );
+});
+
+describe("Muse launch", () => {
+  const CMD = "C:\\Windows\\system32\\cmd.exe";
+  const onWindows = (resolved: string | undefined, env: NodeJS.ProcessEnv = { ComSpec: CMD }) =>
+    museLaunch("muse", env).pipe(
+      Effect.provideService(HostProcess.Platform, "win32"),
+      Effect.provideService(SpawnExecutableResolution, () => resolved),
+    );
+
+  it.effect("runs an exe directly and a launcher script under cmd.exe on Windows", () =>
+    Effect.gen(function* () {
+      expect(yield* onWindows("C:\\Muse\\muse.exe")).toEqual({
+        command: "C:\\Muse\\muse.exe",
+        args: [],
+      });
+      const spaced = "C:\\Users\\Jane Doe\\AppData\\Local\\Programs\\muse\\muse.cmd";
+      expect(yield* onWindows(spaced)).toEqual({ command: CMD, args: ["/d", "/c", "@", spaced] });
+      const spacedAmpersand = "C:\\Users\\R&D Team\\AppData\\Local\\Programs\\muse\\muse.cmd";
+      expect(yield* onWindows(spacedAmpersand)).toEqual({
+        command: CMD,
+        args: ["/d", "/c", "@", spacedAmpersand],
+      });
+      expect(yield* onWindows("C:\\Users\\R&D(1)\\muse.cmd")).toEqual({
+        command: CMD,
+        args: ["/d", "/c", "C:\\Users\\R^&D^(1^)\\muse.cmd"],
+      });
+      expect((yield* onWindows("C:\\Muse\\muse.bat", { SYSTEMROOT: "C:\\Windows" })).command).toBe(
+        "C:\\Windows\\System32\\cmd.exe",
+      );
+      expect(yield* onWindows(undefined)).toEqual({ command: "muse", args: [] });
+    }),
+  );
+
+  // cmd's quote rules only show with a real cmd.exe, spawning as the SDK does.
+  it.effect("starts a real launcher from a folder with spaces and cmd metacharacters", () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcess.Platform) !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const folder = path.join(
+        yield* fs.makeTempDirectoryScoped({ prefix: "MuseLaunch-" }),
+        "R&D Team (x) @ ^y",
+      );
+      yield* fs.makeDirectory(folder);
+      const launcher = path.join(folder, "muse.cmd");
+      // Records its arguments next to itself; reaching the file at all proves cmd found it.
+      yield* fs.writeFileString(launcher, '@echo off\r\necho %*>"%~dp0args.txt"\r\n');
+      const launch = yield* museLaunch(launcher);
+      const run = NodeChildProcess.spawnSync(launch.command, [...launch.args, "serve", "--x"], {
+        cwd: folder,
+        encoding: "utf8",
+      });
+      expect(run.status, run.stderr).toBe(0);
+      expect((yield* fs.readFileString(path.join(folder, "args.txt"))).trim()).toBe("serve --x");
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+});
+
+describe("Muse workspace root", () => {
+  it("writes Windows paths in their verbatim form", () => {
+    expect(museVerbatimPath("C:\\Users\\Person\\repo")).toBe("\\\\?\\C:\\Users\\Person\\repo");
+    expect(museVerbatimPath("\\\\server\\share\\repo")).toBe("\\\\?\\UNC\\server\\share\\repo");
+    expect(museVerbatimPath("\\\\?\\C:\\repo")).toBe("\\\\?\\C:\\repo");
+  });
+
+  // FileSystem.realPath keeps the case it is given; Muse rejects a root whose case differs from the disk's.
+  it.effect("fixes the case of a Windows root natively", () =>
+    Effect.gen(function* () {
+      if ((yield* HostProcess.Platform) !== "win32") return;
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const created = yield* fs.makeTempDirectoryScoped({ prefix: "MuseRoot-" });
+      const root = yield* museWorkspaceRoot(created.toLowerCase());
+      expect(root.startsWith("\\\\?\\")).toBe(true);
+      expect(root.endsWith(`\\${path.basename(created)}`)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

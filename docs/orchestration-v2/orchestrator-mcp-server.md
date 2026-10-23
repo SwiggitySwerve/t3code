@@ -45,7 +45,9 @@ Before `ProviderSessionManager` opens a new V2 provider session, it asks
 - the concrete provider instance; and
 - the provider session.
 
-The credential grants `preview` and `orchestration` capabilities. Credentials
+Workflow members (including judges) receive no `orchestration` capability, so they
+cannot delegate or start workflows. Ordinary delegated children retain orchestration
+access. Browser, device, worktree and pull-request access follow their existing settings. Credentials
 expire after a maximum lifetime, expire when idle, and are revoked when the
 provider session is released. The raw token is not persisted in orchestration
 state.
@@ -192,7 +194,7 @@ provider selection model-visible without allowing a request that cannot run.
 
 ## Tool Surface
 
-The server exposes eleven orchestration tools.
+The orchestration toolkit includes the tools below.
 
 ### `orchestrator_capabilities`
 
@@ -206,6 +208,14 @@ Returns:
 
 Unavailable providers include model-visible constraints such as missing V2
 adapter support, disabled state, missing executable, or missing authentication.
+
+The model list is short on purpose: catalogs such as OpenCode can hold hundreds
+of models, and every call lands in the agent's context. Each provider lists
+custom, favorite, and the caller's own models, plus all current (non-legacy)
+models for Codex, Claude, Muse, and Grok, or the first 8 current models in the
+user's model order for other providers. `omittedModels` counts the rest, and the
+`search` input finds them, legacy models included. `delegate_task` still accepts
+any catalog model.
 
 ### `delegate_task`
 
@@ -237,6 +247,13 @@ that driver; an explicit `providerInstanceId` is honored exactly and fails
 when unavailable. Selecting a different provider without a model uses that
 provider's first advertised model.
 
+A provider runs a runtime mode it does not offer as `approval-required`, so a
+child would ask for approval on every command. `orchestrator_capabilities`
+lists `runtimeModes` only for a provider that offers some of the modes, and
+omits it for a provider that offers all of them. When the target lists
+`runtimeModes`, an explicit `runtimeMode` outside that list is refused, and an
+inherited mode steps down to the broadest mode the target offers.
+
 Each delegated review round uses a new `delegate_task` call with the original brief,
 prior findings, responses, and unresolved objections. Track each round by its own `taskId` and use
 a distinct `clientRequestId` per round, stable across retries of that round.
@@ -252,7 +269,15 @@ provider session. The request becomes the V2 command
 `mode: "async"` returns the current durable state immediately.
 `mode: "wait"` waits for the task result, including nested work and completion follow-ups, or until
 the timeout expires. A wait timeout does not cancel the child; the result sets
-`waitTimedOut: true`, and the caller can continue with `task_status`.
+`waitTimedOut: true`, and the caller can continue with `task_status`. A pending blocking
+question also ends the wait with `hasPendingQuestion: true` and `waitTimedOut: false`.
+If `hasPendingQuestion`, pass `threadId=childThreadId` to `t3_pending_request_list`,
+`t3_pending_request_read` (with `requestId`) and `t3_pending_request_respond`, or ask
+the user; the task's completion still wakes this thread. A pending live approval for the
+task's own unfinished work also ends the wait. Its identity appears in `pendingApproval`;
+it grants no approval authority. Read the fresh full request in the child thread before
+responding, since the durable record can outlive its provider callback. Async questions
+do not end the wait.
 
 ```ts
 type DelegateTaskResult = {
@@ -271,9 +296,64 @@ type DelegateTaskResult = {
   latestTerminalStatus: "completed" | "failed" | "cancelled" | "interrupted" | null;
   latestTerminalSummary: string | null;
   latestTerminalResultContextTransferId: string | null;
+  hasPendingQuestion: boolean;
+  pendingApproval: {
+    requestId: string;
+    kind: "command" | "file-read" | "file-change" | "mcp-elicitation" | "permission";
+    runId: string;
+  } | null;
   waitTimedOut: boolean;
 };
 ```
+
+### `delegate_tasks`
+
+Starts up to 100 delegated tasks in one call. Each entry takes the same fields as
+`delegate_task` except `mode` and `timeoutMs`: batched tasks always run async.
+Every entry is resolved and checked before any starts, so an invalid entry starts
+nothing and the error names its index. An entry's retry key is its own
+`clientRequestId`, or the batch `clientRequestId` plus its position, and maps to
+the same command id `delegate_task` would use. Retrying a batch therefore starts
+only the entries that did not start. The result lists each `taskId`,
+`childThreadId`, status, provider and model in request order.
+
+A coordinator agent that fans out N tasks one `delegate_task` call at a time
+spends one model step per task and, in practice, does not start them all in one
+turn. One `delegate_tasks` call removes both costs.
+
+### Structured results
+
+`delegate_task` and `delegate_tasks` take an optional `resultSchema`, a JSON
+Schema. The child's prompt asks it to end its final message with a fenced json
+block matching the schema, between `<t3-result-schema>` markers that the server
+reads back. `task_status` and `task_wait` then return `structuredResult` when
+the last json block parses and matches (checked with ajv), or
+`structuredResultError` naming what is missing. The prompt is the only place
+the schema is stored, so a task's schema cannot drift from what its child saw.
+
+### Running limit
+
+`maxRunningDelegatedTasks` in server settings (default 16) caps delegated
+children that run at once across the environment. A child past the limit is
+created as a `preparing` run with `admission: "waiting"` and a "Waiting for a
+free agent slot" item, and reports `queued`. When an admitted child's run ends,
+and at server start, the oldest waiting runs are released through
+`prepared-run.release`. New children queue behind waiting ones, so order is
+first come, first served. Worktree children already wait for their checkout and
+are admitted when created: they count toward the limit but are not held by it, so
+a fan-out of many worktree children can run past it (a known gap). Concurrent delegations from different parents can
+briefly exceed the limit by the number of racing commands.
+
+### `task_wait`
+
+Waits for up to 100 delegated tasks of the calling thread. Mode `all` (the
+default) returns when every task is ready, `any` when at least one is. A task is
+ready when it is terminal or waits on a question or approval. Ready tasks come
+back with their summaries in request order and the rest as pending; a timeout
+returns `timedOut: true` and cancels nothing. Reading a finished task
+acknowledges its delivery like `task_status`, so the parent is not also woken
+for it. The wait follows the parent's `subagent.updated` events for status and
+each child's `runtime-request.updated` events for questions and approvals.
 
 ### `task_status`
 
@@ -295,6 +375,280 @@ watches. A nonterminal task with no interruptible run is rejected. A terminal ta
 returns its existing status, and its child thread still stops, including later
 runs and watch wakes. Published task results remain available. It accepts an
 optional cancellation reason.
+
+### Workflows: `workflow_start`, `workflow_status`, `workflow_stop`
+
+`workflow_start` runs a script that starts and combines delegated tasks, so one
+call covers fan-out, phases and follow-up steps that would otherwise take one
+model step each. It returns a `workflowId` at once; the calling thread is woken
+once, when the script ends. Any provider can call it.
+
+Scripts use the Claude Code Workflow format: an optional
+`export const meta = { name, description, phases: [{ title }] }`, then a body that
+may `await` and `return`. The script reads `args` (the JSON value passed to
+`workflow_start`) and can call:
+
+- `agent(prompt, options)`: starts one delegated task and resolves to its summary,
+  or to the parsed `structuredResult` when `options.schema` is set. Options are
+  `label`, `phase`, `model` or `target` (provider instance, model, options),
+  `isolation`, `role` and `schema`. A failed or cancelled agent resolves to
+  `null`, and the failure is recorded on the agent.
+- `parallel(functions)`: runs every function and resolves to their results in
+  order. `pipeline(items, ...stages)` passes each item through the stages in turn,
+  with all items running at once; a stage gets `(previous, item, index)`, and an
+  item stops at the first stage that returns `null`. Both accept at most 4,096
+  items; a step that throws resolves to `null`.
+- `budget.total`, `budget.spent` and `budget.remaining()`: the token budget
+  passed as `budgetTokens`, or `null` and `Infinity` without one.
+- `phase(title)` and `log(...values)`: progress shown in `workflow_status` and the
+  workflow row.
+
+Every `agent()` call is an ordinary delegated task under the workflow, so model
+options, worktree isolation, mode ceilings, the running limit and structured
+results apply unchanged. Its retry key is a hash of its phase, label, prompt,
+schema, target and isolation plus how many identical calls came before it, so a
+re-run maps each call back to the same task. A workflow may start at most 1,000
+agents.
+
+The script runs in a QuickJS sandbox (`quickjs-emscripten`), one module per run,
+with no filesystem, network, process or timer access. `Date.now()`,
+`Math.random()` and `new Date()` throw, because a resumed script must make the
+same calls in the same order. Memory is capped at 256 MB and each synchronous
+slice at 10 seconds. A script that fails to compile is rejected before anything
+starts.
+
+The workflow is an app-owned subagent row on the calling thread whose `workflow`
+field holds its phases and agents; the existing workflow view renders it.
+Member tasks hang under that row, and their own completion deliveries are
+disposed, so only `workflow.complete` delivers to the caller. `workflow_status`
+returns the status, phases, each agent's status, model and summary, the latest
+log line, and the script's return value as JSON or why it failed.
+
+Each agent also reports cumulative `usage`, `outcomeCategory`, and `timings`. Usage
+is recomputed from persisted provider-turn totals across every child run and retry;
+workflow totals include every member, including independent judges and their retries.
+`inputTokens` includes cached reads (`cachedInputTokens`) and cache writes
+(`cacheCreationTokens`). `uncachedInputTokens` subtracts both from input; an omitted
+cache-write count contributes zero to that subtraction. Output includes reasoning.
+`totalTokens` and `tokensUsed` count input plus output, rather than context occupancy.
+
+Usage `status` is `complete`, `partial` (known counts are lower bounds), or
+`unavailable`. Unknown counts are null, never a measured zero. Cache breakdowns
+may be null even when input/output totals are complete. Cursor, Grok and Antigravity
+report no totals; interrupted or cancelled turns may also have none. Totals cover
+the provider's reported main-agent scope; unreported provider-native subagents are
+not measured. Older workflow rows without attempt IDs can attribute only their
+latest attempt to an agent (reported as partial when retries are known); the workflow
+total still includes all member tasks.
+
+Terminal outcome categories are `never_started`, `timed_out`, `cancelled`,
+`provider_error`, `check_failed`, and `completed`; active agents report null.
+Categories record runner facts, including a deadline stop or an unsuccessful check.
+
+Timing values are epoch milliseconds, or null when unrecorded: `createdAt`,
+`runStartedAt`, `providerTurnStartedAt`, `providerTurnEndedAt`, `completedAt`
+(after checkpoint capture), and `runnerSettledAt`. For retries they span the first
+creation/start through the last end/completion, including gaps. They do not sum
+parallel durations or separate individual model responses inside a provider turn.
+Checkpoint behavior is unchanged.
+
+`workflow_stop`, and `task_cancel` on a `workflowId`, stop the script, stop every
+running member as `task_cancel` would, and settle the workflow as cancelled.
+Stopping the calling thread does the same.
+
+#### Checks and file scopes
+
+These follow the `omx graph` execution graph's protected verifiers
+(`~/.agents/graph`), adapted to T3 agents.
+
+- `verify` checks an agent's result before `agent()` returns it:
+  - `{ type: "process", argv, cwd?, timeoutMs?, maxOutputBytes?, successExitCodes? }` runs
+    `argv` in the agent's workspace (its worktree, the caller's worktree, or the project
+    root) without a shell, and passes on an allowed exit code (default `[0]`).
+    `{{result}}` in an argument becomes the path of a file holding the agent's result.
+    Limits: 256 arguments, 64 KiB of arguments, 15 minutes (default 2), 1 MiB of output
+    (default 64 KiB). A `.cmd` or `.bat` launcher is refused, because it needs a shell.
+    Running a command needs the calling thread in full-access mode; otherwise the agent is
+    refused before it starts.
+  - `{ type: "structured", requiredPointers?, equals? }` reads JSON pointers from the
+    agent's structured result, so it needs `schema`. With `outputId`, it reads that
+    declared output file's JSON instead and needs no `schema`; without pointers it only
+    requires the file to hold JSON.
+  - `{ type: "judgment", rubric, target? }` starts a separate agent, labelled
+    `check <label>`, that grades the result against the criteria and answers
+    `{ outcome: "passed" | "failed", reasons }`. A judge can be wrong; its reasons are kept.
+    The judge grades the returned result and works in the caller's checkout, so it does not
+    see files a worktree agent changed; check those with a process check instead.
+    A failed check starts the agent again with what the check saw appended to its task,
+    within the same three attempts. A check that cannot run (timeout, too much output, a
+    missing executable, no verdict) fails the agent without retrying. When the agent was
+    given a `schema`, a result that does not match it fails a `structured` check first,
+    whatever else is checked. `workflow_status`
+    reports each agent's latest `verification` (type, outcome, attempts, detail), and an
+    agent that failed its check reports `failed`. Process checks run again when a workflow
+    resumes after a restart.
+- `scopes: { read?, write? }` lists workspace-relative paths. They are added to the
+  agent's task as instructions; they are not enforced on the file system. Two agents in
+  the same checkout whose write scopes overlap (one path equals or contains the other)
+  never run at once: the later one waits. Agents with `isolation: "worktree"` do not wait.
+- `inputs` and `outputs` declare the files an agent reads and must write, as
+  `[{ id, path, maxBytes?, sha256? }]` with workspace-relative paths (at most 32 each,
+  `maxBytes` default 256 KiB, at most 16 MiB). They need the shared checkout, so
+  `isolation: "worktree"` refuses them. Both are listed in the agent's task.
+  - Before each attempt, every input must exist within `maxBytes`, and an input with
+    `sha256` must still have those bytes; otherwise the agent fails without starting.
+  - After the turn, every output must exist within `maxBytes`. A missing or oversized
+    output fails an `outputs` check, which retries like any failed check; `verify`
+    runs only once the outputs pass, and a process check may name a declared file as
+    `{{input:<id>}}` or `{{output:<id>}}` (an absolute path in the checkout).
+  - Outputs count as write scopes, so two agents never write the same output at once.
+  - `agent()` then returns `{ result, outputs: { <id>: { path, sha256, sizeBytes } } }`,
+    so a later agent can pin what an earlier one wrote.
+- `report: true` makes `agent()` always resolve to
+  `{ ok, result, outputs, attempts, verification, reason }`, failed or not, instead of
+  `null` on failure, so a script can record why an agent failed. A spent budget still
+  throws.
+
+#### Ultracode
+
+The `ultracode` server setting (also a project override; Settings, General) asks agents
+to orchestrate substantive work as a workflow. `keyword`, the default, opts in a turn
+whose message contains the word ultracode; `always` opts in every user or agent turn;
+`off` never does. System turns, such as completion wakes, are never opted in. An opted-in
+turn reaches the provider with a `<t3-ultracode>` note asking for `workflow_start`; the
+stored message is unchanged. Claude Code has its own ultracode, which the keyword starts,
+so a Claude turn only gets the word ultracode added when `always` opts it in.
+`@t3tools/provider-core/server/ultracode` owns this rule, and run execution applies it.
+
+#### In the app
+
+The calling thread's timeline shows a T3-run workflow where it started: its state
+(running, finished, failed or stopped), name and description, agent counts, the
+script's latest log line (or, once it ends, its result), each phase with its agents
+and their own provider icons, and the script, folded when long. While it runs, a
+Stop button stops the whole workflow. The thread's Lineage panel shows the workflow
+as one row whose phases expand to its agents, with the same Stop. Agents open their
+own threads. The row stores the script with a settings line for its args and budget;
+`@t3tools/shared/storedWorkflowScript` owns that format for the server and clients.
+
+#### Durability and limits
+
+- **Restart.** A server stop leaves running workflow rows open. Once startup
+  recovery has settled the runs the stop cancelled, the runner starts each
+  script again from the stored script, args and budget. Retry keys map every
+  `agent()` call back to its task, so finished agents return their stored
+  results at once and running ones are waited on again; no agent starts twice.
+  Recovery marks the runs it cancels with `cancelledByServerRestart`.
+- **Retries.** An agent runs at most three times in all. It runs again when it
+  failed, when a server restart cancelled it, or when it stalled. An agent a user
+  stopped is not retried; the script sees `null`.
+- **Stalls.** Every 30 seconds the runner checks each waited-on agent's thread.
+  If its last update has not changed for `stallTimeoutMs` (default 20 minutes,
+  at least 1 minute), the runner stops the agent and starts it again.
+- **Attempt deadlines.** `attemptTimeoutMs` (1 minute to 6 hours) bounds each
+  attempt, measured from the attempt's run start, so it holds across a restart.
+  The same sweep stops an attempt past its deadline; that counts as a failed
+  attempt and retries with a note asking the agent to finish within the budget.
+  It is separate from `stallTimeoutMs`, which measures inactivity.
+- **Budget.** `budgetTokens` counts cumulative input plus output for finished
+  attempts, including cached reads and writes, retries and judges. It is an estimate
+  rather than a bill. Once it is spent, `agent()` throws for any agent that has not
+  already started; agents already running finish. `workflow_status` reports
+  `tokensUsed`, `usage`, and `budgetTokens`. The script's `budget.spent` and remaining
+  allowance use known totals only; missing usage cannot enforce the cap. Completed
+  attempts are counted again from persisted records when the script resumes.
+- **Caps.** 1,000 agents per workflow and 4,096 items per `parallel` or
+  `pipeline` call. The environment-wide running limit applies to every agent.
+- **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its
+  own checkout of the calling thread's commit, like `delegate_task`.
+
+### Graphs: `graph_review`, `graph_start`
+
+A graph declares work as nodes with dependencies, files and checks instead of a
+script. It follows the `omx graph` execution graph (`~/.agents/graph`): review
+binds the inputs, the reviewed digest gates the start, and a graph completes only
+when every node passed its checks.
+
+```json
+{
+  "schemaVersion": 1,
+  "name": "serial",
+  "nodes": {
+    "inventory": {
+      "subject": "Inventory fixed source data",
+      "description": "Read the input and publish its canonical JSON.",
+      "dependsOn": [],
+      "scopes": { "read": ["fixtures"], "write": ["artifacts"] },
+      "inputs": [
+        { "id": "source", "kind": "workspace_snapshot", "path": "fixtures/input/inventory.json" }
+      ],
+      "outputs": [{ "id": "inventory", "path": "artifacts/inventory.json", "maxBytes": 65536 }],
+      "verify": {
+        "type": "process",
+        "argv": ["node", "verify.mjs", "{{input:source}}", "{{output:inventory}}"]
+      },
+      "attemptBudget": "short"
+    },
+    "summary": {
+      "subject": "Summarize the published inventory",
+      "description": "Read the published inventory and publish its summary.",
+      "dependsOn": ["inventory"],
+      "inputs": [
+        { "id": "inventory", "kind": "task_output", "nodeId": "inventory", "outputId": "inventory" }
+      ],
+      "outputs": [{ "id": "summary", "path": "artifacts/summary.json" }],
+      "verify": { "type": "structured", "outputId": "summary", "requiredPointers": ["/item_count"] }
+    }
+  }
+}
+```
+
+- **Nodes.** `subject` is the agent's label and `description` its task. Optional:
+  `phase`, `target`, `role`, `schema`, `scopes`, `inputs`, `outputs`, `verify` (as
+  for workflow agents), `stallTimeoutMs`, and `attemptBudget`: `short`, `standard`
+  (default) or `long`, 30 minutes, 2 hours or 6 hours per attempt. `long` needs
+  `longBudgetApproved: true`.
+- **Inputs.** A `workspace_snapshot` names a file in the caller's checkout. A
+  `task_output` names an output another node declares; that node must be in
+  `dependsOn`.
+- **`graph_review({ graph })`** validates the graph and reports every problem as a
+  blocker: bad or duplicate ids, unknown or cyclic dependencies, unsafe paths, a
+  `task_output` naming an undeclared output or a node outside `dependsOn`, two
+  nodes declaring one output path, `long` without approval, a structured `outputId`
+  the node does not declare, and a missing or oversized input. It hashes every
+  `workspace_snapshot` input and returns the run order as `layers`, `writeConflicts`
+  between nodes with no path between them (the runner runs those one at a time), the
+  inputs it found, `ready`, and a `digest` over the normalized graph and the input
+  hashes. It starts and records nothing; Claude's read-only tool list includes it.
+- **`graph_start({ graph, acceptedDigest, budgetTokens?, title?, clientRequestId? })`**
+  reviews again and refuses blockers, a digest mismatch, or an input file that
+  changed since the review (naming the files, for reviews this server process
+  made). Reviews are kept in memory, so after a restart a mismatched digest is
+  refused as "Review not found"; run `graph_review` again. A digest that still
+  matches starts without the record. It then runs the graph as a workflow, so `workflow_status`,
+  `workflow_stop`, resume after a restart, the budget, the app's display and the one
+  completion wake work as for a script.
+- **Running.** The stored script is one fixed driver with the graph as its args.
+  A node starts once its own predecessors passed. Its snapshot inputs are pinned to
+  the reviewed hashes, and its `task_output` inputs to the path and hash its
+  producer published, so a node never reads bytes other than those reviewed or
+  produced. Each node runs with `report: true` and its attempt deadline. A node
+  whose predecessor did not pass is skipped, naming that predecessor.
+- **Result.** Per node: `status` (`passed`, `failed` or `skipped`), `attempts`,
+  `inputs` (id to sha256), `outputs` (id to path, sha256 and size), `verification`
+  and, unless it passed, `reason`. If every node passed the workflow completes with
+  `{ ok: true, nodes }`; otherwise it fails with `Graph failed: ` and the same record.
+- **Mapping to omx.** Field names are the omx `ProtectedExecutionContractV1` names in
+  camelCase: `depends_on` → `dependsOn`, `node_id` → `nodeId`, `output_id` →
+  `outputId`, `max_bytes` → `maxBytes`, `attempt_policy.budget` → `attemptBudget`,
+  a `structured_artifact` verifier → `verify: { type: "structured", outputId }`, and
+  an `independent_judgment` verifier → a `judgment` check (or a `process` check
+  when it is a command). Not carried over: content-addressed output snapshots (so
+  producers cannot use worktrees), publication supersession, staffing and worker
+  allocation.
+- **Owners.** `apps/server/src/mcp/workflowGraph.ts` owns graph parsing, review and
+  the driver script; `workflowChecks.ts` owns paths, files and checks;
+  `workflowRunner.ts` owns running agents.
 
 ### `create_threads`
 
@@ -362,14 +716,16 @@ Actor and ingress are separate so agent-authored user-role messages remain
 distinguishable from human-authored messages.
 
 Agents mention another thread as `[title](t3-thread://v1/<threadId>)`. The
-link carries only the id, which resolves in the environment of the message that
-holds it. Clients show the thread's current title rather than the label, so a
-rename never leaves a stale link.
+link carries only the id. Clients first resolve it in the message's environment,
+then use a unique match in another enabled environment. Ambiguous matches stay
+unresolved. Web and desktop show the resolved thread’s current title. Mobile
+relabels local matches; cross-environment links can retain the written label.
 
 List and read results report `snoozed` and `snoozedUntil`, and
 `t3_thread_list` filters on `snoozed`. The server's `isSnoozed` follows the
 client's `effectiveSnoozed`, so agents and the sidebar agree: a snoozed thread
-wakes early when it has a pending request, fails, or completes after the snooze.
+wakes early only when it has a pending request or fails after snoozing. Completed
+runs, background wakes, and delegated completions keep it snoozed.
 
 ### `t3_thread_update`
 
@@ -445,6 +801,19 @@ persisted events and then follows live events, so finalization also runs after
 a server restart. An existing `subagent_result` transfer makes finalization
 idempotent.
 
+Users rarely watch child threads, so a child question would otherwise go
+unanswered. When a child opens a pending `user_input` request, the parent gets
+a notification message telling it to answer with the pending request tools or
+ask the user. The message says whether the child is blocked or, for a Codex
+async question, still working. If the question is answered or dismissed before
+the notification starts a turn, that queued turn is cancelled. Approvals are not
+routed, because those tools cannot answer them.
+A parent still blocked in a `delegate_task` wait gets the blocking question
+through that wait instead.
+If the provider cuts that wait short, a still-pending live question wakes the
+parent when its launching run completes, fails, or waits for post-turn work.
+Stopping or interrupting the parent prevents this catch-up.
+
 A failed run exposes its provider error before any progress text. Successful
 results use the latest assistant content from the final work turn.
 
@@ -518,6 +887,16 @@ Coverage includes:
 - spawn and result context transfers;
 - async status polling;
 - cancellation;
+- batch delegation, task waits, structured results and the running limit;
+- workflow scripts: phases, parallel and pipeline steps, one completion delivery,
+  resume after a restart without duplicate agents, retries of failed,
+  restart-cancelled and stalled agents, the token budget, the agent cap, and
+  per-agent worktrees;
+- workflow schema results, script errors, and Stop through `workflow_stop`, `task_cancel`
+  and the calling thread;
+- attempt deadlines, and graphs: review binding inputs without recording anything,
+  refusals of blockers, a wrong digest and a changed input, a passing graph's per-node
+  record and single wake, a failed node skipping its dependents, and Stop;
 - batch ordinary-thread creation;
 - thread listing and timeline reads, including another project's threads;
 - ordinary-thread send, wait, steering, and interruption;

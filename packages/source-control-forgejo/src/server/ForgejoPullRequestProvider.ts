@@ -1,3 +1,4 @@
+import { SourceControlProviderKind } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as Result from "effect/Result";
@@ -32,12 +33,16 @@ import {
   forgejoChecks,
   forgejoReactions,
 } from "./forgejoPullRequestJson.ts";
+import { ForgejoBranchStatusChecks, markRequiredForgejoChecks } from "./forgejoRequiredChecks.ts";
+import { definition } from "../client/definition.ts";
+
+const isForgejoCliError = Schema.is(ForgejoCli.ForgejoCliError);
 
 const CAPABILITIES: PullRequestCapabilities = {
   diff: true,
   viewedFiles: "environment",
   comment: true,
-  actions: ["merge", "close", "reopen", "update-branch"],
+  actions: [...definition.changeRequestActions],
   mergeMethods: ["merge", "squash", "rebase"],
   updateMethods: ["merge", "rebase"],
   search: false,
@@ -67,7 +72,7 @@ export const make = Effect.gen(function* () {
   const cli = yield* ForgejoCli.ForgejoCli;
   const failure = (operation: string, detail: string, cause?: unknown) =>
     new PullRequestProviderError({
-      provider: "forgejo",
+      provider: SourceControlProviderKind.make("forgejo"),
       operation,
       reason: "failed",
       detail,
@@ -78,7 +83,7 @@ export const make = Effect.gen(function* () {
       Effect.mapError(
         (error) =>
           new PullRequestProviderError({
-            provider: "forgejo",
+            provider: SourceControlProviderKind.make("forgejo"),
             operation: input.path,
             detail: error.detail,
             cause: error,
@@ -200,10 +205,48 @@ export const make = Effect.gen(function* () {
     );
     return permissions(repo, pr, viewer);
   });
+  const readChecks = Effect.fn("ForgejoPullRequestProvider.readChecks")(function* (
+    input: ProviderRepositoryRef,
+    pr: typeof ForgejoPullRequest.Type,
+  ) {
+    const branch = read(
+      {
+        ...input,
+        path: `${repoPath(input)}/branches/${pr.base.ref.split("/").map(encodeURIComponent).join("/")}`,
+      },
+      ForgejoBranchStatusChecks,
+    ).pipe(
+      Effect.catchTags({
+        PullRequestProviderError: (error) => {
+          if (
+            isForgejoCliError(error.cause) &&
+            (error.cause.reason === "forbidden" || error.cause.reason === "not-found")
+          ) {
+            return Effect.succeed({});
+          }
+          return Effect.fail(error);
+        },
+      }),
+    );
+    const [statuses, policy] = yield* Effect.all(
+      [
+        page(
+          {
+            ...input,
+            path: `${repoPath(input)}/statuses/${encodeURIComponent(pr.head.sha)}?sort=recentupdate`,
+          },
+          ForgejoStatus,
+        ),
+        branch,
+      ],
+      { concurrency: 2 },
+    );
+    return markRequiredForgejoChecks(forgejoChecks(statuses.items, pr.html_url), policy);
+  });
   const unsupported = (operation: string) =>
     Effect.fail(failure(operation, `Forgejo does not expose ${operation} through its API.`));
   const provider: PullRequestProviderApi = {
-    kind: "forgejo",
+    kind: SourceControlProviderKind.make("forgejo"),
     capabilities: CAPABILITIES,
     getViewer,
     listChangeRequests: Effect.fn("ForgejoPullRequestProvider.listChangeRequests")(
@@ -242,14 +285,7 @@ export const make = Effect.gen(function* () {
     getChangeRequestChecks: Effect.fn("ForgejoPullRequestProvider.getChangeRequestChecks")(
       function* (input) {
         const pr = yield* getPull(input);
-        const statuses = yield* page(
-          {
-            ...input,
-            path: `${repoPath(input)}/statuses/${encodeURIComponent(pr.head.sha)}?sort=recentupdate`,
-          },
-          ForgejoStatus,
-        );
-        return { state: forgejoChangeRequest(pr).state, checks: forgejoChecks(statuses.items) };
+        return { state: forgejoChangeRequest(pr).state, checks: yield* readChecks(input, pr) };
       },
     ),
     getChangeRequest: Effect.fn("ForgejoPullRequestProvider.getChangeRequest")(function* (input) {
@@ -257,22 +293,17 @@ export const make = Effect.gen(function* () {
         [getPull(input), getRepo(input), getViewer(input)],
         { concurrency: 3 },
       );
-      const statuses = yield* page(
-        {
-          ...input,
-          path: `${repoPath(input)}/statuses/${encodeURIComponent(pr.head.sha)}?sort=recentupdate`,
-        },
-        ForgejoStatus,
-      );
+      const checks = yield* readChecks(input, pr);
       return {
         ...forgejoChangeRequest(pr),
+        headSha: pr.head.sha,
         body: pr.body ?? "",
         changedFiles: pr.changed_files ?? 0,
         reviewers: (pr.requested_reviewers ?? []).flatMap((user) => {
           const actor = forgejoActor(user);
           return actor ? [actor] : [];
         }),
-        checks: forgejoChecks(statuses.items),
+        checks,
         baseComparison: !pr.merge_base
           ? "unknown"
           : pr.merge_base === pr.base.sha
@@ -299,7 +330,11 @@ export const make = Effect.gen(function* () {
               })),
             ),
             page({ ...input, path: `${pullPath(input)}/reviews` }, ForgejoReview),
-            page({ ...input, path: `${pullPath(input)}/commits` }, ForgejoCommit),
+            // Without these, each commit lists its files and a big merge outgrows the output limit.
+            page(
+              { ...input, path: `${pullPath(input)}/commits?files=false&verification=false` },
+              ForgejoCommit,
+            ),
             page({ ...input, path: `${issuePath(input)}/reactions` }, ForgejoReaction),
             getViewer(input),
           ],
@@ -397,7 +432,7 @@ export const make = Effect.gen(function* () {
           ? yield* read(
               {
                 ...input,
-                path: `${repoPath(input)}/git/commits/${encodeURIComponent(input.commit)}`,
+                path: `${repoPath(input)}/git/commits/${encodeURIComponent(input.commit)}?files=false&verification=false`,
               },
               ForgejoCommit,
             )
@@ -430,11 +465,25 @@ export const make = Effect.gen(function* () {
     runAction: (input) => {
       switch (input.action) {
         case "merge":
-          return write({
-            ...input,
-            path: `${pullPath(input)}/merge`,
-            method: "POST",
-            body: { Do: input.mergeMethod ?? "merge" },
+          return Effect.gen(function* () {
+            const deleteBranch = (yield* getRepo(input)).default_delete_branch_after_merge ?? false;
+            yield* write({
+              ...input,
+              path: `${pullPath(input)}/merge`,
+              method: "POST",
+              body: { Do: input.mergeMethod ?? "merge", delete_branch_after_merge: deleteBranch },
+            }).pipe(
+              Effect.catchTags({
+                // Forgejo merges before deleting the branch, so a refused deletion still merged.
+                PullRequestProviderError: (error) =>
+                  deleteBranch
+                    ? getPull(input).pipe(
+                        Effect.mapError(() => error),
+                        Effect.flatMap((pr) => (pr.merged ? Effect.void : Effect.fail(error))),
+                      )
+                    : Effect.fail(error),
+              }),
+            );
           });
         case "close":
         case "reopen":
