@@ -26,6 +26,12 @@ interface HarnessOptions {
   readonly finish?: (spawned: number) => "completed" | "failed" | "hang";
   /** Workspace files by path, for declared outputs. */
   readonly files?: Readonly<Record<string, string>>;
+  /** Why every agent's result misses its schema, when it should. */
+  readonly structuredResultError?: string;
+  /** Process checks, for callers allowed to run commands. */
+  readonly runCommandCheck?: WorkflowRunnerDeps["runCommandCheck"];
+  /** Whether the agents' runs have started, rather than waiting for a running slot. */
+  readonly started?: boolean;
 }
 
 /** A runner whose agents finish as told, recording what it dispatches and stops. */
@@ -35,6 +41,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const completed = yield* Deferred.make<string>();
     const statuses = new Map<string, string>();
     const stops: Array<string> = [];
+    const keys = new Map<string, string>();
     let spawned = 0;
     const update = (id: string, status: string) => {
       statuses.set(id, status);
@@ -56,14 +63,16 @@ const makeHarness = (options: HarnessOptions = {}) =>
       getThreadShell: () =>
         Effect.succeed({
           updatedAt: DateTime.makeUnsafe(0),
-          latestRunStartedAt: DateTime.makeUnsafe(0),
+          latestRunStartedAt: options.started === false ? null : DateTime.makeUnsafe(0),
+          ...(options.started === false ? { activityRunStatus: "preparing" } : {}),
         }),
     } as unknown as ThreadManagementService.ThreadManagementService["Service"];
     const deps: WorkflowRunnerDeps = {
       threads,
-      spawnAgent: () =>
+      spawnAgent: (_workflow, item, requestKey) =>
         Effect.gen(function* () {
           spawned += 1;
+          keys.set(item.task, requestKey);
           const taskId = NodeId.make(`node:agent-${spawned}`);
           const finish = options.finish?.(spawned) ?? "completed";
           if (finish !== "hang") yield* update(taskId, finish);
@@ -82,10 +91,13 @@ const makeHarness = (options: HarnessOptions = {}) =>
           cancelledByServerRestart: false,
           outcomeCategory: statuses.get(taskId) === "completed" ? "completed" : "cancelled",
           usage: aggregateWorkflowUsage([]),
+          ...(options.structuredResultError === undefined
+            ? {}
+            : { structuredResultError: options.structuredResultError }),
         }),
       agentStarted: () => Effect.succeed(false),
-      canRunCommands: () => Effect.succeed(false),
-      runCommandCheck: () => Effect.die("unused"),
+      canRunCommands: () => Effect.succeed(options.runCommandCheck !== undefined),
+      runCommandCheck: options.runCommandCheck ?? (() => Effect.die("unused")),
       readWorkspaceFile: (_workflow, path) => {
         const text = options.files?.[path];
         return Effect.succeed(
@@ -105,6 +117,9 @@ const makeHarness = (options: HarnessOptions = {}) =>
       completed,
       spawned: () => spawned,
       stops,
+      keys,
+      /** Ends the workflow row as a stop would. */
+      stopWorkflow: () => update(workflowId, "cancelled"),
     };
   });
 
@@ -283,4 +298,68 @@ describe("workflow runner", () => {
       }),
     );
   });
+
+  it.effect("keys an unlabelled agent by its content, not by when it started", () =>
+    Effect.gen(function* () {
+      const first = yield* makeHarness();
+      yield* launch(first.runner, 'return await parallel([() => agent("a"), () => agent("b")])');
+      yield* Deferred.await(first.completed);
+      const second = yield* makeHarness();
+      yield* launch(second.runner, 'return await parallel([() => agent("b"), () => agent("a")])');
+      yield* Deferred.await(second.completed);
+      expect(second.keys.get("a")).toBe(first.keys.get("a"));
+      expect(second.keys.get("b")).toBe(first.keys.get("b"));
+    }),
+  );
+
+  it.effect("fails a result that misses its schema even when its other check passes", () =>
+    Effect.gen(function* () {
+      const { runner, completed, spawned } = yield* makeHarness({
+        structuredResultError: "The final message has no json block.",
+        runCommandCheck: () => Effect.succeed({ outcome: "passed", detail: "exit code 0" }),
+      });
+      yield* launch(
+        runner,
+        'return await agent("x", { schema: { type: "object" }, verify: { type: "process", argv: ["node"] }, report: true })',
+      );
+      const report = JSON.parse(yield* Deferred.await(completed));
+      expect(report).toMatchObject({ ok: false, attempts: 3 });
+      expect(report.verification).toMatchObject({ type: "structured", outcome: "failed" });
+      expect(spawned()).toBe(3);
+    }),
+  );
+
+  it.effect("interrupts a running process check when the workflow stops", () =>
+    Effect.gen(function* () {
+      const interrupted = yield* Deferred.make<void>();
+      const checkStarted = yield* Deferred.make<void>();
+      const harness = yield* makeHarness({
+        runCommandCheck: () =>
+          Deferred.succeed(checkStarted, undefined).pipe(
+            Effect.andThen(Effect.never),
+            Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined)),
+          ),
+      });
+      yield* launch(
+        harness.runner,
+        'return await agent("x", { verify: { type: "process", argv: ["node"] } })',
+      );
+      yield* Deferred.await(checkStarted);
+      yield* harness.stopWorkflow();
+      yield* Deferred.await(interrupted);
+    }),
+  );
+
+  it.effect("does not time out an agent still waiting for a running slot", () =>
+    Effect.gen(function* () {
+      const { runner, completed, stops } = yield* makeHarness({
+        started: false,
+        finish: () => "hang",
+      });
+      yield* launch(runner, 'return await agent("x", { attemptTimeoutMs: 60000, report: true })');
+      for (let step = 0; step < 120; step += 1) yield* TestClock.adjust("30 seconds");
+      expect(yield* Deferred.isDone(completed)).toBe(false);
+      expect(stops).toEqual([]);
+    }),
+  );
 });

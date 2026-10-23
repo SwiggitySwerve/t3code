@@ -241,6 +241,102 @@ export function fileInstructions(
   return lines.join("\n");
 }
 
+/** A workspace file as the runner found it; `too_large` once it passes the caller's bound. */
+export type WorkspaceFile =
+  | {
+      readonly status: "found";
+      readonly sha256: string;
+      readonly sizeBytes: number;
+      /** The bytes read as UTF-8. */
+      readonly text: string;
+    }
+  | { readonly status: "missing" }
+  | { readonly status: "too_large"; readonly sizeBytes: number };
+
+/** An output an agent wrote, as returned to the script. */
+export interface ProducedFile {
+  readonly path: string;
+  readonly sha256: string;
+  readonly sizeBytes: number;
+}
+
+/** Reads a declared file, or says why it could not be read. */
+type ReadDeclaredFile = (ref: FileRef) => Promise<WorkspaceFile | string>;
+
+/** Why the declared inputs cannot be used as they are, or undefined when they can. */
+export async function inputProblem(
+  inputs: ReadonlyArray<FileRef>,
+  read: ReadDeclaredFile,
+): Promise<string | undefined> {
+  for (const input of inputs) {
+    const found = await read(input);
+    if (typeof found === "string") return `input ${input.id}: ${found}`;
+    if (found.status === "missing") return `input ${input.id} (${input.path}) does not exist.`;
+    if (found.status === "too_large") {
+      return `input ${input.id} (${input.path}) is larger than its ${input.maxBytes}-byte bound.`;
+    }
+    if (input.sha256 !== undefined && found.sha256 !== input.sha256) {
+      return `input ${input.id} (${input.path}) changed: expected sha256 ${input.sha256}, found ${found.sha256}.`;
+    }
+  }
+  return undefined;
+}
+
+/** The written outputs, or the check outcome that says which are missing or too large. */
+export async function outputFiles(
+  outputs: ReadonlyArray<FileRef>,
+  read: ReadDeclaredFile,
+): Promise<
+  | { readonly outcome: CheckOutcome; readonly files: Readonly<Record<string, ProducedFile>> }
+  | { readonly outcome: CheckOutcome }
+> {
+  const files: Record<string, ProducedFile> = {};
+  const problems: Array<string> = [];
+  for (const output of outputs) {
+    const found = await read(output);
+    if (typeof found === "string") {
+      return { outcome: { outcome: "error", detail: `output ${output.id}: ${found}` } };
+    }
+    if (found.status === "missing") {
+      problems.push(`output ${output.id} (${output.path}) was not written.`);
+    } else if (found.status === "too_large") {
+      problems.push(
+        `output ${output.id} (${output.path}) is larger than its ${output.maxBytes}-byte bound.`,
+      );
+    } else {
+      files[output.id] = { path: output.path, sha256: found.sha256, sizeBytes: found.sizeBytes };
+    }
+  }
+  if (problems.length > 0) return { outcome: { outcome: "failed", detail: problems.join("\n") } };
+  const written = outputs.map((output) => `${output.id} ${files[output.id]!.sha256}`);
+  return { outcome: { outcome: "passed", detail: written.join("\n") }, files };
+}
+
+/** A structured check of a declared output file's JSON instead of the agent's result. */
+export async function structuredOutputCheck(
+  check: StructuredCheck,
+  output: FileRef,
+  read: ReadDeclaredFile,
+): Promise<CheckOutcome> {
+  const found = await read(output);
+  if (typeof found === "string") return { outcome: "error", detail: found };
+  if (found.status !== "found") {
+    return { outcome: "failed", detail: `output ${output.id} (${output.path}) is unreadable.` };
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(found.text);
+  } catch (error) {
+    return {
+      outcome: "failed",
+      detail: `output ${output.id} (${output.path}) is not JSON: ${error instanceof Error ? error.message : String(error)}`,
+    };
+  }
+  return check.requiredPointers.length + Object.keys(check.equals).length === 0
+    ? { outcome: "passed", detail: `output ${output.id} holds JSON.` }
+    : runStructuredCheck(check, parsed);
+}
+
 /** Throws with the reason when the scopes are malformed. */
 export function parseScopes(value: unknown): FileScopes {
   const record = asRecord(value);

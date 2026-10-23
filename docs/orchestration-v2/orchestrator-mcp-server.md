@@ -340,7 +340,8 @@ free agent slot" item, and reports `queued`. When an admitted child's run ends,
 and at server start, the oldest waiting runs are released through
 `prepared-run.release`. New children queue behind waiting ones, so order is
 first come, first served. Worktree children already wait for their checkout and
-are admitted when created. Concurrent delegations from different parents can
+are admitted when created: they count toward the limit but are not held by it, so
+a fan-out of many worktree children can run past it (a known gap). Concurrent delegations from different parents can
 briefly exceed the limit by the number of racing commands.
 
 ### `task_wait`
@@ -476,9 +477,13 @@ These follow the `omx graph` execution graph's protected verifiers
   - `{ type: "judgment", rubric, target? }` starts a separate agent, labelled
     `check <label>`, that grades the result against the criteria and answers
     `{ outcome: "passed" | "failed", reasons }`. A judge can be wrong; its reasons are kept.
+    The judge grades the returned result and works in the caller's checkout, so it does not
+    see files a worktree agent changed; check those with a process check instead.
     A failed check starts the agent again with what the check saw appended to its task,
     within the same three attempts. A check that cannot run (timeout, too much output, a
-    missing executable, no verdict) fails the agent without retrying. `workflow_status`
+    missing executable, no verdict) fails the agent without retrying. When the agent was
+    given a `schema`, a result that does not match it fails a `structured` check first,
+    whatever else is checked. `workflow_status`
     reports each agent's latest `verification` (type, outcome, attempts, detail), and an
     agent that failed its check reports `failed`. Process checks run again when a workflow
     resumes after a restart.

@@ -22,7 +22,6 @@ import {
   type OrchestratorMcpWorkflowUsage,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
-import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -35,6 +34,10 @@ import {
   checkFeedback,
   type FileRef,
   fileInstructions,
+  inputProblem,
+  outputFiles,
+  type ProducedFile,
+  type WorkspaceFile,
   type FileScopes,
   JUDGMENT_RESULT_SCHEMA,
   judgmentOutcome,
@@ -44,11 +47,13 @@ import {
   parseScopes,
   type ProcessCheck,
   runStructuredCheck,
+  structuredOutputCheck,
   scopeInstructions,
   scopesOverlap,
   type WorkflowCheck,
 } from "./workflowChecks.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
+import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
 
 /** Claude Code's documented per-run ceiling. */
 const MAX_AGENTS_PER_WORKFLOW = 1000;
@@ -113,18 +118,6 @@ export function workflowAgentOutcomeCategory(input: {
   return input.status === "completed" ? "completed" : "provider_error";
 }
 
-/** A workspace file as the runner found it; `too_large` once it passes the caller's bound. */
-export type WorkspaceFile =
-  | {
-      readonly status: "found";
-      readonly sha256: string;
-      readonly sizeBytes: number;
-      /** The bytes read as UTF-8. */
-      readonly text: string;
-    }
-  | { readonly status: "missing" }
-  | { readonly status: "too_large"; readonly sizeBytes: number };
-
 /** What agent(prompt, { report: true }) resolves to, failed or not. */
 interface AgentReport {
   readonly ok: boolean;
@@ -138,13 +131,6 @@ interface AgentReport {
     readonly detail: string | null;
   } | null;
   readonly reason: string | null;
-}
-
-/** An output an agent wrote, as returned to the script. */
-interface ProducedFile {
-  readonly path: string;
-  readonly sha256: string;
-  readonly sizeBytes: number;
 }
 
 export interface WorkflowRunnerDeps {
@@ -221,19 +207,6 @@ function numberOption(options: Readonly<Record<string, unknown>>, key: string) {
 function failureMessage<A>(exit: Exit.Exit<A, OrchestratorMcpFailure>, fallback: string): string {
   const failure = Exit.isFailure(exit) ? Exit.findErrorOption(exit) : undefined;
   return failure?._tag === "Some" ? failure.value.message : fallback;
-}
-
-interface WaitingAgent {
-  readonly childThreadId: ThreadId;
-  readonly stallMs: number;
-  readonly attemptTimeoutMs?: number;
-  /** The thread's last recorded update, and when this runner first saw it. */
-  lastUpdatedAt?: number;
-  seenAt?: number;
-  /** When this runner first saw the attempt, if its thread records no run start. */
-  firstSeenAt?: number;
-  /** Its deadline passed and the runner asked it to stop. */
-  timedOut?: boolean;
 }
 
 type MutableAgent = {
@@ -436,7 +409,8 @@ class WorkflowSession {
       .update(
         JSON.stringify([
           phase ?? null,
-          label,
+          // A generated label numbers calls in start order, which a resume can change.
+          stringOption(options, "label") ?? null,
           request.prompt,
           options.schema ?? null,
           target ?? null,
@@ -621,9 +595,9 @@ class WorkflowSession {
         throw new Error(message);
       }
       // An input that changed since the script pinned it would make the work answer another question.
-      const inputProblem = await this.inputProblem(inputs);
-      if (inputProblem !== undefined) {
-        settle("failed", `agent "${label}": ${inputProblem}`);
+      const inputIssue = await inputProblem(inputs, (ref) => this.readFile(ref));
+      if (inputIssue !== undefined) {
+        settle("failed", `agent "${label}": ${inputIssue}`);
         return null;
       }
       const started = await Effect.runPromiseExit(
@@ -699,8 +673,13 @@ class WorkflowSession {
       let produced: Readonly<Record<string, ProducedFile>> | undefined;
       let checkType: WorkflowCheck["type"] | "outputs" | undefined;
       let checked: CheckOutcome | undefined;
-      if (outputs.length > 0) {
-        const found = await this.outputFiles(outputs);
+      // A result asked to match a schema that does not is a failed structured check, so
+      // passing another check cannot hand the script a missing result.
+      if (options.schema !== undefined && structuredResultError !== undefined) {
+        checkType = "structured";
+        checked = { outcome: "failed", detail: structuredResultError };
+      } else if (outputs.length > 0) {
+        const found = await outputFiles(outputs, (ref) => this.readFile(ref));
         if ("files" in found) produced = found.files;
         checkType = "outputs";
         checked = found.outcome;
@@ -725,11 +704,6 @@ class WorkflowSession {
         produced === undefined ? result : { result, outputs: produced };
       if (checked === undefined || checkType === undefined) {
         settle("completed", summary);
-        if (options.schema !== undefined && structuredResultError !== undefined) {
-          entry.outcomeCategory = "check_failed";
-          this.progress = truncate(`agent "${label}": ${structuredResultError}`, PREVIEW_LIMIT);
-          return null;
-        }
         return returned(value);
       }
       entry.verification = {
@@ -777,51 +751,6 @@ class WorkflowSession {
     );
   }
 
-  /** Why the declared inputs cannot be used as they are, or undefined when they can. */
-  private async inputProblem(inputs: ReadonlyArray<FileRef>): Promise<string | undefined> {
-    for (const input of inputs) {
-      const found = await this.readFile(input);
-      if (typeof found === "string") return `input ${input.id}: ${found}`;
-      if (found.status === "missing") return `input ${input.id} (${input.path}) does not exist.`;
-      if (found.status === "too_large") {
-        return `input ${input.id} (${input.path}) is larger than its ${input.maxBytes}-byte bound.`;
-      }
-      if (input.sha256 !== undefined && found.sha256 !== input.sha256) {
-        return `input ${input.id} (${input.path}) changed: expected sha256 ${input.sha256}, found ${found.sha256}.`;
-      }
-    }
-    return undefined;
-  }
-
-  /** The written outputs, or the check outcome that says which are missing or too large. */
-  private async outputFiles(
-    outputs: ReadonlyArray<FileRef>,
-  ): Promise<
-    | { readonly outcome: CheckOutcome; readonly files: Readonly<Record<string, ProducedFile>> }
-    | { readonly outcome: CheckOutcome }
-  > {
-    const files: Record<string, ProducedFile> = {};
-    const problems: Array<string> = [];
-    for (const output of outputs) {
-      const found = await this.readFile(output);
-      if (typeof found === "string") {
-        return { outcome: { outcome: "error", detail: `output ${output.id}: ${found}` } };
-      }
-      if (found.status === "missing") {
-        problems.push(`output ${output.id} (${output.path}) was not written.`);
-      } else if (found.status === "too_large") {
-        problems.push(
-          `output ${output.id} (${output.path}) is larger than its ${output.maxBytes}-byte bound.`,
-        );
-      } else {
-        files[output.id] = { path: output.path, sha256: found.sha256, sizeBytes: found.sizeBytes };
-      }
-    }
-    if (problems.length > 0) return { outcome: { outcome: "failed", detail: problems.join("\n") } };
-    const written = outputs.map((output) => `${output.id} ${files[output.id]!.sha256}`);
-    return { outcome: { outcome: "passed", detail: written.join("\n") }, files };
-  }
-
   private async runCheck(input: {
     readonly check: WorkflowCheck;
     readonly prompt: string;
@@ -841,23 +770,7 @@ class WorkflowSession {
         ? input.outputs.find((ref) => ref.id === check.outputId)
         : undefined;
     if (check.type === "structured" && output !== undefined) {
-      const found = await this.readFile(output);
-      if (typeof found === "string") return { outcome: "error", detail: found };
-      if (found.status !== "found") {
-        return { outcome: "failed", detail: `output ${output.id} (${output.path}) is unreadable.` };
-      }
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(found.text);
-      } catch (error) {
-        return {
-          outcome: "failed",
-          detail: `output ${output.id} (${output.path}) is not JSON: ${error instanceof Error ? error.message : String(error)}`,
-        };
-      }
-      return check.requiredPointers.length + Object.keys(check.equals).length === 0
-        ? { outcome: "passed", detail: `output ${output.id} holds JSON.` }
-        : runStructuredCheck(check, parsed);
+      return structuredOutputCheck(check, output, (ref) => this.readFile(ref));
     }
     if (check.type === "structured") {
       return input.structuredResultError !== undefined
@@ -868,6 +781,7 @@ class WorkflowSession {
       input.summary ??
       (input.structuredResult === undefined ? "" : JSON.stringify(input.structuredResult));
     if (check.type === "process") {
+      // Stopping the workflow interrupts the check, which ends its process.
       const ran = await Effect.runPromiseExit(
         this.deps.runCommandCheck(
           this.workflow,
@@ -876,6 +790,7 @@ class WorkflowSession {
           resultText,
           input.files,
         ),
+        { signal: this.abort.signal },
       );
       return Exit.isFailure(ran)
         ? { outcome: "error", detail: failureMessage(ran, "The check could not run.") }
@@ -967,60 +882,6 @@ class WorkflowSession {
 export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
   const running = new Map<NodeId, WorkflowSession>();
 
-  const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(function* (
-    session: WorkflowSession,
-    workflow: WorkflowContext,
-  ) {
-    const now = yield* Clock.currentTimeMillis;
-    for (const [taskId, agent] of session.waitingAgents()) {
-      const shell = yield* deps.threads
-        .getThreadShell(agent.childThreadId)
-        .pipe(Effect.orElseSucceed(() => null));
-      if (shell === null) continue;
-      if (agent.timedOut === true) continue;
-      if (agent.attemptTimeoutMs !== undefined) {
-        // Each attempt is its own thread, so its run's start survives a server restart.
-        agent.firstSeenAt ??= now;
-        const startedAt = shell.latestRunStartedAt ?? shell.latestRunRequestedAt;
-        const recorded = startedAt == null ? undefined : DateTime.toEpochMillis(startedAt);
-        // A start stamped later than this runner's clock reads is not trusted.
-        const start =
-          recorded === undefined || recorded > now
-            ? agent.firstSeenAt
-            : Math.min(recorded, agent.firstSeenAt);
-        if (now - start >= agent.attemptTimeoutMs) {
-          agent.timedOut = true;
-          session.markTimedOut(taskId);
-          yield* deps.stopAgent(workflow, taskId as NodeId, agent.childThreadId, "timed_out").pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Unable to stop a workflow agent past its deadline", {
-                taskId,
-                cause,
-              }),
-            ),
-          );
-          continue;
-        }
-      }
-      // Measured only on this runner's clock: the thread's stamp just has to stop moving.
-      const updatedAt = DateTime.toEpochMillis(shell.updatedAt);
-      if (agent.seenAt === undefined || agent.lastUpdatedAt !== updatedAt) {
-        agent.lastUpdatedAt = updatedAt;
-        agent.seenAt = now;
-        continue;
-      }
-      if (now - agent.seenAt < agent.stallMs) continue;
-      session.markStalled(taskId);
-      yield* deps
-        .stopAgent(workflow, taskId as NodeId, agent.childThreadId, "stalled")
-        .pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Unable to stop a stalled workflow agent", { taskId, cause }),
-          ),
-        );
-    }
-  });
-
   const run = Effect.fn("WorkflowRunner.run")(function* (
     session: WorkflowSession,
     workflow: WorkflowContext,
@@ -1041,7 +902,7 @@ export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
         Effect.forkChild,
       );
     const sweep = yield* Effect.sleep(STALL_SWEEP_INTERVAL).pipe(
-      Effect.andThen(stopStalledAgents(session, workflow)),
+      Effect.andThen(stopStalledAgents(deps, session, workflow)),
       Effect.forever,
       Effect.forkChild,
     );
