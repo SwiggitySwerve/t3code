@@ -10,6 +10,8 @@ import * as DateTime from "effect/DateTime";
 
 import {
   appWorkflowMemberThreads,
+  workflowGraphHeadline,
+  workflowGraphNodeDetail,
   deriveWorkflowGroups,
   resolveAppWorkflowView,
   isWorkflowScriptMessage,
@@ -419,5 +421,26 @@ describe("graph workflows", () => {
     });
     expect(graph?.waves[0]?.[0]?.member).toBeNull();
     expect(graph?.counts).toEqual({ failed: 1, skipped: 3 });
+  });
+
+  it("words the status line and each node's detail", () => {
+    const graph = graphOf("running", {
+      plan,
+      nodeOutcomes: {
+        a: { status: "passed", attempts: 2 },
+      },
+      agents: [member({ index: 1, state: "running", graphNodeKey: "b", attempt: 1 })],
+    })!;
+    expect(workflowGraphHeadline(graph)).toEqual({
+      summary: "1/4 passed · 1 running · 2 waiting",
+      waitingOn: "Waiting on Build API: 1 node depends on it",
+    });
+    const labels = new Map(plan.nodes.map((node) => [node.key, node.label]));
+    expect(graph.waves.flat().map((node) => workflowGraphNodeDetail(node, labels))).toEqual([
+      { detail: null, retries: "2 attempts" },
+      { detail: "after Schema", retries: "retry 1" },
+      { detail: "after Schema", retries: null },
+      { detail: "after Build API, Build UI", retries: null },
+    ]);
   });
 });

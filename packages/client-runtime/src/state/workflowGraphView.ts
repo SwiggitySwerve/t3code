@@ -129,3 +129,68 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
     .map((wave) => nodes.filter((node) => node.wave === wave));
   return { waves, counts, waitingOn, otherMembers };
 }
+
+/** Words for each node state, shared by the summary line and each node's description. */
+export const WORKFLOW_GRAPH_STATE_LABEL: Readonly<Record<WorkflowGraphNodeState, string>> = {
+  passed: "passed",
+  failed: "failed",
+  skipped: "skipped",
+  running: "running",
+  queued: "queued",
+  waiting: "waiting",
+  not_run: "not run",
+  interrupted: "interrupted",
+};
+
+const SUMMARY_ORDER: ReadonlyArray<WorkflowGraphNodeState> = [
+  "failed",
+  "skipped",
+  "running",
+  "queued",
+  "waiting",
+  "interrupted",
+  "not_run",
+];
+
+/** The status line: "3/6 passed · 1 running · 2 waiting", and what the run waits on. */
+export function workflowGraphHeadline(graph: WorkflowGraphView<unknown>): {
+  readonly summary: string;
+  readonly waitingOn: string | null;
+} {
+  const total = graph.waves.reduce((sum, wave) => sum + wave.length, 0);
+  const parts = [`${graph.counts.passed ?? 0}/${total} passed`];
+  for (const state of SUMMARY_ORDER) {
+    const count = graph.counts[state];
+    if (count !== undefined) parts.push(`${count} ${WORKFLOW_GRAPH_STATE_LABEL[state]}`);
+  }
+  const blocker = graph.waitingOn;
+  return {
+    summary: parts.join(" · "),
+    waitingOn:
+      blocker === null
+        ? null
+        : `Waiting on ${blocker.label}: ${blocker.blocked} ${blocker.blocked === 1 ? "node depends" : "nodes depend"} on it`,
+  };
+}
+
+/**
+ * A node's second line and retry note. The recorded reason comes first; otherwise the nodes it
+ * runs after. Retries show while an agent retries and after a node took more than one attempt.
+ */
+export function workflowGraphNodeDetail(
+  node: WorkflowGraphNodeView<{ readonly attempt: number | null }>,
+  labels: ReadonlyMap<string, string>,
+): { readonly detail: string | null; readonly retries: string | null } {
+  const after =
+    node.dependsOn.length === 0
+      ? null
+      : `after ${node.dependsOn.map((key) => labels.get(key) ?? key).join(", ")}`;
+  const attempts = node.attempts ?? (node.member?.attempt ?? 0) + 1;
+  const retries =
+    attempts <= 1
+      ? null
+      : node.attempts === null
+        ? `retry ${attempts - 1}`
+        : `${attempts} attempts`;
+  return { detail: node.reason ?? after, retries };
+}

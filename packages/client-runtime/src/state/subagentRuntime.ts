@@ -13,10 +13,13 @@ import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript
 
 import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
 
-export type {
-  WorkflowGraphNodeState,
-  WorkflowGraphNodeView,
-  WorkflowGraphView,
+export {
+  WORKFLOW_GRAPH_STATE_LABEL,
+  workflowGraphHeadline,
+  workflowGraphNodeDetail,
+  type WorkflowGraphNodeState,
+  type WorkflowGraphNodeView,
+  type WorkflowGraphView,
 } from "./workflowGraphView.ts";
 
 export type RuntimeSubagentStatus =

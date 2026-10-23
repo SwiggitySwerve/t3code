@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   isTerminalSubagentStatus,
+  workflowGraphHeadline,
   workflowOpeningHeadline,
   type RuntimeSubagent,
   type WorkflowOpening,
@@ -25,6 +26,7 @@ import { findRevealRef } from "./markdownFindContext";
 import { shouldCollapseUserMessage } from "./MessagesTimeline.logic";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
+import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
 
 const FOLDED_SCRIPT_MASK = "linear-gradient(to bottom, black calc(100% - 1.75rem), transparent)";
 
@@ -53,7 +55,12 @@ export function WorkflowOpeningBlock(props: {
   const { opening } = props;
   const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const headline = workflowOpeningHeadline(opening);
-  const phases = opening.group?.phases.filter((phase) => phase.members.length > 0) ?? [];
+  // A graph shows node by node; a script, which declares no dependencies, keeps its phases.
+  const graph = opening.group?.graph ?? null;
+  const graphHeadline = graph === null ? null : workflowGraphHeadline(graph);
+  const phases =
+    graph !== null ? [] : (opening.group?.phases.filter((phase) => phase.members.length > 0) ?? []);
+  const counts = graphHeadline?.summary ?? headline.agents;
   const memberRow = (member: RuntimeSubagent) => {
     const providerInstanceId = member.providerInstanceId ?? opening.providerInstanceId;
     return providerInstanceId === null ? null : (
@@ -89,9 +96,9 @@ export function WorkflowOpeningBlock(props: {
             </p>
           ) : null}
         </div>
-        {headline.agents ? (
+        {counts ? (
           <span aria-live="polite" className="shrink-0 text-2xs tabular-nums text-muted-foreground">
-            {headline.agents}
+            {counts}
           </span>
         ) : null}
         {props.stop ? (
@@ -117,6 +124,23 @@ export function WorkflowOpeningBlock(props: {
           {props.progress}
         </p>
       ) : null}
+      {graphHeadline?.waitingOn ? (
+        <p className="truncate px-2 text-2xs text-foreground" data-thread-find-text="true">
+          {graphHeadline.waitingOn}
+        </p>
+      ) : null}
+      {graph !== null ? (
+        <WorkflowWaveCanvas
+          graph={graph}
+          environmentId={props.environmentId}
+          providerInstanceId={opening.providerInstanceId}
+          driver={opening.driver ?? undefined}
+          onOpenThread={props.onOpenThread}
+        />
+      ) : null}
+      {graph !== null && graph.otherMembers.length > 0 ? (
+        <ul className="m-0 list-none p-0">{graph.otherMembers.map(memberRow)}</ul>
+      ) : null}
       {phases.map((phase) => (
         <section key={phase.index} aria-label={`${phase.title} phase`}>
           <h4 className="flex items-baseline gap-2 px-2 pb-0.5 text-2xs font-medium text-muted-foreground">
@@ -130,7 +154,7 @@ export function WorkflowOpeningBlock(props: {
           <ul className="m-0 list-none p-0">{phase.members.map(memberRow)}</ul>
         </section>
       ))}
-      {opening.group && opening.group.unphasedMembers.length > 0 ? (
+      {graph === null && opening.group && opening.group.unphasedMembers.length > 0 ? (
         <ul className="m-0 list-none p-0">{opening.group.unphasedMembers.map(memberRow)}</ul>
       ) : null}
       <WorkflowScript script={opening.script} />
