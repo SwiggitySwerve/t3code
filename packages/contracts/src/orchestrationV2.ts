@@ -686,6 +686,11 @@ export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
 });
 export type OrchestrationV2WorkflowPlanNode = typeof OrchestrationV2WorkflowPlanNode.Type;
 
+export const OrchestrationV2WorkflowPlan = Schema.Struct({
+  nodes: Schema.Array(OrchestrationV2WorkflowPlanNode),
+});
+export type OrchestrationV2WorkflowPlan = typeof OrchestrationV2WorkflowPlan.Type;
+
 /** How a graph node ended, as its workflow recorded it. */
 export const OrchestrationV2WorkflowNodeOutcome = Schema.Struct({
   status: Schema.Literals(["passed", "failed", "skipped"]),
@@ -745,7 +750,7 @@ export const OrchestrationV2SubagentWorkflow = Schema.Struct({
   phases: Schema.Array(OrchestrationV2WorkflowPhase),
   agents: Schema.Array(OrchestrationV2WorkflowAgent),
   /** The reviewed graph, for workflows started from one; scripts declare no dependencies. */
-  plan: Schema.optional(Schema.Struct({ nodes: Schema.Array(OrchestrationV2WorkflowPlanNode) })),
+  plan: Schema.optional(OrchestrationV2WorkflowPlan),
   /** Outcomes by plan node key, recorded as each node ends. */
   nodeOutcomes: Schema.optional(
     Schema.Record(TrimmedNonEmptyString, OrchestrationV2WorkflowNodeOutcome),

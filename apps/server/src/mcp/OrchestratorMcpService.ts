@@ -16,6 +16,7 @@ import {
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2TurnItem,
+  OrchestrationV2WorkflowPlan,
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
@@ -139,7 +140,7 @@ import {
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
 import { makeWorkflowRunner, workflowAgentOutcomeCategory } from "./workflowRunner.ts";
 import { aggregateWorkflowUsage } from "./workflowUsage.ts";
-import { GRAPH_DRIVER_SCRIPT, parseGraph, reviewGraph } from "./workflowGraph.ts";
+import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -279,6 +280,7 @@ export class OrchestratorMcpService extends Context.Service<
 >()("t3/mcp/OrchestratorMcpService") {}
 
 const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
+const decodeWorkflowPlan = Schema.decodeUnknownOption(OrchestrationV2WorkflowPlan);
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -2239,6 +2241,7 @@ const make = Effect.gen(function* () {
         ? {
             source: GRAPH_DRIVER_SCRIPT,
             args: { graph: parsed.graph, inputs: review.inputs },
+            plan: graphPlan(parsed.graph),
             title: parsed.graph.name ?? "Graph",
           }
         : undefined;
@@ -2270,11 +2273,15 @@ const make = Effect.gen(function* () {
     blockers: review.blockers,
   });
 
-  /** Starts a workflow row for the caller and launches its script; workflows and graphs share it. */
+  /**
+   * Starts a workflow row for the caller and launches its script; workflows and graphs share it.
+   * Only a reviewed graph passes a plan, so a script cannot declare graph nodes or outcomes.
+   */
   const startWorkflow = Effect.fn("OrchestratorMcpService.startWorkflow")(function* (
     scope: McpThreadInvocationScope,
     parent: CallerProjection,
     input: OrchestratorMcpWorkflowStartInput,
+    plan?: OrchestrationV2WorkflowPlan,
   ) {
     const parentRun = yield* requireDelegatingRun(scope, parent);
     const compileError = yield* Effect.promise(() => checkWorkflowScript(input.script));
@@ -2303,6 +2310,7 @@ const make = Effect.gen(function* () {
         script: storedWorkflowScript(input.script, {
           ...(input.args === undefined ? {} : { args: input.args }),
           ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+          ...(plan === undefined ? {} : { plan }),
         }),
       })
       .pipe(
@@ -2322,6 +2330,7 @@ const make = Effect.gen(function* () {
         source: input.script,
         args: input.args ?? null,
         ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+        ...(plan === undefined ? {} : { plan }),
         afterSequence,
       });
     }
@@ -2491,7 +2500,11 @@ const make = Effect.gen(function* () {
       try: () => parseStoredWorkflowScript(row.prompt),
       catch: () => "unreadable" as const,
     }).pipe(Effect.option);
-    if (stored._tag === "None") {
+    const plan =
+      stored._tag === "Some" && stored.value.plan !== undefined
+        ? decodeWorkflowPlan(stored.value.plan)
+        : Option.none();
+    if (stored._tag === "None" || (stored.value.plan !== undefined && Option.isNone(plan))) {
       yield* threadManagement
         .dispatch({
           type: "workflow.complete",
@@ -2515,6 +2528,7 @@ const make = Effect.gen(function* () {
       ...(stored.value.budgetTokens === undefined
         ? {}
         : { budgetTokens: stored.value.budgetTokens }),
+      ...(Option.isSome(plan) ? { plan: plan.value } : {}),
       afterSequence: 0,
     });
     return true;
@@ -3176,13 +3190,20 @@ const make = Effect.gen(function* () {
               : "The graph changed since review (digest mismatch); review it again.",
         );
       }
-      return yield* startWorkflow(scope, parent, {
-        script: compiled.source,
-        args: compiled.args,
-        title: input.title ?? compiled.title,
-        ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
-        ...(input.clientRequestId === undefined ? {} : { clientRequestId: input.clientRequestId }),
-      });
+      return yield* startWorkflow(
+        scope,
+        parent,
+        {
+          script: compiled.source,
+          args: compiled.args,
+          title: input.title ?? compiled.title,
+          ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+          ...(input.clientRequestId === undefined
+            ? {}
+            : { clientRequestId: input.clientRequestId }),
+        },
+        compiled.plan,
+      );
     }),
     workflowStatus: Effect.fn("OrchestratorMcpService.workflowStatus")(
       function* (callerScope, input) {

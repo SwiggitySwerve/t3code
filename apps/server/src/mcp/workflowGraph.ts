@@ -1,6 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- graph review hashes pure, normalized values synchronously.
 import * as NodeCrypto from "node:crypto";
 
+import type { OrchestrationV2WorkflowPlan } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 
 import {
@@ -175,6 +176,18 @@ function graphLayers(graph: WorkflowGraph): string[][] {
     }
   }
   return layers;
+}
+
+/** The graph as the app shows it: each node's label, wave and dependencies, without prompts. */
+export function graphPlan(graph: WorkflowGraph): OrchestrationV2WorkflowPlan {
+  return {
+    nodes: graphLayers(graph).flatMap((layer, wave) =>
+      layer.map((key) => {
+        const node = graph.nodes[key]!;
+        return { key, label: node.subject, wave, dependsOn: [...node.dependsOn] };
+      }),
+    ),
+  };
 }
 
 export function parseGraph(value: unknown): ParseResult {

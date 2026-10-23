@@ -1594,6 +1594,14 @@ describe("graphs", () => {
           parentThreadId,
         );
         expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
+        // The plan comes back from the stored settings, so the resumed row still shows the graph.
+        const row = parent.subagents.find((task) => task.id === workflowId);
+        expect(
+          row?.workflow?.plan?.nodes.map((node) => [node.key, node.wave, node.dependsOn]),
+        ).toEqual([
+          ["produce", 0, []],
+          ["consume", 1, ["produce"]],
+        ]);
       }).pipe(Effect.provide(layerTest)),
     ),
   );

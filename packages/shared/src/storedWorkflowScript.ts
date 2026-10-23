@@ -8,6 +8,8 @@ const SETTINGS_HEADER = "// t3-workflow: ";
 export interface StoredWorkflowSettings {
   readonly args?: unknown;
   readonly budgetTokens?: number;
+  /** The reviewed graph's plan, for workflows started from one; the reader decodes it. */
+  readonly plan?: unknown;
 }
 
 /** Always writes the settings line, so a script that itself starts with it is not misread. */
@@ -27,9 +29,12 @@ export function parseStoredWorkflowScript(stored: string): {
   readonly source: string;
   readonly args: unknown;
   readonly budgetTokens: number | undefined;
+  readonly plan: unknown;
 } {
   const source = storedWorkflowScriptSource(stored);
-  if (!stored.startsWith(SETTINGS_HEADER)) return { source, args: null, budgetTokens: undefined };
+  if (!stored.startsWith(SETTINGS_HEADER)) {
+    return { source, args: null, budgetTokens: undefined, plan: undefined };
+  }
   const newline = stored.indexOf("\n");
   const parsed: unknown = JSON.parse(stored.slice(SETTINGS_HEADER.length, newline));
   const settings =
@@ -40,5 +45,6 @@ export function parseStoredWorkflowScript(stored: string): {
     source,
     args: settings.args ?? null,
     budgetTokens: typeof settings.budgetTokens === "number" ? settings.budgetTokens : undefined,
+    plan: settings.plan,
   };
 }
