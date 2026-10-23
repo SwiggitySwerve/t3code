@@ -115,7 +115,9 @@ export function WorkflowWaveCanvas(props: {
                     labels={labels}
                     environmentId={props.environmentId}
                     providerInstanceId={node.member?.providerInstanceId ?? props.providerInstanceId}
-                    driver={node.member?.driver ?? props.driver}
+                    // A node without an agent has no provider yet; the workflow's own provider
+                    // is the coordinator's, not the node's, so its avatar stays neutral.
+                    driver={node.member === null ? undefined : (node.member.driver ?? props.driver)}
                     onOpenThread={props.onOpenThread}
                     emphasis={related === null ? null : related.has(node.key)}
                     onHighlight={(on) =>
