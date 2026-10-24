@@ -25,6 +25,45 @@ import {
 
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
 
+describe("workflow preset patches", () => {
+  it("C4 creates, renames, replaces targets, clears default and deletes without deep merging", () => {
+    const first = {
+      id: "worker",
+      name: "Worker",
+      target: {
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.4",
+        options: [{ id: "reasoningEffort", value: "high" }],
+      },
+    };
+    const created = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      workflowPresets: { presets: [first], defaultPresetId: first.id },
+    });
+    expect(created.workflowPresets).toEqual({ presets: [first], defaultPresetId: first.id });
+    const edited = {
+      ...first,
+      name: "Renamed",
+      target: {
+        providerInstanceId: ProviderInstanceId.make("claude"),
+        model: "sonnet",
+        options: [],
+      },
+    };
+    const updated = applyServerSettingsPatch(created, {
+      workflowPresets: { presets: [edited], defaultPresetId: null },
+    });
+    expect(updated.workflowPresets).toEqual({ presets: [edited], defaultPresetId: null });
+    const deleted = applyServerSettingsPatch(updated, {
+      workflowPresets: { presets: [], defaultPresetId: null },
+    });
+    expect(deleted.workflowPresets).toEqual(DEFAULT_SERVER_SETTINGS.workflowPresets);
+    expect(
+      applyServerSettingsPatch(created, { threadTitleInstructions: "title" }).workflowPresets,
+    ).toEqual(created.workflowPresets);
+    expect(created.workflowPresets.presets[0]).toEqual(first);
+  });
+});
+
 describe("fallbackTextGenerationModelSelection", () => {
   it("ignores a configured non-default instance at machine scope, matching no fallback", () => {
     const configured = ProviderInstanceId.make("codex_work");

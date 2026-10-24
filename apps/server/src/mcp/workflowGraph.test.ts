@@ -412,8 +412,8 @@ function driver(
   return { calls, phases, outcomes, result };
 }
 
-/** A graph with a node that did not pass ends the workflow as failed, keeping its record. */
-async function failedRecord(result: Promise<unknown>): Promise<unknown> {
+/** A graph with a node that did not pass fails with a readable summary. */
+async function failedRecord(result: Promise<unknown>): Promise<string> {
   const error = await result.then(
     () => {
       throw new Error("The graph should have failed.");
@@ -422,7 +422,7 @@ async function failedRecord(result: Promise<unknown>): Promise<unknown> {
   );
   const message = error instanceof Error ? error.message : String(error);
   expect(message.startsWith("Graph failed: ")).toBe(true);
-  return JSON.parse(message.slice("Graph failed: ".length, message.lastIndexOf(" (at ")));
+  return message;
 }
 
 describe("graph driver in QuickJS", () => {
@@ -539,20 +539,9 @@ describe("graph driver in QuickJS", () => {
         },
       },
     );
-    expect(await failedRecord(run.result)).toMatchObject({
-      ok: false,
-      nodes: {
-        a: {
-          status: "failed",
-          attempts: 3,
-          reason: "check failed",
-          verification: { outcome: "failed", detail: "bad exit" },
-        },
-        b: { status: "skipped", attempts: 0, reason: "Predecessor a did not pass." },
-        c: { status: "skipped", reason: "Predecessor b did not pass." },
-        independent: { status: "passed" },
-      },
-    });
+    expect(await failedRecord(run.result)).toContain(
+      "Graph failed: 1 node failed, 2 skipped. Task: check failed",
+    );
     expect(run.calls.map((call) => call.prompt)).toEqual(["fails", "works"]);
     expect(run.calls.map((call) => call.options.node)).toEqual(["a", "independent"]);
     expect(Object.fromEntries(run.outcomes)).toEqual({
@@ -653,9 +642,9 @@ describe("graph driver in QuickJS", () => {
         a: node({ inputs: [{ id: "source", kind: "workspace_snapshot", path: "src/file" }] }),
       }),
     );
-    expect(await failedRecord(run.result)).toMatchObject({
-      ok: false,
-      nodes: { a: { status: "failed", attempts: 0, reason: "Input source has no reviewed hash." } },
+    expect(await failedRecord(run.result)).toContain("Task: Input source has no reviewed hash.");
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      a: { status: "failed", attempts: 0, reason: "Input source has no reviewed hash." },
     });
     expect(run.calls).toEqual([]);
   });
@@ -670,14 +659,16 @@ describe("graph driver in QuickJS", () => {
         }),
       }),
     );
-    expect(await failedRecord(missing.result)).toMatchObject({
-      ok: false,
-      nodes: { b: { status: "failed", reason: "Predecessor a did not return output data." } },
+    expect(await failedRecord(missing.result)).toContain(
+      "Task: Predecessor a did not return output data.",
+    );
+    expect(Object.fromEntries(missing.outcomes)).toMatchObject({
+      b: { status: "failed", reason: "Predecessor a did not return output data." },
     });
     const nullReport = driver(graph({ a: node({ description: "a" }) }), { a: null });
-    expect(await failedRecord(nullReport.result)).toMatchObject({
-      ok: false,
-      nodes: { a: { status: "failed", attempts: 0 } },
+    expect(await failedRecord(nullReport.result)).toContain("Task: Agent did not pass.");
+    expect(Object.fromEntries(nullReport.outcomes)).toEqual({
+      a: { status: "failed", attempts: 0, reason: "Agent did not pass." },
     });
   });
 });

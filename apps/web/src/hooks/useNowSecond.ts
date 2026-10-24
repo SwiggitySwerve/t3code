@@ -41,6 +41,13 @@ function getSnapshot(): number {
   return nowSecond;
 }
 
-export function useNowSecond(): number {
-  return useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+const subscribeInactive = () => () => {};
+const inactiveSnapshot = () => 0;
+
+export function useNowSecond(active = true): number {
+  return useSyncExternalStore(
+    active ? subscribe : subscribeInactive,
+    active ? getSnapshot : inactiveSnapshot,
+    active ? getSnapshot : inactiveSnapshot,
+  );
 }

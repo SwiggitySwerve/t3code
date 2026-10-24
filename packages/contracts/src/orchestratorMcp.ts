@@ -40,6 +40,7 @@ import {
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { WorkflowPresets } from "./settings.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
   description: "Complete task or message text for the target agent.",
@@ -114,6 +115,12 @@ export const OrchestratorMcpTarget = Schema.Struct({
     OrchestratorMcpTargetOptions.annotate({
       description:
         "Model options from orchestrator_capabilities. For the same provider instance and model, overrides individual inherited values; [] or {} clears them. Claude: {effort: 'max', fastMode: true}; Codex: {reasoningEffort: 'max', serviceTier: 'priority'}. Only use options advertised by the selected model.",
+    }),
+  ),
+  inheritOptions: Schema.optional(
+    Schema.Literal(false).annotate({
+      description:
+        "false: use exactly these options, without inheriting the caller's. Targets T3 resolves for review and restart carry it, so caller changes cannot alter an approved assignment.",
     }),
   ),
 });
@@ -337,9 +344,13 @@ export const OrchestratorMcpTaskWaitResult = Schema.Struct({
 export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult.Type;
 
 export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
+  workerTarget: Schema.optional(OrchestratorMcpTarget).annotate({
+    description:
+      "Default worker target. An agent's own target or legacy model replaces it as a whole, followed by its preset, this worker target, the configured workflow worker default preset, then the caller. The selected target uses the usual option inheritance rules.",
+  }),
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, preset (a saved agent preset id), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -354,9 +365,10 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
 export type OrchestratorMcpWorkflowStartInput = typeof OrchestratorMcpWorkflowStartInput.Type;
 
 export const OrchestratorMcpGraphReviewInput = Schema.Struct({
+  workerTarget: OrchestratorMcpWorkflowStartInput.fields.workerTarget,
   graph: Schema.Unknown.annotate({
     description:
-      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass the same graph and acceptedDigest to graph_start.",
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to retain the approved targets after preset edits or a server restart.",
   }),
 });
 export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
@@ -364,9 +376,31 @@ export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewI
 export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   digest: Schema.NullOr(Schema.String).annotate({
     description:
-      "Covers the normalized graph and its input hashes; null when the graph cannot be read.",
+      "Covers the graph with concrete worker and judgment targets and its input hashes; null when parsing or target resolution fails.",
   }),
   ready: Schema.Boolean,
+  expandedGraph: Schema.NullOr(Schema.Unknown).annotate({
+    description:
+      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to retain the approved assignments after preset edits or a server restart.",
+  }),
+  targets: Schema.Array(
+    Schema.Struct({
+      nodeId: Schema.String,
+      source: Schema.Literals([
+        "target",
+        "model",
+        "preset",
+        "workerTarget",
+        "defaultPreset",
+        "caller",
+      ]),
+      target: OrchestratorMcpTarget,
+      judgmentTarget: Schema.optional(OrchestratorMcpTarget),
+    }),
+  ).annotate({
+    description:
+      "Concrete worker and judgment assignments included in the digest; source describes only how the worker was selected.",
+  }),
   layers: Schema.Array(Schema.Array(Schema.String)),
   writeConflicts: Schema.Array(
     Schema.Struct({
@@ -387,6 +421,7 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
 export type OrchestratorMcpGraphReviewResult = typeof OrchestratorMcpGraphReviewResult.Type;
 
 export const OrchestratorMcpGraphStartInput = Schema.Struct({
+  workerTarget: OrchestratorMcpGraphReviewInput.fields.workerTarget,
   graph: OrchestratorMcpGraphReviewInput.fields.graph,
   acceptedDigest: Schema.String.check(Schema.isPattern(/^sha256:[a-f0-9]{64}$/)).annotate({
     description: "Digest returned by graph_review for the exact graph and input files to run.",
@@ -804,6 +839,10 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
+  workflowPresets: Schema.optional(WorkflowPresets).annotate({
+    description:
+      "Named worker presets and the configured workflow worker default in this environment. Use a preset id in workflow agent options or graph nodes.",
+  }),
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),

@@ -3,6 +3,18 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./workflowUpdate": {
+      "types": "./src/workflowUpdate.ts",
+      "import": "./src/workflowUpdate.ts"
+    },
+    "./workflowBudget": {
+      "types": "./src/workflowBudget.ts",
+      "import": "./src/workflowBudget.ts"
+    },
+    "./workflowGraphResult": {
+      "types": "./src/workflowGraphResult.ts",
+      "import": "./src/workflowGraphResult.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"
@@ -342,6 +354,10 @@
     "./testing/longTempDir": {
       "types": "./src/testing/longTempDir.ts",
       "import": "./src/testing/longTempDir.ts"
+    },
+    "./testing/workflowQa": {
+      "types": "./src/testing/workflowQa.ts",
+      "import": "./src/testing/workflowQa.ts"
     },
     "./testing/symlinks": {
       "types": "./src/testing/symlinks.ts",

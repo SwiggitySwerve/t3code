@@ -1,8 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- optional external payload evidence from the test harness, never application IO.
+import * as NodeFS from "node:fs";
+import { mergeWorkflowPatch } from "@t3tools/shared/workflowUpdate";
 import {
   NodeId,
   type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2WorkflowPlan,
+  type OrchestrationV2WorkflowPatch,
   ProviderDriverKind,
   ProviderInstanceId,
   type OrchestrationV2StoredEvent,
@@ -18,13 +22,25 @@ import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import { makeWorkflowRunner, type WorkflowRunnerDeps } from "./workflowRunner.ts";
+import {
+  makeWorkflowRunner,
+  type WorkflowRunnerDeps,
+  type WorkflowAgentOutcome,
+} from "./workflowRunner.ts";
 import { aggregateWorkflowUsage } from "./workflowUsage.ts";
 
 const threadId = ThreadId.make("thread:workflow-runner");
 const workflowId = NodeId.make("workflow:runner-test");
 
 interface HarnessOptions {
+  readonly onAwaitRelease?: () => Effect.Effect<unknown>;
+  readonly finalization?: Effect.Effect<void>;
+  readonly taskId?: (spawned: number) => string;
+  readonly onWorkflowUpdate?: (workflow: OrchestrationV2SubagentWorkflow) => Effect.Effect<unknown>;
+  readonly usage?: (spawned: number) => ReturnType<typeof aggregateWorkflowUsage>;
+  readonly timing?: (spawned: number) => WorkflowAgentOutcome["timing"];
+  readonly judgment?: (spawned: number) => boolean;
+  readonly model?: (spawned: number) => string | null;
   /** Whether the nth agent (1-based) finishes on its own, and how; otherwise it hangs. */
   readonly finish?: (spawned: number) => "completed" | "failed" | "hang";
   /** Workspace files by path, for declared outputs. */
@@ -45,33 +61,72 @@ interface HarnessOptions {
 /** A runner whose agents finish as told, recording what it dispatches and stops. */
 const makeHarness = (options: HarnessOptions = {}) =>
   Effect.gen(function* () {
-    const updates = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+    // Like the event store: every subscription replays the log, then follows it, and honors its
+    // event-type filter, so a runner listening for the wrong type misses the event as in production.
+    const log: Array<OrchestrationV2StoredEvent> = [];
+    const subscribers: Array<{
+      readonly eventType: string | undefined;
+      readonly queue: Queue.Queue<OrchestrationV2StoredEvent>;
+    }> = [];
+    const publish = (stored: OrchestrationV2StoredEvent) =>
+      Effect.gen(function* () {
+        log.push(stored);
+        for (const subscriber of subscribers)
+          if (subscriber.eventType === undefined || subscriber.eventType === stored.event.type)
+            yield* Queue.offer(subscriber.queue, stored);
+      });
     const completed = yield* Deferred.make<string>();
     const statuses = new Map<string, string>();
+    const taskUpdates = new Map<string, Queue.Queue<void>>();
     const stops: Array<string> = [];
     const keys = new Map<string, string>();
     const firstSpawn = yield* Deferred.make<void>();
     const workflowUpdates: Array<OrchestrationV2SubagentWorkflow> = [];
+    const workflowCommands: Array<unknown> = [];
     let spawned = 0;
     const update = (id: string, status: string) => {
       statuses.set(id, status);
-      return Queue.offer(updates, {
-        sequence: spawned,
-        event: {
-          type: "subagent.updated",
-          payload: { id, status, result: "ok" } as unknown as OrchestrationV2Subagent,
-        },
-      } as unknown as OrchestrationV2StoredEvent);
+      return Effect.gen(function* () {
+        const queue = taskUpdates.get(id);
+        if (queue !== undefined) yield* Queue.offer(queue, undefined);
+        return yield* publish({
+          sequence: spawned,
+          event: {
+            type: "subagent.updated",
+            payload: { id, status, result: "ok" } as unknown as OrchestrationV2Subagent,
+          },
+        } as unknown as OrchestrationV2StoredEvent);
+      });
     };
     const threads = {
-      streamStoredEventsFrom: () => Stream.fromQueue(updates),
+      streamStoredEventsFrom: (input?: { readonly eventType?: string }) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const queue = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+            for (const stored of log)
+              if (input?.eventType === undefined || input.eventType === stored.event.type)
+                yield* Queue.offer(queue, stored);
+            subscribers.push({ eventType: input?.eventType, queue });
+            return Stream.fromQueue(queue);
+          }),
+        ),
       dispatch: (command: {
         readonly type: string;
         readonly result?: string;
-        readonly workflow?: OrchestrationV2SubagentWorkflow;
+        readonly workflow?: OrchestrationV2SubagentWorkflow | OrchestrationV2WorkflowPatch;
       }) => {
         if (command.type === "workflow.update" && command.workflow !== undefined) {
-          workflowUpdates.push(command.workflow);
+          workflowCommands.push(command);
+          const workflow =
+            "kind" in command.workflow
+              ? mergeWorkflowPatch(
+                  workflowUpdates.at(-1) ?? { phases: [], agents: [] },
+                  command.workflow,
+                )
+              : command.workflow;
+          workflowUpdates.push(workflow);
+          if (options.onWorkflowUpdate !== undefined)
+            return options.onWorkflowUpdate(workflow).pipe(Effect.as({} as never));
         }
         return command.type === "workflow.complete"
           ? Deferred.succeed(completed, command.result ?? "").pipe(Effect.as({} as never))
@@ -99,28 +154,65 @@ const makeHarness = (options: HarnessOptions = {}) =>
           spawned += 1;
           keys.set(item.task, requestKey);
           yield* Deferred.succeed(firstSpawn, undefined);
-          const taskId = NodeId.make(`node:agent-${spawned}`);
+          const taskId = NodeId.make(options.taskId?.(spawned) ?? `node:agent-${spawned}`);
           const finish = options.finish?.(spawned) ?? "completed";
           if (finish !== "hang") yield* update(taskId, finish);
           return {
             taskId,
             childThreadId: ThreadId.make(`thread:agent-${spawned}`),
-            model: null,
+            model: options.model?.(spawned) ?? null,
             providerInstanceId: ProviderInstanceId.make("codex"),
             driver: ProviderDriverKind.make("codex"),
           };
         }),
-      readAgent: (_workflow, taskId) =>
-        Effect.succeed({
-          status: statuses.get(taskId) ?? "running",
-          summary: "ok",
-          cancelledByServerRestart: false,
-          outcomeCategory: statuses.get(taskId) === "completed" ? "completed" : "cancelled",
-          usage: aggregateWorkflowUsage([]),
-          ...(options.structuredResultError === undefined
-            ? {}
-            : { structuredResultError: options.structuredResultError }),
-        }),
+      awaitAgent: (_workflow, taskId, onUpdate) =>
+        Effect.gen(function* () {
+          const queue = yield* Queue.unbounded<void>();
+          taskUpdates.set(taskId, queue);
+          const read = (): WorkflowAgentOutcome => ({
+            status: statuses.get(taskId) ?? "running",
+            summary: "ok",
+            cancelledByServerRestart: false,
+            outcomeCategory: statuses.get(taskId) === "completed" ? "completed" : "cancelled",
+            usage: options.usage?.(Number(taskId.split("-").at(-1))) ?? aggregateWorkflowUsage([]),
+            timing: options.timing?.(Number(taskId.split("-").at(-1))),
+            ...(options.judgment === undefined
+              ? {}
+              : {
+                  structuredResult: {
+                    outcome: options.judgment(Number(taskId.split("-").at(-1)))
+                      ? "passed"
+                      : "failed",
+                    reasons: "Checked the result",
+                  },
+                }),
+            ...(options.structuredResultError === undefined
+              ? {}
+              : { structuredResultError: options.structuredResultError }),
+          });
+          const initial = read();
+          onUpdate(initial);
+          if (initial.status !== "running") {
+            if (options.finalization !== undefined) yield* options.finalization;
+            return initial;
+          }
+          const ended = yield* Stream.fromQueue(queue).pipe(
+            Stream.map(read),
+            Stream.tap((outcome) => Effect.sync(() => onUpdate(outcome))),
+            Stream.filter((outcome) => outcome.status !== "running"),
+            Stream.runHead,
+          );
+          if (ended._tag === "None") return yield* Effect.die("Missing test outcome");
+          if (options.finalization !== undefined) yield* options.finalization;
+          return ended.value;
+        }).pipe(
+          Effect.ensuring(
+            Effect.gen(function* () {
+              taskUpdates.delete(taskId);
+              if (options.onAwaitRelease !== undefined) yield* options.onAwaitRelease();
+            }),
+          ),
+        ),
       agentStarted: () => Effect.succeed(false),
       canRunCommands: () => Effect.succeed(options.runCommandCheck !== undefined),
       runCommandCheck: options.runCommandCheck ?? (() => Effect.die("unused")),
@@ -147,8 +239,21 @@ const makeHarness = (options: HarnessOptions = {}) =>
       firstSpawn,
       /** Every row update the runner sent, oldest first. */
       workflowUpdates,
-      /** Ends the workflow row as a stop would. */
-      stopWorkflow: () => update(workflowId, "cancelled"),
+      workflowCommands,
+      /** Ends the workflow row as a stop does: a workflow patch carrying the cancelled status. */
+      stopWorkflow: () =>
+        Effect.sync(() => statuses.set(workflowId, "cancelled")).pipe(
+          Effect.andThen(
+            publish({
+              sequence: spawned,
+              event: {
+                type: "workflow.updated",
+                payload: { id: workflowId, previousRevision: 0, revision: 1, status: "cancelled" },
+              },
+            } as unknown as OrchestrationV2StoredEvent),
+          ),
+        ),
+      updateAgent: update,
     };
   });
 
@@ -182,6 +287,65 @@ const twoNodePlan: OrchestrationV2WorkflowPlan = {
 };
 
 describe("workflow runner", () => {
+  it.effect(
+    "stops new starts at zero and after parallel overshoot without charging replay twice",
+    () =>
+      Effect.gen(function* () {
+        const zero = yield* makeHarness();
+        yield* zero.runner.launch({
+          workflowId,
+          threadId,
+          source: 'return await agent("zero")',
+          args: null,
+          afterSequence: 0,
+          budgetTokens: 0,
+        });
+        expect(yield* Deferred.await(zero.completed)).toContain("budget of 0 tokens is spent");
+        expect(zero.spawned()).toBe(0);
+        expect(zero.workflowUpdates.at(-1)?.budget).toEqual({ limit: 0, exhausted: true });
+        const parallel = yield* makeHarness({
+          usage: () => ({ ...aggregateWorkflowUsage([]), status: "complete", totalTokens: 60 }),
+        });
+        yield* parallel.runner.launch({
+          workflowId,
+          threadId,
+          source:
+            'await parallel([() => agent("a"), () => agent("b")]); return await agent("too late")',
+          args: null,
+          afterSequence: 0,
+          budgetTokens: 100,
+        });
+        expect(yield* Deferred.await(parallel.completed)).toContain("120 recorded");
+        expect(parallel.spawned()).toBe(2);
+        expect(
+          parallel.workflowUpdates
+            .at(-1)
+            ?.agents.slice(0, 2)
+            .map((agent) => agent.totalTokens),
+        ).toEqual([60, 60]);
+      }),
+  );
+  it.effect("uses recorded budget on restart before starting new work", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* harness.runner.launch({
+        workflowId,
+        threadId,
+        source: 'return await agent("new work")',
+        args: null,
+        afterSequence: 0,
+        budgetTokens: 50,
+        previousWorkflow: {
+          phases: [],
+          agents: [
+            { index: 0, label: "Old", state: "completed", agentId: "old-task", totalTokens: 60 },
+          ],
+        },
+      });
+      expect(yield* Deferred.await(harness.completed)).toContain("60 recorded");
+      expect(harness.spawned()).toBe(0);
+    }),
+  );
   it.effect("refuses the agent past the per-workflow limit of 1000", () =>
     Effect.gen(function* () {
       const { runner, completed, spawned } = yield* makeHarness();
@@ -447,6 +611,188 @@ describe("workflow runner", () => {
   );
 
   describe("graph plan", () => {
+    it.effect("deduplicates a reattached task's history and cumulative tokens", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness({
+          taskId: () => "node:agent-1",
+          finish: (spawned) => (spawned === 1 ? "failed" : "completed"),
+          usage: () => ({ ...aggregateWorkflowUsage([]), status: "complete", totalTokens: 10 }),
+        });
+        yield* launch(runner, 'await agent("reattach"); return budget.spent');
+        expect(JSON.parse(yield* Deferred.await(completed))).toBe(10);
+        const worker = workflowUpdates.at(-1)?.agents[0];
+        expect(worker?.totalTokens).toBe(10);
+        expect(worker?.attemptTaskIds).toEqual(["node:agent-1"]);
+        expect(worker?.attemptHistory).toHaveLength(1);
+      }),
+    );
+    it.effect("does not apply execution deadlines while terminal facts are finalizing", () =>
+      Effect.gen(function* () {
+        const finalization = yield* Deferred.make<void>();
+        const observed = yield* Deferred.make<void>();
+        const harness = yield* makeHarness({
+          finish: () => "hang",
+          finalization: Deferred.await(finalization),
+          onWorkflowUpdate: (workflow) =>
+            workflow.agents[0]?.attemptHistory?.[0]?.state === "completed"
+              ? Deferred.succeed(observed, undefined)
+              : Effect.void,
+        });
+        yield* launch(harness.runner, 'return await agent("active", { attemptTimeoutMs: 60000 })');
+        yield* Deferred.await(harness.firstSpawn);
+        yield* harness.updateAgent("node:agent-1", "completed");
+        yield* Deferred.await(observed);
+        yield* TestClock.adjust("2 minutes");
+        expect(harness.stops).toEqual([]);
+        yield* Deferred.succeed(finalization, undefined);
+        yield* Deferred.await(harness.completed);
+      }),
+    );
+    it.effect.each(["stop", "detach"] as const)(
+      "releases an active settlement subscription on %s",
+      (reason) =>
+        Effect.gen(function* () {
+          const observed = yield* Deferred.make<void>();
+          const released = yield* Deferred.make<void>();
+          const harness = yield* makeHarness({
+            finish: () => "hang",
+            onWorkflowUpdate: (workflow) =>
+              workflow.agents[0]?.attemptHistory?.length
+                ? Deferred.succeed(observed, undefined)
+                : Effect.void,
+            onAwaitRelease: () => Deferred.succeed(released, undefined),
+          });
+          yield* launch(harness.runner, 'return await agent("active")');
+          yield* Deferred.await(observed);
+          if (reason === "stop") yield* harness.stopWorkflow();
+          else yield* harness.runner.detachAll;
+          yield* Deferred.await(released);
+          expect(yield* Deferred.isDone(harness.completed)).toBe(false);
+        }),
+    );
+    it.effect("refreshes running attempt timing on child updates without a timer", () =>
+      Effect.gen(function* () {
+        const initial = yield* Deferred.make<void>();
+        const refreshed = yield* Deferred.make<void>();
+        let durationMs = 100;
+        const harness = yield* makeHarness({
+          finish: () => "hang",
+          timing: () => ({ startedAt: 0, durationMs, timingComplete: false }),
+          onWorkflowUpdate: (workflow) => {
+            const duration = workflow.agents[0]?.attemptHistory?.[0]?.durationMs;
+            return duration === 100
+              ? Deferred.succeed(initial, undefined)
+              : duration !== undefined && duration !== 100
+                ? Deferred.succeed(refreshed, undefined)
+                : Effect.void;
+          },
+        });
+        yield* launch(harness.runner, 'return await agent("running")');
+        yield* Deferred.await(initial);
+        durationMs = 500;
+        yield* harness.updateAgent("node:agent-1", "running");
+        yield* Deferred.await(refreshed);
+        expect(harness.workflowUpdates.at(-1)?.agents[0]?.attemptHistory?.[0]?.durationMs).toBe(
+          500,
+        );
+        yield* harness.updateAgent("node:agent-1", "completed");
+        yield* Deferred.await(harness.completed);
+        expect(harness.workflowUpdates.at(-1)?.agents[0]?.attemptHistory?.[0]?.durationMs).toBe(
+          500,
+        );
+      }),
+    );
+    it.effect(
+      "persists each attempt's usage, timing and identity without charging checkers twice",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, workflowUpdates } = yield* makeHarness({
+            judgment: (spawned) => spawned !== 2,
+            model: (spawned) => `model-${spawned}`,
+            usage: (spawned) => ({
+              ...aggregateWorkflowUsage([]),
+              status: "complete",
+              totalTokens: spawned * 10,
+            }),
+            timing: (spawned) => ({
+              startedAt: spawned * 10000,
+              durationMs: spawned * 1000,
+              timingComplete: true,
+            }),
+          });
+          yield* launch(
+            runner,
+            'return await agent("x", { node: "a", verify: { type: "judgment", rubric: ["Correct"] } })',
+            twoNodePlan,
+          );
+          yield* Deferred.await(completed);
+          const [worker, firstJudge, secondJudge] = workflowUpdates.at(-1)!.agents;
+          expect(worker?.totalTokens).toBe(40);
+          expect(worker?.attemptTaskIds).toEqual(["node:agent-1", "node:agent-3"]);
+          expect(worker?.attemptHistory).toEqual([
+            {
+              taskId: "node:agent-1",
+              childThreadId: "thread:agent-1",
+              attempt: 0,
+              providerInstanceId: "codex",
+              model: "model-1",
+              state: "completed",
+              usageStatus: "complete",
+              totalTokens: 10,
+              startedAt: 10000,
+              durationMs: 1000,
+              timingComplete: true,
+            },
+            {
+              taskId: "node:agent-3",
+              childThreadId: "thread:agent-3",
+              attempt: 1,
+              providerInstanceId: "codex",
+              model: "model-3",
+              state: "completed",
+              usageStatus: "complete",
+              totalTokens: 30,
+              startedAt: 30000,
+              durationMs: 3000,
+              timingComplete: true,
+            },
+          ]);
+          expect([firstJudge?.judgmentOutcome, secondJudge?.judgmentOutcome]).toEqual([
+            "failed",
+            "passed",
+          ]);
+          expect([firstJudge?.totalTokens, secondJudge?.totalTokens]).toEqual([20, 40]);
+          // Earlier in-flight snapshots must not acquire later attempts by shared-array mutation.
+          const first = workflowUpdates.find(
+            (update) => update.agents[0]?.attemptHistory?.length === 1,
+          );
+          expect(first?.agents[0]?.attemptHistory).toHaveLength(1);
+        }),
+    );
+    it.effect(
+      "records the started model and clears a previous model when a retry reports none",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, workflowUpdates } = yield* makeHarness({
+            finish: (spawned) => (spawned === 1 ? "failed" : "completed"),
+            model: (spawned) => (spawned === 1 ? "actual-first-model" : null),
+          });
+          yield* launch(
+            runner,
+            'return await agent("x", { node: "a", target: { model: "planned-model" } })',
+            twoNodePlan,
+          );
+          yield* Deferred.await(completed);
+          expect(workflowUpdates.at(-1)?.agents[0]?.attemptHistory?.[0]?.model).toBe(
+            "actual-first-model",
+          );
+          expect(workflowUpdates.at(-1)?.agents[0]).toMatchObject({
+            childThreadId: "thread:agent-2",
+            providerInstanceId: "codex",
+          });
+          expect(workflowUpdates.at(-1)?.agents[0]?.model).toBeUndefined();
+        }),
+    );
     it.effect("sends the plan from the first update, then node outcomes and node keys", () =>
       Effect.gen(function* () {
         const { runner, completed, workflowUpdates } = yield* makeHarness();
@@ -519,7 +865,7 @@ return errors`,
       }),
     );
 
-    it.effect("tags the worker with its node but not the agent that checks it", () =>
+    it.effect("tags the worker and checker with explicit node and attempt identity", () =>
       Effect.gen(function* () {
         const { runner, completed, workflowUpdates } = yield* makeHarness();
         yield* launch(
@@ -534,41 +880,89 @@ return errors`,
           "a",
           ...agents.slice(1).map(() => null),
         ]);
+        expect(agents.slice(1).map((agent) => agent.judgmentFor)).toEqual(
+          agents.slice(1).map((_, attempt) => ({ agentIndex: 0, attempt, graphNodeKey: "a" })),
+        );
       }),
     );
 
-    it.effect("keeps a 30-node graph's row update under 64 KB", () =>
+    it.effect(
+      "keeps checker associations through a judgment retry and duplicate worker labels",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, workflowUpdates } = yield* makeHarness({
+            judgment: (spawned) => spawned !== 2,
+          });
+          yield* launch(
+            runner,
+            `
+          await agent("first", { node: "a", label: "same", verify: { type: "judgment", rubric: ["Correct"] } });
+          return await agent("second", { node: "b", label: "same", verify: { type: "judgment", rubric: ["Correct"] } });
+        `,
+            twoNodePlan,
+          );
+          yield* Deferred.await(completed);
+          const agents = workflowUpdates.at(-1)!.agents;
+          expect(agents.map((agent) => [agent.graphNodeKey, agent.judgmentFor])).toEqual([
+            ["a", undefined],
+            [undefined, { agentIndex: 0, attempt: 0, graphNodeKey: "a" }],
+            [undefined, { agentIndex: 0, attempt: 1, graphNodeKey: "a" }],
+            ["b", undefined],
+            [undefined, { agentIndex: 3, attempt: 0, graphNodeKey: "b" }],
+          ]);
+          expect(agents.map((agent) => agent.childThreadId)).toEqual([
+            "thread:agent-3",
+            "thread:agent-2",
+            "thread:agent-4",
+            "thread:agent-5",
+            "thread:agent-6",
+          ]);
+        }),
+    );
+
+    it.effect("measures a realistic 150-node UTF-8 workflow", () =>
       Effect.gen(function* () {
-        const { runner, completed, workflowUpdates } = yield* makeHarness({
+        const harness = yield* makeHarness({
           finish: (n) => (n % 3 === 0 ? "failed" : "completed"),
+          usage: () => ({ ...aggregateWorkflowUsage([]), status: "complete", totalTokens: 12345 }),
+          timing: () => ({ durationMs: 3210, timingComplete: true }),
+          model: () => "gpt-6.1-sol",
         });
-        const plan: OrchestrationV2WorkflowPlan = {
-          nodes: Array.from({ length: 30 }, (_, index) => ({
-            key: `node-${String(index).padStart(2, "0")}`,
-            label: `Audit package number ${index} for token usage`,
-            wave: Math.floor(index / 5),
-            dependsOn: index < 5 ? [] : [`node-${String(index - 5).padStart(2, "0")}`],
+        const plan = {
+          nodes: Array.from({ length: 150 }, (_, index) => ({
+            key: `node-${index}`,
+            label: `Audit ${index}: données 日本語 🧪`,
+            wave: Math.floor(index / 10),
+            dependsOn: index < 10 ? [] : [`node-${index - 10}`],
           })),
         };
-        // Prompts at the preview limit and reasons past it: the largest a row gets from these fields.
-        yield* launch(
-          runner,
-          `await parallel(${JSON.stringify(plan.nodes.map((node) => node.key))}.map((key) => async () => {
-  await agent(key + " " + "p".repeat(800), { node: key, label: key });
-  node(key, { status: "failed", reason: "r".repeat(2000), attempts: 3 });
-}))`,
-          plan,
-        );
-        yield* Deferred.await(completed);
-        const sizes = workflowUpdates.map((update) => JSON.stringify(update).length);
-        const planBytes = JSON.stringify({
-          plan: workflowUpdates.at(-1)!.plan,
-          nodeOutcomes: workflowUpdates.at(-1)!.nodeOutcomes,
-        }).length;
-        expect(Object.keys(workflowUpdates.at(-1)!.nodeOutcomes ?? {})).toHaveLength(30);
-        expect(Math.max(...sizes)).toBeLessThan(64 * 1024);
-        // The plan and outcomes stay a minority of the row.
-        expect(planBytes).toBeLessThan(24 * 1024);
+        const source = `await parallel(${JSON.stringify(plan.nodes.map((node) => node.key))}.map((key) => async () => {
+          await agent(key + " données 日本語 🧪".repeat(100), { node: key, label: key });
+          node(key, { status: "failed", reason: "raison 日本語 🧪".repeat(100), attempts: 3 });
+        }))`;
+        yield* launch(harness.runner, source, plan);
+        yield* Deferred.await(harness.completed);
+        const commands = harness.workflowCommands;
+        const sizes = commands.map((command) => Buffer.byteLength(JSON.stringify(command), "utf8"));
+        if (process.env.C7_PAYLOAD_ARTIFACT) {
+          NodeFS.writeFileSync(
+            process.env.C7_PAYLOAD_ARTIFACT,
+            JSON.stringify(
+              {
+                boundary: "actual workflow runner dispatch commands",
+                sizes,
+                maxBytes: Math.max(...sizes),
+                source,
+                plan,
+                commands,
+              },
+              null,
+              2,
+            ),
+          );
+        }
+        expect(harness.workflowUpdates.at(-1)?.agents).toHaveLength(150);
+        expect(Math.max(...sizes)).toBeLessThanOrEqual(65536);
       }),
     );
   });

@@ -17,6 +17,9 @@ const COLLISION_PADDING = 5;
 
 const TooltipProvider = TooltipPrimitive.Provider;
 
+/** Lets many triggers share one tooltip, so a long list mounts one root instead of one each. */
+const TooltipCreateHandle = TooltipPrimitive.createHandle;
+
 type TooltipActionsRef = RefObject<TooltipPrimitive.Root.Actions | null>;
 
 // Context values are frozen to the compiler, so consumers update the hovered
@@ -162,4 +165,11 @@ function TooltipPopup({
   );
 }
 
-export { TooltipProvider, Tooltip, TooltipTrigger, TooltipPopup, TooltipScrollDismissArea };
+export {
+  TooltipProvider,
+  TooltipCreateHandle,
+  Tooltip,
+  TooltipTrigger,
+  TooltipPopup,
+  TooltipScrollDismissArea,
+};

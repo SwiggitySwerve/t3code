@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  NodeId,
   ORCHESTRATION_V2_WS_METHODS,
   ThreadId,
   TurnItemId,
@@ -575,6 +576,45 @@ describe("EnvironmentThreads", () => {
 
       expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBe(CACHED_SNAPSHOT_SEQUENCE);
       expect(yield* Ref.get(harness.loaderCalls)).toBe(0);
+    }),
+  );
+
+  it.effect("reloads from a snapshot when a workflow update has no base to apply to", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ cached: BASE_PROJECTION });
+      const occurredAt = DateTime.makeUnsafe("2026-06-20T01:00:00.000Z");
+      // This client holds no row for the workflow, so the patch cannot apply.
+      yield* Queue.offer(harness.inputs, {
+        kind: "event",
+        sequence: CACHED_SNAPSHOT_SEQUENCE + 1,
+        event: {
+          id: EventId.make("event-workflow-gap"),
+          type: "workflow.updated",
+          threadId: THREAD_ID,
+          occurredAt,
+          payload: {
+            id: NodeId.make("workflow:missing"),
+            previousRevision: 4,
+            revision: 5,
+            updatedAt: occurredAt,
+          },
+        },
+      });
+      yield* awaitThreadState(
+        harness.observed,
+        (value) => Option.getOrNull(value.error) === "This thread fell out of sync. Reloading it.",
+      );
+      // The client resubscribes without a cursor, so the server sends a snapshot.
+      yield* Effect.gen(function* () {
+        while ((yield* Ref.get(harness.subscriptionCount)) < 2) yield* Effect.yieldNow;
+      });
+      expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBeUndefined();
+      yield* Queue.offer(harness.inputs, snapshot(BASE_PROJECTION, CACHED_SNAPSHOT_SEQUENCE + 2));
+      const recovered = yield* awaitThreadState(
+        harness.observed,
+        (value) => value.status === "live" && Option.isNone(value.error),
+      );
+      expect(Option.getOrThrow(recovered.data)).toEqual(BASE_PROJECTION);
     }),
   );
 

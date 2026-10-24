@@ -1,4 +1,5 @@
 import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
+import { applyWorkflowUpdate, applyWorkflowProjectionUpdate } from "@t3tools/shared/workflowUpdate";
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
@@ -866,6 +867,8 @@ export function applyToProjection(
         ...base,
         nodes: upsertById(base.nodes, event.payload),
       };
+    case "workflow.updated":
+      return applyWorkflowProjectionUpdate(base, event.payload);
     case "subagent.updated":
       return {
         ...base,
@@ -2187,6 +2190,22 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                 completed_at = excluded.completed_at,
                 payload_json = excluded.payload_json
             `;
+              break;
+            }
+            case "workflow.updated": {
+              const rows = yield* sql<{
+                payload_json: string;
+              }>`SELECT payload_json FROM orchestration_v2_projection_subagents WHERE subagent_id = ${event.payload.id} AND thread_id = ${event.threadId}`;
+              const previous =
+                rows[0] === undefined
+                  ? undefined
+                  : yield* decodeSubagentPayload(rows[0].payload_json);
+              const payload = yield* Effect.try({
+                try: () => applyWorkflowUpdate(previous, event.payload),
+                catch: (cause) =>
+                  new ProjectionStoreApplyEventError({ eventType: event.type, cause }),
+              });
+              yield* apply({ ...event, type: "subagent.updated", payload });
               break;
             }
             case "subagent.updated": {

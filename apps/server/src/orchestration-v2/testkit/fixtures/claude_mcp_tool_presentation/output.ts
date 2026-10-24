@@ -43,6 +43,15 @@ export function assertClaudeMcpToolPresentationOutput(
     },
   });
 
+  // In this recorded claude.ai Firecrawl connector transcript, Claude Code reports each MCP result
+  // as { content: <its text>, structuredContent }; the adapter keeps that pair, not just the text,
+  // as the tool item output. This does not cover other MCP servers, including t3-code tools.
+  for (const tool of tools) {
+    const output = tool.output as { content?: unknown; structuredContent?: unknown } | undefined;
+    assert.equal(typeof output?.content, "string");
+    assert.deepEqual(JSON.parse(output?.content as string), output?.structuredContent);
+  }
+
   assert.equal(map?.status, "completed");
   assert.equal(map?.title, "firecrawl map");
   assert.deepEqual(map?.toolSource, {

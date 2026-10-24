@@ -3,6 +3,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { it as effectIt } from "@effect/vitest";
 import {
   CheckpointScopeId,
+  ContextHandoffId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -14,7 +15,9 @@ import {
   RunAttemptId,
   RunId,
   ThreadId,
+  TurnItemId,
   ProjectId,
+  type OrchestrationV2RestartCancelledBackgroundWork,
   type OrchestrationV2ThreadProjection,
   OrchestrationV2DomainEvent,
 } from "@t3tools/contracts";
@@ -39,11 +42,13 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { applyUltracode, ULTRACODE_TURN_NOTE } from "@t3tools/provider-core/server/ultracode";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
+import { restartCancelledBackgroundWorkNote } from "./RestartBackgroundNote.ts";
 import * as RunExecutionService from "./RunExecutionService.ts";
 import * as RuntimePolicy from "./RuntimePolicy.ts";
 
@@ -257,6 +262,10 @@ it.each([
   expect(harness.createWorktree).toHaveBeenCalledTimes(input.recreated ? 1 : 0);
 });
 
+const RESTART_WORK: ReadonlyArray<OrchestrationV2RestartCancelledBackgroundWork> = [
+  { kind: "subagent", label: "Review agent (id agent-1)", id: "agent-1" },
+];
+
 function makeLocalCommandHarness(input: {
   readonly text: string;
   readonly worktreePath?: string;
@@ -280,6 +289,12 @@ function makeLocalCommandHarness(input: {
     readonly interruptFailure?: boolean;
     readonly interruptCurrentRun?: boolean;
   };
+  /** Runs the turn through the delivery wrapper and records what the provider receives. */
+  readonly delivery?: {
+    readonly restart?: "pending-note" | "continuation";
+    readonly handoff?: "injected" | "inline";
+  };
+  readonly attachments?: OrchestrationV2ThreadProjection["messages"][number]["attachments"];
 }) {
   const now = DateTime.makeUnsafe("2026-09-04T12:00:00Z");
   const threadId = ThreadId.make("thread-native-account-command");
@@ -309,6 +324,9 @@ function makeLocalCommandHarness(input: {
     completedAt: null,
     checkpointId: null,
     contextHandoffId: null,
+    ...(input.delivery?.restart === "continuation"
+      ? { restartContinuationOfRunId: RunId.make("previous-failed-run") }
+      : {}),
   };
   const providerThread: OrchestrationV2ThreadProjection["providerThreads"][number] = {
     id: providerThreadId,
@@ -334,7 +352,7 @@ function makeLocalCommandHarness(input: {
     nodeId: rootNodeId,
     role: "user",
     text: input.text,
-    attachments: [],
+    attachments: input.attachments ?? [],
     streaming: false,
     createdBy: "user",
     creationSource: "web",
@@ -442,7 +460,42 @@ function makeLocalCommandHarness(input: {
     ],
     providerSessions: [],
     providerTurns: [],
-    contextHandoffs: [],
+    contextHandoffs:
+      input.delivery?.handoff === undefined
+        ? []
+        : [
+            {
+              id: ContextHandoffId.make("handoff-delivery"),
+              threadId,
+              targetRunId: runId,
+              fromProviderThreadIds: [],
+              toProviderThreadId: providerThreadId,
+              coveredRunOrdinals: { from: 1, to: 1 },
+              strategy: "full_thread_summary",
+              status: "ready",
+              summaryMessageId: null,
+              summaryText: "",
+              history: {
+                messages: [
+                  {
+                    itemId: TurnItemId.make("item-delivery-history"),
+                    role: "user",
+                    text: "Earlier question",
+                    threadId,
+                    runId: RunId.make("previous-failed-run"),
+                    providerThreadId,
+                    status: "completed",
+                    kind: "user_message",
+                  },
+                ],
+                coverage: "Earlier conversation.",
+                omittedItems: 0,
+              },
+              createdByProviderInstanceId: null,
+              createdAt: now,
+              updatedAt: now,
+            },
+          ],
     contextTransfers: [],
     turnItems: [],
     visibleTurnItems: [],
@@ -484,6 +537,9 @@ function makeLocalCommandHarness(input: {
           activeAttemptId: previousAttemptId,
           providerThreadId: previousProviderThreadId,
           completedAt: now,
+          ...(input.delivery?.restart === undefined
+            ? {}
+            : { restartCancelledBackgroundWork: RESTART_WORK }),
         },
         run,
       ],
@@ -609,17 +665,65 @@ function makeLocalCommandHarness(input: {
                   },
                   ensureThread: () => Effect.succeed(providerThread),
                   resumeThread: () => Effect.succeed(projection.providerThreads[0]),
+                  ...(input.delivery === undefined
+                    ? {}
+                    : {
+                        startTurn,
+                        ...(input.delivery.handoff === "injected" ? { injectHistory } : {}),
+                      }),
                 } as never)
               : Effect.die("A local command must not open a native session."),
   );
+  const deliveredTurns: Array<ProviderAdapter.ProviderAdapterV2TurnInput> = [];
+  const startTurn = vi.fn((turn: ProviderAdapter.ProviderAdapterV2TurnInput) =>
+    Effect.sync(() => {
+      deliveredTurns.push(turn);
+    }),
+  );
+  const injectHistory = vi.fn(() => Effect.succeed(true));
+  // Mirrors RunExecutionService.startRootRun: the keyword hook shapes the message,
+  // then the session (possibly the delivery wrapper) starts the provider turn.
+  const startTurnAsRunExecution = (
+    root: RunExecutionService.RunExecutionServiceV2StartRootRunInput,
+  ) =>
+    root.session
+      .startTurn({
+        appThread: root.appThread,
+        threadId: root.run.threadId,
+        runId: root.run.id,
+        runOrdinal: root.run.ordinal,
+        providerTurnOrdinal: root.providerTurnOrdinal,
+        ...(root.run.restartContinuationOfRunId === undefined
+          ? {}
+          : { restartContinuationOfRunId: root.run.restartContinuationOfRunId }),
+        attemptId: root.attemptId,
+        rootNodeId: root.rootNode.id,
+        providerThread: root.providerThread,
+        message: {
+          ...root.message,
+          text: applyUltracode({
+            mode: "keyword",
+            driver: root.providerThread.driver,
+            text: root.message.text,
+            createdBy: root.message.createdBy,
+            creationSource: root.message.creationSource,
+            delegatedThread: false,
+          }),
+        },
+        modelSelection: root.modelSelection,
+        runtimePolicy: root.runtimePolicy,
+      })
+      .pipe(Effect.orDie);
   const startRootRun = vi.fn<
     (input: RunExecutionService.RunExecutionServiceV2StartRootRunInput) => Effect.Effect<void>
-  >(() =>
-    input.failReadsAfterRunning === true || input.previousTurn !== undefined
-      ? Effect.suspend(() =>
-          providerBusy ? Effect.die("The previous provider turn is still running.") : Effect.void,
-        )
-      : Effect.die("A local command must not start a native turn."),
+  >((root) =>
+    input.delivery !== undefined
+      ? startTurnAsRunExecution(root)
+      : input.failReadsAfterRunning === true || input.previousTurn !== undefined
+        ? Effect.suspend(() =>
+            providerBusy ? Effect.die("The previous provider turn is still running.") : Effect.void,
+          )
+        : Effect.die("A local command must not start a native turn."),
   );
   const failReadIfRunning = Effect.suspend(() =>
     input.failReadsAfterRunning === true &&
@@ -688,7 +792,10 @@ function makeLocalCommandHarness(input: {
         Layer.mock(ContextHandoffService.ContextHandoffServiceV2)({
           prepareProviderHandoff: () => Effect.die("history read must fail first"),
         }),
-        Layer.mock(EventSink.EventSinkV2)({ writeIfRunCurrent }),
+        Layer.mock(EventSink.EventSinkV2)({
+          writeIfRunCurrent,
+          write: () => Effect.succeed([]),
+        }),
         IdAllocator.layer,
         layerWorktreeLocation(input.worktreesDir),
         input.fileSystem === undefined
@@ -715,12 +822,14 @@ function makeLocalCommandHarness(input: {
               ),
             }),
           getTurnStartHistory: () =>
-            Effect.fail(
-              new ProjectionStore.ProjectionStoreReadError({
-                threadId,
-                cause: input.historyReadFailureAfterFallback,
-              }),
-            ),
+            input.delivery !== undefined
+              ? Effect.succeed([])
+              : Effect.fail(
+                  new ProjectionStore.ProjectionStoreReadError({
+                    threadId,
+                    cause: input.historyReadFailureAfterFallback,
+                  }),
+                ),
         }),
         Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
           open,
@@ -754,6 +863,8 @@ function makeLocalCommandHarness(input: {
     open,
     writeIfRunCurrent,
     startRootRun,
+    deliveredTurns,
+    injectHistory,
     interruptTurn,
     tryHandlePromptCommand,
     events,
@@ -1243,3 +1354,87 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
       }),
   );
 }
+
+const HOOKED_TEXT = "Ship the fix with ultracode";
+const HOOKED_TURN_TEXT = `${HOOKED_TEXT}\n\n${ULTRACODE_TURN_NOTE}`;
+const COMPLETED_PREVIOUS_TURN = { runStatus: "completed", turnStatus: "completed" } as const;
+const screenshot = {
+  type: "image",
+  id: "attachment-delivery",
+  name: "screen.png",
+  mimeType: "image/png",
+  sizeBytes: 12,
+} as const;
+
+effectIt.effect.each([
+  {
+    label: "prepends restart context to the hook's turn text",
+    delivery: { restart: "pending-note" },
+    expected: `${restartCancelledBackgroundWorkNote(RESTART_WORK)}\n\nUser message:\n${HOOKED_TURN_TEXT}`,
+  },
+  {
+    label: "keeps the hook's turn text on a restart continuation without context",
+    delivery: { restart: "continuation" },
+    expected: HOOKED_TURN_TEXT,
+  },
+  {
+    label: "keeps the hook's turn text when history was injected natively",
+    delivery: { handoff: "injected" },
+    expected: HOOKED_TURN_TEXT,
+  },
+] as const)("the delivery wrapper $label", ({ delivery, expected }) =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: HOOKED_TEXT,
+      attachments: [screenshot],
+      previousTurn: COMPLETED_PREVIOUS_TURN,
+      delivery,
+    });
+
+    yield* harness.start;
+
+    expect(harness.deliveredTurns).toHaveLength(1);
+    const delivered = harness.deliveredTurns[0]!;
+    expect(delivered.message.text).toBe(expected);
+    expect(delivered.message.attachments).toEqual([screenshot]);
+    expect(delivered.message.text.split(ULTRACODE_TURN_NOTE)).toHaveLength(2);
+    // A restart continuation is prompted by its own text; the source run id is
+    // not part of what the provider adapter receives.
+    expect(delivered.restartContinuationOfRunId).toBeUndefined();
+    expect(harness.injectHistory).toHaveBeenCalledTimes(delivery.handoff === "injected" ? 1 : 0);
+  }),
+);
+
+effectIt.effect("the delivery wrapper keeps the hook's note after inline handoff context", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: HOOKED_TEXT,
+      previousTurn: COMPLETED_PREVIOUS_TURN,
+      delivery: { handoff: "inline" },
+    });
+
+    yield* harness.start;
+
+    const text = harness.deliveredTurns[0]!.message.text;
+    expect(text).toContain("Earlier question");
+    expect(text.endsWith(`User message:\n${HOOKED_TURN_TEXT}`)).toBe(true);
+    expect(text.split("User message:\n")).toHaveLength(2);
+    expect(text.split(ULTRACODE_TURN_NOTE)).toHaveLength(2);
+  }),
+);
+
+effectIt.effect("a turn the hook leaves alone is delivered unchanged after context", () =>
+  Effect.gen(function* () {
+    const harness = makeLocalCommandHarness({
+      text: "Plain request",
+      previousTurn: COMPLETED_PREVIOUS_TURN,
+      delivery: { restart: "pending-note" },
+    });
+
+    yield* harness.start;
+
+    expect(harness.deliveredTurns[0]!.message.text).toBe(
+      `${restartCancelledBackgroundWorkNote(RESTART_WORK)}\n\nUser message:\nPlain request`,
+    );
+  }),
+);

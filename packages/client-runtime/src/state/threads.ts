@@ -225,6 +225,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
   };
   if (resumeCache?.owner === owner) resumeCache.snapshot = committed;
   const awaitingCompletion = yield* Ref.make(false);
+  const needsSnapshot = yield* Ref.make(false);
+  const resyncRequests = yield* Queue.unbounded<void>();
   const applyLock = yield* Semaphore.make(1);
   // Save only completed data/cursor updates. A canceled scope must not cache
   // a cursor whose event has not reached the data yet.
@@ -449,8 +451,10 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
       );
     }
     if (sequence === appliedSequence) return;
-    yield* SubscriptionRef.set(lastSequence, sequence);
-    if (fresh.length === 0) return;
+    if (fresh.length === 0) {
+      yield* SubscriptionRef.set(lastSequence, sequence);
+      return;
+    }
 
     const waiting = yield* Ref.get(awaitingCompletion);
     // Apply against the latest projection/history in one update so a concurrent
@@ -459,6 +463,8 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     type EventApplyResult =
       | { readonly _tag: "noop" }
       | { readonly _tag: "delete" }
+      // A workflow patch whose base revision this client does not hold; only a snapshot repairs it.
+      | { readonly _tag: "resync"; readonly message: string }
       | {
           readonly _tag: "applied";
           readonly projection: OrchestrationV2ThreadProjection;
@@ -491,7 +497,15 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
               latestLocalTurnOrdinal: current.history.latestLocalTurnOrdinal,
             }
           : undefined;
-      const next = applyOrchestrationV2ProjectionEvent(current.data.value, item.event, partial);
+      let next: ReturnType<typeof applyOrchestrationV2ProjectionEvent>;
+      try {
+        next = applyOrchestrationV2ProjectionEvent(current.data.value, item.event, partial);
+      } catch (error) {
+        return [
+          { _tag: "resync", message: error instanceof Error ? error.message : String(error) },
+          current,
+        ];
+      }
       if (next === null || next === current.data.value) {
         return [{ _tag: "noop" }, current];
       }
@@ -523,12 +537,23 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           const [applied, next] = applyEvent(current, item);
           current = next;
           if (applied._tag !== "noop") result = applied;
-          if (applied._tag === "delete") break;
+          if (applied._tag === "delete" || applied._tag === "resync") break;
         }
         return [result, current];
       },
     );
 
+    if (result._tag === "resync") {
+      // Replaying from this cursor would hit the same gap, so ask the server for a snapshot.
+      yield* Effect.logWarning("Thread update did not apply; reloading the thread.").pipe(
+        Effect.annotateLogs({ environmentId, threadId, cause: result.message.slice(0, 200) }),
+      );
+      yield* setStreamError("This thread fell out of sync. Reloading it.");
+      yield* Ref.set(needsSnapshot, true);
+      yield* Queue.offer(resyncRequests, undefined);
+      return;
+    }
+    yield* SubscriptionRef.set(lastSequence, sequence);
     if (result._tag === "delete") {
       yield* setDeleted();
       return;
@@ -749,6 +774,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
     onSome: (service) =>
       service.changes.pipe(Stream.filter(ConnectionWakeups.shouldResubscribeAfterWakeup)),
   });
+  const resubscriptions = Stream.merge(foregroundResubscriptions, Stream.fromQueue(resyncRequests));
 
   // Only the first subscription after a warm live resume keeps the retained
   // status. A replacement session or foreground resubscribe on the same scope
@@ -841,7 +867,9 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         }
 
         const sequence = yield* SubscriptionRef.get(lastSequence);
-        const canResume = Option.isSome(current.data);
+        // After an update failed to apply, the next subscription starts from a snapshot.
+        const forceSnapshot = yield* Ref.getAndSet(needsSnapshot, false);
+        const canResume = Option.isSome(current.data) && !forceSnapshot;
         const acceptBoundedSnapshot = yield* Ref.get(acceptsBoundedSocketSnapshots);
         if (!supportsCompletionMarker && canResume) {
           yield* SubscriptionRef.update(state, (value) => ({
@@ -855,6 +883,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
           threadId,
           ...(canResume ? { afterSequence: sequence } : {}),
           ...(supportsCompletionMarker ? { requestCompletionMarker: true as const } : {}),
+          acceptWorkflowUpdates: true as const,
           ...(acceptBoundedSnapshot
             ? { acceptBoundedSnapshot: true as const, acceptCompactTurnItems: true as const }
             : {}),
@@ -864,7 +893,7 @@ export const makeEnvironmentThreadState = Effect.fn("EnvironmentThreadState.make
         onDefect: () => setStreamError("Could not synchronize the thread."),
         onExpectedFailure: (cause) => setStreamError(formatThreadError(cause)),
         retryExpectedFailureAfter: "250 millis",
-        resubscribe: foregroundResubscriptions,
+        resubscribe: resubscriptions,
       },
     ).pipe(Stream.runForEachArray(applyItems)),
   );

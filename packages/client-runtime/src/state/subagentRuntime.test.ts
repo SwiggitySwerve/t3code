@@ -9,6 +9,7 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
+  appWorkflowHeading,
   appWorkflowMemberThreads,
   workflowGraphHeadline,
   workflowGraphNodeDetail,
@@ -17,6 +18,8 @@ import {
   isWorkflowScriptMessage,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
+  workflowProgressText,
+  workflowMemberIdentity,
 } from "./subagentRuntime.ts";
 
 const at = (iso: string) => DateTime.makeUnsafe(iso);
@@ -482,6 +485,69 @@ describe("graph workflows", () => {
     expect(a?.member?.title).toBe("second try");
   });
 
+  it("associates checkers by explicit node identity across duplicate labels and retries", () => {
+    const graph = graphOf("failed", {
+      plan: { nodes: plan.nodes.map((node) => ({ ...node, label: "Same label" })) },
+      agents: [
+        member({ index: 0, graphNodeKey: "a", childThreadId: ThreadId.make("old-worker") }),
+        member({
+          index: 1,
+          label: "check Same label",
+          judgmentFor: { agentIndex: 0, attempt: 0, graphNodeKey: "a" },
+          childThreadId: ThreadId.make("first-check"),
+        }),
+        member({ index: 2, graphNodeKey: "b", childThreadId: ThreadId.make("other-worker") }),
+        member({
+          index: 3,
+          label: "check Same label",
+          state: "failed",
+          judgmentFor: { agentIndex: 0, attempt: 1, graphNodeKey: "a" },
+          childThreadId: ThreadId.make("retry-check"),
+        }),
+        member({
+          index: 4,
+          label: "check Same label",
+          judgmentFor: { agentIndex: 2, attempt: 0, graphNodeKey: "b" },
+          childThreadId: ThreadId.make("other-check"),
+        }),
+        member({ index: 5, graphNodeKey: "a", childThreadId: ThreadId.make("new-worker") }),
+        member({ index: 6, label: "check Same label" }),
+      ],
+    })!;
+    const [a, b] = graph.waves.flat();
+    expect(a?.member?.childThreadId).toBe("new-worker");
+    expect(a?.checkers.map((checker) => checker.childThreadId)).toEqual([
+      "first-check",
+      "retry-check",
+    ]);
+    expect(b?.checkers.map((checker) => checker.childThreadId)).toEqual(["other-check"]);
+    expect(graph.otherMembers.map((checker) => checker.agentIndex)).toEqual([6]);
+  });
+
+  it("uses actual member provider and model, leaving never-started nodes neutral", () => {
+    const graph = graphOf("failed", {
+      plan,
+      agents: [
+        member({
+          index: 0,
+          graphNodeKey: "a",
+          model: "actual-model",
+          providerInstanceId: ProviderInstanceId.make("other-provider"),
+          childThreadId: ThreadId.make("actual-thread"),
+        }),
+        member({ index: 1, graphNodeKey: "b", state: "failed" }),
+      ],
+    })!;
+    const nodes = graph.waves.flat();
+    expect(nodes.map((node) => workflowMemberIdentity(node.member))).toEqual([
+      "other-provider / actual-model",
+      "Not started",
+      "Not started",
+      "Not started",
+    ]);
+    expect(nodes[0]?.member?.model).not.toBe(subagent().model);
+  });
+
   it("words the status line and each node's detail", () => {
     const graph = graphOf("running", {
       plan,
@@ -500,6 +566,97 @@ describe("graph workflows", () => {
       { detail: "after Schema", retries: "retry 1" },
       { detail: "after Schema", retries: null },
       { detail: "after Build API, Build UI", retries: null },
+    ]);
+  });
+});
+
+describe("workflow progress text", () => {
+  const plan = {
+    nodes: [
+      { key: "build", label: "Build API", wave: 0, dependsOn: [] },
+      { key: "test", label: "Test", wave: 1, dependsOn: ["build"] },
+    ],
+  };
+  const legacy =
+    "The workflow failed: Graph failed: " +
+    JSON.stringify({
+      ok: false,
+      nodes: {
+        build: {
+          status: "failed",
+          reason: "Provider unavailable",
+          outputs: { huge: "x".repeat(10000) },
+        },
+        test: { status: "skipped" },
+      },
+    }) +
+    " (at eval_script:25)";
+  const row = {
+    status: "failed" as const,
+    result: legacy,
+    workflow: { plan, phases: [], agents: [] },
+  };
+
+  it("summarizes old graph errors with labels, reasons and skipped context", () => {
+    expect(workflowProgressText(row)).toBe(
+      "Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable",
+    );
+    expect(
+      workflowProgressText({
+        ...row,
+        workflow: {
+          ...row.workflow,
+          nodeOutcomes: { build: { status: "failed", reason: "Recorded reason" } },
+        },
+      }),
+    ).toContain("Build API: Recorded reason");
+    expect(
+      workflowProgressText({
+        ...row,
+        result: legacy.slice(0, 100),
+        workflow: {
+          ...row.workflow,
+          nodeOutcomes: {
+            build: { status: "failed", reason: "Provider unavailable" },
+            test: { status: "skipped" },
+          },
+        },
+      }),
+    ).toBe("Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable");
+  });
+
+  it("preserves unknown errors and script results and hides only graph success records", () => {
+    for (const result of ["Permission denied", "{bad JSON}", '{"ok":false,"nodes":{}}']) {
+      expect(workflowProgressText({ ...row, result })).toBe(result);
+    }
+    expect(workflowProgressText({ ...row, workflow: undefined })).toBe(legacy);
+    const result = JSON.stringify({
+      ok: true,
+      nodes: { build: { status: "passed" }, test: { status: "passed" } },
+    });
+    expect(workflowProgressText({ ...row, status: "completed", result })).toBeNull();
+    expect(workflowProgressText({ ...row, status: "completed", result, workflow: undefined })).toBe(
+      result,
+    );
+    expect(workflowProgressText({ ...row, status: "running", progress: "Working" })).toBe(
+      "Working",
+    );
+  });
+});
+
+describe("appWorkflowHeading", () => {
+  it("names each run state, and stays generic before the run has one", () => {
+    expect(
+      (["running", "completed", "failed", "cancelled", "interrupted", "pending"] as const).map(
+        appWorkflowHeading,
+      ),
+    ).toEqual([
+      "Workflow running",
+      "Workflow finished",
+      "Workflow failed",
+      "Workflow stopped",
+      "Workflow stopped",
+      "Workflow",
     ]);
   });
 });

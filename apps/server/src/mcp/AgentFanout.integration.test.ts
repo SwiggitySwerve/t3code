@@ -15,21 +15,44 @@ import {
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
+  OrchestrationV2ThreadStreamItem,
+  type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2Run,
+  type ModelSelection,
   type OrchestrationV2Subagent,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderTurnId,
+  RunId,
+  RunAttemptId,
   type ServerProvider,
   type TurnTokenUsage,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { storedWorkflowScript } from "@t3tools/shared/storedWorkflowScript";
+import { subscribeOrchestrationV2Thread } from "../ws.ts";
+import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
+import { workflowPatches } from "@t3tools/shared/workflowUpdate";
+import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
+import {
+  projectDomainEventForWire,
+  projectThreadProjectionForWire,
+} from "../orchestration-v2/WireProjection.ts";
+import {
+  buildBoundedThreadStreamSnapshot,
+  boundWorkflowUpdateBatches,
+} from "../orchestration-v2/ThreadStream.ts";
+import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
+import * as SqlClient from "effect/sql/SqlClient";
+import { json as rpcJson } from "effect/rpc/RpcSerialization";
+import type { ResponseChunkEncoded } from "effect/rpc/RpcMessage";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -39,6 +62,10 @@ import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
+import {
+  CLAUDE_PROVIDER,
+  ClaudeProviderCapabilitiesV2,
+} from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -85,11 +112,30 @@ const provider: ServerProvider = {
   skills: [],
 };
 
+const claudeInstanceId = ProviderInstanceId.make("claude-test");
+const claudeModel = "claude-sonnet-4-6";
+const claudeAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
+  ...adapter,
+  instanceId: claudeInstanceId,
+  driver: CLAUDE_PROVIDER,
+  getCapabilities: () => Effect.succeed(ClaudeProviderCapabilitiesV2),
+};
+const claudeProvider: ServerProvider = {
+  ...provider,
+  instanceId: claudeInstanceId,
+  driver: claudeAdapter.driver,
+  models: [{ slug: claudeModel, name: claudeModel, isCustom: false, capabilities: null }],
+};
+
 const layerDatabase = SqlitePersistence.layerMemory;
-const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
+const makeLayerTest = (
+  maxRunningDelegatedTasks?: number,
+  providers: ReadonlyArray<ServerProvider> = [provider, claudeProvider],
+) => {
+  const layerAdapters = ProviderAdapterRegistry.layerFromAdapters([adapter, claudeAdapter]);
   const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
     { name: "delegate-tasks" },
-    ProviderAdapterRegistry.layerFromAdapters([adapter]),
+    layerAdapters,
     {
       databaseLayer: layerDatabase,
       runEffectWorker: false,
@@ -98,7 +144,20 @@ const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
   );
   const layerOrchestration = ThreadManagementService.layer.pipe(
     Layer.provideMerge(layerOrchestrator),
-    Layer.provideMerge(ServerSettings.layerTest()),
+    Layer.provideMerge(
+      ServerSettings.layerTest({
+        providerInstances: Object.fromEntries(
+          providers.map((provider) => [
+            provider.instanceId,
+            {
+              driver: provider.driver,
+              enabled: provider.enabled,
+              config: {},
+            },
+          ]),
+        ),
+      }),
+    ),
     Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
   );
   const layerSecretStore = Layer.sync(ServerSecretStore.ServerSecretStore, () =>
@@ -122,8 +181,8 @@ const makeLayerTest = (maxRunningDelegatedTasks?: number) => {
     ),
     Layer.provideMerge(McpServer.McpServer.layer),
     Layer.provideMerge(layerOrchestration),
-    Layer.provideMerge(ProviderAdapterRegistry.layerFromAdapters([adapter])),
-    Layer.provideMerge(ProviderRegistryMock.layer([provider])),
+    Layer.provideMerge(layerAdapters),
+    Layer.provideMerge(ProviderRegistryMock.layer(providers)),
     Layer.provideMerge(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
     Layer.provideMerge(
       Layer.mock(ProjectService.ProjectService)({
@@ -186,35 +245,37 @@ const invoke = (name: string, args: Record<string, unknown>) =>
 const errorText = (result: McpSchema.CallToolResult) =>
   result.content.map((part) => ("text" in part ? part.text : "")).join("");
 
-const startParent = Effect.gen(function* () {
-  const orchestrator = yield* Orchestrator.OrchestratorV2;
-  yield* orchestrator.dispatch({
-    type: "thread.create",
-    createdBy: "user",
-    creationSource: "web",
-    commandId: CommandId.make("command:delegate-tasks:create"),
-    threadId: parentThreadId,
-    projectId: ProjectId.make("project:delegate-tasks"),
-    title: "Delegate tasks parent",
-    modelSelection,
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
+const startParentWithSelection = (selection: ModelSelection) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      createdBy: "user",
+      creationSource: "web",
+      commandId: CommandId.make("command:delegate-tasks:create"),
+      threadId: parentThreadId,
+      projectId: ProjectId.make("project:delegate-tasks"),
+      title: "Delegate tasks parent",
+      modelSelection: selection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      createdBy: "user",
+      creationSource: "web",
+      commandId: CommandId.make("command:delegate-tasks:start"),
+      threadId: parentThreadId,
+      messageId: MessageId.make("message:delegate-tasks:start"),
+      text: "Fan out work.",
+      attachments: [],
+      modelSelection: selection,
+      dispatchMode: { type: "start_immediately" },
+    });
   });
-  yield* orchestrator.dispatch({
-    type: "message.dispatch",
-    createdBy: "user",
-    creationSource: "web",
-    commandId: CommandId.make("command:delegate-tasks:start"),
-    threadId: parentThreadId,
-    messageId: MessageId.make("message:delegate-tasks:start"),
-    text: "Fan out work.",
-    attachments: [],
-    modelSelection,
-    dispatchMode: { type: "start_immediately" },
-  });
-});
+const startParent = startParentWithSelection(modelSelection);
 
 const childTasks = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -311,7 +372,7 @@ const completeChild = (
           threadId: childThreadId,
           runId: run.id,
           occurredAt: now,
-          payload: { ...run, status: "completed", ...runPatch, startedAt: now, completedAt: now },
+          payload: { ...run, status: "completed", startedAt: now, completedAt: now, ...runPatch },
         },
       ],
     });
@@ -320,6 +381,28 @@ const completeChild = (
 const decodeStarted = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTasksResult);
 const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpTaskWaitResult);
 const decodeWorkflow = Schema.decodeUnknownEffect(OrchestratorMcpWorkflowResult);
+
+const refusedTargets = [
+  {
+    name: "unregistered provider",
+    target: { providerInstanceId: "missing-provider", model },
+    reason: "Provider instance missing-provider is not registered.",
+  },
+  {
+    name: "disabled provider",
+    target: { providerInstanceId: claudeInstanceId, model: claudeModel },
+    reason: `Provider ${claudeInstanceId} cannot run a child task:`,
+  },
+  {
+    name: "unknown model",
+    target: { providerInstanceId: instanceId, model: "unknown-model" },
+    reason: `Model unknown-model is not advertised by provider ${instanceId}.`,
+  },
+];
+const layerRefusedTargets = makeLayerTest(undefined, [
+  provider,
+  { ...claudeProvider, enabled: false },
+]);
 
 describe("delegate_tasks", () => {
   it.effect("starts every task in one call, in request order, and retries without duplicates", () =>
@@ -543,13 +626,14 @@ const awaitWorkflowEnd = (workflowId: string) =>
       .streamStoredEventsFrom({
         threadId: parentThreadId,
         afterSequence: 0,
-        eventType: "subagent.updated",
       })
       .pipe(
         Stream.filter(
           (stored) =>
-            stored.event.type === "subagent.updated" &&
+            (stored.event.type === "subagent.updated" ||
+              stored.event.type === "workflow.updated") &&
             stored.event.payload.id === workflowId &&
+            stored.event.payload.status !== undefined &&
             stored.event.payload.status !== "running",
         ),
         Stream.runHead,
@@ -558,6 +642,396 @@ const awaitWorkflowEnd = (workflowId: string) =>
       (yield* invoke("workflow_status", { workflowId })).structuredContent,
     );
   });
+
+it.effect(
+  "C7 reconstructs bounded 150-node commands, persisted events, wire replay and reconnect",
+  () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sql = yield* SqlClient.SqlClient;
+      const initial = yield* orchestrator.getThreadProjection(parentThreadId);
+      const workflowId = NodeId.make("workflow:scale");
+      yield* orchestrator.dispatch({
+        type: "workflow.start",
+        commandId: CommandId.make("scale-start"),
+        createdBy: "agent",
+        creationSource: "mcp",
+        threadId: parentThreadId,
+        runId: initial.runs.at(-1)!.id,
+        workflowId,
+        title: "Scale 日本語 🧪",
+        script: "// frozen reviewed graph\n" + "Long prompt 日本語 🧪\n".repeat(150),
+      });
+      const base = yield* orchestrator.getThreadProjection(parentThreadId);
+      const highWater = yield* sql<{
+        sequence: number;
+      }>`SELECT max(sequence) AS sequence FROM orchestration_events`;
+      const workflow: OrchestrationV2SubagentWorkflow = {
+        phases: [{ index: 0, title: "Audit 日本語" }],
+        budget: { limit: 100000, exhausted: true },
+        plan: {
+          nodes: Array.from({ length: 150 }, (_, i) => ({
+            key: `n${i}`,
+            label: `Audit ${i} données 日本語 🧪`,
+            wave: Math.floor(i / 10),
+            dependsOn: i < 10 ? [] : [`n${i - 10}`],
+          })),
+        },
+        agents: Array.from({ length: 450 }, (_, index) => ({
+          index,
+          label: `${index < 150 ? "Worker" : "Check"} ${index}`,
+          state: "completed",
+          ...(index < 150
+            ? { graphNodeKey: `n${index}` }
+            : {
+                judgmentFor: {
+                  agentIndex: index % 150,
+                  attempt: index < 300 ? 0 : 1,
+                  graphNodeKey: `n${index % 150}`,
+                },
+                judgmentOutcome: "passed",
+              }),
+          prompt: "Inspect données 日本語 🧪 ".repeat(20),
+          result: "Evidence and reasons 日本語 🧪 ".repeat(50),
+          agentId: `task-${index}-1`,
+          childThreadId: ThreadId.make(`child-${index}-1`),
+          attemptTaskIds: [NodeId.make(`task-${index}-0`), NodeId.make(`task-${index}-1`)],
+          attemptHistory: [0, 1].map((attempt) => ({
+            taskId: NodeId.make(`task-${index}-${attempt}`),
+            childThreadId: ThreadId.make(`child-${index}-${attempt}`),
+            attempt,
+            state: attempt === 0 ? "failed" : "completed",
+            providerInstanceId: instanceId,
+            model,
+            usageStatus: "complete",
+            totalTokens: 1234,
+            durationMs: 3210,
+            timingComplete: true,
+          })),
+        })),
+        nodeOutcomes: Object.fromEntries(
+          Array.from({ length: 150 }, (_, i) => [
+            `n${i}`,
+            { status: "passed", attempts: 2, reason: "Reviewed evidence 日本語 🧪 ".repeat(20) },
+          ]),
+        ),
+      };
+      const commands = workflowPatches({ phases: [], agents: [] }, workflow).map(
+        (patch, index) => ({
+          type: "workflow.update" as const,
+          commandId: CommandId.make(`scale-update-${index}`),
+          threadId: parentThreadId,
+          workflowId,
+          workflow: patch,
+        }),
+      );
+      for (const command of commands) yield* orchestrator.dispatch(command);
+      // A producer that read an older row still lands: the sink rebases it on the current revision.
+      {
+        const sink = yield* EventSink.EventSinkV2;
+        const before = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === workflowId,
+        )!;
+        const stale = before.workflow!.revision! - 1;
+        const now = yield* DateTime.now;
+        yield* sink.commitCommand({
+          commandId: CommandId.make("scale-stale-revision"),
+          threadId: parentThreadId,
+          commandType: "test.stale-workflow-update",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make("event:scale-stale-revision"),
+              type: "workflow.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: {
+                id: workflowId,
+                previousRevision: stale - 1,
+                revision: stale,
+                progress: "Stale producer progress",
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        const after = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === workflowId,
+        )!;
+        expect(after.workflow!.revision).toBe(before.workflow!.revision! + 1);
+        expect(after.progress).toBe("Stale producer progress");
+        // Restore the progress the remaining assertions expect.
+        yield* sink.commitCommand({
+          commandId: CommandId.make("scale-stale-revision-restore"),
+          threadId: parentThreadId,
+          commandType: "test.stale-workflow-update",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make("event:scale-stale-revision-restore"),
+              type: "workflow.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: {
+                id: workflowId,
+                previousRevision: 0,
+                revision: 1,
+                ...(before.progress === undefined ? {} : { progress: before.progress }),
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+      }
+      // Retried delivery uses the command receipt; it must not add a revision or reapply usage.
+      yield* orchestrator.dispatch(commands.at(-1)!);
+      const oversized = yield* Effect.result(
+        orchestrator.dispatch({
+          ...commands[0]!,
+          commandId: CommandId.make("scale-oversized"),
+          workflow: {
+            kind: "patch",
+            agents: [{ ...workflow.agents[0]!, result: "日本語".repeat(20000) }],
+          },
+        }),
+      );
+      expect(oversized._tag).toBe("Failure");
+      const changedPlan = yield* Effect.result(
+        orchestrator.dispatch({
+          ...commands[0]!,
+          commandId: CommandId.make("scale-changed-plan"),
+          workflow: { kind: "patch", plan: { nodes: [] } },
+        }),
+      );
+      expect(changedPlan._tag).toBe("Failure");
+      const complete = {
+        type: "workflow.complete" as const,
+        commandId: CommandId.make("scale-complete"),
+        threadId: parentThreadId,
+        workflowId,
+        status: "completed" as const,
+        result: "Recorded result 日本語 🧪",
+      };
+      yield* orchestrator.dispatch(complete);
+      const acknowledgements = [1, 2].map((index) => ({
+        type: "delegated_task.completion-delivery.acknowledge" as const,
+        commandId: CommandId.make(`scale-observed-${index}`),
+        parentThreadId,
+        taskId: workflowId,
+        observedByRunId: initial.runs.at(-1)!.id,
+      }));
+      for (const command of acknowledgements) yield* orchestrator.dispatch(command);
+      const projected = yield* orchestrator.getThreadProjection(parentThreadId);
+      const final = projected.subagents.find((task) => task.id === workflowId)!;
+      // Commands, the two stale-producer events, completion and two acknowledgements.
+      expect(final.workflow).toEqual({ ...workflow, revision: commands.length + 5 });
+      const rows = yield* sql<{
+        event_type: string;
+        payload_json: string;
+      }>`SELECT event_type, payload_json FROM orchestration_events WHERE sequence > ${highWater[0]!.sequence} AND event_type = 'workflow.updated' ORDER BY sequence`;
+      expect(rows).toHaveLength(commands.length + 5);
+      const stored = yield* orchestrator
+        .streamStoredEventsFrom({
+          threadId: parentThreadId,
+          afterSequence: highWater[0]!.sequence,
+          eventType: "workflow.updated",
+        })
+        .pipe(Stream.take(rows.length), Stream.runCollect);
+      const encode = Schema.encodeEffect(Schema.toCodecJson(OrchestrationV2ThreadStreamItem));
+      const decode = Schema.decodeUnknownEffect(
+        Schema.toCodecJson(OrchestrationV2ThreadStreamItem),
+      );
+      const wire = yield* Effect.forEach(stored, (item) =>
+        encode({
+          kind: "event",
+          sequence: item.sequence,
+          event: projectDomainEventForWire(item.event),
+        }),
+      );
+      const batches = yield* Stream.fromArray(
+        stored.map((item) => ({
+          kind: "event" as const,
+          sequence: item.sequence,
+          event: item.event,
+        })),
+      ).pipe(boundWorkflowUpdateBatches, Stream.chunks, Stream.runCollect);
+      const serializer = rpcJson.makeUnsafe();
+      const rpcFrames = yield* Effect.forEach(batches, (batch) =>
+        Effect.gen(function* () {
+          const values = yield* Effect.forEach(batch, (item) => encode(item));
+          const message: ResponseChunkEncoded = {
+            _tag: "Chunk",
+            requestId: "workflow-scale-subscription",
+            values: [values[0]!, ...values.slice(1)],
+          };
+          const frame = serializer.encode(message);
+          if (typeof frame !== "string")
+            throw new Error("Expected the production JSON RPC serializer");
+          return frame;
+        }),
+      );
+      let client = base;
+      for (const encoded of wire) {
+        const item = yield* decode(encoded);
+        if (item.kind !== "event") throw new Error("Expected event");
+        client = applyOrchestrationV2ProjectionEvent(client, item.event)!;
+      }
+      expect(client.subagents.find((task) => task.id === workflowId)).toEqual(final);
+      // The finished workflow's timeline item changes through its own event, for every client.
+      const itemEvents = yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM orchestration_events WHERE sequence > ${highWater[0]!.sequence} AND event_type = 'turn-item.updated' ORDER BY sequence`;
+      const workflowItems = itemEvents
+        .map((row) => JSON.parse(row.payload_json))
+        .filter((item) => item.type === "subagent" && item.subagentId === workflowId);
+      expect(workflowItems.at(-1)).toMatchObject({ status: "completed" });
+      expect(
+        projected.turnItems.find(
+          (item) => item.type === "subagent" && item.subagentId === workflowId,
+        ),
+      ).toMatchObject({ status: "completed", result: complete.result });
+      // Older clients do not apply patches.
+      const subscribe = (input: { afterSequence?: number; acceptWorkflowUpdates?: true }) =>
+        subscribeOrchestrationV2Thread({ threadId: parentThreadId, ...input }).pipe(
+          // Replay reads the same in-memory database the orchestrator writes.
+          Effect.provide(OrchestrationEventStore.layer),
+        );
+      // A replay holding a patch sends an older client a snapshot rather than one full row per
+      // patch, which could far exceed the replay byte limit.
+      const tail = stored.slice(-3);
+      const legacyResume = yield* subscribe({ afterSequence: tail[0]!.sequence - 1 }).pipe(
+        Effect.flatMap((stream) => Stream.runHead(stream)),
+        Effect.timeout("20 seconds"),
+      );
+      if (legacyResume._tag !== "Some" || legacyResume.value.kind !== "snapshot")
+        throw new Error("Expected an older client's resume to start from a snapshot");
+      expect(
+        boundedSnapshotProjection(legacyResume.value).subagents.find(
+          (task) => task.id === workflowId,
+        ),
+      ).toEqual(final);
+      // A current client replays the patches themselves.
+      const currentResume = yield* subscribe({
+        afterSequence: tail[0]!.sequence - 1,
+        acceptWorkflowUpdates: true,
+      }).pipe(
+        Effect.flatMap((stream) =>
+          stream.pipe(
+            Stream.filter(
+              (item) =>
+                item.kind === "event" &&
+                item.event.type === "workflow.updated" &&
+                item.event.payload.id === workflowId,
+            ),
+            Stream.take(tail.length),
+            Stream.runCollect,
+          ),
+        ),
+        Effect.timeout("20 seconds"),
+      );
+      expect(Array.from(currentResume)).toHaveLength(tail.length);
+      // Live, an older client receives each new patch as the workflow's full row.
+      const subscribed = yield* Deferred.make<void>();
+      const live = yield* subscribe({}).pipe(
+        Effect.flatMap((stream) =>
+          stream.pipe(
+            // Commit only after the snapshot, so the change arrives as a live event.
+            Stream.tap((item) =>
+              item.kind === "snapshot" ? Deferred.succeed(subscribed, undefined) : Effect.void,
+            ),
+            Stream.filter(
+              (item) =>
+                item.kind === "event" &&
+                (item.event.type === "workflow.updated" ||
+                  item.event.type === "subagent.updated") &&
+                item.event.payload.id === workflowId,
+            ),
+            Stream.runHead,
+          ),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(subscribed).pipe(Effect.timeout("20 seconds"));
+      {
+        const sink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        yield* sink.commitCommand({
+          commandId: CommandId.make("scale-live-legacy"),
+          threadId: parentThreadId,
+          commandType: "test.live-workflow-update",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make("event:scale-live-legacy"),
+              type: "workflow.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: {
+                id: workflowId,
+                previousRevision: 0,
+                revision: 1,
+                progress: "Live progress for older clients",
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+      }
+      const liveItem = yield* Fiber.join(live).pipe(Effect.timeout("20 seconds"));
+      if (liveItem._tag !== "Some" || liveItem.value.kind !== "event")
+        throw new Error("Expected a live workflow event");
+      expect(liveItem.value.event.type).toBe("subagent.updated");
+      expect(
+        liveItem.value.event.type === "subagent.updated"
+          ? liveItem.value.event.payload.progress
+          : null,
+      ).toBe("Live progress for older clients");
+      const snapshot = buildBoundedThreadStreamSnapshot({
+        snapshotSequence: stored.at(-1)!.sequence,
+        projection: projected,
+      });
+      const encodedSnapshot = yield* encode(snapshot);
+      const reconnect = yield* decode(encodedSnapshot);
+      if (reconnect.kind !== "snapshot") throw new Error("Expected snapshot");
+      expect(
+        boundedSnapshotProjection(reconnect).subagents.find((task) => task.id === workflowId),
+      ).toEqual(final);
+      const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+      expect(Math.max(...commands.map(bytes))).toBeLessThan(65536);
+      expect(
+        Math.max(...rows.map((row) => Buffer.byteLength(row.payload_json, "utf8"))),
+      ).toBeLessThan(65536);
+      expect(Math.max(...wire.map(bytes))).toBeLessThan(65536);
+      expect(Math.max(...rpcFrames.map((frame) => Buffer.byteLength(frame, "utf8")))).toBeLessThan(
+        65536,
+      );
+      expect(bytes(encodedSnapshot)).toBeGreaterThan(65536);
+      if (process.env.C7_BOUNDARY_ARTIFACT)
+        NodeFS.writeFileSync(
+          process.env.C7_BOUNDARY_ARTIFACT,
+          JSON.stringify(
+            {
+              commands: [...commands, complete, ...acknowledgements],
+              persistedPayloads: rows,
+              wire,
+              rpcFrames,
+              snapshot: encodedSnapshot,
+              commandBytes: [...commands, complete, ...acknowledgements].map(bytes),
+              persistedBytes: rows.map((row) => Buffer.byteLength(row.payload_json, "utf8")),
+              wireBytes: wire.map(bytes),
+              rpcFrameBytes: rpcFrames.map((frame) => Buffer.byteLength(frame, "utf8")),
+              snapshotBytes: bytes(encodedSnapshot),
+            },
+            null,
+            2,
+          ),
+        );
+    }).pipe(Effect.provide(Layer.merge(layerTest, layerDatabase))),
+);
 
 const startWorkflow = (script: string, args?: unknown) =>
   Effect.gen(function* () {
@@ -570,6 +1044,379 @@ const startWorkflow = (script: string, args?: unknown) =>
   });
 
 describe("workflow_start", () => {
+  it.effect(
+    "C4 preserves script target, legacy, preset, workflow default and caller precedence",
+    () =>
+      Effect.gen(function* () {
+        yield* startParentWithSelection({
+          ...modelSelection,
+          options: [{ id: "serviceTier", value: "priority" }],
+        });
+        yield* answerWorkflowAgents(() => "done");
+        const settings = yield* ServerSettings.ServerSettingsService;
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [
+              {
+                id: "worker",
+                name: "Worker",
+                target: { providerInstanceId: claudeInstanceId, model: claudeModel, options: [] },
+              },
+              {
+                id: "same",
+                name: "Same model",
+                target: {
+                  providerInstanceId: instanceId,
+                  model,
+                  options: [{ id: "reasoningEffort", value: "high" }],
+                },
+              },
+            ],
+            defaultPresetId: "worker",
+          },
+        });
+        expect((yield* invoke("orchestrator_capabilities", {})).structuredContent).toMatchObject({
+          workflowPresets: {
+            defaultPresetId: "worker",
+            presets: [
+              {
+                id: "worker",
+                name: "Worker",
+                target: { providerInstanceId: claudeInstanceId, model: claudeModel },
+              },
+              { id: "same", name: "Same model", target: { providerInstanceId: instanceId, model } },
+            ],
+          },
+        });
+        const script = `return [
+        await agent("own", { target: { model: "${model}" }, preset: "missing" }),
+        await agent("legacy", { model: "${model}", preset: "missing" }),
+        await agent("preset", { preset: "worker" }),
+        await agent("same", { preset: "same" }),
+        await agent("default")
+      ]`;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        for (const workerTarget of [
+          undefined,
+          { providerInstanceId: instanceId, model, options: [] },
+        ]) {
+          const started = yield* decodeWorkflow(
+            (yield* invoke("workflow_start", {
+              script,
+              ...(workerTarget === undefined ? {} : { workerTarget }),
+            })).structuredContent,
+          );
+          expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+          const expected = [
+            { ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] },
+            { ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] },
+            { instanceId: claudeInstanceId, model: claudeModel, options: [] },
+            // The preset was frozen at start with its complete, sorted options.
+            {
+              ...modelSelection,
+              options: [
+                { id: "reasoningEffort", value: "high" },
+                { id: "serviceTier", value: "priority" },
+              ],
+            },
+            workerTarget === undefined
+              ? { instanceId: claudeInstanceId, model: claudeModel, options: [] }
+              : { ...modelSelection, options: [] },
+          ];
+          for (const [index, selection] of expected.entries()) {
+            const member = yield* awaitMember(started.workflowId, index + 1);
+            expect(
+              (yield* orchestrator.getThreadProjection(member.childThreadId!)).thread
+                .modelSelection,
+            ).toEqual(selection);
+          }
+        }
+        yield* settings.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+        const caller = yield* startWorkflow('return await agent("caller")');
+        yield* awaitWorkflowEnd(caller.workflowId);
+        expect((yield* awaitMember(caller.workflowId, 1)).providerInstanceId).toBe(instanceId);
+        expect(
+          (yield* orchestrator.getThreadProjection(parentThreadId)).thread.modelSelection,
+        ).toEqual({ ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] });
+      }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("C3 preserves resolver option inheritance overrides and clearing", () =>
+    Effect.gen(function* () {
+      const inherited = [
+        { id: "reasoningEffort", value: "medium" },
+        { id: "serviceTier", value: "priority" },
+      ];
+      yield* startParentWithSelection({ ...modelSelection, options: inherited });
+      yield* answerWorkflowAgents(() => "done");
+      const workerTarget = { options: { reasoningEffort: "high" } };
+      const cases: Array<{ own: Record<string, unknown>; expected: ModelSelection }> = [
+        {
+          own: {},
+          expected: {
+            ...modelSelection,
+            options: [{ id: "reasoningEffort", value: "high" }, inherited[1]!],
+          },
+        },
+        { own: { target: { options: [] } }, expected: { ...modelSelection, options: [] } },
+        { own: { target: { options: {} } }, expected: { ...modelSelection, options: [] } },
+        { own: { target: { model } }, expected: { ...modelSelection, options: inherited } },
+        { own: { model: "other-model" }, expected: { instanceId, model: "other-model" } },
+        {
+          own: { target: { providerInstanceId: claudeInstanceId } },
+          expected: { instanceId: claudeInstanceId, model: claudeModel },
+        },
+      ];
+      const started = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", {
+          workerTarget,
+          args: cases.map(({ own }) => own),
+          script: 'return await parallel(args.map((own) => () => agent("options", own)))',
+        })).structuredContent,
+      );
+      expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      for (const [index, entry] of cases.entries()) {
+        const member = yield* awaitMember(started.workflowId, index + 1);
+        const child = yield* orchestrator.getThreadProjection(member.childThreadId!);
+        expect(child.thread.modelSelection).toEqual(entry.expected);
+        const graph = {
+          schemaVersion: 1,
+          nodes: {
+            a: { subject: "options", description: "options", dependsOn: [], ...entry.own },
+          },
+        };
+        const reviewed = yield* decodeReview(
+          (yield* invoke("graph_review", { graph, workerTarget })).structuredContent,
+        );
+        const target = {
+          providerInstanceId: entry.expected.instanceId,
+          model: entry.expected.model,
+          options: [...(entry.expected.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+        };
+        expect(reviewed).toMatchObject({ ready: true, targets: [{ target }] });
+        const explicit = yield* reviewGraph({
+          ...graph,
+          nodes: { a: { subject: "options", description: "options", dependsOn: [], target } },
+        });
+        expect(reviewed.digest).toBe(explicit.digest);
+      }
+    }).pipe(
+      Effect.provide(
+        makeLayerTest(undefined, [
+          {
+            ...provider,
+            models: [
+              ...provider.models,
+              { slug: "other-model", name: "Other", isCustom: true, capabilities: null },
+            ],
+          },
+          claudeProvider,
+        ]),
+      ),
+    ),
+  );
+  it.effect("C3 selects the whole agent target before the worker default", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents(() => "done");
+      const started = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", {
+          workerTarget: { providerInstanceId: claudeInstanceId, model: claudeModel },
+          script: `return [
+          await agent("default"),
+          await agent("partial", { target: { model: "${model}" } }),
+          await agent("legacy", { model: "${model}" }),
+          await agent("empty", { target: {} })
+        ]`,
+        })).structuredContent,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("completed");
+      expect(
+        (yield* childTasks)
+          .filter((task) => task.parentNodeId === started.workflowId)
+          .map((agent) => [agent.providerInstanceId, agent.model]),
+      ).toEqual([
+        [claudeInstanceId, claudeModel],
+        [instanceId, model],
+        [instanceId, model],
+        [instanceId, model],
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect.each(refusedTargets)(
+    "records a refused $name without substituting a worker",
+    ({ target, reason }) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents(() => "unexpected dispatch");
+        const started = yield* startWorkflow(
+          `return await agent("refused worker", { target: ${JSON.stringify(target)} })`,
+        );
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        // Scripts receive null for an agent that could not start; the failed attempt stays visible.
+        expect(ended.status).toBe("completed");
+        expect(JSON.parse(ended.result!)).toBeNull();
+        expect(ended.agents).toHaveLength(1);
+        expect(ended.agents[0]).toMatchObject({
+          status: "failed",
+          taskId: null,
+          outcomeCategory: "never_started",
+        });
+        expect(ended.agents[0]?.result).toContain(reason);
+        expect((yield* childTasks).map((task) => task.id)).toEqual([started.workflowId]);
+      }).pipe(Effect.provide(layerRefusedTargets)),
+  );
+
+  it.effect("persists each mixed-provider worker's selected model and options", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents(() => "mixed reply");
+      const targets = [
+        { providerInstanceId: instanceId, model, options: { reasoningEffort: "high" } },
+        {
+          providerInstanceId: claudeInstanceId,
+          model: claudeModel,
+          options: { effort: "max", fastMode: true },
+        },
+      ];
+      const started = yield* startWorkflow(
+        `return await parallel(args.map((target) => () => agent("mixed worker", { target })))`,
+        targets,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("completed");
+      expect(JSON.parse(ended.result!)).toEqual(["mixed reply", "mixed reply"]);
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const members = (yield* childTasks).filter(
+        (task) => task.parentNodeId === started.workflowId,
+      );
+      expect(members).toHaveLength(2);
+      expect(new Set(members.map((task) => task.childThreadId)).size).toBe(2);
+      for (const [index, target] of targets.entries()) {
+        const member = members.find(
+          (task) => task.providerInstanceId === target.providerInstanceId,
+        )!;
+        const driver = index === 0 ? adapter.driver : claudeAdapter.driver;
+        expect(member).toMatchObject({ driver, model: target.model });
+        const child = yield* orchestrator.getThreadProjection(member.childThreadId!);
+        const expectedSelection = {
+          instanceId: target.providerInstanceId,
+          model: target.model,
+          options: Object.entries(target.options).map(([id, value]) => ({ id, value })),
+        };
+        expect(child.thread.modelSelection).toEqual(expectedSelection);
+        expect(child.runs).toHaveLength(1);
+        expect(child.runs[0]?.modelSelection).toEqual(expectedSelection);
+      }
+      expect(ended.agents.map((agent) => [agent.model, agent.status])).toEqual(
+        targets.map((target) => [target.model, "completed"]),
+      );
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      expect(parent.thread.modelSelection).toEqual(modelSelection);
+      const row = parent.subagents.find((task) => task.id === started.workflowId);
+      expect(
+        row?.workflow?.agents.map((agent) => [
+          agent.providerInstanceId,
+          agent.driver,
+          agent.model,
+          agent.state,
+        ]),
+      ).toEqual(
+        targets.map((target, index) => [
+          target.providerInstanceId,
+          index === 0 ? adapter.driver : claudeAdapter.driver,
+          target.model,
+          "completed",
+        ]),
+      );
+      expect(
+        parent.subagents.filter((task) => task.parentNodeId === started.workflowId),
+      ).toHaveLength(2);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "keeps concurrent workflows on one parent independent through completion and wake",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const [first, second] = yield* Effect.all(
+          [startWorkflow(twoStepScript), startWorkflow(twoStepScript)],
+          { concurrency: "unbounded" },
+        );
+        expect(first.workflowId).not.toBe(second.workflowId);
+        const firstMember = yield* awaitMember(first.workflowId, 1);
+        const secondMember = yield* awaitMember(second.workflowId, 1);
+        expect(firstMember.id).not.toBe(secondMember.id);
+        expect(firstMember.childThreadId).not.toBe(secondMember.childThreadId);
+        expect(firstMember.prompt).toBe(secondMember.prompt);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        expect(
+          (yield* childTasks).filter(
+            (task) =>
+              task.parentNodeId === first.workflowId || task.parentNodeId === second.workflowId,
+          ),
+        ).toHaveLength(2);
+
+        yield* completeChild(secondMember.childThreadId!, "second one");
+        const secondNext = yield* awaitMember(second.workflowId, 2);
+        expect(secondNext.prompt).toBe("second after second one");
+        yield* completeChild(secondNext.childThreadId!, "second two");
+        const secondEnded = yield* awaitWorkflowEnd(second.workflowId);
+        expect(JSON.parse(secondEnded.result!)).toEqual(["second one", "second two"]);
+        expect(secondEnded.status).toBe("completed");
+        const firstPending = yield* decodeWorkflow(
+          (yield* invoke("workflow_status", { workflowId: first.workflowId })).structuredContent,
+        );
+        expect(firstPending.status).toBe("running");
+        expect(firstPending.agents).toHaveLength(1);
+        expect(firstPending.agents[0]).toMatchObject({ taskId: firstMember.id, status: "running" });
+        const midway = yield* orchestrator.getThreadProjection(parentThreadId);
+        expect(
+          midway.runs.flatMap((run) => run.delegatedCompletion?.delivery?.taskIds ?? []),
+        ).toEqual([second.workflowId]);
+
+        yield* completeChild(firstMember.childThreadId!, "first one");
+        const firstNext = yield* awaitMember(first.workflowId, 2);
+        expect(firstNext.prompt).toBe("second after first one");
+        yield* completeChild(firstNext.childThreadId!, "first two");
+        const firstEnded = yield* awaitWorkflowEnd(first.workflowId);
+        expect(firstEnded.status).toBe("completed");
+        expect(JSON.parse(firstEnded.result!)).toEqual(["first one", "first two"]);
+        const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+        const members = parent.subagents.filter(
+          (task) =>
+            task.parentNodeId === first.workflowId || task.parentNodeId === second.workflowId,
+        );
+        expect(members).toHaveLength(4);
+        expect(new Set(members.map((task) => task.id)).size).toBe(4);
+        expect(new Set(members.map((task) => task.childThreadId)).size).toBe(4);
+        for (const [ended, owned] of [
+          [firstEnded, [firstMember, firstNext]],
+          [secondEnded, [secondMember, secondNext]],
+        ] as const) {
+          expect(ended.agents.map((agent) => agent.taskId)).toEqual(owned.map((task) => task.id));
+          expect(ended.agents.map((agent) => agent.status)).toEqual(["completed", "completed"]);
+          expect(
+            members
+              .filter((task) => task.parentNodeId === ended.workflowId)
+              .map((task) => task.completionDelivery?.state),
+          ).toEqual(["disposed", "disposed"]);
+        }
+        expect(
+          parent.runs.flatMap((run) => run.delegatedCompletion?.delivery?.taskIds ?? []),
+        ).toEqual([second.workflowId, first.workflowId]);
+        expect(
+          parent.turnItems
+            .filter((item) => item.type === "subagent")
+            .map((item) => item.type === "subagent" && item.subagentId),
+        ).toEqual(expect.arrayContaining([first.workflowId, second.workflowId]));
+        expect(parent.turnItems.filter((item) => item.type === "subagent")).toHaveLength(2);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("runs phases of parallel and pipelined agents and wakes the caller once", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -793,6 +1640,841 @@ const twoStepScript =
   'const first = await agent("first")\nconst second = await agent("second after " + first)\nreturn [first, second]';
 
 describe("workflow resume", () => {
+  it.effect.each([
+    { status: "failed", runStatus: "completed", restart: false, legacy: false, tokens: 17 },
+    { status: "failed", runStatus: "failed", restart: true, legacy: true, tokens: 17 },
+    { status: "cancelled", runStatus: "cancelled", restart: true, legacy: true, tokens: undefined },
+  ] as const)(
+    "settles orphan turns for $status tasks (restart=$restart, legacy=$legacy)",
+    (scenario) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const orphan = Effect.fn("test.orphanTurn")(function* (workflowId: NodeId) {
+          const member = yield* awaitMember(workflowId, 1);
+          const run = (yield* orchestrator.getThreadProjection(member.childThreadId!)).runs.at(-1)!;
+          const start = DateTime.makeUnsafe(1000);
+          const end = DateTime.makeUnsafe(4001);
+          const { delegatedTaskId: _taskId, ...legacyRun } = run;
+          yield* sink.commitCommand({
+            commandId: CommandId.make("command:orphan-turn"),
+            threadId: member.childThreadId!,
+            commandType: "test.orphan-turn",
+            acceptedAt: end,
+            effects: [],
+            events: [
+              {
+                id: EventId.make("event:orphan-turn"),
+                type: "provider-turn.updated",
+                threadId: member.childThreadId!,
+                runId: run.id,
+                occurredAt: start,
+                payload: {
+                  id: ProviderTurnId.make("provider-turn:orphan"),
+                  providerThreadId: run.providerThreadId!,
+                  nodeId: run.rootNodeId!,
+                  runAttemptId: run.activeAttemptId,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status: "running",
+                  startedAt: start,
+                  completedAt: null,
+                  ...(scenario.tokens === undefined
+                    ? {}
+                    : {
+                        // Even a provider's complete counter cannot finalize an open turn.
+                        turnTokenUsage: {
+                          usageStatus: "complete" as const,
+                          usageScope: "main_agent" as const,
+                          hasSubagents: false,
+                          inputTokens: scenario.tokens,
+                          outputTokens: 0,
+                        },
+                      }),
+                },
+              },
+              {
+                id: EventId.make("event:orphan-run-end"),
+                type: "run.updated",
+                threadId: member.childThreadId!,
+                runId: run.id,
+                occurredAt: end,
+                payload: {
+                  ...(scenario.legacy ? legacyRun : run),
+                  status: scenario.runStatus,
+                  startedAt: start,
+                  completedAt: end,
+                },
+              },
+              ...(!scenario.legacy
+                ? [
+                    {
+                      id: EventId.make("event:unrelated-run"),
+                      type: "run.updated" as const,
+                      threadId: member.childThreadId!,
+                      runId: RunId.make("run:unrelated"),
+                      occurredAt: start,
+                      payload: {
+                        ...run,
+                        id: RunId.make("run:unrelated"),
+                        ordinal: 2,
+                        delegatedTaskId: NodeId.make("task:unrelated"),
+                        activeAttemptId: RunAttemptId.make("attempt:unrelated"),
+                        rootNodeId: NodeId.make("node:unrelated"),
+                        status: "running" as const,
+                        startedAt: start,
+                        completedAt: null,
+                      },
+                    },
+                    {
+                      id: EventId.make("event:unrelated-turn"),
+                      type: "provider-turn.updated" as const,
+                      threadId: member.childThreadId!,
+                      runId: RunId.make("run:unrelated"),
+                      occurredAt: start,
+                      payload: {
+                        id: ProviderTurnId.make("provider-turn:unrelated"),
+                        providerThreadId: run.providerThreadId!,
+                        nodeId: NodeId.make("node:unrelated"),
+                        runAttemptId: RunAttemptId.make("attempt:unrelated"),
+                        nativeTurnRef: null,
+                        ordinal: 2,
+                        status: "running" as const,
+                        startedAt: start,
+                        completedAt: null,
+                        turnTokenUsage: {
+                          usageStatus: "complete" as const,
+                          usageScope: "main_agent" as const,
+                          hasSubagents: false,
+                          inputTokens: 999,
+                          outputTokens: 0,
+                        },
+                      },
+                    },
+                  ]
+                : []),
+              {
+                id: EventId.make("event:orphan-task-end"),
+                type: "subagent.updated",
+                threadId: parentThreadId,
+                runId: member.runId!,
+                occurredAt: end,
+                payload: {
+                  ...member,
+                  status: scenario.status,
+                  result: "provider stopped",
+                  completedAt: end,
+                  updatedAt: end,
+                },
+              },
+            ],
+          });
+          return member;
+        });
+        const finish = Effect.fn("test.finishOrphanWorkflow")(function* (workflowId: NodeId) {
+          if (scenario.status === "failed") {
+            const retry = yield* awaitMember(workflowId, 2);
+            yield* completeChild(retry.childThreadId!, "recovered", { status: "completed" }, 23);
+          }
+          const ended = yield* awaitWorkflowEnd(workflowId);
+          expect(JSON.parse(ended.result!)).toBe(scenario.status === "failed" ? "recovered" : null);
+          expect(ended.usage).toMatchObject({
+            status: scenario.tokens === undefined ? "unavailable" : "partial",
+            totalTokens: scenario.tokens === undefined ? null : 40,
+          });
+          const worker = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+            (task) => task.id === workflowId,
+          )!.workflow!.agents[0]!;
+          expect(worker.attemptHistory?.[0]).toMatchObject({
+            state: scenario.status,
+            durationMs: 3001,
+            timingComplete: true,
+            usageStatus: scenario.tokens === undefined ? "unavailable" : "partial",
+          });
+          expect(worker.attemptHistory?.[0]?.totalTokens).toBe(scenario.tokens);
+          expect(worker.attemptTaskIds).toHaveLength(scenario.status === "failed" ? 2 : 1);
+        });
+        if (scenario.restart) {
+          const workflowId = yield* withServerProcess((service) =>
+            Effect.gen(function* () {
+              const started = yield* service.workflowStart(invocation, {
+                script: 'return await agent("orphan")',
+              });
+              yield* awaitMember(started.workflowId, 1);
+              return started.workflowId;
+            }),
+          );
+          // No service is observing when these terminal legacy records arrive.
+          yield* orphan(workflowId);
+          yield* withServerProcess((service) =>
+            Effect.gen(function* () {
+              expect(yield* service.resumeWorkflows).toBe(1);
+              yield* finish(workflowId);
+            }),
+          );
+        } else {
+          const started = yield* startWorkflow('return await agent("orphan")');
+          yield* orphan(started.workflowId);
+          yield* finish(started.workflowId);
+        }
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("settles terminal tasks after late run and usage completion across replay", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const terminalBeforeRun = Effect.fn("test.terminalBeforeRun")(function* (
+        workflowId: NodeId,
+        member: OrchestrationV2Subagent,
+        status: "failed" | "completed",
+        startedAt: number,
+      ) {
+        const run = (yield* orchestrator.getThreadProjection(member.childThreadId!)).runs.at(-1)!;
+        const now = DateTime.makeUnsafe(startedAt);
+        yield* sink.commitCommand({
+          commandId: CommandId.make(`command:early-task:${member.id}`),
+          threadId: member.childThreadId!,
+          commandType: "test.early-task",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make(`event:open-run:${member.id}`),
+              type: "run.updated",
+              threadId: member.childThreadId!,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now, completedAt: null },
+            },
+            {
+              id: EventId.make(`event:early-task:${member.id}`),
+              type: "subagent.updated",
+              threadId: parentThreadId,
+              runId: member.runId!,
+              occurredAt: now,
+              payload: {
+                ...member,
+                status,
+                result: "early result",
+                completedAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        // The runner has consumed the terminal task while the run is still open.
+        yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentThreadId,
+            afterSequence: 0,
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                (stored.event.type === "subagent.updated" ||
+                  stored.event.type === "workflow.updated") &&
+                stored.event.payload.id === workflowId &&
+                ((stored.event.type === "workflow.updated"
+                  ? stored.event.payload.patch?.agents
+                  : stored.event.payload.workflow?.agents
+                )?.some((agent) =>
+                  agent.attemptHistory?.some(
+                    (attempt) => attempt.taskId === member.id && attempt.state === status,
+                  ),
+                ) ??
+                  false),
+            ),
+            Stream.runHead,
+          );
+      });
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            script: 'return await agent("retry")',
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          yield* terminalBeforeRun(started.workflowId, first, "failed", 1000);
+          return started.workflowId;
+        }),
+      );
+      // Shutdown interrupted the settlement wait. Replay must read the persisted open run.
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          yield* service.resumeWorkflows;
+          const first = yield* awaitMember(workflowId, 1);
+          yield* completeChild(
+            first.childThreadId!,
+            "failed",
+            {
+              status: "failed",
+              startedAt: DateTime.makeUnsafe(1000),
+              completedAt: DateTime.makeUnsafe(4001),
+            },
+            30,
+          );
+          const second = yield* awaitMember(workflowId, 2);
+          yield* terminalBeforeRun(workflowId, second, "completed", 10000);
+          yield* completeChild(
+            second.childThreadId!,
+            "done",
+            {
+              startedAt: DateTime.makeUnsafe(10000),
+              completedAt: DateTime.makeUnsafe(14590),
+            },
+            70,
+          );
+          yield* awaitWorkflowEnd(workflowId);
+        }),
+      );
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      const worker = parent.subagents.find((task) => task.id === workflowId)!.workflow!.agents[0]!;
+      expect(
+        worker.attemptHistory?.map((attempt) => [
+          attempt.durationMs,
+          attempt.timingComplete,
+          attempt.totalTokens,
+        ]),
+      ).toEqual([
+        [3001, true, 30],
+        [4590, true, 70],
+      ]);
+      expect(worker.attemptHistory?.reduce((sum, attempt) => sum + attempt.durationMs!, 0)).toBe(
+        7591,
+      );
+      expect(worker.totalTokens).toBe(100);
+      expect(new Set(worker.attemptTaskIds).size).toBe(2);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("observes run start and retains late usage while execution is open", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow('return await agent("late usage")');
+      const member = yield* awaitMember(started.workflowId, 1);
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const run = (yield* orchestrator.getThreadProjection(member.childThreadId!)).runs.at(-1)!;
+      const start = DateTime.makeUnsafe(1000);
+      const end = DateTime.makeUnsafe(4001);
+      const turn = {
+        id: ProviderTurnId.make("provider-turn:late-usage"),
+        providerThreadId: run.providerThreadId!,
+        nodeId: run.rootNodeId!,
+        runAttemptId: run.activeAttemptId,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running" as const,
+        startedAt: start,
+        completedAt: null,
+        turnTokenUsage: {
+          usageScope: "main_agent" as const,
+          usageStatus: "partial" as const,
+          hasSubagents: false,
+          inputTokens: 10,
+          outputTokens: 0,
+        },
+      };
+      const awaitAttempt = (
+        matches: (
+          attempt: NonNullable<
+            NonNullable<OrchestrationV2Subagent["workflow"]>["agents"][number]["attemptHistory"]
+          >[number],
+        ) => boolean,
+      ) =>
+        orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentThreadId,
+            afterSequence: 0,
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                (stored.event.type === "subagent.updated" ||
+                  stored.event.type === "workflow.updated") &&
+                stored.event.payload.id === started.workflowId &&
+                ((stored.event.type === "workflow.updated"
+                  ? stored.event.payload.patch?.agents
+                  : stored.event.payload.workflow?.agents
+                )?.some((agent) => agent.attemptHistory?.some(matches)) ??
+                  false),
+            ),
+            Stream.runHead,
+          );
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:start"),
+        threadId: member.childThreadId!,
+        commandType: "test.run-start",
+        acceptedAt: start,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:start"),
+            type: "run.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: start,
+            payload: { ...run, status: "running", startedAt: start },
+          },
+          {
+            id: EventId.make("event:late-usage:turn-start"),
+            type: "provider-turn.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: start,
+            payload: turn,
+          },
+        ],
+      });
+      // No parent task update accompanies admission: the child run event must publish the clock anchor.
+      yield* awaitAttempt((attempt) => attempt.activeStartedAt === 1000);
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:task-end"),
+        threadId: member.childThreadId!,
+        commandType: "test.task-end",
+        acceptedAt: end,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:task-end"),
+            type: "subagent.updated",
+            threadId: parentThreadId,
+            runId: member.runId!,
+            occurredAt: end,
+            payload: {
+              ...member,
+              status: "completed",
+              result: "done",
+              completedAt: end,
+              updatedAt: end,
+            },
+          },
+        ],
+      });
+      yield* awaitAttempt(
+        (attempt) => attempt.state === "completed" && attempt.usageStatus === "partial",
+      );
+      expect(
+        (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === started.workflowId,
+        )?.status,
+      ).toBe("running");
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:turn-end"),
+        threadId: member.childThreadId!,
+        commandType: "test.turn-end",
+        acceptedAt: end,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:turn-end"),
+            type: "provider-turn.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: end,
+            payload: {
+              ...turn,
+              status: "completed",
+              completedAt: end,
+              turnTokenUsage: { ...turn.turnTokenUsage, usageStatus: "complete", inputTokens: 20 },
+            },
+          },
+        ],
+      });
+      // Adapters finalize usage before emitting the terminal that ends the run.
+      yield* awaitAttempt((attempt) => attempt.totalTokens === 20 && !attempt.timingComplete);
+      expect(
+        (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === started.workflowId,
+        )?.status,
+      ).toBe("running");
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:run-end"),
+        threadId: member.childThreadId!,
+        commandType: "test.run-end",
+        acceptedAt: end,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:run-end"),
+            type: "run.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: end,
+            payload: { ...run, status: "completed", startedAt: start, completedAt: end },
+          },
+        ],
+      });
+      yield* awaitWorkflowEnd(started.workflowId);
+      const worker = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (task) => task.id === started.workflowId,
+      )!.workflow!.agents[0]!;
+      expect(worker.attemptHistory?.[0]).toMatchObject({
+        durationMs: 3001,
+        timingComplete: true,
+        usageStatus: "complete",
+        totalTokens: 20,
+      });
+      expect(worker.totalTokens).toBe(20);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("C4 preserves historical script inheritance despite a new configured default", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({
+        workflowPresets: {
+          presets: [
+            {
+              id: "worker",
+              name: "Worker",
+              target: { providerInstanceId: claudeInstanceId, model: claudeModel },
+            },
+          ],
+          defaultPresetId: "worker",
+        },
+      });
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      for (const [index, script] of [
+        'return await agent("historical")',
+        storedWorkflowScript('return await agent("historical")', {}),
+      ].entries()) {
+        const workflowId = NodeId.make(`workflow:historical-${index}`);
+        yield* orchestrator.dispatch({
+          type: "workflow.start",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: CommandId.make(`command:historical-${index}`),
+          threadId: parentThreadId,
+          runId: parent.runs.at(-1)!.id,
+          workflowId,
+          title: "Historical",
+          script,
+        });
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            const member = yield* awaitMember(workflowId, 1);
+            expect(member).toMatchObject({ providerInstanceId: instanceId, model });
+            yield* completeChild(member.childThreadId!, "done");
+            expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
+          }),
+        );
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect(
+    "C4 retains a failed preset snapshot even if its model becomes available after restart",
+    () => {
+      const providers: ServerProvider[] = [provider, claudeProvider];
+      return Effect.gen(function* () {
+        yield* startParent;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [
+              {
+                id: "late",
+                name: "Late",
+                target: { providerInstanceId: instanceId, model: "late-model" },
+              },
+            ],
+            defaultPresetId: "late",
+          },
+        });
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const started = yield* service.workflowStart(invocation, {
+              script: `await agent("own", { target: { model: "${model}" } }); return await agent("late", { preset: "late" })`,
+            });
+            yield* awaitMember(started.workflowId, 1);
+            return started.workflowId;
+          }),
+        );
+        providers[0] = {
+          ...provider,
+          models: [
+            ...provider.models,
+            { slug: "late-model", name: "Late", isCustom: true, capabilities: null },
+          ],
+        };
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            yield* answerWorkflowAgents((prompt) => (prompt === "late" ? "unexpected" : undefined));
+            const own = yield* awaitMember(workflowId, 1);
+            yield* completeChild(own.childThreadId!, "done");
+            const ended = yield* awaitWorkflowEnd(workflowId);
+            expect(ended.agents[1]?.result).toContain("Model late-model is not advertised");
+            expect(
+              (yield* childTasks).filter((task) => task.parentNodeId === workflowId),
+            ).toHaveLength(1);
+          }),
+        );
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+  it.effect("C4 snapshots preset definitions and the default across edit, delete and restart", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({
+        workflowPresets: {
+          presets: [
+            {
+              id: "worker",
+              name: "Worker",
+              target: { providerInstanceId: claudeInstanceId, model: claudeModel, options: [] },
+            },
+          ],
+          defaultPresetId: "worker",
+        },
+      });
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            script:
+              'await agent("first"); await agent("named", { preset: "worker" }); return await agent("default")',
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first).toMatchObject({ providerInstanceId: claudeInstanceId, model: claudeModel });
+          yield* settings.updateSettings({
+            workflowPresets: {
+              presets: [
+                { id: "worker", name: "Edited", target: { providerInstanceId: instanceId, model } },
+              ],
+              defaultPresetId: "worker",
+            },
+          });
+          yield* completeChild(first.childThreadId!, "one");
+          expect(yield* awaitMember(started.workflowId, 2)).toMatchObject({
+            providerInstanceId: claudeInstanceId,
+            model: claudeModel,
+          });
+          return started.workflowId;
+        }),
+      );
+      yield* settings.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const named = yield* awaitMember(workflowId, 2);
+          yield* answerWorkflowAgents((prompt) =>
+            prompt === "default" || prompt === "first" ? "three" : undefined,
+          );
+          yield* completeChild(named.childThreadId!, "two");
+          const ended = yield* awaitWorkflowEnd(workflowId);
+          expect(ended.agents[2]?.status).toBe("completed");
+          const last = yield* awaitMember(workflowId, 3);
+          expect(last).toMatchObject({ providerInstanceId: claudeInstanceId, model: claudeModel });
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          expect(
+            (yield* orchestrator.getThreadProjection(last.childThreadId!)).thread.modelSelection
+              .options,
+          ).toEqual([]);
+          expect(
+            (yield* orchestrator.getThreadProjection(parentThreadId)).thread.modelSelection,
+          ).toEqual(modelSelection);
+          expect(ended.status).toBe("completed");
+        }),
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("C4 refuses a missing script preset without falling back to the worker target", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", {
+          workerTarget: { providerInstanceId: instanceId, model },
+          script: 'return await agent("missing", { preset: "deleted" })',
+        })).structuredContent,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.agents[0]?.result).toContain("Workflow preset deleted was not found.");
+      expect(
+        (yield* childTasks).filter((task) => task.parentNodeId === started.workflowId),
+      ).toHaveLength(0);
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("C3 freezes a model-omitted worker default across catalog reordering", () => {
+    const providers: ServerProvider[] = [
+      provider,
+      {
+        ...claudeProvider,
+        models: [
+          ...claudeProvider.models,
+          {
+            slug: "other-claude",
+            name: "Other",
+            isCustom: true,
+            capabilities: null,
+          },
+        ],
+      },
+    ];
+    return Effect.gen(function* () {
+      yield* startParent;
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            workerTarget: { providerInstanceId: claudeInstanceId },
+            script: 'await agent("first"); await agent("second"); return await agent("third")',
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first.model).toBe(claudeModel);
+          yield* completeChild(first.childThreadId!, "one");
+          yield* awaitMember(started.workflowId, 2);
+          return started.workflowId;
+        }),
+      );
+      providers[1] = { ...providers[1]!, models: providers[1]!.models.toReversed() };
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const second = yield* awaitMember(workflowId, 2);
+          yield* completeChild(second.childThreadId!, "two");
+          const third = yield* awaitMember(workflowId, 3);
+          expect(third.providerInstanceId).toBe(claudeInstanceId);
+          expect(third.model).toBe(claudeModel);
+          yield* completeChild(third.childThreadId!, "three");
+          expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
+        }),
+      );
+    }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+  });
+
+  it.effect(
+    "C3 defers a failed default until selected and retains its refusal after restart",
+    () => {
+      const providers: ServerProvider[] = [provider, claudeProvider];
+      return Effect.gen(function* () {
+        yield* startParent;
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const started = yield* service.workflowStart(invocation, {
+              workerTarget: { model: "late-model" },
+              script: `return [await agent("own", { target: { model: "${model}" } }), await agent("default")]`,
+            });
+            yield* awaitMember(started.workflowId, 1);
+            return started.workflowId;
+          }),
+        );
+        // Making the model available later must not replace the recorded refusal.
+        providers[0] = {
+          ...provider,
+          models: [
+            ...provider.models,
+            {
+              slug: "late-model",
+              name: "Late",
+              isCustom: true,
+              capabilities: null,
+            },
+          ],
+        };
+        const ended = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            yield* answerWorkflowAgents((prompt) =>
+              prompt === "default" ? "unexpected" : undefined,
+            );
+            const own = yield* awaitMember(workflowId, 1);
+            yield* completeChild(own.childThreadId!, "done");
+            return yield* awaitWorkflowEnd(workflowId);
+          }),
+        );
+        expect(JSON.parse(ended.result!)).toEqual(["done", null]);
+        expect(ended.agents[1]?.result).toContain(
+          `Model late-model is not advertised by provider ${instanceId}.`,
+        );
+        expect((yield* childTasks).filter((task) => task.parentNodeId === workflowId)).toHaveLength(
+          1,
+        );
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+  it.effect("C3 resumes worker routing for new calls and preserves completed calls", () =>
+    Effect.gen(function* () {
+      yield* startParentWithSelection({
+        ...modelSelection,
+        options: [
+          { id: "reasoningEffort", value: "medium" },
+          { id: "serviceTier", value: "priority" },
+        ],
+      });
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            script:
+              'const first = await agent("first"); const second = await agent("second after " + first, { target: { options: { reasoningEffort: "high" } } }); return [first, second]',
+            workerTarget: { options: [{ id: "reasoningEffort", value: "high" }] },
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first.providerInstanceId).toBe(instanceId);
+          yield* completeChild(first.childThreadId!, "one");
+          yield* awaitMember(started.workflowId, 2);
+          return started.workflowId;
+        }),
+      );
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("command:change-caller"),
+        threadId: parentThreadId,
+        modelSelection: {
+          instanceId,
+          model: "other-model",
+          options: [{ id: "new-option", value: true }],
+        },
+      });
+      const second = yield* awaitMember(workflowId, 2);
+      yield* completeChild(second.childThreadId!, "", {
+        status: "cancelled",
+        cancelledByServerRestart: true,
+      });
+      const ended = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const retried = yield* awaitMember(workflowId, 3);
+          expect(retried.prompt).toBe("second after one");
+          expect(retried.providerInstanceId).toBe(instanceId);
+          expect(retried.model).toBe(model);
+          expect(
+            (yield* orchestrator.getThreadProjection(retried.childThreadId!)).thread.modelSelection,
+          ).toEqual({
+            ...modelSelection,
+            options: [
+              { id: "reasoningEffort", value: "high" },
+              { id: "serviceTier", value: "priority" },
+            ],
+          });
+          yield* completeChild(retried.childThreadId!, "two");
+          return yield* awaitWorkflowEnd(workflowId);
+        }),
+      );
+      expect(JSON.parse(ended.result!)).toEqual(["one", "two"]);
+      const row = (yield* childTasks).find((task) => task.id === workflowId)!;
+      expect(row.workflow!.agents.map((agent) => agent.attemptTaskIds!.length)).toEqual([1, 2]);
+    }).pipe(
+      Effect.provide(
+        makeLayerTest(undefined, [
+          {
+            ...provider,
+            models: [
+              ...provider.models,
+              { slug: "other-model", name: "Other", isCustom: true, capabilities: null },
+            ],
+          },
+          claudeProvider,
+        ]),
+      ),
+    ),
+  );
   it.effect("resumes a running workflow after a restart without starting its agents twice", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -902,6 +2584,59 @@ describe("workflow resume", () => {
         ]);
         expect(ended.usage.status).toBe("unavailable");
         expect(ended.tokensUsed).toBeNull();
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "replays persisted retry history without losing usage or duplicating child identity",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const started = yield* service.workflowStart(invocation, {
+              script: 'return await agent("retry")',
+            });
+            const first = yield* awaitMember(started.workflowId, 1);
+            yield* completeChild(first.childThreadId!, "failed", { status: "failed" }, 30);
+            yield* awaitMember(started.workflowId, 2);
+            return started.workflowId;
+          }),
+        );
+        const second = yield* awaitMember(workflowId, 2);
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            yield* completeChild(second.childThreadId!, "done", { status: "completed" }, 70);
+            yield* awaitWorkflowEnd(workflowId);
+          }),
+        );
+        const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        );
+        const worker = parent.subagents.find((task) => task.id === workflowId)?.workflow?.agents[0];
+        expect(worker?.totalTokens).toBe(100);
+        expect(
+          worker?.attemptHistory?.map((attempt) => [
+            attempt.state,
+            attempt.totalTokens,
+            attempt.usageStatus,
+          ]),
+        ).toEqual([
+          ["failed", 30, "complete"],
+          ["completed", 70, "complete"],
+        ]);
+        expect(worker?.attemptHistory?.map((attempt) => attempt.taskId)).toEqual(
+          worker?.attemptTaskIds,
+        );
+        expect(worker?.attemptHistory?.[1]?.childThreadId).toBe(second.childThreadId);
+        expect(
+          worker?.attemptHistory?.map((attempt) => [attempt.durationMs, attempt.timingComplete]),
+        ).toEqual([
+          [0, true],
+          [0, true],
+        ]);
+        expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
       }).pipe(Effect.provide(layerTest)),
   );
 
@@ -1044,7 +2779,8 @@ describe("workflow resume", () => {
       expect(JSON.parse(ended.result!)).toEqual({
         a: "1",
         b: "2",
-        refused: "The workflow's budget of 1500 tokens is spent (1800 used).",
+        refused:
+          "The workflow's budget of 1500 tokens is spent (1800 recorded). New agents will not start; already-running agents may exceed this budget.",
         remaining: 0,
       });
       expect(ended.tokensUsed).toBe(1800);
@@ -1402,6 +3138,565 @@ const serialGraph = (dir: string) => ({
 });
 
 describe("graphs", () => {
+  it.effect(
+    "C4 expands preset graphs before digest and starts the approved graph after edits and restart",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const target = { providerInstanceId: claudeInstanceId, model: claudeModel, options: [] };
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [{ id: "reviewer", name: "Reviewer", target }],
+            defaultPresetId: "reviewer",
+          },
+        });
+        const node = { subject: "worker", description: "work", dependsOn: [], preset: "reviewer" };
+        const graph = { schemaVersion: 1, nodes: { a: node } };
+        const reviewed = yield* withServerProcess((service) =>
+          service.graphReview(invocation, { graph }),
+        );
+        expect(reviewed.ready).toBe(true);
+        expect(reviewed.targets).toMatchObject([{ source: "preset", target }]);
+        expect(reviewed.expandedGraph).toMatchObject({ nodes: { a: { target } } });
+        expect(JSON.stringify(reviewed.expandedGraph)).not.toContain('"preset"');
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [
+              {
+                id: "reviewer",
+                name: "Changed",
+                target: { providerInstanceId: instanceId, model },
+              },
+            ],
+            defaultPresetId: "reviewer",
+          },
+        });
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const equivalent = yield* service.graphReview(invocation, {
+              graph: reviewed.expandedGraph,
+            });
+            expect(equivalent.digest).toBe(reviewed.digest);
+            const stale = yield* service
+              .graphStart(invocation, { graph, acceptedDigest: reviewed.digest! })
+              .pipe(Effect.flip);
+            expect(stale.message).toContain("graph");
+            yield* settings.updateSettings({
+              workflowPresets: { presets: [], defaultPresetId: null },
+            });
+            const started = yield* service.graphStart(invocation, {
+              graph: reviewed.expandedGraph,
+              acceptedDigest: reviewed.digest!,
+            });
+            const worker = yield* awaitMember(started.workflowId, 1);
+            expect(worker).toMatchObject({
+              providerInstanceId: claudeInstanceId,
+              model: claudeModel,
+            });
+            yield* completeChild(worker.childThreadId!, "done");
+            expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+          }),
+        );
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("C4 applies every precedence branch and refuses missing graph presets", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const presetTarget = {
+        providerInstanceId: claudeInstanceId,
+        model: claudeModel,
+        options: [],
+      };
+      yield* settings.updateSettings({
+        workflowPresets: {
+          presets: [{ id: "worker", name: "Worker", target: presetTarget }],
+          defaultPresetId: "worker",
+        },
+      });
+      const node = { subject: "worker", description: "work", dependsOn: [] };
+      for (const [own, workerTarget, source, expectedProvider] of [
+        [{ target: {}, preset: "missing" }, presetTarget, "target", instanceId],
+        [{ model, preset: "missing" }, presetTarget, "model", instanceId],
+        [{ preset: "worker" }, { model }, "preset", claudeInstanceId],
+        [{}, { model }, "workerTarget", instanceId],
+        [{}, undefined, "defaultPreset", claudeInstanceId],
+      ] as const) {
+        const reviewed = yield* decodeReview(
+          (yield* invoke("graph_review", {
+            graph: { schemaVersion: 1, nodes: { a: { ...node, ...own } } },
+            ...(workerTarget === undefined ? {} : { workerTarget }),
+          })).structuredContent,
+        );
+        expect(reviewed.ready).toBe(true);
+        expect(reviewed.targets[0]).toMatchObject({
+          source,
+          target: { providerInstanceId: expectedProvider },
+        });
+      }
+      const missing = yield* reviewGraph({
+        schemaVersion: 1,
+        nodes: { a: { ...node, preset: "missing" } },
+      });
+      expect(missing).toMatchObject({ ready: false, digest: null, expandedGraph: null });
+      expect(missing.blockers).toContain("a: Workflow preset missing was not found.");
+      yield* settings.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+      expect(
+        (yield* reviewGraph({ schemaVersion: 1, nodes: { a: node } })).targets[0],
+      ).toMatchObject({ source: "caller", target: { providerInstanceId: instanceId, model } });
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("C3 refuses an inherited model absent from an empty provider catalog", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const reviewed = yield* reviewGraph({
+        schemaVersion: 1,
+        nodes: {
+          a: { subject: "worker", description: "work", dependsOn: [] },
+        },
+      });
+      expect(reviewed.ready).toBe(false);
+      expect(reviewed.blockers).toEqual([
+        `a: Model ${model} is not advertised by provider ${instanceId}.`,
+      ]);
+      expect(yield* childTasks).toEqual([]);
+    }).pipe(Effect.provide(makeLayerTest(undefined, [{ ...provider, models: [] }]))),
+  );
+
+  it.effect("C3 keeps exact reviewed options after caller changes and graph restart", () =>
+    Effect.gen(function* () {
+      yield* startParentWithSelection({
+        ...modelSelection,
+        options: [{ id: "serviceTier", value: "priority" }],
+      });
+      const graph = {
+        schemaVersion: 1,
+        nodes: {
+          a: { subject: "first", description: "first", dependsOn: [] },
+          b: {
+            subject: "second",
+            description: "second",
+            dependsOn: ["a"],
+            verify: { type: "judgment", rubric: ["correct"] },
+          },
+        },
+      };
+      const workerTarget = { options: [{ id: "reasoningEffort", value: "high" }] };
+      const expected = {
+        ...modelSelection,
+        options: [
+          { id: "reasoningEffort", value: "high" },
+          { id: "serviceTier", value: "priority" },
+        ],
+      };
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const reviewed = yield* service.graphReview(invocation, { graph, workerTarget });
+          expect(reviewed.targets[1]?.judgmentTarget).toEqual({
+            providerInstanceId: instanceId,
+            model,
+            options: expected.options,
+            inheritOptions: false,
+          });
+          const explicit = yield* service.graphReview(invocation, {
+            graph: {
+              ...graph,
+              nodes: Object.fromEntries(
+                Object.entries(graph.nodes).map(([key, node]) => [
+                  key,
+                  {
+                    ...node,
+                    target: reviewed.targets.find((entry) => entry.nodeId === key)!.target,
+                    ...("verify" in node
+                      ? {
+                          verify: {
+                            ...node.verify,
+                            target: reviewed.targets.find((entry) => entry.nodeId === key)!
+                              .judgmentTarget,
+                          },
+                        }
+                      : {}),
+                  },
+                ]),
+              ),
+            },
+          });
+          expect(explicit.digest).toBe(reviewed.digest);
+          const started = yield* service.graphStart(invocation, {
+            graph,
+            workerTarget,
+            acceptedDigest: reviewed.digest!,
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          yield* orchestrator.dispatch({
+            type: "thread.model-selection.set",
+            commandId: CommandId.make("command:change-graph-caller"),
+            threadId: parentThreadId,
+            modelSelection: { ...modelSelection, options: [{ id: "new-option", value: true }] },
+          });
+          yield* completeChild(first.childThreadId!, "first done");
+          const second = yield* awaitMember(started.workflowId, 2);
+          const selection = (yield* orchestrator.getThreadProjection(second.childThreadId!)).thread
+            .modelSelection;
+          expect({
+            ...selection,
+            options: [...(selection.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+          }).toEqual(expected);
+          return started.workflowId;
+        }),
+      );
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const second = yield* awaitMember(workflowId, 2);
+          yield* completeChild(second.childThreadId!, "second done");
+          const judge = yield* awaitMember(workflowId, 3);
+          const selection = (yield* orchestrator.getThreadProjection(judge.childThreadId!)).thread
+            .modelSelection;
+          expect({
+            ...selection,
+            options: [...(selection.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+          }).toEqual(expected);
+          yield* completeChild(
+            judge.childThreadId!,
+            '```json\n{"outcome":"passed","reasons":"correct"}\n```',
+          );
+          expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
+        }),
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("starts the approved expanded graph after the caller's options change", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const setCallerOptions = (
+        id: string,
+        options: ReadonlyArray<{ id: string; value: string }>,
+      ) =>
+        orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make(id),
+          threadId: parentThreadId,
+          modelSelection: { ...modelSelection, options },
+        });
+      yield* setCallerOptions("command:caller-before-review", [
+        { id: "serviceTier", value: "priority" },
+      ]);
+      // The node names the caller's provider and model, so review inherits the caller's options.
+      const graph = {
+        schemaVersion: 1,
+        nodes: {
+          a: {
+            subject: "worker",
+            description: "work",
+            dependsOn: [],
+            target: { providerInstanceId: instanceId, model },
+          },
+        },
+      };
+      const reviewed = yield* reviewGraph(graph);
+      expect(reviewed.ready).toBe(true);
+      const frozen = { serviceTier: "priority" };
+      expect(reviewed.expandedGraph).toMatchObject({
+        nodes: { a: { target: { options: [{ id: "serviceTier", value: frozen.serviceTier }] } } },
+      });
+      yield* setCallerOptions("command:caller-after-review", [
+        { id: "serviceTier", value: "priority" },
+        { id: "reasoningEffort", value: "high" },
+      ]);
+      const started = yield* decodeWorkflow(
+        (yield* invoke("graph_start", {
+          graph: reviewed.expandedGraph,
+          acceptedDigest: reviewed.digest,
+        })).structuredContent,
+      );
+      const worker = yield* awaitMember(started.workflowId, 1);
+      expect(
+        (yield* orchestrator.getThreadProjection(worker.childThreadId!)).thread.modelSelection,
+      ).toEqual({ ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] });
+      yield* completeChild(worker.childThreadId!, "done");
+      expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("C3 expands defaults before hashing and reports target provenance", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const node = { subject: "worker", description: "work", dependsOn: [] };
+      const workerTarget = { providerInstanceId: claudeInstanceId, model: claudeModel };
+      const graph = { schemaVersion: 1, nodes: { a: node } };
+      const defaults = yield* decodeReview(
+        (yield* invoke("graph_review", { graph, workerTarget })).structuredContent,
+      );
+      const explicit = yield* decodeReview(
+        (yield* invoke("graph_review", {
+          graph: { ...graph, nodes: { a: { ...node, target: workerTarget } } },
+        })).structuredContent,
+      );
+      expect(defaults.ready).toBe(true);
+      expect(defaults.digest).toBe(explicit.digest);
+      expect(defaults).toMatchObject({
+        targets: [
+          {
+            nodeId: "a",
+            source: "workerTarget",
+            target: { ...workerTarget, options: [] },
+          },
+        ],
+      });
+      expect(explicit).toMatchObject({ targets: [{ nodeId: "a", source: "target" }] });
+      const inherited = yield* decodeReview(
+        (yield* invoke("graph_review", { graph })).structuredContent,
+      );
+      expect(inherited).toMatchObject({
+        targets: [{ source: "caller", target: { providerInstanceId: instanceId, model } }],
+      });
+      for (const own of [{ target: { model } }, { model }, { target: {} }]) {
+        const reviewed = yield* decodeReview(
+          (yield* invoke("graph_review", {
+            graph: { ...graph, nodes: { a: { ...node, ...own } } },
+            workerTarget,
+          })).structuredContent,
+        );
+        expect(reviewed.ready).toBe(true);
+        expect(reviewed.digest).toBe(inherited.digest);
+        expect(reviewed).toMatchObject({
+          targets: [{ source: "model" in own ? "model" : "target" }],
+        });
+      }
+      // A different concrete assignment cannot use the approved digest.
+      const refused = yield* invoke("graph_start", { graph, acceptedDigest: defaults.digest });
+      expect(refused.isError).toBe(true);
+      expect(errorText(refused)).toContain("digest mismatch");
+      yield* answerWorkflowAgents(() => "done");
+      const started = yield* decodeWorkflow(
+        (yield* invoke("graph_start", {
+          graph,
+          workerTarget,
+          acceptedDigest: defaults.digest,
+        })).structuredContent,
+      );
+      yield* awaitWorkflowEnd(started.workflowId);
+      expect(yield* awaitMember(started.workflowId, 1)).toMatchObject({
+        providerInstanceId: claudeInstanceId,
+        model: claudeModel,
+      });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect.each(refusedTargets)(
+    "C3 refuses an unavailable judgment $name at review",
+    ({ target, reason }) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const graph = {
+          schemaVersion: 1,
+          nodes: {
+            a: {
+              subject: "worker",
+              description: "work",
+              dependsOn: [],
+              verify: { type: "judgment", rubric: ["check"], target },
+            },
+          },
+        };
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.ready).toBe(false);
+        expect(reviewed.blockers.join(" ")).toContain(reason);
+        expect(yield* childTasks).toEqual([]);
+      }).pipe(Effect.provide(layerRefusedTargets)),
+  );
+  it.effect.each(refusedTargets)(
+    "C3 refuses a graph targeting $name at review and start",
+    ({ target, reason }) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents(() => "unexpected dispatch");
+        const graph = {
+          schemaVersion: 1,
+          name: "Refused target",
+          nodes: {
+            worker: { subject: "Worker", description: "refused worker", dependsOn: [], target },
+            downstream: {
+              subject: "Downstream",
+              description: "must not run",
+              dependsOn: ["worker"],
+            },
+          },
+        };
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.ready).toBe(false);
+        expect(reviewed.blockers.join(" ")).toContain(reason);
+        const result = yield* invoke("graph_start", {
+          graph,
+          acceptedDigest: reviewed.digest ?? `sha256:${"0".repeat(64)}`,
+        });
+        expect(result.isError).toBe(true);
+        expect(errorText(result)).toContain(reason);
+        expect(yield* childTasks).toEqual([]);
+      }).pipe(Effect.provide(layerRefusedTargets)),
+  );
+
+  /** A 150-node, ten-wave review of read-only nodes, as a coordinator would send it. */
+  const wideReviewGraph = (descriptionLength: number) => {
+    const label = (index: number) => `n${String(index + 1).padStart(3, "0")}`;
+    return {
+      schemaVersion: 1,
+      name: "Wide review",
+      nodes: Object.fromEntries(
+        Array.from({ length: 150 }, (_, index) => [
+          label(index),
+          {
+            subject: `Check area ${index + 1}`,
+            description: `Read only: report one finding for area ${index + 1}. `
+              .repeat(Math.ceil(descriptionLength / 50))
+              .slice(0, descriptionLength),
+            dependsOn: index < 15 ? [] : [label(index - 15)],
+            scopes: { read: ["."] },
+          },
+        ]),
+      ),
+    };
+  };
+
+  /**
+   * Stores graph_review's real service result as two SYNTHETIC tool items, then returns what a
+   * client receives: the item in a snapshot and in a live event, and the item getTurnItem returns.
+   * No provider ran. Each item is hand-built from the service payload:
+   * - "claude": an explicitly duplicated full-content envelope, `{ content: <the text>,
+   *   structuredContent }`. It represents the shape recorded for a claude.ai connector result
+   *   (claude_mcp_tool_presentation transcript) and for a small live graph_review. It is not a
+   *   guarantee of what Claude Code stores for a large result: a live 150-node run stored a
+   *   notice in `content` plus one `structuredContent`, not the review text twice.
+   * - "codex": `mcpToolCall.result.structuredContent` as the output, the Codex adapter's shape.
+   * The labels name these shapes. They are not observations of either provider's large-output
+   * behavior, and neither model necessarily sees the complete stored result.
+   */
+  const clientViewOfReview = (result: McpSchema.CallToolResult) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const run = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.at(-1)!;
+      const now = yield* DateTime.now;
+      const outputs = {
+        claude: {
+          toolName: "mcp__t3-code__graph_review",
+          output: { content: errorText(result), structuredContent: result.structuredContent },
+        },
+        codex: { toolName: "t3-code.graph_review", output: result.structuredContent },
+      };
+      const events = Object.entries(outputs).map(([driver, { toolName, output }], index) => ({
+        id: EventId.make(`event:review-item:${driver}`),
+        type: "turn-item.updated" as const,
+        threadId: parentThreadId,
+        runId: run.id,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(`turn-item:review:${driver}`),
+          type: "dynamic_tool" as const,
+          threadId: parentThreadId,
+          runId: run.id,
+          nodeId: run.rootNodeId,
+          providerThreadId: run.providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 100 + index,
+          status: "completed" as const,
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          toolName,
+          input: { graph: "(the graph the coordinator sent)" },
+          output,
+        },
+      }));
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:review-items"),
+        threadId: parentThreadId,
+        commandType: "test.review-items",
+        acceptedAt: now,
+        effects: [],
+        events,
+      });
+      const snapshot = projectThreadProjectionForWire(
+        yield* orchestrator.getThreadProjection(parentThreadId),
+      );
+      return yield* Effect.forEach(events, (event) =>
+        Effect.gen(function* () {
+          const itemId = event.payload.id;
+          const detail = (yield* threads.getTurnItem({ threadId: parentThreadId, itemId })).item;
+          return {
+            driver: itemId.replace("turn-item:review:", ""),
+            snapshot: snapshot.turnItems.find((item) => item.id === itemId),
+            live: projectDomainEventForWire(event).payload,
+            detail,
+          };
+        }),
+      );
+    });
+
+  it.effect("graph_review at 150 nodes reaches clients only through getTurnItem", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const result = yield* invoke("graph_review", { graph: wideReviewGraph(50) });
+      const review = yield* decodeReview(result.structuredContent);
+      expect(review).toMatchObject({ ready: true, blockers: [] });
+      expect(review.targets).toHaveLength(150);
+      expect(review.layers).toHaveLength(10);
+      expect(review.expandedGraph).toMatchObject({ nodes: expect.any(Object) });
+      // The text block and structuredContent come from the same value, so the duplicated envelope
+      // below holds one review twice. This checks the MCP service result only; it does not say
+      // what either provider shows its model, which at 150 nodes may be a cut or a notice.
+      expect(JSON.parse(errorText(result))).toEqual(result.structuredContent);
+
+      const views = yield* clientViewOfReview(result);
+      expect(views.map((view) => view.driver)).toEqual(["claude", "codex"]);
+      for (const { driver, snapshot, live, detail } of views) {
+        // Neither the snapshot nor the live event carries a single review field.
+        for (const item of [snapshot, live]) {
+          expect(item, driver).toMatchObject({ type: "dynamic_tool", outputOmitted: true });
+          expect(item, driver).not.toHaveProperty("output");
+          expect(JSON.stringify(item).length, driver).toBeLessThan(2_000);
+        }
+        const fetched = detail?.type === "dynamic_tool" ? detail.output : undefined;
+        const structured =
+          driver === "claude"
+            ? (fetched as { readonly structuredContent?: unknown } | undefined)?.structuredContent
+            : fetched;
+        expect(structured, driver).toEqual(result.structuredContent);
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("getTurnItem truncates an explicitly duplicated review envelope past 256 KiB", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      // 600-character descriptions are ordinary for a coordinator planning real work.
+      const result = yield* invoke("graph_review", { graph: wideReviewGraph(600) });
+      expect(result.isError).not.toBe(true);
+      const bytes = JSON.stringify(result.structuredContent).length;
+      // getTurnItem returns at most 256 KiB of output as data, whatever the provider. This checks
+      // that boundary. The "claude" item is a SYNTHETIC envelope that duplicates the review (text
+      // plus structuredContent) so that one copy fits and two do not. It is not a claim that
+      // Claude Code stores two copies of a large result; a live over-limit run stored a notice.
+      expect(bytes).toBeLessThan(256 * 1024);
+      expect(bytes * 2).toBeGreaterThan(256 * 1024);
+
+      const [duplicatedEnvelope, structuredOnly] = yield* clientViewOfReview(result);
+      const output = (view: typeof duplicatedEnvelope) =>
+        view?.detail?.type === "dynamic_tool" ? view.detail.output : undefined;
+      expect(output(structuredOnly)).toEqual(result.structuredContent);
+      expect(output(duplicatedEnvelope)).toEqual(
+        expect.stringContaining("output truncated for transport"),
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("graph_review binds inputs, reports a missing one, and records nothing", () =>
     withScratchDir((dir) =>
       Effect.gen(function* () {
@@ -1530,9 +3825,10 @@ describe("graphs", () => {
         );
         const ended = yield* awaitWorkflowEnd(started.workflowId);
         expect(ended.status).toBe("failed");
-        expect(ended.result).toContain("Graph failed: ");
-        expect(ended.result).toContain('"consume":{"status":"skipped"');
-        expect(ended.result).toContain("Predecessor produce did not pass.");
+        const reason = `Its outputs check failed: output total (${dir}/total.json) was not written.`;
+        expect(ended.result).toContain(
+          `The workflow failed: Graph failed: 1 node failed, 1 skipped. Produce: ${reason}`,
+        );
         expect(ended.agents).toHaveLength(1);
         expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 3 });
         // The row itself records both nodes, including the one that never started an agent.
@@ -1540,8 +3836,17 @@ describe("graphs", () => {
           parentThreadId,
         )).subagents.find((task) => task.id === started.workflowId);
         expect(row?.workflow?.agents.map((agent) => agent.graphNodeKey)).toEqual(["produce"]);
-        expect(row?.workflow?.nodeOutcomes).toMatchObject({
-          produce: { status: "failed", attempts: 3 },
+        const attempts = row?.workflow?.agents[0]?.attemptHistory;
+        expect(attempts).toHaveLength(3);
+        expect(new Set(attempts?.map((attempt) => attempt.taskId)).size).toBe(3);
+        expect(attempts?.map((attempt) => attempt.attempt)).toEqual([0, 1, 2]);
+        expect(
+          attempts?.every(
+            (attempt) => attempt.state === "completed" && attempt.childThreadId.length > 0,
+          ),
+        ).toBe(true);
+        expect(row?.workflow?.nodeOutcomes).toEqual({
+          produce: { status: "failed", attempts: 3, reason },
           consume: { status: "skipped", attempts: 0, reason: "Predecessor produce did not pass." },
         });
       }).pipe(Effect.provide(layerTest)),
@@ -1631,6 +3936,11 @@ describe("graphs", () => {
         expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
         // The plan comes back from the stored settings, so the resumed row still shows the graph.
         const row = parent.subagents.find((task) => task.id === workflowId);
+        expect(row?.workflow?.agents.map((agent) => agent.attemptHistory?.length)).toEqual([1, 1]);
+        expect(row?.workflow?.agents[0]?.attemptHistory?.[0]?.childThreadId).toBe(
+          parent.subagents.find((task) => task.id === row?.workflow?.agents[0]?.agentId)
+            ?.childThreadId,
+        );
         expect(
           row?.workflow?.plan?.nodes.map((node) => [node.key, node.wave, node.dependsOn]),
         ).toEqual([
@@ -1661,10 +3971,19 @@ describe("graphs", () => {
         const ended = yield* awaitWorkflowEnd(started.workflowId);
         expect(ended.status).toBe("failed");
         expect(ended.tokensUsed).toBe(1500);
-        expect(ended.result).toContain('"produce":{"status":"passed"');
+        const reason =
+          "Error: The workflow's budget of 1000 tokens is spent (1500 recorded). New agents will not start; already-running agents may exceed this budget.";
         expect(ended.result).toContain(
-          "The workflow's budget of 1000 tokens is spent (1500 used).",
+          `The workflow failed: Graph failed: 1 node failed. Consume: ${reason}`,
         );
+        const row = (yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        )).subagents.find((task) => task.id === started.workflowId);
+        expect(row?.workflow?.nodeOutcomes).toEqual({
+          produce: { status: "passed", attempts: 1 },
+          consume: { status: "failed", attempts: 0, reason },
+        });
+        expect(row?.workflow?.budget).toEqual({ limit: 1000, exhausted: true });
       }).pipe(Effect.provide(layerTest)),
     ),
   );
