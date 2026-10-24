@@ -29,6 +29,7 @@ import {
   type ServerProvider,
   type TurnTokenUsage,
   ThreadId,
+  TurnItemId,
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { storedWorkflowScript } from "@t3tools/shared/storedWorkflowScript";
@@ -36,7 +37,10 @@ import { subscribeOrchestrationV2Thread } from "../ws.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
 import { workflowPatches } from "@t3tools/shared/workflowUpdate";
 import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
-import { projectDomainEventForWire } from "../orchestration-v2/WireProjection.ts";
+import {
+  projectDomainEventForWire,
+  projectThreadProjectionForWire,
+} from "../orchestration-v2/WireProjection.ts";
 import {
   buildBoundedThreadStreamSnapshot,
   boundWorkflowUpdateBatches,
@@ -3536,6 +3540,163 @@ describe("graphs", () => {
       }).pipe(Effect.provide(layerRefusedTargets)),
   );
 
+  /** A 150-node, ten-wave review of read-only nodes, as a coordinator would send it. */
+  const wideReviewGraph = (descriptionLength: number) => {
+    const label = (index: number) => `n${String(index + 1).padStart(3, "0")}`;
+    return {
+      schemaVersion: 1,
+      name: "Wide review",
+      nodes: Object.fromEntries(
+        Array.from({ length: 150 }, (_, index) => [
+          label(index),
+          {
+            subject: `Check area ${index + 1}`,
+            description: `Read only: report one finding for area ${index + 1}. `
+              .repeat(Math.ceil(descriptionLength / 50))
+              .slice(0, descriptionLength),
+            dependsOn: index < 15 ? [] : [label(index - 15)],
+            scopes: { read: ["."] },
+          },
+        ]),
+      ),
+    };
+  };
+
+  /**
+   * Stores graph_review's real service result as two SYNTHETIC tool items, then returns what a
+   * client receives: the item in a snapshot and in a live event, and the item getTurnItem returns.
+   * No provider ran. Each item is hand-built from the service payload:
+   * - "claude": an explicitly duplicated full-content envelope, `{ content: <the text>,
+   *   structuredContent }`. It represents the shape recorded for a claude.ai connector result
+   *   (claude_mcp_tool_presentation transcript) and for a small live graph_review. It is not a
+   *   guarantee of what Claude Code stores for a large result: a live 150-node run stored a
+   *   notice in `content` plus one `structuredContent`, not the review text twice.
+   * - "codex": `mcpToolCall.result.structuredContent` as the output, the Codex adapter's shape.
+   * The labels name these shapes. They are not observations of either provider's large-output
+   * behavior, and neither model necessarily sees the complete stored result.
+   */
+  const clientViewOfReview = (result: McpSchema.CallToolResult) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const run = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.at(-1)!;
+      const now = yield* DateTime.now;
+      const outputs = {
+        claude: {
+          toolName: "mcp__t3-code__graph_review",
+          output: { content: errorText(result), structuredContent: result.structuredContent },
+        },
+        codex: { toolName: "t3-code.graph_review", output: result.structuredContent },
+      };
+      const events = Object.entries(outputs).map(([driver, { toolName, output }], index) => ({
+        id: EventId.make(`event:review-item:${driver}`),
+        type: "turn-item.updated" as const,
+        threadId: parentThreadId,
+        runId: run.id,
+        occurredAt: now,
+        payload: {
+          id: TurnItemId.make(`turn-item:review:${driver}`),
+          type: "dynamic_tool" as const,
+          threadId: parentThreadId,
+          runId: run.id,
+          nodeId: run.rootNodeId,
+          providerThreadId: run.providerThreadId,
+          providerTurnId: null,
+          nativeItemRef: null,
+          parentItemId: null,
+          ordinal: 100 + index,
+          status: "completed" as const,
+          title: null,
+          startedAt: now,
+          completedAt: now,
+          updatedAt: now,
+          toolName,
+          input: { graph: "(the graph the coordinator sent)" },
+          output,
+        },
+      }));
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:review-items"),
+        threadId: parentThreadId,
+        commandType: "test.review-items",
+        acceptedAt: now,
+        effects: [],
+        events,
+      });
+      const snapshot = projectThreadProjectionForWire(
+        yield* orchestrator.getThreadProjection(parentThreadId),
+      );
+      return yield* Effect.forEach(events, (event) =>
+        Effect.gen(function* () {
+          const itemId = event.payload.id;
+          const detail = (yield* threads.getTurnItem({ threadId: parentThreadId, itemId })).item;
+          return {
+            driver: itemId.replace("turn-item:review:", ""),
+            snapshot: snapshot.turnItems.find((item) => item.id === itemId),
+            live: projectDomainEventForWire(event).payload,
+            detail,
+          };
+        }),
+      );
+    });
+
+  it.effect("graph_review at 150 nodes reaches clients only through getTurnItem", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const result = yield* invoke("graph_review", { graph: wideReviewGraph(50) });
+      const review = yield* decodeReview(result.structuredContent);
+      expect(review).toMatchObject({ ready: true, blockers: [] });
+      expect(review.targets).toHaveLength(150);
+      expect(review.layers).toHaveLength(10);
+      expect(review.expandedGraph).toMatchObject({ nodes: expect.any(Object) });
+      // The text block and structuredContent come from the same value, so the duplicated envelope
+      // below holds one review twice. This checks the MCP service result only; it does not say
+      // what either provider shows its model, which at 150 nodes may be a cut or a notice.
+      expect(JSON.parse(errorText(result))).toEqual(result.structuredContent);
+
+      const views = yield* clientViewOfReview(result);
+      expect(views.map((view) => view.driver)).toEqual(["claude", "codex"]);
+      for (const { driver, snapshot, live, detail } of views) {
+        // Neither the snapshot nor the live event carries a single review field.
+        for (const item of [snapshot, live]) {
+          expect(item, driver).toMatchObject({ type: "dynamic_tool", outputOmitted: true });
+          expect(item, driver).not.toHaveProperty("output");
+          expect(JSON.stringify(item).length, driver).toBeLessThan(2_000);
+        }
+        const fetched = detail?.type === "dynamic_tool" ? detail.output : undefined;
+        const structured =
+          driver === "claude"
+            ? (fetched as { readonly structuredContent?: unknown } | undefined)?.structuredContent
+            : fetched;
+        expect(structured, driver).toEqual(result.structuredContent);
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("getTurnItem truncates an explicitly duplicated review envelope past 256 KiB", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      // 600-character descriptions are ordinary for a coordinator planning real work.
+      const result = yield* invoke("graph_review", { graph: wideReviewGraph(600) });
+      expect(result.isError).not.toBe(true);
+      const bytes = JSON.stringify(result.structuredContent).length;
+      // getTurnItem returns at most 256 KiB of output as data, whatever the provider. This checks
+      // that boundary. The "claude" item is a SYNTHETIC envelope that duplicates the review (text
+      // plus structuredContent) so that one copy fits and two do not. It is not a claim that
+      // Claude Code stores two copies of a large result; a live over-limit run stored a notice.
+      expect(bytes).toBeLessThan(256 * 1024);
+      expect(bytes * 2).toBeGreaterThan(256 * 1024);
+
+      const [duplicatedEnvelope, structuredOnly] = yield* clientViewOfReview(result);
+      const output = (view: typeof duplicatedEnvelope) =>
+        view?.detail?.type === "dynamic_tool" ? view.detail.output : undefined;
+      expect(output(structuredOnly)).toEqual(result.structuredContent);
+      expect(output(duplicatedEnvelope)).toEqual(
+        expect.stringContaining("output truncated for transport"),
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("graph_review binds inputs, reports a missing one, and records nothing", () =>
     withScratchDir((dir) =>
       Effect.gen(function* () {

@@ -4500,6 +4500,120 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  const GRAPH_REVIEW_SCENARIO = "codex-mcp-structured-result";
+  const GRAPH_REVIEW_NATIVE_THREAD = "native-codex-graph-review-thread";
+  const GRAPH_REVIEW_NATIVE_TURN = "native-codex-graph-review-turn";
+  const GRAPH_REVIEW_PROMPT = "Review the graph.";
+  const graphReviewResult = {
+    digest: `sha256:${"a".repeat(64)}`,
+    ready: true,
+    expandedGraph: { schemaVersion: 1, nodes: { a: { subject: "A", dependsOn: [] } } },
+    targets: [],
+    layers: [["a"]],
+    writeConflicts: [],
+    inputs: [],
+    blockers: [],
+  };
+  const graphReviewToolItem = (status: "inProgress" | "completed") => ({
+    type: "mcpToolCall",
+    id: "mcp-graph-review-call",
+    server: "t3-code",
+    tool: "graph_review",
+    status,
+    arguments: { graph: { schemaVersion: 1, nodes: {} } },
+    // Codex gives an MCP result's text blocks and its structured content side by side.
+    ...(status === "completed"
+      ? {
+          result: {
+            content: [{ type: "text", text: JSON.stringify(graphReviewResult) }],
+            structuredContent: graphReviewResult,
+          },
+        }
+      : {}),
+  });
+
+  const graphReviewTranscript = makeCodexReplayTranscript({
+    scenario: GRAPH_REVIEW_SCENARIO,
+    entries: [
+      ...codexReplayPreamble({
+        nativeThreadId: GRAPH_REVIEW_NATIVE_THREAD,
+        nativeTurnId: GRAPH_REVIEW_NATIVE_TURN,
+        prompt: GRAPH_REVIEW_PROMPT,
+      }),
+      {
+        type: "emit_inbound",
+        label: "item/started/graph-review",
+        frame: {
+          method: "item/started",
+          params: {
+            item: graphReviewToolItem("inProgress"),
+            threadId: GRAPH_REVIEW_NATIVE_THREAD,
+            turnId: GRAPH_REVIEW_NATIVE_TURN,
+            startedAtMs: 1782622440500,
+          },
+        },
+      },
+      {
+        type: "emit_inbound",
+        label: "item/completed/graph-review",
+        frame: {
+          method: "item/completed",
+          params: {
+            item: graphReviewToolItem("completed"),
+            threadId: GRAPH_REVIEW_NATIVE_THREAD,
+            turnId: GRAPH_REVIEW_NATIVE_TURN,
+            completedAtMs: 1782622441500,
+          },
+        },
+      },
+      {
+        type: "emit_inbound",
+        label: "turn/completed",
+        frame: {
+          method: "turn/completed",
+          params: {
+            threadId: GRAPH_REVIEW_NATIVE_THREAD,
+            turn: makeCodexReplayTurn({ id: GRAPH_REVIEW_NATIVE_TURN, status: "completed" }),
+          },
+        },
+      },
+    ],
+  });
+
+  it.effect("keeps an MCP tool's structured result, not its text blocks, as the tool output", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeCodexReplayHarness(graphReviewTranscript);
+        const now = yield* DateTime.now;
+
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now,
+            attemptId: RunAttemptId.make("attempt-codex-graph-review"),
+            text: GRAPH_REVIEW_PROMPT,
+          }),
+        );
+        yield* harness.awaitTerminal(1);
+
+        const completed = harness.events.flatMap((event) =>
+          event.type === "turn_item.updated" &&
+          event.turnItem.type === "dynamic_tool" &&
+          event.turnItem.status === "completed"
+            ? [event.turnItem]
+            : [],
+        );
+        assert.lengthOf(completed, 1);
+        assert.equal(completed[0]?.toolName, "t3-code.graph_review");
+        assert.deepEqual(completed[0]?.output, graphReviewResult);
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
   const ORPHAN_WAIT_SCENARIO = "codex-orphaned-dynamic-tool";
   const ORPHAN_WAIT_NATIVE_THREAD = "native-codex-orphan-wait-thread";
   const ORPHAN_WAIT_NATIVE_TURN = "native-codex-orphan-wait-turn";
