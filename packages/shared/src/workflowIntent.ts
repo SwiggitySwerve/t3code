@@ -8,7 +8,8 @@
  * decided by the caller, not here.
  *
  * Each occurrence is judged on its own, so an excluded one never hides a valid one elsewhere:
- * - code: inline code spans and fenced blocks;
+ * - code: inline code (also across a line break), fenced blocks (also inside quotes and list
+ *   items) and indented blocks, as the Markdown parser reads them;
  * - URLs, paths, file names and identifiers (`workflow_start`, `.github/workflows/ci.yml`):
  *   a match must be the whole whitespace-delimited token, apart from quotes, brackets and
  *   sentence punctuation;
@@ -18,6 +19,10 @@
  * Phrases are compared token by token, never compiled into a pattern, so a custom phrase
  * cannot inject pattern syntax.
  */
+import type { Nodes } from "mdast";
+import remarkParse from "remark-parse";
+import { unified } from "unified";
+
 import { upgradeLegacyContextMessage } from "./composerContextLegacy.ts";
 import { replaceComposerContextReferences } from "./composerContextReferences.ts";
 
@@ -40,7 +45,6 @@ const DEFAULT_TRIGGERS: WorkflowTriggerSettings = { enabled: true, extras: [] };
 
 // Dashes separate words in prose ("workflow—now"); a hyphen inside a word does not.
 const TOKEN = /[^\s\u2013\u2014]+/gu;
-const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
 // Characters that may hug a word without making it part of a path, URL or identifier.
 const OPENING_GLUE = "(\"'\u201C\u2018[{*~";
 const CLOSING_GLUE = ")\"'\u201D\u2019]}*~";
@@ -95,6 +99,13 @@ export function workflowTriggerExtrasProblems(
   return problems;
 }
 
+/**
+ * Lowercase for the no-keyword shortcut. A capital sigma becomes a final sigma at the end of a
+ * word and a medial one elsewhere, and masking code can move a word's end, so both fold to the
+ * medial form. That keeps the shortcut from rejecting text the full scan would match.
+ */
+const foldCase = (text: string) => text.toLowerCase().replace(/\u03c2/gu, "\u03c3");
+
 /** The text a person typed: context chips and the legacy context blocks removed. */
 function typedText(text: string): string {
   return replaceComposerContextReferences(upgradeLegacyContextMessage(text).text, () => " ");
@@ -102,61 +113,44 @@ function typedText(text: string): string {
 
 const blank = (text: string) => text.replace(/[^\n]/gu, " ");
 
-function closesFence(line: string, fence: { readonly char: string; readonly length: number }) {
-  const trimmed = line.replace(/^ {0,3}/u, "");
-  let run = 0;
-  while (trimmed[run] === fence.char) run += 1;
-  return run >= fence.length && trimmed.slice(run).trim() === "";
-}
+const markdownParser = unified().use(remarkParse).freeze();
 
-function maskInlineCode(line: string): string {
-  let result = "";
-  let cursor = 0;
-  let index = line.indexOf("`");
-  while (index !== -1) {
-    let length = 1;
-    while (line[index + length] === "`") length += 1;
-    // A backtick run closes only at a run of the same length; an unmatched run is literal.
-    let close = line.indexOf("`", index + length);
-    while (close !== -1) {
-      let closeLength = 1;
-      while (line[close + closeLength] === "`") closeLength += 1;
-      if (closeLength === length) break;
-      close = line.indexOf("`", close + closeLength);
+/**
+ * Source offsets of every code node, in document order. The walk keeps its own stack and pushes
+ * children in reverse: a message can nest quotes or lists tens of thousands deep, which the
+ * parser reads without trouble and a recursive walk would not survive.
+ */
+function codeRanges(root: Nodes): Array<readonly [number, number]> {
+  const ranges: Array<readonly [number, number]> = [];
+  const pending: Nodes[] = [root];
+  for (let node = pending.pop(); node !== undefined; node = pending.pop()) {
+    if (node.type === "code" || node.type === "inlineCode") {
+      const { start, end } = node.position ?? {};
+      if (start?.offset !== undefined && end?.offset !== undefined) {
+        ranges.push([start.offset, end.offset]);
+      }
+    } else if ("children" in node) {
+      for (let index = node.children.length - 1; index >= 0; index -= 1) {
+        pending.push(node.children[index]!);
+      }
     }
-    if (close === -1) {
-      index = line.indexOf("`", index + length);
-      continue;
-    }
-    result += line.slice(cursor, index) + " ".repeat(close + length - index);
-    cursor = close + length;
-    index = line.indexOf("`", cursor);
   }
-  return result + line.slice(cursor);
+  return ranges;
 }
 
-/** Same length as the input, with code replaced by spaces so token boundaries stay put. */
+/**
+ * Same length as the input, with code replaced by spaces so token boundaries stay put. The
+ * Markdown parser decides what is code, so a fence inside a quote or a list item, an indented
+ * block and an inline span that runs over a line break are all found as they are rendered.
+ */
 function maskCode(text: string): string {
-  let fence: { readonly char: string; readonly length: number } | null = null;
-  return text
-    .split("\n")
-    .map((line) => {
-      if (fence !== null) {
-        if (closesFence(line, fence)) fence = null;
-        return blank(line);
-      }
-      const opening = FENCE_OPEN.exec(line);
-      // A backtick fence's info string cannot hold a backtick: "```x```" is inline code.
-      if (
-        opening !== null &&
-        !(opening[1]![0] === "`" && line.slice(opening[0].length).includes("`"))
-      ) {
-        fence = { char: opening[1]![0]!, length: opening[1]!.length };
-        return blank(line);
-      }
-      return maskInlineCode(line);
-    })
-    .join("\n");
+  let masked = "";
+  let cursor = 0;
+  for (const [start, end] of codeRanges(markdownParser.parse(text))) {
+    masked += text.slice(cursor, start) + blank(text.slice(start, end));
+    cursor = end;
+  }
+  return masked + text.slice(cursor);
 }
 
 const consistsOf = (text: string, allowed: string) => {
@@ -231,9 +225,13 @@ export function detectWorkflowIntent(
     const words = normalizeWorkflowTriggerPhrase(keyword).split(" ");
     return words[0] === "" ? [] : [{ keyword: keyword.trim(), words }];
   });
-  const tokens = Array.from(maskCode(typedText(text)).matchAll(TOKEN), (match) =>
-    match[0].toLowerCase(),
-  );
+  const typed = typedText(text);
+  // Masking only removes characters, so a message without any phrase's first word has no match.
+  // Skipping the Markdown parse then keeps nested lists, which parse slowly, off messages that
+  // never mention a trigger. It never rejects a text the full scan would match.
+  const lowered = foldCase(typed);
+  if (!phrases.some(({ words }) => lowered.includes(foldCase(words[0]!)))) return null;
+  const tokens = Array.from(maskCode(typed).matchAll(TOKEN), (match) => match[0].toLowerCase());
   for (let index = 0; index < tokens.length; index += 1) {
     for (const { keyword, words } of phrases) {
       if (phraseAt(tokens, index, words) && !isCiCompound(tokens, index, words.length)) {

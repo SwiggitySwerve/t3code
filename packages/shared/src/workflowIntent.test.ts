@@ -59,6 +59,50 @@ describe("detectWorkflowIntent", () => {
     }
   });
 
+  it("skips fences inside blockquotes and list items, indented code and multiline inline code", () => {
+    for (const text of [
+      "> ```\n> workflow\n> ```",
+      "> ~~~ts\n> const workflow = 1\n> ~~~",
+      "- ```\n  workflow\n  ```",
+      "1. ```ts\n   const workflow = 1\n   ```",
+      "> - ```\n>   workflow\n>   ```",
+      "    workflow",
+      "\tworkflow",
+      "Run this:\n\n    workflow --start\n    more workflow",
+      "- item\n\n      workflow indented code in a list item",
+      "call `the\nworkflow` tool",
+      "call ``the\nworkflow`` tool",
+      "> ```\r\n> workflow\r\n> ```",
+      "Run this:\r\n\r\n    workflow\r\n",
+    ]) {
+      expect(keyword(text), text).toBeNull();
+    }
+  });
+
+  it("keeps a valid occurrence next to these code forms", () => {
+    for (const text of [
+      "> ```\n> workflow\n> ```\nnow a real workflow",
+      "- ```\n  workflow\n  ```\n- plan a workflow",
+      "    workflow\n\nplan a workflow",
+      "call `the\nworkflow` tool, then plan a workflow",
+      // An indented line continues its paragraph; it is not code.
+      "plan this\n    workflow now",
+      "- plan this\n  workflow now",
+      "> plan a workflow",
+    ]) {
+      expect(keyword(text), text).toBe("workflow");
+    }
+  });
+
+  it("reads deeply nested Markdown without exhausting the stack", () => {
+    const quotes = "> ".repeat(10_000);
+    expect(keyword(`${quotes}plan a workflow`)).toBe("workflow");
+    expect(keyword(`${quotes}plain words`)).toBeNull();
+    // Code at the bottom of the nest is still code; a valid word after the nest still counts.
+    expect(keyword(`${quotes}\`workflow\``)).toBeNull();
+    expect(keyword(`${quotes}\`workflow\`\n\nplan a workflow`)).toBe("workflow");
+  });
+
   it("skips CI compounds in either direction", () => {
     for (const text of [
       "fix the CI workflow",
@@ -144,6 +188,41 @@ describe("detectWorkflowIntent", () => {
     expect(keyword("a workflow", [])).toBe("workflow");
     expect(keyword("a workflow", ["", "  "])).toBe("workflow");
     expect(detectWorkflowIntent("a workflow")?.keyword).toBe("workflow");
+  });
+});
+
+describe("detectWorkflowIntent without a trigger word", () => {
+  // These texts skip the Markdown parse, so only the answer is checked: it must stay the same
+  // as the full scan's, and a text that holds a trigger's first word must still be scanned.
+  it("finds nothing when no trigger's first word is present", () => {
+    for (const text of ["", " ", "plan the audit", "- item\n- another", "work flow"]) {
+      expect(keyword(text), text).toBeNull();
+      expect(keyword(text, ["fan out", ""]), text).toBeNull();
+    }
+  });
+
+  it("still finds the built-in word and extras in any case, with or without extras", () => {
+    expect(keyword("Plan a WORKFLOW")).toBe("workflow");
+    expect(keyword("Plan a WORKFLOW", [])).toBe("workflow");
+    expect(keyword("Please FAN OUT the audit", ["fan out"])).toBe("fan out");
+    expect(keyword("please fan out", ["  Fan   Out "])).toBe("Fan   Out");
+    expect(keyword("a workflow, please fan out", ["fan out"])).toBe("workflow");
+    expect(keyword("please fan out", ["", "  ", "fan out"])).toBe("fan out");
+  });
+
+  it("scans a text that holds only the first word of a longer phrase", () => {
+    expect(keyword("fan the flames", ["fan out"])).toBeNull();
+    expect(keyword("fan out", ["fan out"])).toBe("fan out");
+  });
+
+  it("still masks code when the trigger's first word is only inside it", () => {
+    expect(keyword("run `workflow` here")).toBeNull();
+    expect(keyword("run `fan out` here", ["fan out"])).toBeNull();
+  });
+
+  it("matches a word-final sigma that only becomes final once code is masked", () => {
+    // Whole-text lowercasing reads the sigma as medial because of the code after it.
+    expect(keyword("\u0391\u03a3`x`", ["\u03b1\u03c2"])).toBe("\u03b1\u03c2");
   });
 });
 

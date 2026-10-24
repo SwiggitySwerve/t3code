@@ -91,6 +91,10 @@
       "types": "./src/server/ultracode.ts",
       "import": "./src/server/ultracode.ts"
     },
+    "./server/workflowTrigger": {
+      "types": "./src/server/workflowTrigger.ts",
+      "import": "./src/server/workflowTrigger.ts"
+    },
     "./server/orchestrationInstructions": {
       "types": "./src/server/orchestrationInstructions.ts",
       "import": "./src/server/orchestrationInstructions.ts"
@@ -98,6 +102,10 @@
     "./server/pathExpansion": {
       "types": "./src/server/pathExpansion.ts",
       "import": "./src/server/pathExpansion.ts"
+    },
+    "./server/personMessage": {
+      "types": "./src/server/personMessage.ts",
+      "import": "./src/server/personMessage.ts"
     },
     "./server/processGroup": {
       "types": "./src/server/processGroup.ts",

@@ -4112,6 +4112,22 @@ describe("profile model preference", () => {
       }).pipe(Effect.provide(makeLayerTest(undefined, [codexWithEffort, claudeOffline]))),
   );
 
+  it.effect("graph review lists the profiles the user saved and leaves the digest alone", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const unassigned = {
+        schemaVersion: 1,
+        nodes: { a: { subject: "worker", description: "work", dependsOn: [] } },
+      };
+      const none = yield* reviewGraph(unassigned);
+      expect(none.availableProfiles).toBeUndefined();
+      yield* saveProfile(codexEntry);
+      const listed = yield* reviewGraph(unassigned);
+      expect(listed.availableProfiles).toEqual([{ presetId: "worker", presetName: "Worker" }]);
+      expect(listed.digest).toBe(none.digest);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect(
     "graph review blocks a profile with no usable entry and never inherits the caller",
     () =>

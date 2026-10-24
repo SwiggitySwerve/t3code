@@ -43,6 +43,7 @@ import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { applyUltracode, ULTRACODE_TURN_NOTE } from "@t3tools/provider-core/server/ultracode";
+import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
@@ -884,6 +885,30 @@ function makeLocalCommandHarness(input: {
     }).pipe(Effect.provide(layer)),
   };
 }
+
+effectIt.effect("hands run execution the stored words next to the provider-projected text", () =>
+  Effect.gen(function* () {
+    const chip = formatComposerContextReference({
+      kind: "terminal",
+      contextId: "ctx-log" as never,
+      label: "build log",
+    });
+    const stored = `Look at ${chip} please`;
+    const harness = makeLocalCommandHarness({
+      text: stored,
+      previousTurn: COMPLETED_PREVIOUS_TURN,
+      delivery: {},
+    });
+
+    yield* harness.start;
+
+    const started = harness.startRootRun.mock.calls[0]?.[0];
+    // The hook that reads the person's words must not see the context the chip expands to.
+    expect(started?.typedText).toBe(stored);
+    expect(started?.message.text).not.toBe(stored);
+    expect(started?.message.text).toContain("[Terminal: build log; ref=ctx-log]");
+  }),
+);
 
 effectIt.effect("recovers an abandoned failed turn before continuing its native conversation", () =>
   Effect.gen(function* () {

@@ -1,6 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { EventId, ProviderDriverKind, type ProviderReplayEntry } from "@t3tools/contracts";
+import {
+  EventId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  type ProviderReplayEntry,
+} from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -13,6 +18,7 @@ import {
   makeClaudeRestartReplayHarness,
 } from "../Adapters/ClaudeAdapterV2.testkit.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
+import { workflowTurnNote } from "@t3tools/provider-core/server/workflowTrigger";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
 import * as Orchestrator from "../Orchestrator.ts";
@@ -132,6 +138,8 @@ const runRestart = Effect.fn("runRestart")(function* (input: {
   readonly resumedPrompts: ReadonlyArray<string>;
   readonly userMessagesAfterRestart: ReadonlyArray<string>;
   readonly continueThreadsAfterServerUpdate: boolean;
+  /** Applies to the turns after the restart; the recorded first turn ran with the defaults. */
+  readonly serverSettings?: ProviderReplayHarness.ReplayServerSettings;
 }) {
   const transcript = yield* readRestartTranscript(input.resumedPrompts);
   const workspace = yield* checkpointWorkspace(SCENARIO);
@@ -251,6 +259,7 @@ const runRestart = Effect.fn("runRestart")(function* (input: {
     runOrchestratorV2ProviderReplayScenario(scenario("after-restart", phase2Steps), harness, {
       databaseLayer: snapshotDatabase,
       continueThreadsAfterServerUpdate: input.continueThreadsAfterServerUpdate,
+      ...(input.serverSettings === undefined ? {} : { serverSettings: input.serverSettings }),
     }),
   );
 
@@ -296,4 +305,81 @@ describe("restart-cancelled background work", () => {
         ),
       ),
   );
+});
+
+// The real hook, delivery wrapper and Claude adapter: the workflow note must reach the provider
+// after the restart note, on a driver whose own ultracode a keyword would otherwise start.
+describe("workflow trigger on the first turn after a restart", () => {
+  const PROFILES = {
+    presets: [
+      {
+        id: "profile-fast",
+        name: "Fast worker",
+        target: {
+          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+          model: "claude-haiku-4-5",
+        },
+      },
+    ],
+    defaultPresetId: null,
+  };
+  const NOTE_FOR_PROFILES = workflowTurnNote(PROFILES);
+  const run = (input: {
+    readonly typed: string;
+    readonly resumedPrompt: string;
+    /** The next message does not ask for a workflow, so only the ultracode setting shapes it. */
+    readonly secondPrompt?: string;
+    readonly serverSettings: ProviderReplayHarness.ReplayServerSettings;
+  }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const projection = yield* runRestart({
+          resumedPrompts: [input.resumedPrompt, input.secondPrompt ?? SECOND_AFTER_RESTART],
+          userMessagesAfterRestart: [input.typed, SECOND_AFTER_RESTART],
+          continueThreadsAfterServerUpdate: false,
+          serverSettings: input.serverSettings,
+        });
+        // The stored message is what the person typed; the note is only in the provider prompt.
+        assert.deepEqual(userTexts(projection), [
+          CLAUDE_BACKGROUND_SUBAGENT_AFTER_ROOT_PROMPT,
+          input.typed,
+          SECOND_AFTER_RESTART,
+        ]);
+      }).pipe(
+        provideDeterministicTestRuntime,
+        Effect.provide(Layer.merge(IdAllocator.layer, NodeServices.layer)),
+      ),
+    );
+
+  it.effect(
+    "keeps the plan-first note after the restart note and lists the user's profiles",
+    () => {
+      const typed = "Plan a workflow to finish the background audit";
+      return run({
+        typed,
+        resumedPrompt: `${NOTE}\n\nUser message:\n${typed}\n\n${NOTE_FOR_PROFILES}`,
+        serverSettings: { workflowPresets: PROFILES },
+      });
+    },
+  );
+
+  it.effect("prefers the workflow note over ultracode and adds no native trigger word", () => {
+    const typed = "ultracode: finish the background audit as a workflow";
+    return run({
+      typed,
+      resumedPrompt: `${NOTE}\n\nUser message:\n${typed}\n\n${workflowTurnNote({ presets: [], defaultPresetId: null })}`,
+      // Claude's own ultracode keyword is added only where the person did not ask for a workflow.
+      secondPrompt: `${SECOND_AFTER_RESTART}\n\nultracode`,
+      serverSettings: { ultracode: "always" },
+    });
+  });
+
+  it.effect("sends the message as typed when workflow triggers are off", () => {
+    const typed = "Finish the background audit as a workflow";
+    return run({
+      typed,
+      resumedPrompt: `${NOTE}\n\nUser message:\n${typed}`,
+      serverSettings: { ultracode: "off", workflowTriggers: { enabled: false, extras: [] } },
+    });
+  });
 });

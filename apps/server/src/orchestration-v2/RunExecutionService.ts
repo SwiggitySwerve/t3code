@@ -43,7 +43,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import { applyUltracode } from "@t3tools/provider-core/server/ultracode";
+import { applyTurnTriggers } from "@t3tools/provider-core/server/workflowTrigger";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import type { ProjectionStoreV2Error } from "./ProjectionStore.ts";
@@ -575,6 +575,11 @@ export interface RunExecutionServiceV2StartRootRunInput {
   readonly shouldFinalizeRun?: () => Effect.Effect<boolean, ProjectionStoreV2Error>;
   readonly hasUnpairedRunInterruptRequest?: () => Effect.Effect<boolean, never>;
   readonly message: ProviderAdapter.ProviderAdapterV2TurnMessage;
+  /**
+   * What the person wrote, as stored. `message.text` is already projected for the provider
+   * (context chips expanded), and the workflow trigger must not read pasted context.
+   */
+  readonly typedText: string;
   readonly modelSelection: ModelSelection;
   readonly runtimePolicy: ProviderAdapter.ProviderAdapterV2RuntimePolicy;
 }
@@ -1628,13 +1633,21 @@ export const layer: Layer.Layer<
           providerThread: input.providerThread,
           message: {
             ...input.message,
-            text: applyUltracode({
-              mode: runSettings.ultracode,
+            text: applyTurnTriggers({
+              ultracode: runSettings.ultracode,
+              workflowTriggers: runSettings.workflowTriggers,
+              workflowPresets: runSettings.workflowPresets,
               driver: input.providerThread.driver,
               text: input.message.text,
+              typedText: input.typedText,
               createdBy: input.message.createdBy,
               creationSource: input.message.creationSource,
+              scheduledTaskId: input.message.scheduledTaskId,
+              senderThreadId: input.message.senderThreadId,
               delegatedThread: input.appThread.lineage?.relationshipToParent === "subagent",
+              resumesEarlierTurn:
+                input.attempt.reason === "steering_restart" ||
+                input.run.restartContinuationOfRunId !== undefined,
             }),
           },
           modelSelection: input.modelSelection,

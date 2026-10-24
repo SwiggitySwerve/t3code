@@ -431,6 +431,12 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
     description:
       "One entry per profile that chose a worker in this review, with the entry chosen and why earlier ones were skipped. Look a node's profile up by its targets[].presetId.",
   }),
+  availableProfiles: Schema.optional(
+    Schema.Array(Schema.Struct({ presetId: Schema.String, presetName: Schema.String })),
+  ).annotate({
+    description:
+      "Profiles the user saved in Settings, which nodes may use as their preset; absent when the user saved none. Read a profile's models from orchestrator_capabilities workflowPresets, for example to pick a verifier's target.",
+  }),
   layers: Schema.Array(Schema.Array(Schema.String)),
   writeConflicts: Schema.Array(
     Schema.Struct({

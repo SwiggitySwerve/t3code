@@ -171,7 +171,7 @@ const WorkflowRunStopTool = Tool.make("workflow_stop", {
 
 const GraphReviewTool = Tool.make("graph_review", {
   description:
-    "Needs an agent running inside a T3 thread. Review a dependency graph before starting it. Validates the graph, hashes its workspace input files in the caller's shared checkout, and returns a digest, run order as dependency layers, write conflicts, input status and blockers. Review does not start agents. When ready, call graph_start with the same graph and acceptedDigest. Start refuses a digest mismatch, blockers, or inputs that changed since review. The graph runs as a workflow: workflow_status reads progress, workflow_stop stops it, and it sends one completion wake.",
+    "Needs an agent running inside a T3 thread. Review a dependency graph before starting it. Validates the graph, hashes its workspace input files in the caller's shared checkout, and returns a digest, run order as dependency layers, write conflicts, input status and blockers. Review does not start agents. Assign workers with a node's preset: a profile id from availableProfiles in the result or from orchestrator_capabilities workflowPresets. Profiles are created by the user in Settings, so there may be none; do not invent ids. Assign a verifier with a judgment check's target. When ready, call graph_start with the same graph and acceptedDigest. Start refuses a digest mismatch, blockers, or inputs that changed since review. The graph runs as a workflow: workflow_status reads progress, workflow_stop stops it, and it sends one completion wake.",
   parameters: OrchestratorMcpGraphReviewInput,
   success: OrchestratorMcpGraphReviewResult,
   failure: OrchestratorMcpFailure,

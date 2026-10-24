@@ -1291,6 +1291,8 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         transcriptFile: new URL("./muse_workflow/muse_transcript.ndjson", import.meta.url),
         modelSelection: MUSE_MODEL_SELECTION,
         runContinuationWorker: true,
+        // The prompt asks Muse's own workflow tool. It was recorded without T3's plan-first note.
+        serverSettings: { workflowTriggers: { enabled: false, extras: [] } },
         assertOutput: assertMuseWorkflowOutput,
       },
     ],

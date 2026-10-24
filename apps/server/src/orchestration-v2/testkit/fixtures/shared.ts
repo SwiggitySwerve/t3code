@@ -29,6 +29,7 @@ import type {
 } from "../OrchestratorScenario.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import type { RuntimePolicyV2Override } from "../../RuntimePolicy.ts";
+import type { ReplayServerSettings } from "../ProviderReplayHarness.ts";
 
 export const SIMPLE_PROMPT = "Respond with the following text: fixture simple ok";
 export const MULTI_TURN_FIRST_PROMPT = "Respond with exactly: first fixture turn complete";
@@ -313,6 +314,8 @@ export interface ProviderOrchestratorReplayVariant {
   readonly modelSelection: ModelSelection;
   readonly runtimePolicyOverride?: RuntimePolicyV2Override;
   readonly runContinuationWorker?: boolean;
+  /** Settings the recorded run needs, when the defaults would change what the provider is sent. */
+  readonly serverSettings?: ReplayServerSettings;
   readonly expectedAbsentWorkspacePaths?: ReadonlyArray<string>;
   readonly assertOutput: (
     result: OrchestratorV2ScenarioResult,

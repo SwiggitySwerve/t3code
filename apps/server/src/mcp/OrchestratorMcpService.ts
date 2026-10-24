@@ -2481,6 +2481,7 @@ const make = Effect.gen(function* () {
   type GraphReview = ReturnType<typeof reviewGraph> & {
     targets: OrchestratorMcpGraphReviewResult["targets"];
     profiles: ReadonlyArray<ProfileChoice>;
+    availableProfiles: NonNullable<OrchestratorMcpGraphReviewResult["availableProfiles"]>;
     expandedGraph: unknown | null;
   };
   // Recent reviews by digest: input hashes, so a refused start can name the files that changed,
@@ -2624,6 +2625,10 @@ const make = Effect.gen(function* () {
       ...reviewed,
       targets,
       profiles: [...profiles.values()],
+      availableProfiles: presets.presets.map((preset) => ({
+        presetId: preset.id,
+        presetName: preset.name,
+      })),
       expandedGraph:
         targetBlockers.length === 0 && reviewed.blockers.length === 0
           ? (concreteGraph ?? null)
@@ -2670,6 +2675,9 @@ const make = Effect.gen(function* () {
     ready: review.digest !== null && review.blockers.length === 0,
     targets: review.targets,
     ...(review.profiles.length === 0 ? {} : { profiles: review.profiles }),
+    ...(review.availableProfiles.length === 0
+      ? {}
+      : { availableProfiles: review.availableProfiles }),
     expandedGraph: review.expandedGraph,
     layers: review.layers,
     writeConflicts: review.writeConflicts,

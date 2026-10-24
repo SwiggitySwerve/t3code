@@ -789,6 +789,7 @@ it.effect("rechecks run ownership immediately before calling the provider", () =
       providerTurnOrdinal: 1,
       shouldStartProviderTurn: () =>
         Ref.modify(guardCalls, (calls) => [calls === 0, calls + 1] as const),
+      typedText: "Do not start after ownership changes.",
       message: {
         messageId: MessageId.make("message:run-execution-start-guard"),
         text: "Do not start after ownership changes.",
@@ -852,6 +853,7 @@ it.effect("passes the thread's MCP app context to the provider under a safe key"
       attempt: { id: attemptId, providerTurnId: null } as OrchestrationV2RunAttempt,
       attemptId,
       providerTurnOrdinal: 1,
+      typedText: "What is on my list?",
       message: {
         messageId: MessageId.make("message:run-execution-app-context"),
         text: "What is on my list?",
@@ -974,6 +976,7 @@ it.effect("fails the run when its ownership check cannot be read before calling 
               cause: "database unavailable",
             }),
           ),
+        typedText: "Start while the store is down.",
         message: {
           messageId: MessageId.make("message:run-execution-start-guard-read"),
           text: "Start while the store is down.",
@@ -1061,6 +1064,7 @@ it.effect(
           attempt: { id: attemptId, providerTurnId: null } as OrchestrationV2RunAttempt,
           attemptId,
           providerTurnOrdinal: 1,
+          typedText: testCase.text,
           message: {
             messageId: MessageId.make(`message:compact-routing:${index}`),
             text: testCase.text,
@@ -1169,6 +1173,7 @@ it.effect("starts the provider when checkpoint baseline capture fails", () =>
         } as OrchestrationV2RunAttempt,
         attemptId,
         providerTurnOrdinal: 1,
+        typedText: "Start the provider without a baseline.",
         message: {
           messageId: MessageId.make("message:run-execution-baseline-failure"),
           text: "Start the provider without a baseline.",
@@ -1312,6 +1317,7 @@ it.effect.each(["failure", "interruption", "stale-attempt", "start-guard"] as co
           ...(scenario === "start-guard"
             ? { shouldStartProviderTurn: () => Effect.succeed(false) }
             : {}),
+          typedText: "Start after settings fail.",
           message: {
             messageId: MessageId.make("message:run-execution-settings-failure"),
             text: "Start after settings fail.",
@@ -1585,6 +1591,7 @@ it.effect("ingests new member threads of an owned child after the root turn term
         } as OrchestrationV2RunAttempt,
         attemptId,
         providerTurnOrdinal: 1,
+        typedText: "Spawn a child and finish.",
         message: {
           messageId: MessageId.make("message:run-execution-late-child:user"),
           text: "Spawn a child and finish.",
@@ -1719,6 +1726,7 @@ it.effect("ends a nested native subagent and its thread when the root run is int
         attempt: { id: attemptId, providerTurnId: rootProviderTurnId } as OrchestrationV2RunAttempt,
         attemptId,
         providerTurnOrdinal: 1,
+        typedText: "Spawn a nested subagent.",
         message: {
           messageId: MessageId.make(`message:${key}:user`),
           text: "Spawn a nested subagent.",
@@ -2150,6 +2158,7 @@ it.effect(
           attemptId: ids.attemptId,
           relatedThreadIds: [unrelatedChildThreadId, memberThreadId],
           providerTurnOrdinal: 1,
+          typedText: "Spawn a subagent then stop.",
           message: {
             messageId: MessageId.make("message:subagent-interrupt-cascade:user"),
             text: "Spawn a subagent then stop.",
@@ -2768,6 +2777,211 @@ it.effect("sends a delegated child's task text unchanged even when it says ultra
   }),
 );
 
+const WORKFLOW_PROFILES = {
+  presets: [
+    {
+      id: "profile-fast",
+      name: "Fast worker",
+      target: { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    },
+  ],
+  defaultPresetId: null,
+};
+
+const providerTextsFor = (
+  input: Omit<
+    Parameters<typeof captureRootRunTermination>[0],
+    "shouldFinalizeRun" | "events" | "startTurn"
+  >,
+) =>
+  Effect.gen(function* () {
+    const sent = yield* Ref.make<ReadonlyArray<string>>([]);
+    yield* captureRootRunTermination({
+      ...input,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      startTurn: (turn) => Ref.update(sent, (texts) => [...texts, turn.message.text]),
+    });
+    return yield* Ref.get(sent);
+  });
+
+it.effect("asks every driver's coordinator to plan a workflow when a person says workflow", () =>
+  Effect.gen(function* () {
+    for (const providerDriver of ["codex", "claudeAgent", "cursor"]) {
+      const [text] = yield* providerTextsFor({
+        key: `workflow-turn-${providerDriver}`,
+        messageText: "Split the parser audit into a workflow",
+        providerDriver: ProviderDriverKind.make(providerDriver),
+        settings: { workflowPresets: WORKFLOW_PROFILES },
+      });
+      assert.isTrue(
+        text?.startsWith("Split the parser audit into a workflow\n\n<t3-workflow>"),
+        providerDriver,
+      );
+      assert.include(text, "graph_review");
+      assert.include(text, '"Fast worker" (id "profile-fast")');
+      assert.notInclude(text, "<t3-ultracode>");
+    }
+  }),
+);
+
+it.effect("lets the workflow note win over ultracode and adds no native trigger word", () =>
+  Effect.gen(function* () {
+    for (const providerDriver of ["codex", "claudeAgent"]) {
+      const [text] = yield* providerTextsFor({
+        key: `workflow-over-ultracode-${providerDriver}`,
+        messageText: "ultracode this: run it as a workflow",
+        providerDriver: ProviderDriverKind.make(providerDriver),
+        settings: { ultracode: "always" },
+      });
+      assert.include(text, "<t3-workflow>");
+      assert.notInclude(text, "<t3-ultracode>");
+      assert.isFalse(text?.trimEnd().endsWith("\nultracode"), providerDriver);
+    }
+    // Without the word, the ultracode setting still decides.
+    const [claudeText] = yield* providerTextsFor({
+      key: "ultracode-without-workflow-claude",
+      messageText: "Audit the parser",
+      providerDriver: ProviderDriverKind.make("claudeAgent"),
+      settings: { ultracode: "always" },
+    });
+    assert.equal(claudeText, "Audit the parser\n\nultracode");
+  }),
+);
+
+it.effect("sends the turn unchanged when workflow triggers are off, built-in word included", () =>
+  Effect.gen(function* () {
+    const settings = {
+      ultracode: "off",
+      workflowTriggers: { enabled: false, extras: ["fan out"] },
+    } as const;
+    for (const messageText of ["Run it as a workflow", "please fan out the audit"]) {
+      const sent = yield* providerTextsFor({
+        key: `workflow-switch-off-${messageText.length}`,
+        messageText,
+        settings,
+      });
+      assert.deepEqual(sent, [messageText]);
+    }
+  }),
+);
+
+it.effect("starts a workflow from the user's own trigger words", () =>
+  Effect.gen(function* () {
+    const [text] = yield* providerTextsFor({
+      key: "workflow-extra-word",
+      messageText: "Please fan out the audit",
+      settings: { workflowTriggers: { enabled: true, extras: ["fan out"] } },
+    });
+    assert.include(text, "<t3-workflow>");
+  }),
+);
+
+it.effect("starts a workflow on the first attempt and on a retried or recovered one", () =>
+  Effect.gen(function* () {
+    for (const attemptReason of ["initial", "retry", "provider_recovery"] as const) {
+      const [text] = yield* providerTextsFor({
+        key: `workflow-attempt-${attemptReason}`,
+        messageText: "Run it as a workflow",
+        attemptReason,
+      });
+      assert.include(text, "<t3-workflow>", attemptReason);
+    }
+  }),
+);
+
+it.effect("never starts a workflow from anything but a person's new message", () =>
+  Effect.gen(function* () {
+    const threadId = ThreadId.make("thread:workflow-parent");
+    const refused: ReadonlyArray<{
+      readonly name: string;
+      readonly input: Partial<Parameters<typeof providerTextsFor>[0]>;
+    }> = [
+      {
+        name: "agent text sent over MCP",
+        input: { messageAuthor: { createdBy: "agent", creationSource: "mcp" } },
+      },
+      {
+        name: "completion wake",
+        input: { messageAuthor: { createdBy: "agent", creationSource: "server" } },
+      },
+      {
+        name: "system wake",
+        input: { messageAuthor: { createdBy: "system", creationSource: "server" } },
+      },
+      {
+        // A canned reply the server sends for the user (an approval) is not typed by them.
+        name: "canned server reply",
+        input: { messageAuthor: { createdBy: "user", creationSource: "server" } },
+      },
+      {
+        name: "scheduled task",
+        input: {
+          messageAuthor: {
+            createdBy: "user",
+            creationSource: "web",
+            scheduledTaskId: "task-1" as never,
+          },
+        },
+      },
+      {
+        name: "message from another thread",
+        input: {
+          messageAuthor: {
+            createdBy: "user",
+            creationSource: "mobile",
+            senderThreadId: threadId,
+          },
+        },
+      },
+      {
+        name: "delegated child",
+        input: {
+          appThreadLineage: {
+            parentThreadId: threadId,
+            relationshipToParent: "subagent",
+            rootThreadId: threadId,
+          },
+        },
+      },
+      { name: "steering restart", input: { attemptReason: "steering_restart" } },
+      {
+        name: "restart continuation",
+        input: { restartContinuationOfRunId: RunId.make("run:workflow-earlier") },
+      },
+    ];
+    for (const [index, { name, input }] of refused.entries()) {
+      const sent = yield* providerTextsFor({
+        key: `workflow-refused-${index}`,
+        messageText: "Run it as a workflow",
+        settings: { ultracode: "off" },
+        ...input,
+      });
+      assert.deepEqual(sent, ["Run it as a workflow"], name);
+    }
+  }),
+);
+
+it.effect("reads the typed words, not the context projected into the provider text", () =>
+  Effect.gen(function* () {
+    const projected = 'Look at this\n\n<t3_context version="1">\nthe workflow log\n</t3_context>';
+    const [unchanged] = yield* providerTextsFor({
+      key: "workflow-projected-context",
+      messageText: projected,
+      typedText: "Look at this",
+      settings: { ultracode: "off" },
+    });
+    assert.equal(unchanged, projected);
+    const [triggered] = yield* providerTextsFor({
+      key: "workflow-typed-word",
+      messageText: projected,
+      typedText: "Look at this as a workflow",
+    });
+    assert.isTrue(triggered?.startsWith(projected), "keeps the projected text ahead of the note");
+    assert.include(triggered, "<t3-workflow>");
+  }),
+);
+
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({
@@ -2810,9 +3024,17 @@ function captureRootRunTermination(input: {
   readonly messageText?: string;
   readonly appThreadLineage?: OrchestrationV2AppThread["lineage"];
   readonly messageAuthor?: {
-    readonly createdBy: "agent" | "user";
-    readonly creationSource: "mcp" | "web";
+    readonly createdBy: ProviderAdapter.ProviderAdapterV2TurnMessage["createdBy"];
+    readonly creationSource: ProviderAdapter.ProviderAdapterV2TurnMessage["creationSource"];
+    readonly scheduledTaskId?: ProviderAdapter.ProviderAdapterV2TurnMessage["scheduledTaskId"];
+    readonly senderThreadId?: ProviderAdapter.ProviderAdapterV2TurnMessage["senderThreadId"];
   };
+  /** What the person wrote, as stored; the provider text is `messageText`. */
+  readonly typedText?: string;
+  readonly providerDriver?: ProviderDriverKind;
+  readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
+  readonly attemptReason?: OrchestrationV2RunAttempt["reason"];
+  readonly restartContinuationOfRunId?: RunId;
 }) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
@@ -2889,7 +3111,7 @@ function captureRootRunTermination(input: {
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
             ingestNormalized: input.ingestNormalized ?? (() => Effect.succeed([])),
           }),
-          ServerSettings.layerTest(),
+          ServerSettings.layerTest(input.settings),
           Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
             refresh: () => Effect.void,
             refreshAfterTurn: () =>
@@ -2951,6 +3173,9 @@ function captureRootRunTermination(input: {
           threadId: ids.threadId,
           ordinal: 1,
           providerInstanceId,
+          ...(input.restartContinuationOfRunId === undefined
+            ? {}
+            : { restartContinuationOfRunId: input.restartContinuationOfRunId }),
         } as OrchestrationV2Run,
         rootNode: {
           id: ids.rootNodeId,
@@ -2961,7 +3186,7 @@ function captureRootRunTermination(input: {
         } as OrchestrationV2CheckpointScope,
         providerThread: {
           id: ids.providerThreadId,
-          driver,
+          driver: input.providerDriver ?? driver,
         } as OrchestrationV2ProviderThread,
         attempt: {
           id: ids.attemptId,
@@ -2969,6 +3194,7 @@ function captureRootRunTermination(input: {
             input.initialProviderTurnId === undefined
               ? ids.rootProviderTurnId
               : input.initialProviderTurnId,
+          ...(input.attemptReason === undefined ? {} : { reason: input.attemptReason }),
         } as OrchestrationV2RunAttempt,
         attemptId: ids.attemptId,
         providerTurnOrdinal: 1,
@@ -2981,12 +3207,19 @@ function captureRootRunTermination(input: {
           : {
               hasUnpairedRunInterruptRequest: input.hasUnpairedRunInterruptRequest,
             }),
+        typedText: input.typedText ?? input.messageText ?? "interrupt projection",
         message: {
           messageId: MessageId.make(`message:${input.key}`),
           text: input.messageText ?? "interrupt projection",
           attachments: [],
           createdBy: input.messageAuthor?.createdBy ?? "user",
           creationSource: input.messageAuthor?.creationSource ?? "web",
+          ...(input.messageAuthor?.scheduledTaskId === undefined
+            ? {}
+            : { scheduledTaskId: input.messageAuthor.scheduledTaskId }),
+          ...(input.messageAuthor?.senderThreadId === undefined
+            ? {}
+            : { senderThreadId: input.messageAuthor.senderThreadId }),
         },
         modelSelection: { instanceId: providerInstanceId, model: "gpt-5.4" },
         runtimePolicy: {
@@ -3450,6 +3683,7 @@ function runBackgroundItemScenario(
               loadInheritedBackgroundTurnItems: options.loadInheritedBackgroundTurnItems,
             }),
         providerTurnOrdinal: 1,
+        typedText: "Start a background item and finish.",
         message: {
           messageId: MessageId.make(`message:${key}:user`),
           text: "Start a background item and finish.",

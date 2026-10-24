@@ -518,7 +518,12 @@ whose message contains the word ultracode; `always` opts in every user or agent 
 turn reaches the provider with a `<t3-ultracode>` note asking for `workflow_start`; the
 stored message is unchanged. Claude Code has its own ultracode, which the keyword starts,
 so a Claude turn only gets the word ultracode added when `always` opts it in.
-`@t3tools/provider-core/server/ultracode` owns this rule, and run execution applies it.
+`@t3tools/provider-core/server/ultracode` owns this rule. Run execution applies it through
+`@t3tools/provider-core/server/workflowTrigger`, where a person's message that asks for a
+workflow (the `workflowTriggers` setting) gets a plan-first `<t3-workflow>` note naming
+`graph_review` instead of the ultracode note, on every driver. Only a person's message on a
+thread that is not a delegated task can ask; wakes, steers, restart continuations and
+server-made replies cannot. The detector reads the stored message, not the provider text.
 
 #### In the app
 
