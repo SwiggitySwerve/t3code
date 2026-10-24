@@ -61,7 +61,20 @@ interface HarnessOptions {
 /** A runner whose agents finish as told, recording what it dispatches and stops. */
 const makeHarness = (options: HarnessOptions = {}) =>
   Effect.gen(function* () {
-    const updates = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+    // Like the event store: every subscription replays the log, then follows it, and honors its
+    // event-type filter, so a runner listening for the wrong type misses the event as in production.
+    const log: Array<OrchestrationV2StoredEvent> = [];
+    const subscribers: Array<{
+      readonly eventType: string | undefined;
+      readonly queue: Queue.Queue<OrchestrationV2StoredEvent>;
+    }> = [];
+    const publish = (stored: OrchestrationV2StoredEvent) =>
+      Effect.gen(function* () {
+        log.push(stored);
+        for (const subscriber of subscribers)
+          if (subscriber.eventType === undefined || subscriber.eventType === stored.event.type)
+            yield* Queue.offer(subscriber.queue, stored);
+      });
     const completed = yield* Deferred.make<string>();
     const statuses = new Map<string, string>();
     const taskUpdates = new Map<string, Queue.Queue<void>>();
@@ -76,7 +89,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
       return Effect.gen(function* () {
         const queue = taskUpdates.get(id);
         if (queue !== undefined) yield* Queue.offer(queue, undefined);
-        return yield* Queue.offer(updates, {
+        return yield* publish({
           sequence: spawned,
           event: {
             type: "subagent.updated",
@@ -86,7 +99,17 @@ const makeHarness = (options: HarnessOptions = {}) =>
       });
     };
     const threads = {
-      streamStoredEventsFrom: () => Stream.fromQueue(updates),
+      streamStoredEventsFrom: (input?: { readonly eventType?: string }) =>
+        Stream.unwrap(
+          Effect.gen(function* () {
+            const queue = yield* Queue.unbounded<OrchestrationV2StoredEvent>();
+            for (const stored of log)
+              if (input?.eventType === undefined || input.eventType === stored.event.type)
+                yield* Queue.offer(queue, stored);
+            subscribers.push({ eventType: input?.eventType, queue });
+            return Stream.fromQueue(queue);
+          }),
+        ),
       dispatch: (command: {
         readonly type: string;
         readonly result?: string;
@@ -217,8 +240,19 @@ const makeHarness = (options: HarnessOptions = {}) =>
       /** Every row update the runner sent, oldest first. */
       workflowUpdates,
       workflowCommands,
-      /** Ends the workflow row as a stop would. */
-      stopWorkflow: () => update(workflowId, "cancelled"),
+      /** Ends the workflow row as a stop does: a workflow patch carrying the cancelled status. */
+      stopWorkflow: () =>
+        Effect.sync(() => statuses.set(workflowId, "cancelled")).pipe(
+          Effect.andThen(
+            publish({
+              sequence: spawned,
+              event: {
+                type: "workflow.updated",
+                payload: { id: workflowId, previousRevision: 0, revision: 1, status: "cancelled" },
+              },
+            } as unknown as OrchestrationV2StoredEvent),
+          ),
+        ),
       updateAgent: update,
     };
   });

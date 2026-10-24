@@ -1078,23 +1078,28 @@ export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
     session: WorkflowSession,
     workflow: WorkflowContext,
   ) {
-    const watcher = yield* deps.threads
-      .streamStoredEventsFrom({
+    // Member tasks report through subagent rows; the workflow row's own status changes (a stop)
+    // arrive as workflow patches. One filtered stream each keeps transcript events out.
+    const events = (eventType: "subagent.updated" | "workflow.updated") =>
+      deps.threads.streamStoredEventsFrom({
         threadId: workflow.threadId,
         afterSequence: workflow.afterSequence,
-        eventType: "subagent.updated",
-      })
-      .pipe(
-        Stream.runForEach((stored) =>
-          Effect.sync(() => {
-            if (stored.event.type === "subagent.updated") session.observe(stored.event.payload);
-            if (stored.event.type === "workflow.updated")
-              session.observeWorkflowStatus(stored.event.payload.id, stored.event.payload.status);
-          }),
-        ),
-        Effect.ignore,
-        Effect.forkChild,
-      );
+        eventType,
+      });
+    const watcher = yield* Stream.merge(
+      events("subagent.updated"),
+      events("workflow.updated"),
+    ).pipe(
+      Stream.runForEach((stored) =>
+        Effect.sync(() => {
+          if (stored.event.type === "subagent.updated") session.observe(stored.event.payload);
+          if (stored.event.type === "workflow.updated")
+            session.observeWorkflowStatus(stored.event.payload.id, stored.event.payload.status);
+        }),
+      ),
+      Effect.ignore,
+      Effect.forkChild,
+    );
     const sweep = yield* Effect.sleep(STALL_SWEEP_INTERVAL).pipe(
       Effect.andThen(stopStalledAgents(deps, session, workflow)),
       Effect.forever,

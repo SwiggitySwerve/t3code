@@ -304,8 +304,10 @@ const decodePresetTargets = Schema.decodeUnknownOption(
 const concreteWorkflowTarget = (selection: ModelSelection): OrchestratorMcpTarget => ({
   providerInstanceId: selection.instanceId,
   model: selection.model,
-  // Explicit empty options prevent later inheritance; ordering does not change selection.
+  // The complete resolved options; ordering does not change selection.
   options: [...(selection.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+  // Frozen: re-resolving at start or after a restart must not pick up the caller's later options.
+  inheritOptions: false,
 });
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
@@ -1611,7 +1613,10 @@ const make = Effect.gen(function* () {
 
     const inheritsOptions =
       instanceId === inheritedSelection.instanceId && model === inheritedSelection.model;
-    let options = inheritsOptions ? inheritedSelection.options : undefined;
+    let options =
+      inheritsOptions && input.target?.inheritOptions !== false
+        ? inheritedSelection.options
+        : undefined;
     if (requestedOptions !== undefined) {
       const selections = new Map(
         (requestedOptions.length === 0 ? [] : (options ?? [])).map((selection) => [

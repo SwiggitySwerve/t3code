@@ -1107,11 +1107,12 @@ describe("workflow_start", () => {
             { ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] },
             { ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] },
             { instanceId: claudeInstanceId, model: claudeModel, options: [] },
+            // The preset was frozen at start with its complete, sorted options.
             {
               ...modelSelection,
               options: [
-                { id: "serviceTier", value: "priority" },
                 { id: "reasoningEffort", value: "high" },
+                { id: "serviceTier", value: "priority" },
               ],
             },
             workerTarget === undefined
@@ -3294,6 +3295,7 @@ describe("graphs", () => {
             providerInstanceId: instanceId,
             model,
             options: expected.options,
+            inheritOptions: false,
           });
           const explicit = yield* service.graphReview(invocation, {
             graph: {
@@ -3361,6 +3363,59 @@ describe("graphs", () => {
           expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
         }),
       );
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("starts the approved expanded graph after the caller's options change", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const setCallerOptions = (
+        id: string,
+        options: ReadonlyArray<{ id: string; value: string }>,
+      ) =>
+        orchestrator.dispatch({
+          type: "thread.model-selection.set",
+          commandId: CommandId.make(id),
+          threadId: parentThreadId,
+          modelSelection: { ...modelSelection, options },
+        });
+      yield* setCallerOptions("command:caller-before-review", [
+        { id: "serviceTier", value: "priority" },
+      ]);
+      // The node names the caller's provider and model, so review inherits the caller's options.
+      const graph = {
+        schemaVersion: 1,
+        nodes: {
+          a: {
+            subject: "worker",
+            description: "work",
+            dependsOn: [],
+            target: { providerInstanceId: instanceId, model },
+          },
+        },
+      };
+      const reviewed = yield* reviewGraph(graph);
+      expect(reviewed.ready).toBe(true);
+      const frozen = { serviceTier: "priority" };
+      expect(reviewed.expandedGraph).toMatchObject({
+        nodes: { a: { target: { options: [{ id: "serviceTier", value: frozen.serviceTier }] } } },
+      });
+      yield* setCallerOptions("command:caller-after-review", [
+        { id: "serviceTier", value: "priority" },
+        { id: "reasoningEffort", value: "high" },
+      ]);
+      const started = yield* decodeWorkflow(
+        (yield* invoke("graph_start", {
+          graph: reviewed.expandedGraph,
+          acceptedDigest: reviewed.digest,
+        })).structuredContent,
+      );
+      const worker = yield* awaitMember(started.workflowId, 1);
+      expect(
+        (yield* orchestrator.getThreadProjection(worker.childThreadId!)).thread.modelSelection,
+      ).toEqual({ ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] });
+      yield* completeChild(worker.childThreadId!, "done");
+      expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
     }).pipe(Effect.provide(layerTest)),
   );
   it.effect("C3 expands defaults before hashing and reports target provenance", () =>
