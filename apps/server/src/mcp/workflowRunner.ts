@@ -23,6 +23,8 @@ import {
   type WorkflowAgentOutcomeCategory,
   type OrchestratorMcpWorkflowUsage,
   type ModelSelection,
+  type WorkflowPresets,
+  type OrchestratorMcpTarget,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -83,6 +85,10 @@ export interface WorkflowContext {
   readonly args: unknown;
   readonly workerTarget?: unknown;
   readonly workerTargetError?: string;
+  readonly workflowPresets?: WorkflowPresets;
+  readonly presetTargets?: Readonly<
+    Record<string, { readonly target: OrchestratorMcpTarget } | { readonly error: string }>
+  >;
   readonly callerSelection?: ModelSelection;
   /** New agents stop starting once finished agents used this many tokens. */
   readonly budgetTokens?: number;
@@ -94,11 +100,48 @@ export interface WorkflowContext {
 
 /** Select one whole request before the provider resolver applies caller inheritance. */
 export function selectWorkflowTarget(
-  own: { readonly target?: unknown; readonly model?: string | undefined },
+  own: {
+    readonly target?: unknown;
+    readonly model?: string | undefined;
+    readonly preset?: unknown;
+  },
   workerTarget?: unknown,
-): { readonly target: unknown; readonly source: "target" | "model" | "workerTarget" | "caller" } {
+  presets?: WorkflowPresets,
+  snapshots?: WorkflowContext["presetTargets"],
+): {
+  readonly target: unknown;
+  readonly source: "target" | "model" | "preset" | "workerTarget" | "defaultPreset" | "caller";
+  readonly error?: string;
+} {
   if (own.target !== undefined) return { target: own.target, source: "target" };
   if (own.model !== undefined) return { target: { model: own.model }, source: "model" };
+  if (own.preset !== undefined && (typeof own.preset !== "string" || !own.preset.trim())) {
+    return {
+      target: undefined,
+      source: "preset",
+      error: "Workflow preset must be a non-empty id.",
+    };
+  }
+  const presetId =
+    own.preset ?? (workerTarget === undefined ? presets?.defaultPresetId : undefined);
+  if (presetId !== undefined && presetId !== null) {
+    const source = own.preset !== undefined ? "preset" : "defaultPreset";
+    const preset = presets?.presets.find((preset) => preset.id === presetId);
+    if (preset === undefined)
+      return {
+        target: undefined,
+        source,
+        error: `Workflow preset ${String(presetId)} was not found.`,
+      };
+    const snapshot = snapshots?.[preset.id];
+    if (snapshot !== undefined)
+      return {
+        target: "target" in snapshot ? snapshot.target : undefined,
+        source,
+        ...("error" in snapshot ? { error: snapshot.error } : {}),
+      };
+    return { target: preset.target, source };
+  }
   if (workerTarget !== undefined) return { target: workerTarget, source: "workerTarget" };
   return { target: undefined, source: "caller" };
 }
@@ -425,9 +468,11 @@ class WorkflowSession {
     if (phase !== undefined) this.addPhase(phase);
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
-    const { target, source } = selectWorkflowTarget(
-      { target: options.target, model },
+    const { target, source, error } = selectWorkflowTarget(
+      { target: options.target, model, preset: options.preset },
       this.workflow.workerTarget,
+      this.workflow.workflowPresets,
+      this.workflow.presetTargets,
     );
     let check: WorkflowCheck | undefined;
     let scopes: FileScopes | undefined;
@@ -435,7 +480,7 @@ class WorkflowSession {
     let outputs: ReadonlyArray<FileRef> = [];
     let attemptTimeoutMs: number | undefined;
     let invalid: string | undefined =
-      source === "workerTarget" ? this.workflow.workerTargetError : undefined;
+      error ?? (source === "workerTarget" ? this.workflow.workerTargetError : undefined);
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);

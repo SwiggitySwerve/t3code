@@ -34,6 +34,56 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
 
+it.effect("C4 persists preset CRUD and refuses invalid settings without changing disk", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const target = {
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.4",
+      options: [],
+    };
+    const preset = { id: "worker", name: "Worker", target };
+    yield* service.updateSettings({
+      workflowPresets: { presets: [preset], defaultPresetId: preset.id },
+    });
+    const before = yield* fs.readFileString(config.settingsPath);
+    assert.deepEqual((yield* decodeServerSettingsJson(before)).workflowPresets, {
+      presets: [preset],
+      defaultPresetId: preset.id,
+    });
+    for (const invalid of [
+      { presets: [preset, preset], defaultPresetId: null },
+      { presets: [], defaultPresetId: "missing" },
+      { presets: [{ ...preset, id: " " }], defaultPresetId: null },
+    ]) {
+      const refused = yield* service.updateSettings({ workflowPresets: invalid }).pipe(Effect.flip);
+      assert.equal(refused._tag, "ServerSettingsError");
+      assert.equal(yield* fs.readFileString(config.settingsPath), before);
+    }
+    const renamed = {
+      ...preset,
+      name: "Reviewer",
+      target: { ...target, model: "other", options: [{ id: "effort", value: "high" }] },
+    };
+    yield* service.updateSettings({
+      workflowPresets: { presets: [renamed], defaultPresetId: null },
+    });
+    assert.deepEqual(
+      (yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath)))
+        .workflowPresets,
+      { presets: [renamed], defaultPresetId: null },
+    );
+    yield* service.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+    assert.deepEqual(
+      (yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath)))
+        .workflowPresets,
+      DEFAULT_SERVER_SETTINGS.workflowPresets,
+    );
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
 const layerServerSettings = () =>
   ServerSettingsModule.layer.pipe(
     Layer.provide(ServerSecretStore.layer),

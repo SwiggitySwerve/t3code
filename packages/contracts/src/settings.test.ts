@@ -17,6 +17,7 @@ import {
   ServerSettings,
   ServerSettingsPatch,
   withIdleCompaction,
+  requiredScopesForServerSettingsPatch,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -26,6 +27,41 @@ const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+describe("workflow preset settings", () => {
+  const preset = {
+    id: "reviewer",
+    name: "Reviewer",
+    target: { providerInstanceId: "codex", model: "gpt-5.4", options: [] },
+  };
+  it("C4 decodes defaults and a complete preset settings patch", () => {
+    expect(decodeServerSettings({}).workflowPresets).toEqual({
+      presets: [],
+      defaultPresetId: null,
+    });
+    const patch = { workflowPresets: { presets: [preset], defaultPresetId: preset.id } };
+    expect(decodeServerSettingsPatch(patch)).toEqual(patch);
+    expect(requiredScopesForServerSettingsPatch(decodeServerSettingsPatch(patch))).toEqual([
+      "settings:write",
+    ]);
+  });
+  it("C4 rejects duplicate and empty identities, incomplete targets and missing defaults", () => {
+    for (const workflowPresets of [
+      { presets: [preset, preset], defaultPresetId: null },
+      { presets: [{ ...preset, id: " " }], defaultPresetId: null },
+      { presets: [{ ...preset, name: " " }], defaultPresetId: null },
+      { presets: [{ ...preset, target: { model: "gpt-5.4" } }], defaultPresetId: null },
+      {
+        presets: [{ ...preset, target: { providerInstanceId: "codex", model: " " } }],
+        defaultPresetId: null,
+      },
+      { presets: [], defaultPresetId: "missing" },
+    ]) {
+      expect(() => decodeServerSettingsPatch({ workflowPresets })).toThrow();
+      expect(() => decodeServerSettings({ workflowPresets })).toThrow();
+    }
+  });
+});
 
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {

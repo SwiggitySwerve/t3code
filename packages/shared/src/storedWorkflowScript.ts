@@ -10,6 +10,8 @@ export interface StoredWorkflowSettings {
   readonly budgetTokens?: number;
   readonly workerTarget?: unknown;
   readonly workerTargetSnapshot?: unknown;
+  readonly workflowPresets?: unknown;
+  readonly presetTargets?: unknown;
   /** Caller model/options frozen at start, independently of its current authority. */
   readonly callerSelection?: unknown;
   /** The reviewed graph's plan, for workflows started from one; the reader decodes it. */
@@ -36,6 +38,8 @@ export function parseStoredWorkflowScript(stored: string): {
   readonly plan: unknown;
   readonly workerTarget: unknown;
   readonly workerTargetSnapshot: unknown;
+  readonly workflowPresets: unknown;
+  readonly presetTargets: unknown;
   readonly callerSelection: unknown;
 } {
   const source = storedWorkflowScriptSource(stored);
@@ -47,6 +51,8 @@ export function parseStoredWorkflowScript(stored: string): {
       plan: undefined,
       workerTarget: undefined,
       workerTargetSnapshot: undefined,
+      workflowPresets: undefined,
+      presetTargets: undefined,
       callerSelection: undefined,
     };
   }
@@ -63,6 +69,8 @@ export function parseStoredWorkflowScript(stored: string): {
     plan: settings.plan,
     workerTarget: settings.workerTarget,
     workerTargetSnapshot: settings.workerTargetSnapshot,
+    workflowPresets: settings.workflowPresets,
+    presetTargets: settings.presetTargets,
     callerSelection: settings.callerSelection,
   };
 }

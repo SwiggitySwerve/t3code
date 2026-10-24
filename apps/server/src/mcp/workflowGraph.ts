@@ -38,6 +38,7 @@ interface GraphNode {
   readonly phase?: string;
   readonly target?: unknown;
   readonly model?: string;
+  readonly preset?: string;
   readonly role?: string;
   readonly schema?: unknown;
   readonly scopes?: FileScopes;
@@ -150,6 +151,7 @@ function parseNode(value: unknown): GraphNode {
     ...(node.phase === undefined ? {} : { phase: text(node.phase, "phase") }),
     ...(node.target === undefined ? {} : { target: node.target }),
     ...(node.model === undefined ? {} : { model: text(node.model, "model") }),
+    ...(node.preset === undefined ? {} : { preset: text(node.preset, "preset") }),
     ...(node.role === undefined ? {} : { role: text(node.role, "role") }),
     ...(node.schema === undefined ? {} : { schema: node.schema }),
     ...(node.scopes === undefined ? {} : { scopes: parseScopes(node.scopes) }),

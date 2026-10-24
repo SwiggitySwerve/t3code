@@ -631,6 +631,101 @@ const startWorkflow = (script: string, args?: unknown) =>
   });
 
 describe("workflow_start", () => {
+  it.effect(
+    "C4 preserves script target, legacy, preset, workflow default and caller precedence",
+    () =>
+      Effect.gen(function* () {
+        yield* startParentWithSelection({
+          ...modelSelection,
+          options: [{ id: "serviceTier", value: "priority" }],
+        });
+        yield* answerWorkflowAgents(() => "done");
+        const settings = yield* ServerSettings.ServerSettingsService;
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [
+              {
+                id: "worker",
+                name: "Worker",
+                target: { providerInstanceId: claudeInstanceId, model: claudeModel, options: [] },
+              },
+              {
+                id: "same",
+                name: "Same model",
+                target: {
+                  providerInstanceId: instanceId,
+                  model,
+                  options: [{ id: "reasoningEffort", value: "high" }],
+                },
+              },
+            ],
+            defaultPresetId: "worker",
+          },
+        });
+        expect((yield* invoke("orchestrator_capabilities", {})).structuredContent).toMatchObject({
+          workflowPresets: {
+            defaultPresetId: "worker",
+            presets: [
+              {
+                id: "worker",
+                name: "Worker",
+                target: { providerInstanceId: claudeInstanceId, model: claudeModel },
+              },
+              { id: "same", name: "Same model", target: { providerInstanceId: instanceId, model } },
+            ],
+          },
+        });
+        const script = `return [
+        await agent("own", { target: { model: "${model}" }, preset: "missing" }),
+        await agent("legacy", { model: "${model}", preset: "missing" }),
+        await agent("preset", { preset: "worker" }),
+        await agent("same", { preset: "same" }),
+        await agent("default")
+      ]`;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        for (const workerTarget of [
+          undefined,
+          { providerInstanceId: instanceId, model, options: [] },
+        ]) {
+          const started = yield* decodeWorkflow(
+            (yield* invoke("workflow_start", {
+              script,
+              ...(workerTarget === undefined ? {} : { workerTarget }),
+            })).structuredContent,
+          );
+          expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+          const expected = [
+            { ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] },
+            { ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] },
+            { instanceId: claudeInstanceId, model: claudeModel, options: [] },
+            {
+              ...modelSelection,
+              options: [
+                { id: "serviceTier", value: "priority" },
+                { id: "reasoningEffort", value: "high" },
+              ],
+            },
+            workerTarget === undefined
+              ? { instanceId: claudeInstanceId, model: claudeModel, options: [] }
+              : { ...modelSelection, options: [] },
+          ];
+          for (const [index, selection] of expected.entries()) {
+            const member = yield* awaitMember(started.workflowId, index + 1);
+            expect(
+              (yield* orchestrator.getThreadProjection(member.childThreadId!)).thread
+                .modelSelection,
+            ).toEqual(selection);
+          }
+        }
+        yield* settings.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+        const caller = yield* startWorkflow('return await agent("caller")');
+        yield* awaitWorkflowEnd(caller.workflowId);
+        expect((yield* awaitMember(caller.workflowId, 1)).providerInstanceId).toBe(instanceId);
+        expect(
+          (yield* orchestrator.getThreadProjection(parentThreadId)).thread.modelSelection,
+        ).toEqual({ ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] });
+      }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("C3 preserves resolver option inheritance overrides and clearing", () =>
     Effect.gen(function* () {
       const inherited = [
@@ -1131,6 +1226,186 @@ const twoStepScript =
   'const first = await agent("first")\nconst second = await agent("second after " + first)\nreturn [first, second]';
 
 describe("workflow resume", () => {
+  it.effect("C4 preserves historical script inheritance despite a new configured default", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({
+        workflowPresets: {
+          presets: [
+            {
+              id: "worker",
+              name: "Worker",
+              target: { providerInstanceId: claudeInstanceId, model: claudeModel },
+            },
+          ],
+          defaultPresetId: "worker",
+        },
+      });
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      for (const [index, script] of [
+        'return await agent("historical")',
+        storedWorkflowScript('return await agent("historical")', {}),
+      ].entries()) {
+        const workflowId = NodeId.make(`workflow:historical-${index}`);
+        yield* orchestrator.dispatch({
+          type: "workflow.start",
+          createdBy: "agent",
+          creationSource: "mcp",
+          commandId: CommandId.make(`command:historical-${index}`),
+          threadId: parentThreadId,
+          runId: parent.runs.at(-1)!.id,
+          workflowId,
+          title: "Historical",
+          script,
+        });
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            const member = yield* awaitMember(workflowId, 1);
+            expect(member).toMatchObject({ providerInstanceId: instanceId, model });
+            yield* completeChild(member.childThreadId!, "done");
+            expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
+          }),
+        );
+      }
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect(
+    "C4 retains a failed preset snapshot even if its model becomes available after restart",
+    () => {
+      const providers: ServerProvider[] = [provider, claudeProvider];
+      return Effect.gen(function* () {
+        yield* startParent;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [
+              {
+                id: "late",
+                name: "Late",
+                target: { providerInstanceId: instanceId, model: "late-model" },
+              },
+            ],
+            defaultPresetId: "late",
+          },
+        });
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const started = yield* service.workflowStart(invocation, {
+              script: `await agent("own", { target: { model: "${model}" } }); return await agent("late", { preset: "late" })`,
+            });
+            yield* awaitMember(started.workflowId, 1);
+            return started.workflowId;
+          }),
+        );
+        providers[0] = {
+          ...provider,
+          models: [
+            ...provider.models,
+            { slug: "late-model", name: "Late", isCustom: true, capabilities: null },
+          ],
+        };
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            yield* answerWorkflowAgents((prompt) => (prompt === "late" ? "unexpected" : undefined));
+            const own = yield* awaitMember(workflowId, 1);
+            yield* completeChild(own.childThreadId!, "done");
+            const ended = yield* awaitWorkflowEnd(workflowId);
+            expect(ended.agents[1]?.result).toContain("Model late-model is not advertised");
+            expect(
+              (yield* childTasks).filter((task) => task.parentNodeId === workflowId),
+            ).toHaveLength(1);
+          }),
+        );
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+  it.effect("C4 snapshots preset definitions and the default across edit, delete and restart", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({
+        workflowPresets: {
+          presets: [
+            {
+              id: "worker",
+              name: "Worker",
+              target: { providerInstanceId: claudeInstanceId, model: claudeModel, options: [] },
+            },
+          ],
+          defaultPresetId: "worker",
+        },
+      });
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            script:
+              'await agent("first"); await agent("named", { preset: "worker" }); return await agent("default")',
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first).toMatchObject({ providerInstanceId: claudeInstanceId, model: claudeModel });
+          yield* settings.updateSettings({
+            workflowPresets: {
+              presets: [
+                { id: "worker", name: "Edited", target: { providerInstanceId: instanceId, model } },
+              ],
+              defaultPresetId: "worker",
+            },
+          });
+          yield* completeChild(first.childThreadId!, "one");
+          expect(yield* awaitMember(started.workflowId, 2)).toMatchObject({
+            providerInstanceId: claudeInstanceId,
+            model: claudeModel,
+          });
+          return started.workflowId;
+        }),
+      );
+      yield* settings.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const named = yield* awaitMember(workflowId, 2);
+          yield* answerWorkflowAgents((prompt) =>
+            prompt === "default" || prompt === "first" ? "three" : undefined,
+          );
+          yield* completeChild(named.childThreadId!, "two");
+          const ended = yield* awaitWorkflowEnd(workflowId);
+          expect(ended.agents[2]?.status).toBe("completed");
+          const last = yield* awaitMember(workflowId, 3);
+          expect(last).toMatchObject({ providerInstanceId: claudeInstanceId, model: claudeModel });
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          expect(
+            (yield* orchestrator.getThreadProjection(last.childThreadId!)).thread.modelSelection
+              .options,
+          ).toEqual([]);
+          expect(
+            (yield* orchestrator.getThreadProjection(parentThreadId)).thread.modelSelection,
+          ).toEqual(modelSelection);
+          expect(ended.status).toBe("completed");
+        }),
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("C4 refuses a missing script preset without falling back to the worker target", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", {
+          workerTarget: { providerInstanceId: instanceId, model },
+          script: 'return await agent("missing", { preset: "deleted" })',
+        })).structuredContent,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.agents[0]?.result).toContain("Workflow preset deleted was not found.");
+      expect(
+        (yield* childTasks).filter((task) => task.parentNodeId === started.workflowId),
+      ).toHaveLength(0);
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("C3 freezes a model-omitted worker default across catalog reordering", () => {
     const providers: ServerProvider[] = [
       provider,
@@ -1914,6 +2189,116 @@ const serialGraph = (dir: string) => ({
 });
 
 describe("graphs", () => {
+  it.effect(
+    "C4 expands preset graphs before digest and starts the approved graph after edits and restart",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        const target = { providerInstanceId: claudeInstanceId, model: claudeModel, options: [] };
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [{ id: "reviewer", name: "Reviewer", target }],
+            defaultPresetId: "reviewer",
+          },
+        });
+        const node = { subject: "worker", description: "work", dependsOn: [], preset: "reviewer" };
+        const graph = { schemaVersion: 1, nodes: { a: node } };
+        const reviewed = yield* withServerProcess((service) =>
+          service.graphReview(invocation, { graph }),
+        );
+        expect(reviewed.ready).toBe(true);
+        expect(reviewed.targets).toMatchObject([{ source: "preset", target }]);
+        expect(reviewed.expandedGraph).toMatchObject({ nodes: { a: { target } } });
+        expect(JSON.stringify(reviewed.expandedGraph)).not.toContain('"preset"');
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [
+              {
+                id: "reviewer",
+                name: "Changed",
+                target: { providerInstanceId: instanceId, model },
+              },
+            ],
+            defaultPresetId: "reviewer",
+          },
+        });
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const equivalent = yield* service.graphReview(invocation, {
+              graph: reviewed.expandedGraph,
+            });
+            expect(equivalent.digest).toBe(reviewed.digest);
+            const stale = yield* service
+              .graphStart(invocation, { graph, acceptedDigest: reviewed.digest! })
+              .pipe(Effect.flip);
+            expect(stale.message).toContain("graph");
+            yield* settings.updateSettings({
+              workflowPresets: { presets: [], defaultPresetId: null },
+            });
+            const started = yield* service.graphStart(invocation, {
+              graph: reviewed.expandedGraph,
+              acceptedDigest: reviewed.digest!,
+            });
+            const worker = yield* awaitMember(started.workflowId, 1);
+            expect(worker).toMatchObject({
+              providerInstanceId: claudeInstanceId,
+              model: claudeModel,
+            });
+            yield* completeChild(worker.childThreadId!, "done");
+            expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+          }),
+        );
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("C4 applies every precedence branch and refuses missing graph presets", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const settings = yield* ServerSettings.ServerSettingsService;
+      const presetTarget = {
+        providerInstanceId: claudeInstanceId,
+        model: claudeModel,
+        options: [],
+      };
+      yield* settings.updateSettings({
+        workflowPresets: {
+          presets: [{ id: "worker", name: "Worker", target: presetTarget }],
+          defaultPresetId: "worker",
+        },
+      });
+      const node = { subject: "worker", description: "work", dependsOn: [] };
+      for (const [own, workerTarget, source, expectedProvider] of [
+        [{ target: {}, preset: "missing" }, presetTarget, "target", instanceId],
+        [{ model, preset: "missing" }, presetTarget, "model", instanceId],
+        [{ preset: "worker" }, { model }, "preset", claudeInstanceId],
+        [{}, { model }, "workerTarget", instanceId],
+        [{}, undefined, "defaultPreset", claudeInstanceId],
+      ] as const) {
+        const reviewed = yield* decodeReview(
+          (yield* invoke("graph_review", {
+            graph: { schemaVersion: 1, nodes: { a: { ...node, ...own } } },
+            ...(workerTarget === undefined ? {} : { workerTarget }),
+          })).structuredContent,
+        );
+        expect(reviewed.ready).toBe(true);
+        expect(reviewed.targets[0]).toMatchObject({
+          source,
+          target: { providerInstanceId: expectedProvider },
+        });
+      }
+      const missing = yield* reviewGraph({
+        schemaVersion: 1,
+        nodes: { a: { ...node, preset: "missing" } },
+      });
+      expect(missing).toMatchObject({ ready: false, digest: null, expandedGraph: null });
+      expect(missing.blockers).toContain("a: Workflow preset missing was not found.");
+      yield* settings.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+      expect(
+        (yield* reviewGraph({ schemaVersion: 1, nodes: { a: node } })).targets[0],
+      ).toMatchObject({ source: "caller", target: { providerInstanceId: instanceId, model } });
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("C3 refuses an inherited model absent from an empty provider catalog", () =>
     Effect.gen(function* () {
       yield* startParent;

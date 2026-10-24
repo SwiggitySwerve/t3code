@@ -1144,7 +1144,44 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
+export const WorkflowPresetTarget = Schema.Struct({
+  providerInstanceId: ProviderInstanceId,
+  model: TrimmedNonEmptyString,
+  options: Schema.optionalKey(ProviderOptionSelections),
+});
+export type WorkflowPresetTarget = typeof WorkflowPresetTarget.Type;
+
+export const WorkflowPreset = Schema.Struct({
+  id: TrimmedNonEmptyString,
+  name: TrimmedNonEmptyString,
+  target: WorkflowPresetTarget,
+});
+export type WorkflowPreset = typeof WorkflowPreset.Type;
+
+// Replace the list and its default together so deleting a default cannot leave a dangling reference.
+export const WorkflowPresets = Schema.Struct({
+  presets: Schema.Array(WorkflowPreset).check(
+    Schema.makeFilter(
+      (presets) =>
+        new Set(presets.map((preset) => preset.id)).size === presets.length ||
+        "Workflow preset ids must be unique.",
+    ),
+  ),
+  defaultPresetId: Schema.NullOr(TrimmedNonEmptyString),
+}).check(
+  Schema.makeFilter(
+    (settings) =>
+      settings.defaultPresetId === null ||
+      settings.presets.some((preset) => preset.id === settings.defaultPresetId) ||
+      "The workflow worker default must reference an existing preset.",
+  ),
+);
+export type WorkflowPresets = typeof WorkflowPresets.Type;
+
 export const ServerSettings = Schema.Struct({
+  workflowPresets: WorkflowPresets.pipe(
+    Schema.withDecodingDefault(Effect.succeed({ presets: [], defaultPresetId: null })),
+  ),
   // Null means no client has migrated this preference yet; an empty value is
   // authoritative so another device cannot resurrect cleared preferences.
   favorites: Schema.NullOr(ModelFavorites).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
@@ -1495,6 +1532,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  workflowPresets: Schema.optionalKey(WorkflowPresets),
   setModelFavorites: Schema.optionalKey(
     Schema.Array(Schema.Struct({ ...ModelFavorite.fields, favorite: Schema.Boolean })),
   ),

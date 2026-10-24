@@ -10,6 +10,7 @@ import {
   ModelSelection,
   NodeId,
   TurnItemId,
+  WorkflowPresets,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -287,11 +288,14 @@ const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManageme
 const decodeWorkflowPlan = Schema.decodeUnknownOption(OrchestrationV2WorkflowPlan);
 const decodeWorkflowCallerSelection = Schema.decodeUnknownOption(ModelSelection);
 const decodeWorkflowTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
-const decodeWorkerTargetSnapshot = Schema.decodeUnknownOption(
-  Schema.Union([
-    Schema.Struct({ target: OrchestratorMcpTarget }),
-    Schema.Struct({ error: Schema.String }),
-  ]),
+const WorkflowTargetSnapshot = Schema.Union([
+  Schema.Struct({ target: OrchestratorMcpTarget }),
+  Schema.Struct({ error: Schema.String }),
+]);
+const decodeWorkerTargetSnapshot = Schema.decodeUnknownOption(WorkflowTargetSnapshot);
+const decodeWorkflowPresets = Schema.decodeUnknownOption(WorkflowPresets);
+const decodePresetTargets = Schema.decodeUnknownOption(
+  Schema.Record(Schema.String, WorkflowTargetSnapshot),
 );
 const concreteWorkflowTarget = (selection: ModelSelection): OrchestratorMcpTarget => ({
   providerInstanceId: selection.instanceId,
@@ -1173,6 +1177,10 @@ const make = Effect.gen(function* () {
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const loadWorkflowPresets = serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.workflowPresets),
+    Effect.mapError(() => failure("orchestration_error", "Unable to read workflow presets.")),
+  );
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -2225,6 +2233,7 @@ const make = Effect.gen(function* () {
 
   type GraphReview = ReturnType<typeof reviewGraph> & {
     targets: OrchestratorMcpGraphReviewResult["targets"];
+    expandedGraph: unknown | null;
   };
   // Input hashes of recent reviews by digest, so a refused start can name the files that changed.
   const reviewedGraphInputs = new Map<string, GraphReview["inputs"]>();
@@ -2238,6 +2247,7 @@ const make = Effect.gen(function* () {
   ) {
     const threadId = parent.thread.id;
     const parsed = parseGraph(graph);
+    const presets = yield* loadWorkflowPresets;
     let concreteGraph = parsed.ok ? parsed.graph : undefined;
     const hashes: Record<string, GraphReview["inputs"][string]> = {};
     const targets: OrchestratorMcpGraphReviewResult["targets"][number][] = [];
@@ -2290,8 +2300,12 @@ const make = Effect.gen(function* () {
     if (parsed.ok) {
       const nodes: Record<string, (typeof parsed.graph.nodes)[string]> = {};
       for (const [nodeId, node] of Object.entries(parsed.graph.nodes)) {
-        const selected = selectWorkflowTarget(node, workerTarget);
-        const target = yield* resolveGraphTarget(selected.target, nodeId);
+        const selected = selectWorkflowTarget(node, workerTarget, presets);
+        if (selected.error !== undefined) targetBlockers.push(`${nodeId}: ${selected.error}`);
+        const target =
+          selected.error === undefined
+            ? yield* resolveGraphTarget(selected.target, nodeId)
+            : undefined;
         let verify = node.verify;
         let judgmentTarget: OrchestratorMcpTarget | undefined;
         if (verify?.type === "judgment") {
@@ -2305,7 +2319,7 @@ const make = Effect.gen(function* () {
             target,
             ...(judgmentTarget === undefined ? {} : { judgmentTarget }),
           });
-        const { model: _legacyModel, ...concreteNode } = node;
+        const { model: _legacyModel, preset: _preset, ...concreteNode } = node;
         nodes[nodeId] = { ...concreteNode, target, ...(verify === undefined ? {} : { verify }) };
       }
       concreteGraph = { ...parsed.graph, nodes };
@@ -2329,6 +2343,10 @@ const make = Effect.gen(function* () {
     const review: GraphReview = {
       ...reviewed,
       targets,
+      expandedGraph:
+        targetBlockers.length === 0 && reviewed.blockers.length === 0
+          ? (concreteGraph ?? null)
+          : null,
       blockers: [...reviewed.blockers, ...targetBlockers],
       digest: targetBlockers.length > 0 ? null : reviewed.digest,
     };
@@ -2367,6 +2385,7 @@ const make = Effect.gen(function* () {
     digest: review.digest,
     ready: review.digest !== null && review.blockers.length === 0,
     targets: review.targets,
+    expandedGraph: review.expandedGraph,
     layers: review.layers,
     writeConflicts: review.writeConflicts,
     inputs: Object.entries(review.inputs).map(([filePath, hash]) =>
@@ -2398,19 +2417,27 @@ const make = Effect.gen(function* () {
     const key = yield* requestKey(input.clientRequestId);
     const commandId = stableCommandId({ scope, requestKey: key, operation: "workflow-start" });
     const workflowId = NodeId.make(String(commandId).replace(/^command:/, "workflow:"));
+    const workflowPresets = yield* loadWorkflowPresets;
+    const snapshotTarget = Effect.fn("OrchestratorMcpService.snapshotWorkflowTarget")(function* (
+      target: OrchestratorMcpTarget,
+    ) {
+      return yield* resolveTargetRechecking({
+        parent,
+        target,
+        providers: yield* loadProviders,
+      }).pipe(
+        Effect.map((resolved) => ({ target: concreteWorkflowTarget(resolved.modelSelection) })),
+        Effect.catch((error) => Effect.succeed({ error: error.message })),
+      );
+    });
+    const presetTargets: Record<string, typeof WorkflowTargetSnapshot.Type> = Object.create(null);
+    for (const preset of workflowPresets.presets) {
+      presetTargets[preset.id] = yield* snapshotTarget(preset.target);
+    }
     // Defaults must not depend on catalog order after a restart. Keep failure until
     // an agent actually selects the default: its own target can still override it.
     const workerTargetSnapshot =
-      input.workerTarget === undefined
-        ? undefined
-        : yield* resolveTargetRechecking({
-            parent,
-            target: input.workerTarget,
-            providers: yield* loadProviders,
-          }).pipe(
-            Effect.map((resolved) => ({ target: concreteWorkflowTarget(resolved.modelSelection) })),
-            Effect.catch((error) => Effect.succeed({ error: error.message })),
-          );
+      input.workerTarget === undefined ? undefined : yield* snapshotTarget(input.workerTarget);
     const afterSequence = yield* threadManagement
       .getThreadEventSequence(scope.thread.threadId)
       .pipe(Effect.mapError(threadManagementFailure));
@@ -2426,6 +2453,8 @@ const make = Effect.gen(function* () {
         title: input.title ?? "Workflow",
         script: storedWorkflowScript(input.script, {
           callerSelection: parent.thread.modelSelection,
+          workflowPresets,
+          presetTargets,
           ...(input.args === undefined ? {} : { args: input.args }),
           ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
           ...(input.workerTarget === undefined ? {} : { workerTarget: input.workerTarget }),
@@ -2625,11 +2654,21 @@ const make = Effect.gen(function* () {
       stored._tag === "Some" && stored.value.workerTargetSnapshot !== undefined
         ? decodeWorkerTargetSnapshot(stored.value.workerTargetSnapshot)
         : Option.none();
+    const workflowPresets =
+      stored._tag === "Some" && stored.value.workflowPresets !== undefined
+        ? decodeWorkflowPresets(stored.value.workflowPresets)
+        : Option.none();
+    const presetTargets =
+      stored._tag === "Some" && stored.value.presetTargets !== undefined
+        ? decodePresetTargets(stored.value.presetTargets)
+        : Option.none();
     if (
       stored._tag === "None" ||
       (stored.value.plan !== undefined && Option.isNone(plan)) ||
       (stored.value.callerSelection !== undefined && Option.isNone(callerSelection)) ||
-      (stored.value.workerTargetSnapshot !== undefined && Option.isNone(workerTargetSnapshot))
+      (stored.value.workerTargetSnapshot !== undefined && Option.isNone(workerTargetSnapshot)) ||
+      (stored.value.workflowPresets !== undefined && Option.isNone(workflowPresets)) ||
+      (stored.value.presetTargets !== undefined && Option.isNone(presetTargets))
     ) {
       yield* threadManagement
         .dispatch({
@@ -2651,6 +2690,8 @@ const make = Effect.gen(function* () {
       threadId: row.threadId,
       source: stored.value.source,
       args: stored.value.args,
+      ...(Option.isSome(workflowPresets) ? { workflowPresets: workflowPresets.value } : {}),
+      ...(Option.isSome(presetTargets) ? { presetTargets: presetTargets.value } : {}),
       ...(Option.isSome(workerTargetSnapshot) && "target" in workerTargetSnapshot.value
         ? { workerTarget: workerTargetSnapshot.value.target }
         : stored.value.workerTarget === undefined
@@ -3122,6 +3163,7 @@ const make = Effect.gen(function* () {
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
         inheritedModel: inherited?.model ?? null,
         inheritedOptions: inherited?.options ?? [],
+        workflowPresets: settings.workflowPresets,
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         providers: providers.map((provider) => {

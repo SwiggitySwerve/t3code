@@ -77,6 +77,7 @@ describe("orchestrator MCP contracts", () => {
     const review = {
       digest: `sha256:${"a".repeat(64)}`,
       ready: false,
+      expandedGraph: null,
       targets: [],
       layers: [["first", "second"], ["last"]],
       writeConflicts: [{ nodes: ["first", "second"], paths: ["src/shared.ts"] }],
