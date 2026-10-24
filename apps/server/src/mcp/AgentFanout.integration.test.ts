@@ -16,6 +16,7 @@ import {
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
   type OrchestrationV2Run,
+  type ModelSelection,
   type OrchestrationV2Subagent,
   ProjectId,
   ProviderDriverKind,
@@ -222,35 +223,37 @@ const invoke = (name: string, args: Record<string, unknown>) =>
 const errorText = (result: McpSchema.CallToolResult) =>
   result.content.map((part) => ("text" in part ? part.text : "")).join("");
 
-const startParent = Effect.gen(function* () {
-  const orchestrator = yield* Orchestrator.OrchestratorV2;
-  yield* orchestrator.dispatch({
-    type: "thread.create",
-    createdBy: "user",
-    creationSource: "web",
-    commandId: CommandId.make("command:delegate-tasks:create"),
-    threadId: parentThreadId,
-    projectId: ProjectId.make("project:delegate-tasks"),
-    title: "Delegate tasks parent",
-    modelSelection,
-    runtimeMode: "full-access",
-    interactionMode: "default",
-    branch: null,
-    worktreePath: null,
+const startParentWithSelection = (selection: ModelSelection) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "thread.create",
+      createdBy: "user",
+      creationSource: "web",
+      commandId: CommandId.make("command:delegate-tasks:create"),
+      threadId: parentThreadId,
+      projectId: ProjectId.make("project:delegate-tasks"),
+      title: "Delegate tasks parent",
+      modelSelection: selection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+    });
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      createdBy: "user",
+      creationSource: "web",
+      commandId: CommandId.make("command:delegate-tasks:start"),
+      threadId: parentThreadId,
+      messageId: MessageId.make("message:delegate-tasks:start"),
+      text: "Fan out work.",
+      attachments: [],
+      modelSelection: selection,
+      dispatchMode: { type: "start_immediately" },
+    });
   });
-  yield* orchestrator.dispatch({
-    type: "message.dispatch",
-    createdBy: "user",
-    creationSource: "web",
-    commandId: CommandId.make("command:delegate-tasks:start"),
-    threadId: parentThreadId,
-    messageId: MessageId.make("message:delegate-tasks:start"),
-    text: "Fan out work.",
-    attachments: [],
-    modelSelection,
-    dispatchMode: { type: "start_immediately" },
-  });
-});
+const startParent = startParentWithSelection(modelSelection);
 
 const childTasks = Effect.gen(function* () {
   const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -628,6 +631,111 @@ const startWorkflow = (script: string, args?: unknown) =>
   });
 
 describe("workflow_start", () => {
+  it.effect("C3 preserves resolver option inheritance overrides and clearing", () =>
+    Effect.gen(function* () {
+      const inherited = [
+        { id: "reasoningEffort", value: "medium" },
+        { id: "serviceTier", value: "priority" },
+      ];
+      yield* startParentWithSelection({ ...modelSelection, options: inherited });
+      yield* answerWorkflowAgents(() => "done");
+      const workerTarget = { options: { reasoningEffort: "high" } };
+      const cases: Array<{ own: Record<string, unknown>; expected: ModelSelection }> = [
+        {
+          own: {},
+          expected: {
+            ...modelSelection,
+            options: [{ id: "reasoningEffort", value: "high" }, inherited[1]!],
+          },
+        },
+        { own: { target: { options: [] } }, expected: { ...modelSelection, options: [] } },
+        { own: { target: { options: {} } }, expected: { ...modelSelection, options: [] } },
+        { own: { target: { model } }, expected: { ...modelSelection, options: inherited } },
+        { own: { model: "other-model" }, expected: { instanceId, model: "other-model" } },
+        {
+          own: { target: { providerInstanceId: claudeInstanceId } },
+          expected: { instanceId: claudeInstanceId, model: claudeModel },
+        },
+      ];
+      const started = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", {
+          workerTarget,
+          args: cases.map(({ own }) => own),
+          script: 'return await parallel(args.map((own) => () => agent("options", own)))',
+        })).structuredContent,
+      );
+      expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      for (const [index, entry] of cases.entries()) {
+        const member = yield* awaitMember(started.workflowId, index + 1);
+        const child = yield* orchestrator.getThreadProjection(member.childThreadId!);
+        expect(child.thread.modelSelection).toEqual(entry.expected);
+        const graph = {
+          schemaVersion: 1,
+          nodes: {
+            a: { subject: "options", description: "options", dependsOn: [], ...entry.own },
+          },
+        };
+        const reviewed = yield* decodeReview(
+          (yield* invoke("graph_review", { graph, workerTarget })).structuredContent,
+        );
+        const target = {
+          providerInstanceId: entry.expected.instanceId,
+          model: entry.expected.model,
+          options: [...(entry.expected.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+        };
+        expect(reviewed).toMatchObject({ ready: true, targets: [{ target }] });
+        const explicit = yield* reviewGraph({
+          ...graph,
+          nodes: { a: { subject: "options", description: "options", dependsOn: [], target } },
+        });
+        expect(reviewed.digest).toBe(explicit.digest);
+      }
+    }).pipe(
+      Effect.provide(
+        makeLayerTest(undefined, [
+          {
+            ...provider,
+            models: [
+              ...provider.models,
+              { slug: "other-model", name: "Other", isCustom: true, capabilities: null },
+            ],
+          },
+          claudeProvider,
+        ]),
+      ),
+    ),
+  );
+  it.effect("C3 selects the whole agent target before the worker default", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents(() => "done");
+      const started = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", {
+          workerTarget: { providerInstanceId: claudeInstanceId, model: claudeModel },
+          script: `return [
+          await agent("default"),
+          await agent("partial", { target: { model: "${model}" } }),
+          await agent("legacy", { model: "${model}" }),
+          await agent("empty", { target: {} })
+        ]`,
+        })).structuredContent,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("completed");
+      expect(
+        (yield* childTasks)
+          .filter((task) => task.parentNodeId === started.workflowId)
+          .map((agent) => [agent.providerInstanceId, agent.model]),
+      ).toEqual([
+        [claudeInstanceId, claudeModel],
+        [instanceId, model],
+        [instanceId, model],
+        [instanceId, model],
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect.each(refusedTargets)(
     "records a refused $name without substituting a worker",
     ({ target, reason }) =>
@@ -1023,6 +1131,180 @@ const twoStepScript =
   'const first = await agent("first")\nconst second = await agent("second after " + first)\nreturn [first, second]';
 
 describe("workflow resume", () => {
+  it.effect("C3 freezes a model-omitted worker default across catalog reordering", () => {
+    const providers: ServerProvider[] = [
+      provider,
+      {
+        ...claudeProvider,
+        models: [
+          ...claudeProvider.models,
+          {
+            slug: "other-claude",
+            name: "Other",
+            isCustom: true,
+            capabilities: null,
+          },
+        ],
+      },
+    ];
+    return Effect.gen(function* () {
+      yield* startParent;
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            workerTarget: { providerInstanceId: claudeInstanceId },
+            script: 'await agent("first"); await agent("second"); return await agent("third")',
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first.model).toBe(claudeModel);
+          yield* completeChild(first.childThreadId!, "one");
+          yield* awaitMember(started.workflowId, 2);
+          return started.workflowId;
+        }),
+      );
+      providers[1] = { ...providers[1]!, models: providers[1]!.models.toReversed() };
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const second = yield* awaitMember(workflowId, 2);
+          yield* completeChild(second.childThreadId!, "two");
+          const third = yield* awaitMember(workflowId, 3);
+          expect(third.providerInstanceId).toBe(claudeInstanceId);
+          expect(third.model).toBe(claudeModel);
+          yield* completeChild(third.childThreadId!, "three");
+          expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
+        }),
+      );
+    }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+  });
+
+  it.effect(
+    "C3 defers a failed default until selected and retains its refusal after restart",
+    () => {
+      const providers: ServerProvider[] = [provider, claudeProvider];
+      return Effect.gen(function* () {
+        yield* startParent;
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const started = yield* service.workflowStart(invocation, {
+              workerTarget: { model: "late-model" },
+              script: `return [await agent("own", { target: { model: "${model}" } }), await agent("default")]`,
+            });
+            yield* awaitMember(started.workflowId, 1);
+            return started.workflowId;
+          }),
+        );
+        // Making the model available later must not replace the recorded refusal.
+        providers[0] = {
+          ...provider,
+          models: [
+            ...provider.models,
+            {
+              slug: "late-model",
+              name: "Late",
+              isCustom: true,
+              capabilities: null,
+            },
+          ],
+        };
+        const ended = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            yield* answerWorkflowAgents((prompt) =>
+              prompt === "default" ? "unexpected" : undefined,
+            );
+            const own = yield* awaitMember(workflowId, 1);
+            yield* completeChild(own.childThreadId!, "done");
+            return yield* awaitWorkflowEnd(workflowId);
+          }),
+        );
+        expect(JSON.parse(ended.result!)).toEqual(["done", null]);
+        expect(ended.agents[1]?.result).toContain(
+          `Model late-model is not advertised by provider ${instanceId}.`,
+        );
+        expect((yield* childTasks).filter((task) => task.parentNodeId === workflowId)).toHaveLength(
+          1,
+        );
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+  it.effect("C3 resumes worker routing for new calls and preserves completed calls", () =>
+    Effect.gen(function* () {
+      yield* startParentWithSelection({
+        ...modelSelection,
+        options: [
+          { id: "reasoningEffort", value: "medium" },
+          { id: "serviceTier", value: "priority" },
+        ],
+      });
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            script:
+              'const first = await agent("first"); const second = await agent("second after " + first, { target: { options: { reasoningEffort: "high" } } }); return [first, second]',
+            workerTarget: { options: [{ id: "reasoningEffort", value: "high" }] },
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first.providerInstanceId).toBe(instanceId);
+          yield* completeChild(first.childThreadId!, "one");
+          yield* awaitMember(started.workflowId, 2);
+          return started.workflowId;
+        }),
+      );
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.model-selection.set",
+        commandId: CommandId.make("command:change-caller"),
+        threadId: parentThreadId,
+        modelSelection: {
+          instanceId,
+          model: "other-model",
+          options: [{ id: "new-option", value: true }],
+        },
+      });
+      const second = yield* awaitMember(workflowId, 2);
+      yield* completeChild(second.childThreadId!, "", {
+        status: "cancelled",
+        cancelledByServerRestart: true,
+      });
+      const ended = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const retried = yield* awaitMember(workflowId, 3);
+          expect(retried.prompt).toBe("second after one");
+          expect(retried.providerInstanceId).toBe(instanceId);
+          expect(retried.model).toBe(model);
+          expect(
+            (yield* orchestrator.getThreadProjection(retried.childThreadId!)).thread.modelSelection,
+          ).toEqual({
+            ...modelSelection,
+            options: [
+              { id: "reasoningEffort", value: "high" },
+              { id: "serviceTier", value: "priority" },
+            ],
+          });
+          yield* completeChild(retried.childThreadId!, "two");
+          return yield* awaitWorkflowEnd(workflowId);
+        }),
+      );
+      expect(JSON.parse(ended.result!)).toEqual(["one", "two"]);
+      const row = (yield* childTasks).find((task) => task.id === workflowId)!;
+      expect(row.workflow!.agents.map((agent) => agent.attemptTaskIds!.length)).toEqual([1, 2]);
+    }).pipe(
+      Effect.provide(
+        makeLayerTest(undefined, [
+          {
+            ...provider,
+            models: [
+              ...provider.models,
+              { slug: "other-model", name: "Other", isCustom: true, capabilities: null },
+            ],
+          },
+          claudeProvider,
+        ]),
+      ),
+    ),
+  );
   it.effect("resumes a running workflow after a restart without starting its agents twice", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -1632,8 +1914,215 @@ const serialGraph = (dir: string) => ({
 });
 
 describe("graphs", () => {
+  it.effect("C3 refuses an inherited model absent from an empty provider catalog", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const reviewed = yield* reviewGraph({
+        schemaVersion: 1,
+        nodes: {
+          a: { subject: "worker", description: "work", dependsOn: [] },
+        },
+      });
+      expect(reviewed.ready).toBe(false);
+      expect(reviewed.blockers).toEqual([
+        `a: Model ${model} is not advertised by provider ${instanceId}.`,
+      ]);
+      expect(yield* childTasks).toEqual([]);
+    }).pipe(Effect.provide(makeLayerTest(undefined, [{ ...provider, models: [] }]))),
+  );
+
+  it.effect("C3 keeps exact reviewed options after caller changes and graph restart", () =>
+    Effect.gen(function* () {
+      yield* startParentWithSelection({
+        ...modelSelection,
+        options: [{ id: "serviceTier", value: "priority" }],
+      });
+      const graph = {
+        schemaVersion: 1,
+        nodes: {
+          a: { subject: "first", description: "first", dependsOn: [] },
+          b: {
+            subject: "second",
+            description: "second",
+            dependsOn: ["a"],
+            verify: { type: "judgment", rubric: ["correct"] },
+          },
+        },
+      };
+      const workerTarget = { options: [{ id: "reasoningEffort", value: "high" }] };
+      const expected = {
+        ...modelSelection,
+        options: [
+          { id: "reasoningEffort", value: "high" },
+          { id: "serviceTier", value: "priority" },
+        ],
+      };
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const reviewed = yield* service.graphReview(invocation, { graph, workerTarget });
+          expect(reviewed.targets[1]?.judgmentTarget).toEqual({
+            providerInstanceId: instanceId,
+            model,
+            options: expected.options,
+          });
+          const explicit = yield* service.graphReview(invocation, {
+            graph: {
+              ...graph,
+              nodes: Object.fromEntries(
+                Object.entries(graph.nodes).map(([key, node]) => [
+                  key,
+                  {
+                    ...node,
+                    target: reviewed.targets.find((entry) => entry.nodeId === key)!.target,
+                    ...("verify" in node
+                      ? {
+                          verify: {
+                            ...node.verify,
+                            target: reviewed.targets.find((entry) => entry.nodeId === key)!
+                              .judgmentTarget,
+                          },
+                        }
+                      : {}),
+                  },
+                ]),
+              ),
+            },
+          });
+          expect(explicit.digest).toBe(reviewed.digest);
+          const started = yield* service.graphStart(invocation, {
+            graph,
+            workerTarget,
+            acceptedDigest: reviewed.digest!,
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          yield* orchestrator.dispatch({
+            type: "thread.model-selection.set",
+            commandId: CommandId.make("command:change-graph-caller"),
+            threadId: parentThreadId,
+            modelSelection: { ...modelSelection, options: [{ id: "new-option", value: true }] },
+          });
+          yield* completeChild(first.childThreadId!, "first done");
+          const second = yield* awaitMember(started.workflowId, 2);
+          const selection = (yield* orchestrator.getThreadProjection(second.childThreadId!)).thread
+            .modelSelection;
+          expect({
+            ...selection,
+            options: [...(selection.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+          }).toEqual(expected);
+          return started.workflowId;
+        }),
+      );
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          const second = yield* awaitMember(workflowId, 2);
+          yield* completeChild(second.childThreadId!, "second done");
+          const judge = yield* awaitMember(workflowId, 3);
+          const selection = (yield* orchestrator.getThreadProjection(judge.childThreadId!)).thread
+            .modelSelection;
+          expect({
+            ...selection,
+            options: [...(selection.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+          }).toEqual(expected);
+          yield* completeChild(
+            judge.childThreadId!,
+            '```json\n{"outcome":"passed","reasons":"correct"}\n```',
+          );
+          expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
+        }),
+      );
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("C3 expands defaults before hashing and reports target provenance", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const node = { subject: "worker", description: "work", dependsOn: [] };
+      const workerTarget = { providerInstanceId: claudeInstanceId, model: claudeModel };
+      const graph = { schemaVersion: 1, nodes: { a: node } };
+      const defaults = yield* decodeReview(
+        (yield* invoke("graph_review", { graph, workerTarget })).structuredContent,
+      );
+      const explicit = yield* decodeReview(
+        (yield* invoke("graph_review", {
+          graph: { ...graph, nodes: { a: { ...node, target: workerTarget } } },
+        })).structuredContent,
+      );
+      expect(defaults.ready).toBe(true);
+      expect(defaults.digest).toBe(explicit.digest);
+      expect(defaults).toMatchObject({
+        targets: [
+          {
+            nodeId: "a",
+            source: "workerTarget",
+            target: { ...workerTarget, options: [] },
+          },
+        ],
+      });
+      expect(explicit).toMatchObject({ targets: [{ nodeId: "a", source: "target" }] });
+      const inherited = yield* decodeReview(
+        (yield* invoke("graph_review", { graph })).structuredContent,
+      );
+      expect(inherited).toMatchObject({
+        targets: [{ source: "caller", target: { providerInstanceId: instanceId, model } }],
+      });
+      for (const own of [{ target: { model } }, { model }, { target: {} }]) {
+        const reviewed = yield* decodeReview(
+          (yield* invoke("graph_review", {
+            graph: { ...graph, nodes: { a: { ...node, ...own } } },
+            workerTarget,
+          })).structuredContent,
+        );
+        expect(reviewed.ready).toBe(true);
+        expect(reviewed.digest).toBe(inherited.digest);
+        expect(reviewed).toMatchObject({
+          targets: [{ source: "model" in own ? "model" : "target" }],
+        });
+      }
+      // A different concrete assignment cannot use the approved digest.
+      const refused = yield* invoke("graph_start", { graph, acceptedDigest: defaults.digest });
+      expect(refused.isError).toBe(true);
+      expect(errorText(refused)).toContain("digest mismatch");
+      yield* answerWorkflowAgents(() => "done");
+      const started = yield* decodeWorkflow(
+        (yield* invoke("graph_start", {
+          graph,
+          workerTarget,
+          acceptedDigest: defaults.digest,
+        })).structuredContent,
+      );
+      yield* awaitWorkflowEnd(started.workflowId);
+      expect(yield* awaitMember(started.workflowId, 1)).toMatchObject({
+        providerInstanceId: claudeInstanceId,
+        model: claudeModel,
+      });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect.each(refusedTargets)(
-    "reviews a graph targeting $name then records refused dispatch",
+    "C3 refuses an unavailable judgment $name at review",
+    ({ target, reason }) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const graph = {
+          schemaVersion: 1,
+          nodes: {
+            a: {
+              subject: "worker",
+              description: "work",
+              dependsOn: [],
+              verify: { type: "judgment", rubric: ["check"], target },
+            },
+          },
+        };
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.ready).toBe(false);
+        expect(reviewed.blockers.join(" ")).toContain(reason);
+        expect(yield* childTasks).toEqual([]);
+      }).pipe(Effect.provide(layerRefusedTargets)),
+  );
+  it.effect.each(refusedTargets)(
+    "C3 refuses a graph targeting $name at review and start",
     ({ target, reason }) =>
       Effect.gen(function* () {
         yield* startParent;
@@ -1650,32 +2139,16 @@ describe("graphs", () => {
             },
           },
         };
-        // Current review validates the graph, but target availability is checked at dispatch.
         const reviewed = yield* reviewGraph(graph);
-        expect(reviewed.ready).toBe(true);
-        const result = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
-        expect(result.isError).not.toBe(true);
-        const started = yield* decodeWorkflow(result.structuredContent);
-        const ended = yield* awaitWorkflowEnd(started.workflowId);
-        expect(ended.status).toBe("failed");
-        expect(ended.agents).toHaveLength(1);
-        expect(ended.agents[0]).toMatchObject({
-          status: "failed",
-          taskId: null,
-          outcomeCategory: "never_started",
+        expect(reviewed.ready).toBe(false);
+        expect(reviewed.blockers.join(" ")).toContain(reason);
+        const result = yield* invoke("graph_start", {
+          graph,
+          acceptedDigest: reviewed.digest ?? `sha256:${"0".repeat(64)}`,
         });
-        expect(ended.agents[0]?.result).toContain(reason);
-        expect(ended.result).toContain(reason);
-        const tasks = yield* childTasks;
-        expect(tasks.map((task) => task.id)).toEqual([started.workflowId]);
-        expect(tasks[0]?.workflow?.nodeOutcomes).toMatchObject({
-          worker: { status: "failed" },
-          downstream: {
-            status: "skipped",
-            attempts: 0,
-            reason: "Predecessor worker did not pass.",
-          },
-        });
+        expect(result.isError).toBe(true);
+        expect(errorText(result)).toContain(reason);
+        expect(yield* childTasks).toEqual([]);
       }).pipe(Effect.provide(layerRefusedTargets)),
   );
 

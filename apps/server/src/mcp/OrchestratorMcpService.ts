@@ -7,7 +7,7 @@ import {
   type RunId,
   isProviderAvailable,
   MessageId,
-  type ModelSelection,
+  ModelSelection,
   NodeId,
   TurnItemId,
   type OrchestrationV2Run,
@@ -49,7 +49,7 @@ import {
   type OrchestratorMcpScheduledTask,
   type OrchestratorMcpScheduleTaskInput,
   type OrchestratorMcpScheduleTaskResult,
-  type OrchestratorMcpTarget,
+  OrchestratorMcpTarget,
   type OrchestratorMcpTaskCancelInput,
   type OrchestratorMcpTaskCancelResult,
   type OrchestratorMcpUpdateScheduledTaskInput,
@@ -138,7 +138,11 @@ import {
   withResultSchema,
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
-import { makeWorkflowRunner, workflowAgentOutcomeCategory } from "./workflowRunner.ts";
+import {
+  makeWorkflowRunner,
+  selectWorkflowTarget,
+  workflowAgentOutcomeCategory,
+} from "./workflowRunner.ts";
 import { aggregateWorkflowUsage } from "./workflowUsage.ts";
 import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
@@ -281,6 +285,20 @@ export class OrchestratorMcpService extends Context.Service<
 
 const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
 const decodeWorkflowPlan = Schema.decodeUnknownOption(OrchestrationV2WorkflowPlan);
+const decodeWorkflowCallerSelection = Schema.decodeUnknownOption(ModelSelection);
+const decodeWorkflowTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
+const decodeWorkerTargetSnapshot = Schema.decodeUnknownOption(
+  Schema.Union([
+    Schema.Struct({ target: OrchestratorMcpTarget }),
+    Schema.Struct({ error: Schema.String }),
+  ]),
+);
+const concreteWorkflowTarget = (selection: ModelSelection): OrchestratorMcpTarget => ({
+  providerInstanceId: selection.instanceId,
+  model: selection.model,
+  // Explicit empty options prevent later inheritance; ordering does not change selection.
+  options: [...(selection.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+});
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
@@ -2031,7 +2049,13 @@ const make = Effect.gen(function* () {
         }
         const prepared = yield* prepareDelegation({
           scope,
-          parent,
+          parent:
+            workflow.callerSelection === undefined
+              ? parent
+              : {
+                  ...parent,
+                  thread: { ...parent.thread, modelSelection: workflow.callerSelection },
+                },
           providers: yield* loadProviders,
           item,
           requestKey: key,
@@ -2199,19 +2223,92 @@ const make = Effect.gen(function* () {
     }),
   });
 
-  type GraphReview = ReturnType<typeof reviewGraph>;
+  type GraphReview = ReturnType<typeof reviewGraph> & {
+    targets: OrchestratorMcpGraphReviewResult["targets"];
+  };
   // Input hashes of recent reviews by digest, so a refused start can name the files that changed.
   const reviewedGraphInputs = new Map<string, GraphReview["inputs"]>();
   const REVIEWED_GRAPHS_KEPT = 256;
 
   /** Reviews a graph against the files in the caller's checkout as they are now. */
   const reviewCallerGraph = Effect.fn("OrchestratorMcpService.reviewCallerGraph")(function* (
-    threadId: ThreadId,
+    parent: CallerProjection,
     graph: unknown,
+    workerTarget: OrchestratorMcpTarget | undefined,
   ) {
+    const threadId = parent.thread.id;
     const parsed = parseGraph(graph);
+    let concreteGraph = parsed.ok ? parsed.graph : undefined;
     const hashes: Record<string, GraphReview["inputs"][string]> = {};
+    const targets: OrchestratorMcpGraphReviewResult["targets"][number][] = [];
+    const targetBlockers: string[] = [];
+    const resolveGraphTarget = Effect.fn("OrchestratorMcpService.resolveGraphTarget")(
+      function* (value: unknown, _label: string) {
+        const target =
+          value === undefined
+            ? undefined
+            : yield* decodeWorkflowTarget(value).pipe(
+                Effect.mapError(() => failure("invalid_request", "Invalid target.")),
+              );
+        const resolved = yield* resolveTargetRechecking({
+          parent,
+          target,
+          providers: yield* loadProviders,
+        });
+        const selection = resolved.modelSelection;
+        // Graph approval needs a known concrete assignment, including inherited models.
+        const providers = yield* loadProviders;
+        const model = providers
+          .find((provider) => provider.instanceId === selection.instanceId)
+          ?.models.find((model) => model.slug === selection.model);
+        if (model === undefined) {
+          return yield* failure(
+            "model_unavailable",
+            `Model ${selection.model} is not advertised by provider ${selection.instanceId}.`,
+          );
+        }
+        // Dispatch receives these inherited values explicitly, so validate them too.
+        const invalid = invalidOptionSelections(
+          selection.options ?? [],
+          model.capabilities?.optionDescriptors,
+        );
+        if (invalid.length > 0)
+          return yield* failure(
+            "invalid_request",
+            `Model ${selection.model} on provider ${selection.instanceId} rejected options: ${invalid.join(" ")}`,
+          );
+        return concreteWorkflowTarget(selection);
+      },
+      (effect, _value, label) =>
+        effect.pipe(
+          Effect.catch((error) => {
+            targetBlockers.push(`${label}: ${error.message}`);
+            return Effect.succeed(undefined);
+          }),
+        ),
+    );
     if (parsed.ok) {
+      const nodes: Record<string, (typeof parsed.graph.nodes)[string]> = {};
+      for (const [nodeId, node] of Object.entries(parsed.graph.nodes)) {
+        const selected = selectWorkflowTarget(node, workerTarget);
+        const target = yield* resolveGraphTarget(selected.target, nodeId);
+        let verify = node.verify;
+        let judgmentTarget: OrchestratorMcpTarget | undefined;
+        if (verify?.type === "judgment") {
+          judgmentTarget = yield* resolveGraphTarget(verify.target ?? target, `${nodeId} judgment`);
+          verify = { ...verify, target: judgmentTarget };
+        }
+        if (target !== undefined)
+          targets.push({
+            nodeId,
+            source: selected.source,
+            target,
+            ...(judgmentTarget === undefined ? {} : { judgmentTarget }),
+          });
+        const { model: _legacyModel, ...concreteNode } = node;
+        nodes[nodeId] = { ...concreteNode, target, ...(verify === undefined ? {} : { verify }) };
+      }
+      concreteGraph = { ...parsed.graph, nodes };
       // A file several nodes read is read once, under the largest bound; review checks each.
       const bounds = new Map<string, number>();
       for (const node of Object.values(parsed.graph.nodes)) {
@@ -2228,7 +2325,13 @@ const make = Effect.gen(function* () {
             : file.status;
       }
     }
-    const review = reviewGraph(graph, hashes);
+    const reviewed = reviewGraph(concreteGraph ?? graph, hashes);
+    const review: GraphReview = {
+      ...reviewed,
+      targets,
+      blockers: [...reviewed.blockers, ...targetBlockers],
+      digest: targetBlockers.length > 0 ? null : reviewed.digest,
+    };
     if (review.digest !== null) {
       reviewedGraphInputs.delete(review.digest);
       reviewedGraphInputs.set(review.digest, review.inputs);
@@ -2237,12 +2340,12 @@ const make = Effect.gen(function* () {
       }
     }
     const compiled =
-      parsed.ok && review.blockers.length === 0
+      concreteGraph !== undefined && review.blockers.length === 0
         ? {
             source: GRAPH_DRIVER_SCRIPT,
-            args: { graph: parsed.graph, inputs: review.inputs },
-            plan: graphPlan(parsed.graph),
-            title: parsed.graph.name ?? "Graph",
+            args: { graph: concreteGraph, inputs: review.inputs },
+            plan: graphPlan(concreteGraph),
+            title: concreteGraph.name ?? "Graph",
           }
         : undefined;
     return { review, compiled };
@@ -2263,6 +2366,7 @@ const make = Effect.gen(function* () {
   const graphReviewResult = (review: GraphReview): OrchestratorMcpGraphReviewResult => ({
     digest: review.digest,
     ready: review.digest !== null && review.blockers.length === 0,
+    targets: review.targets,
     layers: review.layers,
     writeConflicts: review.writeConflicts,
     inputs: Object.entries(review.inputs).map(([filePath, hash]) =>
@@ -2294,6 +2398,19 @@ const make = Effect.gen(function* () {
     const key = yield* requestKey(input.clientRequestId);
     const commandId = stableCommandId({ scope, requestKey: key, operation: "workflow-start" });
     const workflowId = NodeId.make(String(commandId).replace(/^command:/, "workflow:"));
+    // Defaults must not depend on catalog order after a restart. Keep failure until
+    // an agent actually selects the default: its own target can still override it.
+    const workerTargetSnapshot =
+      input.workerTarget === undefined
+        ? undefined
+        : yield* resolveTargetRechecking({
+            parent,
+            target: input.workerTarget,
+            providers: yield* loadProviders,
+          }).pipe(
+            Effect.map((resolved) => ({ target: concreteWorkflowTarget(resolved.modelSelection) })),
+            Effect.catch((error) => Effect.succeed({ error: error.message })),
+          );
     const afterSequence = yield* threadManagement
       .getThreadEventSequence(scope.thread.threadId)
       .pipe(Effect.mapError(threadManagementFailure));
@@ -2308,8 +2425,11 @@ const make = Effect.gen(function* () {
         workflowId,
         title: input.title ?? "Workflow",
         script: storedWorkflowScript(input.script, {
+          callerSelection: parent.thread.modelSelection,
           ...(input.args === undefined ? {} : { args: input.args }),
           ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+          ...(input.workerTarget === undefined ? {} : { workerTarget: input.workerTarget }),
+          ...(workerTargetSnapshot === undefined ? {} : { workerTargetSnapshot }),
           ...(plan === undefined ? {} : { plan }),
         }),
       })
@@ -2323,16 +2443,7 @@ const make = Effect.gen(function* () {
       return yield* failure("orchestration_error", "The workflow did not start.");
     }
     if (started.status === "running" && !workflowRunner.isRunning(workflowId)) {
-      workflowScopes.set(workflowId, workflowScope(scope, workflowId));
-      yield* workflowRunner.launch({
-        workflowId,
-        threadId: scope.thread.threadId,
-        source: input.script,
-        args: input.args ?? null,
-        ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
-        ...(plan === undefined ? {} : { plan }),
-        afterSequence,
-      });
+      yield* resumeWorkflow(started, workflowScope(scope, workflowId), afterSequence);
     }
     return yield* workflowResult(yield* loadProjection(scope.thread.threadId), started);
   });
@@ -2495,6 +2606,8 @@ const make = Effect.gen(function* () {
 
   const resumeWorkflow = Effect.fn("OrchestratorMcpService.resumeWorkflow")(function* (
     row: OrchestrationV2Subagent,
+    scope = resumedWorkflowScope(row),
+    afterSequence = 0,
   ) {
     const stored = yield* Effect.try({
       try: () => parseStoredWorkflowScript(row.prompt),
@@ -2504,7 +2617,20 @@ const make = Effect.gen(function* () {
       stored._tag === "Some" && stored.value.plan !== undefined
         ? decodeWorkflowPlan(stored.value.plan)
         : Option.none();
-    if (stored._tag === "None" || (stored.value.plan !== undefined && Option.isNone(plan))) {
+    const callerSelection =
+      stored._tag === "Some" && stored.value.callerSelection !== undefined
+        ? decodeWorkflowCallerSelection(stored.value.callerSelection)
+        : Option.none();
+    const workerTargetSnapshot =
+      stored._tag === "Some" && stored.value.workerTargetSnapshot !== undefined
+        ? decodeWorkerTargetSnapshot(stored.value.workerTargetSnapshot)
+        : Option.none();
+    if (
+      stored._tag === "None" ||
+      (stored.value.plan !== undefined && Option.isNone(plan)) ||
+      (stored.value.callerSelection !== undefined && Option.isNone(callerSelection)) ||
+      (stored.value.workerTargetSnapshot !== undefined && Option.isNone(workerTargetSnapshot))
+    ) {
       yield* threadManagement
         .dispatch({
           type: "workflow.complete",
@@ -2517,7 +2643,7 @@ const make = Effect.gen(function* () {
         .pipe(Effect.ignore);
       return false;
     }
-    workflowScopes.set(row.id, resumedWorkflowScope(row));
+    workflowScopes.set(row.id, scope);
     // Replaying the thread's task updates from the start tells the script which of
     // its agents already finished.
     yield* workflowRunner.launch({
@@ -2525,11 +2651,20 @@ const make = Effect.gen(function* () {
       threadId: row.threadId,
       source: stored.value.source,
       args: stored.value.args,
+      ...(Option.isSome(workerTargetSnapshot) && "target" in workerTargetSnapshot.value
+        ? { workerTarget: workerTargetSnapshot.value.target }
+        : stored.value.workerTarget === undefined
+          ? {}
+          : { workerTarget: stored.value.workerTarget }),
+      ...(Option.isSome(workerTargetSnapshot) && "error" in workerTargetSnapshot.value
+        ? { workerTargetError: workerTargetSnapshot.value.error }
+        : {}),
+      ...(Option.isSome(callerSelection) ? { callerSelection: callerSelection.value } : {}),
       ...(stored.value.budgetTokens === undefined
         ? {}
         : { budgetTokens: stored.value.budgetTokens }),
       ...(Option.isSome(plan) ? { plan: plan.value } : {}),
-      afterSequence: 0,
+      afterSequence,
     });
     return true;
   });
@@ -3166,12 +3301,20 @@ const make = Effect.gen(function* () {
     graphReview: Effect.fn("OrchestratorMcpService.graphReview")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "graph_review");
       yield* requireCapability(scope);
-      const { review } = yield* reviewCallerGraph(scope.thread.threadId, input.graph);
+      const { review } = yield* reviewCallerGraph(
+        yield* loadProjection(scope.thread.threadId),
+        input.graph,
+        input.workerTarget,
+      );
       return graphReviewResult(review);
     }),
     graphStart: Effect.fn("OrchestratorMcpService.graphStart")(function* (callerScope, input) {
       const { scope, parent } = yield* loadThreadCaller(callerScope, "graph_start");
-      const { review, compiled } = yield* reviewCallerGraph(scope.thread.threadId, input.graph);
+      const { review, compiled } = yield* reviewCallerGraph(
+        parent,
+        input.graph,
+        input.workerTarget,
+      );
       if (review.blockers.length > 0 || compiled === undefined) {
         return yield* failure(
           "invalid_request",

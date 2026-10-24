@@ -22,6 +22,7 @@ import {
   type ThreadId,
   type WorkflowAgentOutcomeCategory,
   type OrchestratorMcpWorkflowUsage,
+  type ModelSelection,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -80,12 +81,26 @@ export interface WorkflowContext {
   readonly threadId: ThreadId;
   readonly source: string;
   readonly args: unknown;
+  readonly workerTarget?: unknown;
+  readonly workerTargetError?: string;
+  readonly callerSelection?: ModelSelection;
   /** New agents stop starting once finished agents used this many tokens. */
   readonly budgetTokens?: number;
   /** Stored event sequence before the workflow row was created. */
   readonly afterSequence: number;
   /** The reviewed graph's plan; only then may the script tag agents and record node outcomes. */
   readonly plan?: OrchestrationV2WorkflowPlan;
+}
+
+/** Select one whole request before the provider resolver applies caller inheritance. */
+export function selectWorkflowTarget(
+  own: { readonly target?: unknown; readonly model?: string | undefined },
+  workerTarget?: unknown,
+): { readonly target: unknown; readonly source: "target" | "model" | "workerTarget" | "caller" } {
+  if (own.target !== undefined) return { target: own.target, source: "target" };
+  if (own.model !== undefined) return { target: { model: own.model }, source: "model" };
+  if (workerTarget !== undefined) return { target: workerTarget, source: "workerTarget" };
+  return { target: undefined, source: "caller" };
 }
 
 export interface WorkflowAgentStart {
@@ -410,13 +425,17 @@ class WorkflowSession {
     if (phase !== undefined) this.addPhase(phase);
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
-    const target = options.target ?? (model === undefined ? undefined : { model });
+    const { target, source } = selectWorkflowTarget(
+      { target: options.target, model },
+      this.workflow.workerTarget,
+    );
     let check: WorkflowCheck | undefined;
     let scopes: FileScopes | undefined;
     let inputs: ReadonlyArray<FileRef> = [];
     let outputs: ReadonlyArray<FileRef> = [];
     let attemptTimeoutMs: number | undefined;
-    let invalid: string | undefined;
+    let invalid: string | undefined =
+      source === "workerTarget" ? this.workflow.workerTargetError : undefined;
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);

@@ -344,6 +344,59 @@ const persistedShape = {
 };
 
 describe("frozen workflow acceptance", () => {
+  it("accepts persisted review refusal without a workflow, retaining both unavailable targets", () => {
+    const run = evidence("unavailable");
+    const final = finalFrame(run);
+    const graph = acceptanceGraph("unavailable", [], []);
+    final.workflows = [];
+    const captured = {
+      ...final,
+      toolCalls: [
+        {
+          type: "dynamic_tool",
+          toolName: "t3-code.graph_review",
+          threadId: final.thread.id,
+          status: "completed",
+          input: { graph },
+          output: {
+            ready: false,
+            digest: null,
+            blockers: [
+              "missingProvider: Provider instance acceptance-provider-does-not-exist is not registered.",
+              "unknownModel: Model acceptance-model-does-not-exist is not advertised by provider cliproxy.",
+            ],
+          },
+        },
+      ],
+    };
+    run.frames[run.frames.length - 1] = captured;
+    expect(checkAcceptance(run)).toEqual({ pass: true, failures: [] });
+    for (const mutate of [
+      (frame: typeof captured) => {
+        frame.toolCalls = [];
+      },
+      (frame: typeof captured) => {
+        frame.toolCalls[0]!.output.blockers.pop();
+      },
+      (frame: typeof captured) => {
+        frame.toolCalls[0]!.output.ready = true;
+      },
+      (frame: typeof captured) => {
+        frame.toolCalls[0]!.input.graph.nodes.unknownModel!.target.model = "substitute";
+      },
+      (frame: typeof captured) => {
+        frame.tasks.push({ id: "unexpected-child" });
+      },
+      (frame: typeof captured) => {
+        frame.fileAudit.events.push(mutation("writes.log", 1700000000100));
+      },
+    ]) {
+      const altered = structuredClone(captured);
+      mutate(altered);
+      expect(checkAcceptance({ ...run, frames: [run.frames[0], altered] }).pass).toBe(false);
+    }
+  });
+
   it("accepts a sanitized persisted workflow/task/child record shape", () => {
     const run = evidence("refactor");
     const final = finalFrame(run);

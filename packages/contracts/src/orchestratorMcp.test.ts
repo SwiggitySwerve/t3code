@@ -7,6 +7,7 @@ import {
   OrchestratorMcpGraphReviewInput,
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpGraphStartInput,
+  OrchestratorMcpWorkflowStartInput,
 } from "./orchestratorMcp.ts";
 
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
@@ -14,8 +15,34 @@ const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegat
 const decodeGraphReviewInput = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewInput);
 const decodeGraphReviewResult = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewResult);
 const decodeGraphStartInput = Schema.decodeUnknownSync(OrchestratorMcpGraphStartInput);
+const decodeWorkflowStartInput = Schema.decodeUnknownSync(OrchestratorMcpWorkflowStartInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("decodes worker defaults consistently on scripts, graph review and graph start", () => {
+    for (const options of [{ reasoningEffort: "high" }, [], {}]) {
+      const workerTarget = { model: "sol", options };
+      const expected = {
+        model: "sol",
+        options: Array.isArray(options)
+          ? options
+          : Object.entries(options).map(([id, value]) => ({ id, value })),
+      };
+      expect(
+        decodeWorkflowStartInput({
+          script: "return 1",
+          workerTarget,
+        }).workerTarget,
+      ).toEqual(expected);
+      expect(decodeGraphReviewInput({ graph: {}, workerTarget }).workerTarget).toEqual(expected);
+      expect(
+        decodeGraphStartInput({
+          graph: {},
+          workerTarget,
+          acceptedDigest: `sha256:${"a".repeat(64)}`,
+        }).workerTarget,
+      ).toEqual(expected);
+    }
+  });
   it("leaves graph validation to the server while requiring a review digest to start", () => {
     const graph = { schemaVersion: 999, nodes: { invalid: { unknownField: true } } };
     const acceptedDigest = `sha256:${"a".repeat(64)}`;
@@ -50,6 +77,7 @@ describe("orchestrator MCP contracts", () => {
     const review = {
       digest: `sha256:${"a".repeat(64)}`,
       ready: false,
+      targets: [],
       layers: [["first", "second"], ["last"]],
       writeConflicts: [{ nodes: ["first", "second"], paths: ["src/shared.ts"] }],
       inputs: [

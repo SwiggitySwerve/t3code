@@ -1,13 +1,17 @@
 /**
  * How a T3-run workflow's script is stored on its row: an optional settings line
- * (args and token budget) above the script source. The server writes and resumes
- * from it; clients show the source.
+ * (args, token budget and routing snapshot) above the script source. The server
+ * writes and resumes from it; clients show the source.
  */
 const SETTINGS_HEADER = "// t3-workflow: ";
 
 export interface StoredWorkflowSettings {
   readonly args?: unknown;
   readonly budgetTokens?: number;
+  readonly workerTarget?: unknown;
+  readonly workerTargetSnapshot?: unknown;
+  /** Caller model/options frozen at start, independently of its current authority. */
+  readonly callerSelection?: unknown;
   /** The reviewed graph's plan, for workflows started from one; the reader decodes it. */
   readonly plan?: unknown;
 }
@@ -30,10 +34,21 @@ export function parseStoredWorkflowScript(stored: string): {
   readonly args: unknown;
   readonly budgetTokens: number | undefined;
   readonly plan: unknown;
+  readonly workerTarget: unknown;
+  readonly workerTargetSnapshot: unknown;
+  readonly callerSelection: unknown;
 } {
   const source = storedWorkflowScriptSource(stored);
   if (!stored.startsWith(SETTINGS_HEADER)) {
-    return { source, args: null, budgetTokens: undefined, plan: undefined };
+    return {
+      source,
+      args: null,
+      budgetTokens: undefined,
+      plan: undefined,
+      workerTarget: undefined,
+      workerTargetSnapshot: undefined,
+      callerSelection: undefined,
+    };
   }
   const newline = stored.indexOf("\n");
   const parsed: unknown = JSON.parse(stored.slice(SETTINGS_HEADER.length, newline));
@@ -46,5 +61,8 @@ export function parseStoredWorkflowScript(stored: string): {
     args: settings.args ?? null,
     budgetTokens: typeof settings.budgetTokens === "number" ? settings.budgetTokens : undefined,
     plan: settings.plan,
+    workerTarget: settings.workerTarget,
+    workerTargetSnapshot: settings.workerTargetSnapshot,
+    callerSelection: settings.callerSelection,
   };
 }

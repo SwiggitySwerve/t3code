@@ -28,6 +28,8 @@ export interface AcceptanceFrame {
   childThreads: unknown[];
   server: { pid: number; commandLine: string };
   fileAudit?: unknown;
+  /** Raw persisted dynamic-tool rows, including review requests and responses. */
+  toolCalls?: unknown[];
 }
 export interface AcceptanceEvidence {
   version: 1;
@@ -144,6 +146,56 @@ function reviewFindings(result: unknown): RecordValue[] {
   return findings;
 }
 
+function completedFileAudit(frame: AcceptanceFrame) {
+  const audit = record(frame.fileAudit);
+  requireFact(
+    typeof audit.startedAt === "number" &&
+      typeof audit.endedAt === "number" &&
+      audit.startedAt < audit.endedAt,
+    "Missing completed filesystem audit",
+  );
+  return { audit, events: fileChanges(audit) };
+}
+
+function checkReviewRefusal(frame: AcceptanceFrame, thread: RecordValue) {
+  requireFact(
+    frame.workflows.length === 0 && frame.tasks.length === 0 && frame.childThreads.length === 0,
+    "Review refusal started a workflow or child",
+  );
+  const calls = list(frame.toolCalls).map(record);
+  const reviews = calls.filter((call) => /(?:^|[._])graph_review$/.test(String(call.toolName)));
+  requireFact(reviews.length === 1, "Missing or duplicate persisted graph review");
+  requireFact(
+    !calls.some((call) => /(?:^|[._])graph_start$/.test(String(call.toolName))),
+    "A refused graph was submitted for start",
+  );
+  const review = reviews[0]!;
+  requireFact(
+    review.threadId === thread.id && review.status === "completed",
+    "Review belongs to another thread or is incomplete",
+  );
+  const graph = acceptanceGraph("unavailable", [], []);
+  requireFact(
+    same(record(review.input), { graph }),
+    "Review request changed the unavailable graph",
+  );
+  const result = record(review.output);
+  requireFact(result.ready === false && result.digest === null, "Missing review refusal");
+  const reasons = Object.entries(graph.nodes).map(
+    ([key, node]) =>
+      key +
+      ": " +
+      (key === "missingProvider"
+        ? `Provider instance ${node.target.providerInstanceId} is not registered.`
+        : `Model ${node.target.model} is not advertised by provider ${node.target.providerInstanceId}.`),
+  );
+  requireFact(
+    same(list(result.blockers).toSorted(), reasons.toSorted()),
+    "Missing explicit provider and model refusal evidence",
+  );
+  requireFact(completedFileAudit(frame).events.length === 0, "Write during refused review");
+}
+
 /** Consumes captured database records and file bytes; no coordinator verdict is an input. */
 export function checkAcceptance(input: unknown): { pass: boolean; failures: string[] } {
   try {
@@ -186,6 +238,11 @@ export function checkAcceptance(input: unknown): { pass: boolean; failures: stri
         selection.model === coordinator.model,
       "Wrong coordinator target",
     );
+    // Old C2 captures have a failed workflow; C3 refuses before creating a row.
+    if (scenario === "unavailable" && final.workflows.length === 0) {
+      checkReviewRefusal(final, thread);
+      return { pass: true, failures: [] };
+    }
     const row = oneWorkflow(final);
     requireFact(row.threadId === thread.id, "Workflow belongs to another thread");
     requireFact(
@@ -309,13 +366,7 @@ export function checkAcceptance(input: unknown): { pass: boolean; failures: stri
       tasks.length === seen.size && tasks.every((task) => seen.has(task.id)),
       "Unrecorded or duplicate child tasks",
     );
-    const audit = record(final.fileAudit);
-    requireFact(
-      typeof audit.startedAt === "number" &&
-        typeof audit.endedAt === "number" &&
-        audit.startedAt < audit.endedAt,
-      "Missing completed filesystem audit",
-    );
+    const { audit, events: fileEvents } = completedFileAudit(final);
     requireFact(
       tasks.every(
         (task) =>
@@ -331,7 +382,6 @@ export function checkAcceptance(input: unknown): { pass: boolean; failures: stri
       ),
       "Filesystem audit ended before agents",
     );
-    const fileEvents = fileChanges(audit);
     const writer = agents.find((agent) => agent.graphNodeKey === "writer");
     const allowedWrites = graph.nodes.writer?.scopes.write ?? [];
     for (const event of fileEvents) {
