@@ -13,8 +13,9 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import { ChevronRightIcon, LoaderCircleIcon, SquareIcon, WorkflowIcon } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
+import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
 import ChatMarkdown from "../ChatMarkdown";
@@ -119,11 +120,7 @@ export function WorkflowOpeningBlock(props: {
           </Button>
         ) : null}
       </header>
-      {props.progress ? (
-        <p className="truncate px-2 text-2xs text-muted-foreground" data-thread-find-text="true">
-          {props.progress}
-        </p>
-      ) : null}
+      {props.progress ? <WorkflowProgress text={props.progress} /> : null}
       {graphHeadline?.waitingOn ? (
         <p className="truncate px-2 text-2xs text-foreground" data-thread-find-text="true">
           {graphHeadline.waitingOn}
@@ -133,13 +130,16 @@ export function WorkflowOpeningBlock(props: {
         <WorkflowWaveCanvas
           graph={graph}
           environmentId={props.environmentId}
-          providerInstanceId={opening.providerInstanceId}
-          driver={opening.driver ?? undefined}
           onOpenThread={props.onOpenThread}
         />
       ) : null}
       {graph !== null && graph.otherMembers.length > 0 ? (
-        <ul className="m-0 list-none p-0">{graph.otherMembers.map(memberRow)}</ul>
+        <section aria-label="Other workflow agents">
+          <p className="px-2 text-2xs text-muted-foreground">
+            Other agents · node association unavailable
+          </p>
+          <ul className="m-0 list-none p-0">{graph.otherMembers.map(memberRow)}</ul>
+        </section>
       ) : null}
       {phases.map((phase) => (
         <section key={phase.index} aria-label={`${phase.title} phase`}>
@@ -159,6 +159,49 @@ export function WorkflowOpeningBlock(props: {
       ) : null}
       <WorkflowScript script={opening.script} />
     </section>
+  );
+}
+
+function WorkflowProgress(props: { readonly text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const textRef = useRef<HTMLParagraphElement>(null);
+  const contentId = useId();
+  const revealRef = findRevealRef(() => setExpanded(true));
+  useEffect(() => {
+    const element = textRef.current;
+    if (element === null || expanded) return;
+    const measure = () => setOverflows(element.scrollHeight > element.clientHeight);
+    measure();
+    return observeResize(element, measure);
+  });
+  return (
+    <div ref={revealRef} data-thread-find-fold={expanded ? undefined : ""}>
+      <p
+        ref={textRef}
+        id={contentId}
+        className={cn(
+          "break-words whitespace-pre-wrap px-2 text-2xs text-muted-foreground",
+          !expanded && "line-clamp-3",
+        )}
+        data-thread-find-text="true"
+      >
+        {props.text}
+      </p>
+      {overflows || expanded ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost-muted"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          data-scroll-anchor-ignore
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "Show less" : "Show full result"}
+        </Button>
+      ) : null}
+    </div>
   );
 }
 

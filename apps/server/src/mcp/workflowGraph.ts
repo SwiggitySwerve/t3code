@@ -3,6 +3,7 @@ import * as NodeCrypto from "node:crypto";
 
 import type { OrchestrationV2WorkflowPlan } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
+import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
 import {
   FILE_ID,
@@ -447,6 +448,8 @@ const run = (key) =>
 await Promise.all(Object.keys(graph.nodes).sort().map(run));
 const record = { ok: Object.values(results).every((node) => node.status === "passed"), nodes: results };
 // A graph completes only when every node passed; the failed workflow keeps the record.
-if (!record.ok) throw new Error("Graph failed: " + JSON.stringify(record));
+if (!record.ok) throw new Error((${workflowGraphFailureSummary.toString()})(
+  Object.entries(results).map(([key, outcome]) => ({ ...outcome, label: graph.nodes[key].subject }))
+));
 return record;
 `;

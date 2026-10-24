@@ -30,6 +30,7 @@ export interface WorkflowGraphNodeView<Member> {
   readonly attempts: number | null;
   /** The agent that runs this node, once one started. */
   readonly member: Member | null;
+  readonly checkers: ReadonlyArray<Member>;
 }
 
 export interface WorkflowGraphView<Member> {
@@ -49,6 +50,7 @@ export interface WorkflowGraphView<Member> {
 interface GraphMember {
   readonly graphNodeKey?: string | undefined;
   readonly status: string;
+  readonly judgmentFor?: { readonly graphNodeKey?: string | undefined } | undefined;
 }
 
 function stateWithoutOutcome(member: GraphMember | null, active: boolean): WorkflowGraphNodeState {
@@ -68,8 +70,16 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
   const keys = new Set(input.plan.nodes.map((node) => node.key));
   const memberByKey = new Map<string, Member>();
   const otherMembers: Array<Member> = [];
+  const checkersByKey = new Map<string, Array<Member>>();
   for (const member of input.members) {
-    if (member.graphNodeKey !== undefined && keys.has(member.graphNodeKey)) {
+    if (member.judgmentFor !== undefined) {
+      const key = member.judgmentFor.graphNodeKey;
+      if (key !== undefined && keys.has(key)) {
+        const checkers = checkersByKey.get(key) ?? [];
+        checkers.push(member);
+        checkersByKey.set(key, checkers);
+      } else otherMembers.push(member);
+    } else if (member.graphNodeKey !== undefined && keys.has(member.graphNodeKey)) {
       memberByKey.set(member.graphNodeKey, member);
     } else {
       otherMembers.push(member);
@@ -96,6 +106,7 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
       reason: outcome?.reason ?? null,
       attempts: outcome?.attempts ?? null,
       member,
+      checkers: checkersByKey.get(node.key) ?? [],
     };
   });
 

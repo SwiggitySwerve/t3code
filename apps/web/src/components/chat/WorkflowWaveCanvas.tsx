@@ -1,6 +1,7 @@
 import {
   WORKFLOW_GRAPH_STATE_LABEL,
   workflowGraphNodeDetail,
+  workflowMemberIdentity,
   type RuntimeSubagent,
   type WorkflowGraphNodeState,
   type WorkflowGraphNodeView,
@@ -18,7 +19,7 @@ import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { AgentElapsed } from "./AgentElapsed";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
-import { type WaveBox, workflowWaveLayout } from "./workflowWaveLayout";
+import { WAVE_CARD_HEIGHT, type WaveBox, workflowWaveLayout } from "./workflowWaveLayout";
 
 /** The avatar dot for each node state; nodes that never ran share the stopped dot. */
 const AVATAR_STATUS: Readonly<Record<WorkflowGraphNodeState, OrchestrationV2TurnItem["status"]>> = {
@@ -45,9 +46,6 @@ const MUTED_STATES: ReadonlySet<WorkflowGraphNodeState> = new Set([
 export function WorkflowWaveCanvas(props: {
   readonly graph: WorkflowGraphView<RuntimeSubagent>;
   readonly environmentId: EnvironmentId;
-  /** The workflow's provider, for nodes whose agent has not started. */
-  readonly providerInstanceId: ProviderInstanceId | null;
-  readonly driver: ProviderDriverKind | undefined;
   readonly onOpenThread: (threadId: string) => void;
 }) {
   const { graph } = props;
@@ -114,10 +112,10 @@ export function WorkflowWaveCanvas(props: {
                     box={box}
                     labels={labels}
                     environmentId={props.environmentId}
-                    providerInstanceId={node.member?.providerInstanceId ?? props.providerInstanceId}
+                    providerInstanceId={node.member?.providerInstanceId ?? null}
                     // A node without an agent has no provider yet; the workflow's own provider
                     // is the coordinator's, not the node's, so its avatar stays neutral.
-                    driver={node.member === null ? undefined : (node.member.driver ?? props.driver)}
+                    driver={node.member?.driver}
                     onOpenThread={props.onOpenThread}
                     emphasis={related === null ? null : related.has(node.key)}
                     onHighlight={(on) =>
@@ -152,11 +150,10 @@ function WorkflowNodeCard(props: {
   const { detail, retries } = workflowGraphNodeDetail(node, props.labels);
   const threadId = node.member?.childThreadId ?? null;
   const state = WORKFLOW_GRAPH_STATE_LABEL[node.state];
-  const description = [state, retries, detail].filter(Boolean).join(", ");
+  const identity = workflowMemberIdentity(node.member);
+  const description = [state, identity, retries, detail].filter(Boolean).join(", ");
   const className = cn(
-    "group/node absolute flex min-w-0 items-center gap-2 rounded-md border border-border/70 bg-card px-2 text-left",
-    node.state === "failed" && "border-destructive/50",
-    props.emphasis === true && "border-foreground/40",
+    "group/node flex min-w-0 items-center gap-2 px-2 text-left w-full rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
     props.emphasis === false ? "opacity-35" : MUTED_STATES.has(node.state) && "opacity-60",
   );
   const highlight = {
@@ -180,6 +177,7 @@ function WorkflowNodeCard(props: {
         <span className="truncate text-xs font-medium text-foreground" data-thread-find-text="true">
           {node.label}
         </span>
+        <span className="truncate text-2xs text-muted-foreground">{identity}</span>
         <span
           className={cn(
             "truncate text-2xs",
@@ -205,46 +203,103 @@ function WorkflowNodeCard(props: {
   );
   // The card truncates its text; the tooltip shows all of it.
   return (
+    <div
+      className={cn(
+        "absolute overflow-hidden rounded-md border border-border/70 bg-card",
+        node.state === "failed" && "border-destructive/50",
+        props.emphasis === true && "border-foreground/40",
+      )}
+      style={style}
+    >
+      <Tooltip>
+        <TooltipTrigger
+          delay={200}
+          render={
+            threadId === null ? (
+              <div
+                role="group"
+                aria-label={node.label}
+                aria-description={description}
+                className={className}
+                style={{ height: WAVE_CARD_HEIGHT }}
+                data-node-state={node.state}
+                data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
+                tabIndex={0}
+                {...highlight}
+              />
+            ) : (
+              <button
+                type="button"
+                aria-label={`Open ${node.label}`}
+                aria-description={description}
+                onClick={() => props.onOpenThread(threadId)}
+                className={cn(
+                  className,
+                  "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+                )}
+                style={{ height: WAVE_CARD_HEIGHT }}
+                data-node-state={node.state}
+                data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
+                {...highlight}
+              />
+            )
+          }
+        >
+          {content}
+        </TooltipTrigger>
+        <TooltipPopup className="max-w-80">
+          <span className="font-medium">{node.label}</span>
+          {": "}
+          {description}
+        </TooltipPopup>
+      </Tooltip>
+      {node.checkers.map((checker) => (
+        <WorkflowChecker key={checker.id} checker={checker} onOpenThread={props.onOpenThread} />
+      ))}
+    </div>
+  );
+}
+
+function WorkflowChecker(props: {
+  readonly checker: RuntimeSubagent;
+  readonly onOpenThread: (threadId: string) => void;
+}) {
+  const { checker } = props;
+  const threadId = checker.childThreadId;
+  const label = `Check attempt ${(checker.judgmentFor?.attempt ?? 0) + 1}: ${checker.status}`;
+  const identity = workflowMemberIdentity(checker);
+  const result = checker.error ?? checker.result;
+  const description = [label, identity, result].filter(Boolean).join(" · ");
+  const className =
+    "block h-7 w-full truncate border-t border-border/50 px-2 text-left text-2xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70";
+  return (
     <Tooltip>
       <TooltipTrigger
-        delay={200}
         render={
           threadId === null ? (
             <div
               role="group"
-              aria-label={node.label}
+              aria-label={checker.title}
               aria-description={description}
               className={className}
-              style={style}
-              data-node-state={node.state}
-              data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
               tabIndex={0}
-              {...highlight}
             />
           ) : (
             <button
               type="button"
-              aria-label={`Open ${node.label}`}
+              className={cn(className, "cursor-pointer hover:bg-accent/20")}
+              aria-label={`Open ${checker.title}, ${label}`}
               aria-description={description}
               onClick={() => props.onOpenThread(threadId)}
-              className={cn(
-                className,
-                "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-              )}
-              style={style}
-              data-node-state={node.state}
-              data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
-              {...highlight}
             />
           )
         }
       >
-        {content}
+        {label} · {identity}
       </TooltipTrigger>
       <TooltipPopup className="max-w-80">
-        <span className="font-medium">{node.label}</span>
-        {": "}
-        {description}
+        {checker.title}: {label} · {identity}
+        {result ? <p className="whitespace-pre-wrap break-words">{result}</p> : null}
       </TooltipPopup>
     </Tooltip>
   );

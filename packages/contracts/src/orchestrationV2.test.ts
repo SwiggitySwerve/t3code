@@ -394,7 +394,15 @@ describe("orchestration V2 contracts", () => {
       });
     const planned = {
       phases: [{ index: 0, title: "Layer 1" }],
-      agents: [{ index: 0, label: "Build", state: "failed" as const, graphNodeKey: "build" }],
+      agents: [
+        { index: 0, label: "Build", state: "failed" as const, graphNodeKey: "build" },
+        {
+          index: 1,
+          label: "Check",
+          state: "completed" as const,
+          judgmentFor: { agentIndex: 0, attempt: 2, graphNodeKey: "build" },
+        },
+      ],
       plan: {
         nodes: [
           { key: "build", label: "Build", wave: 0, dependsOn: [] },

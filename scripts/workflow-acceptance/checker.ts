@@ -82,6 +82,22 @@ function checkFiles(actual: unknown, expected: Record<string, string>) {
     );
   }
 }
+function optionsById(value: unknown): Map<string, string | boolean> {
+  const options = new Map<string, string | boolean>();
+  for (const entry of list(value)) {
+    const option = record(entry);
+    requireFact(
+      same(Object.keys(option).sort(), ["id", "value"]) &&
+        typeof option.id === "string" &&
+        option.id.length > 0 &&
+        (typeof option.value === "string" || typeof option.value === "boolean"),
+      "Malformed worker option",
+    );
+    requireFact(!options.has(option.id), "Duplicate worker option");
+    options.set(option.id, option.value);
+  }
+  return options;
+}
 function checkTarget(
   task: RecordValue,
   target: typeof coordinator | typeof worker,
@@ -97,8 +113,12 @@ function checkTarget(
     selection.instanceId === target.providerInstanceId && selection.model === target.model,
     "Selection differs from dispatched target",
   );
+  // Persisted options may be sorted; validate before indexing so duplicates cannot disappear.
+  const actualOptions = optionsById(selection.options === undefined ? [] : selection.options);
+  const expectedOptions = optionsById("options" in target ? target.options : []);
   requireFact(
-    same(selection.options ?? [], "options" in target ? target.options : []),
+    actualOptions.size === expectedOptions.size &&
+      [...expectedOptions].every(([id, value]) => actualOptions.get(id) === value),
     "Worker options changed",
   );
   requireFact(

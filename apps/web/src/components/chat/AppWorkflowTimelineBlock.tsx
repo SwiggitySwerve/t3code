@@ -1,5 +1,8 @@
 import { useAtomValue } from "@effect/atom-react";
-import { resolveAppWorkflowView } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  resolveAppWorkflowView,
+  workflowProgressText,
+} from "@t3tools/client-runtime/state/subagentRuntime";
 import type { NodeId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
 import { useState, type ReactNode } from "react";
 
@@ -57,7 +60,7 @@ export function AppWorkflowTimelineBlock(props: {
       onOpenThread={(threadId) => props.onOpenThread(threadId as ThreadId)}
       heading={HEADINGS[row.status] ?? "Workflow"}
       // While it runs, the script's latest log line; afterwards, what it returned or why it ended.
-      progress={row.status === "running" ? (row.progress ?? null) : row.result}
+      progress={workflowProgressText(row)}
       {...(canStop && row.status === "running"
         ? { stop: { onStop: () => void stop(), stopping, disabled: stopping } }
         : {})}

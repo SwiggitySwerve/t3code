@@ -424,6 +424,7 @@ class WorkflowSession {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
     readonly keyLabel?: string | null;
+    readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
   }): Promise<unknown> {
     const ran = await this.runAgent(request);
     if (request.options.report !== true) return ran.value;
@@ -452,6 +453,7 @@ class WorkflowSession {
     readonly options: Readonly<Record<string, unknown>>;
     /** The label its retry key uses, when not the script's own; null keys it by content alone. */
     readonly keyLabel?: string | null;
+    readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
   }): Promise<{
     readonly value: unknown;
     readonly entry: MutableAgent;
@@ -541,6 +543,7 @@ class WorkflowSession {
       index: this.agents.length,
       label,
       ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
+      ...(request.judgmentFor === undefined ? {} : { judgmentFor: request.judgmentFor }),
       state: "queued",
       ...(phase === undefined ? {} : { phaseIndex: this.phases.indexOf(phase), phaseTitle: phase }),
       prompt: truncate(request.prompt, PREVIEW_LIMIT),
@@ -723,6 +726,7 @@ class WorkflowSession {
       delete entry.outcomeCategory;
       entry.childThreadId = started.value.childThreadId;
       if (started.value.model !== null) entry.model = started.value.model;
+      else delete entry.model;
       entry.providerInstanceId = started.value.providerInstanceId;
       entry.driver = started.value.driver;
       if (attempt > 0) entry.attempt = attempt;
@@ -799,6 +803,11 @@ class WorkflowSession {
         checkType = check.type;
         checked = await this.runCheck({
           check,
+          judgmentFor: {
+            agentIndex: entry.index,
+            attempt,
+            ...(entry.graphNodeKey === undefined ? {} : { graphNodeKey: entry.graphNodeKey }),
+          },
           prompt: request.prompt,
           label,
           phase,
@@ -865,6 +874,7 @@ class WorkflowSession {
 
   private async runCheck(input: {
     readonly check: WorkflowCheck;
+    readonly judgmentFor: NonNullable<OrchestrationV2WorkflowAgent["judgmentFor"]>;
     readonly prompt: string;
     readonly label: string;
     readonly phase: string | undefined;
@@ -920,6 +930,7 @@ class WorkflowSession {
       }),
       // Its prompt already pins the work it judges; a generated worker label would not.
       keyLabel: null,
+      judgmentFor: input.judgmentFor,
       options: {
         label: `check ${input.label}`,
         ...(input.phase === undefined ? {} : { phase: input.phase }),

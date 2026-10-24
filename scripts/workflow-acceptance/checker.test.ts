@@ -7,6 +7,7 @@ import {
   fixtureFiles,
   judge,
   scenarios,
+  worker,
   type Scenario,
 } from "./fixtures.ts";
 import { checkAcceptance, sha256 } from "./checker.ts";
@@ -421,6 +422,67 @@ describe("frozen workflow acceptance", () => {
   it.each(scenarios)("accepts complete independent evidence: %s", (scenario) => {
     expect(checkAcceptance(evidence(scenario))).toEqual({ pass: true, failures: [] });
   });
+
+  it.each(["review", "refactor", "restart"] as const)(
+    "accepts reordered worker options without changing evidence: %s",
+    (scenario) => {
+      const run = evidence(scenario);
+      for (const child of finalFrame(run).childThreads) {
+        const selection = object(child.modelSelection);
+        if (Array.isArray(selection.options)) selection.options = selection.options.toReversed();
+      }
+      const captured = structuredClone(run);
+      expect(checkAcceptance(run)).toEqual({ pass: true, failures: [] });
+      expect(run).toEqual(captured);
+    },
+  );
+
+  it.each([
+    ["missing options", undefined],
+    ["null options", null],
+    [
+      "object instead of array",
+      Object.fromEntries(worker.options.map(({ id, value }) => [id, value])),
+    ],
+    ["empty options", []],
+    ["missing option", worker.options.slice(0, 1)],
+    ["null entry", [null, worker.options[1]]],
+    ["array entry", [["serviceTier", "ultrafast"], worker.options[1]]],
+    ["missing id", [{ value: "ultrafast" }, worker.options[1]]],
+    ["non-string id", [{ id: 1, value: "ultrafast" }, worker.options[1]]],
+    ["missing value", [{ id: "serviceTier" }, worker.options[1]]],
+    ["non-scalar value", [{ id: "serviceTier", value: {} }, worker.options[1]]],
+    ["extra entry field", [{ ...worker.options[0], extra: true }, worker.options[1]]],
+    ["duplicate replacing an option", [worker.options[0], worker.options[0]]],
+    ["duplicate identical option", [...worker.options, worker.options[0]]],
+    ["duplicate changed option", [{ ...worker.options[0], value: "priority" }, ...worker.options]],
+    ["extra option", [...worker.options, { id: "extra", value: true }]],
+    ["changed id", [{ id: "extra", value: "ultrafast" }, worker.options[1]]],
+    ["changed value", [{ ...worker.options[0], value: "priority" }, worker.options[1]]],
+    ["changed value type", [{ ...worker.options[0], value: true }, worker.options[1]]],
+  ])("rejects worker options with %s", (_name, options) => {
+    const run = evidence("refactor");
+    const child = finalFrame(run).childThreads.find((child) => child.id === "child-scoutA")!;
+    object(child.modelSelection).options = structuredClone(options);
+    expect(checkAcceptance(run).pass).toBe(false);
+  });
+
+  it.each([[], undefined])("accepts empty options on a target without options: %s", (options) => {
+    const run = evidence("refactor");
+    const child = finalFrame(run).childThreads.find((child) => child.id === "judge-child")!;
+    object(child.modelSelection).options = options;
+    expect(checkAcceptance(run)).toEqual({ pass: true, failures: [] });
+  });
+
+  it.each([null, {}, [{ id: "extra", value: true }]])(
+    "rejects malformed or extra options on a target without options: %s",
+    (options) => {
+      const run = evidence("refactor");
+      const child = finalFrame(run).childThreads.find((child) => child.id === "judge-child")!;
+      object(child.modelSelection).options = options;
+      expect(checkAcceptance(run).pass).toBe(false);
+    },
+  );
 
   it.each(["providerInstanceId", "model"])("rejects judgment routing substitution: %s", (field) => {
     const run = evidence("refactor");

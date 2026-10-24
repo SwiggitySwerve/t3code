@@ -702,6 +702,14 @@ export type OrchestrationV2WorkflowNodeOutcome = typeof OrchestrationV2WorkflowN
 export const OrchestrationV2WorkflowAgent = Schema.Struct({
   /** The graph node this agent runs, for workflows started from a reviewed graph. */
   graphNodeKey: Schema.optional(TrimmedNonEmptyString),
+  /** The worker and attempt judged by this member, independent of display labels. */
+  judgmentFor: Schema.optional(
+    Schema.Struct({
+      agentIndex: NonNegativeInt,
+      attempt: NonNegativeInt,
+      graphNodeKey: Schema.optional(TrimmedNonEmptyString),
+    }),
+  ),
   attemptTaskIds: Schema.optional(Schema.Array(NodeId)),
   outcomeCategory: Schema.optional(WorkflowAgentOutcomeCategory),
   runnerSettledAt: Schema.optional(NonNegativeInt),

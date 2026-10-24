@@ -3668,7 +3668,7 @@ describe("live subagents after their parent turn settles", () => {
     second: number,
     status: OrchestrationV2TurnItem["status"],
     origin: "app_owned" | "provider_native" = "app_owned",
-  ): OrchestrationV2TurnItem => ({
+  ): Extract<OrchestrationV2TurnItem, { type: "subagent" }> => ({
     ...base(id, second),
     status,
     completedAt: status === "running" ? null : at(second),
@@ -3681,8 +3681,12 @@ describe("live subagents after their parent turn settles", () => {
     prompt: `Inspect ${id}`,
     result: null,
   });
-  const rowsFor = (children: ReadonlyArray<OrchestrationV2TurnItem>) =>
+  const rowsFor = (
+    children: ReadonlyArray<OrchestrationV2TurnItem>,
+    appWorkflowIds?: ReadonlySet<string>,
+  ) =>
     deriveMessagesTimelineRows({
+      appWorkflowIds,
       timelineEntries: deriveTimelineEntriesFromVisibleTurnItems({
         visibleTurnItems: (
           [
@@ -3755,6 +3759,33 @@ describe("live subagents after their parent turn settles", () => {
     expect(rows.find((row) => row.id === "done")).toMatchObject({
       subagents: [{ item: { id: "done" } }, { item: { id: "live" } }],
     });
+  });
+
+  it("keeps a finished app workflow visible while ordinary finished children fold", () => {
+    const rows = rowsFor(
+      [
+        { ...child("workflow", 3, "completed"), childThreadId: null },
+        { ...child("second-workflow", 4, "completed"), childThreadId: null },
+        child("ordinary", 5, "completed"),
+      ],
+      new Set(["workflow", "second-workflow"]),
+    );
+    expect(rows.map((row) => row.id)).toContain("workflow");
+    expect(rows.map((row) => row.id)).not.toContain("ordinary");
+    expect(rows.find((row) => row.id === "workflow")).not.toHaveProperty("subagents");
+    expect(rows.map((row) => row.id)).toContain("second-workflow");
+  });
+
+  it("does not retain a finished child just because an adjacent workflow is running", () => {
+    const rows = rowsFor(
+      [
+        { ...child("workflow", 3, "running"), childThreadId: null },
+        child("ordinary", 4, "completed"),
+      ],
+      new Set(["workflow"]),
+    );
+    expect(rows.map((row) => row.id)).toContain("workflow");
+    expect(rows.map((row) => row.id)).not.toContain("ordinary");
   });
 
   it("keeps a running child visible when a steer supersedes its attempt", () => {

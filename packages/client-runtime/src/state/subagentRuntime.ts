@@ -10,6 +10,7 @@ import type {
 } from "@t3tools/contracts";
 import { isOrchestrationV2WorkActive, isProviderNativeSubagentThread } from "@t3tools/contracts";
 import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript";
+import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
 import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
 
@@ -96,6 +97,7 @@ export interface RuntimeSubagent {
     | undefined;
   /** The graph node a workflow member runs. */
   readonly graphNodeKey?: string | undefined;
+  readonly judgmentFor?: OrchestrationV2SubagentWorkflow["agents"][number]["judgmentFor"];
   readonly firstSeenAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -119,6 +121,96 @@ export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
 
 export function isLiveSubagentTurnItem(item: OrchestrationV2TurnItem): boolean {
   return item.type === "subagent" && isOrchestrationV2WorkActive(item.status);
+}
+
+/** Matches the app-owned workflow entry point, never a completed child thread. */
+export function isAppWorkflowTurnItem(
+  item: OrchestrationV2TurnItem,
+  workflowIds?: ReadonlySet<string>,
+): boolean {
+  return (
+    item.type === "subagent" &&
+    item.origin === "app_owned" &&
+    workflowIds?.has(item.subagentId) === true
+  );
+}
+
+/** Identity recorded on the member after dispatch, never the plan or coordinator's target. */
+export function workflowMemberIdentity(member: RuntimeSubagent | null): string {
+  if (member === null) return "Not started";
+  if (member.childThreadId === null && member.startedAt === null && member.model === null)
+    return "Not started";
+  return `${member.providerInstanceId ?? "Unknown provider"} / ${member.model ?? "Unknown model"}`;
+}
+
+/** Old graph errors embedded the full outcome record; arbitrary script text stays intact. */
+export function workflowProgressText(row: {
+  readonly status: OrchestrationV2Subagent["status"];
+  readonly progress?: string | undefined;
+  readonly result: string | null;
+  readonly workflow?: OrchestrationV2SubagentWorkflow | undefined;
+}): string | null {
+  if (row.status === "running") return row.progress ?? null;
+  const plan = row.workflow?.plan;
+  if (plan === undefined || row.result === null) return row.result;
+  const prefix = "The workflow failed: Graph failed: ";
+  if (row.result.startsWith(prefix)) {
+    const recorded = plan.nodes.flatMap((node) => {
+      const outcome = row.workflow?.nodeOutcomes?.[node.key];
+      return outcome === undefined ? [] : [{ ...outcome, label: node.label }];
+    });
+    if (recorded.some((node) => node.status === "failed"))
+      return workflowGraphFailureSummary(recorded);
+  }
+  const raw = row.result.startsWith(prefix) ? row.result.slice(prefix.length) : row.result;
+  let record: unknown;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    // QuickJS appends the source location to thrown errors, outside their JSON record.
+    const location = raw.lastIndexOf(" (at ");
+    if (!row.result.startsWith(prefix) || location < 0) return row.result;
+    try {
+      record = JSON.parse(raw.slice(0, location));
+    } catch {
+      return row.result;
+    }
+  }
+  if (typeof record !== "object" || record === null || !("ok" in record) || !("nodes" in record))
+    return row.result;
+  const outcomes = record.nodes;
+  if (
+    typeof record.ok !== "boolean" ||
+    typeof outcomes !== "object" ||
+    outcomes === null ||
+    Array.isArray(outcomes)
+  )
+    return row.result;
+  const nodes: Array<{ label: string; status: string; reason?: string }> = [];
+  for (const node of plan.nodes) {
+    const outcome: unknown = Object.getOwnPropertyDescriptor(outcomes, node.key)?.value;
+    if (
+      typeof outcome !== "object" ||
+      outcome === null ||
+      !("status" in outcome) ||
+      !["passed", "failed", "skipped"].includes(String(outcome.status))
+    )
+      return row.result;
+    const recorded = row.workflow?.nodeOutcomes?.[node.key];
+    nodes.push({
+      label: node.label,
+      status: recorded?.status ?? String(outcome.status),
+      ...(recorded?.reason !== undefined
+        ? { reason: recorded.reason }
+        : "reason" in outcome && typeof outcome.reason === "string"
+          ? { reason: outcome.reason }
+          : {}),
+    });
+  }
+  if (record.ok && nodes.every((node) => node.status === "passed")) return null;
+  return record.ok === false && nodes.some((node) => node.status === "failed")
+    ? workflowGraphFailureSummary(nodes)
+    : row.result;
 }
 
 export interface SubagentWorkflowGroup {
@@ -196,6 +288,7 @@ function workflowMembersToRuntime(
       recentActivity: [],
       graph: undefined,
       graphNodeKey: agent.graphNodeKey,
+      judgmentFor: agent.judgmentFor,
       firstSeenAt: isoFromEpochMillis(agent.queuedAt) ?? startedAt ?? coordinator.firstSeenAt,
       startedAt,
       completedAt,

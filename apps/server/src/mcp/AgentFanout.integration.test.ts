@@ -2665,9 +2665,10 @@ describe("graphs", () => {
         );
         const ended = yield* awaitWorkflowEnd(started.workflowId);
         expect(ended.status).toBe("failed");
-        expect(ended.result).toContain("Graph failed: ");
-        expect(ended.result).toContain('"consume":{"status":"skipped"');
-        expect(ended.result).toContain("Predecessor produce did not pass.");
+        const reason = `Its outputs check failed: output total (${dir}/total.json) was not written.`;
+        expect(ended.result).toContain(
+          `The workflow failed: Graph failed: 1 node failed, 1 skipped. Produce: ${reason}`,
+        );
         expect(ended.agents).toHaveLength(1);
         expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 3 });
         // The row itself records both nodes, including the one that never started an agent.
@@ -2675,8 +2676,8 @@ describe("graphs", () => {
           parentThreadId,
         )).subagents.find((task) => task.id === started.workflowId);
         expect(row?.workflow?.agents.map((agent) => agent.graphNodeKey)).toEqual(["produce"]);
-        expect(row?.workflow?.nodeOutcomes).toMatchObject({
-          produce: { status: "failed", attempts: 3 },
+        expect(row?.workflow?.nodeOutcomes).toEqual({
+          produce: { status: "failed", attempts: 3, reason },
           consume: { status: "skipped", attempts: 0, reason: "Predecessor produce did not pass." },
         });
       }).pipe(Effect.provide(layerTest)),
@@ -2796,10 +2797,17 @@ describe("graphs", () => {
         const ended = yield* awaitWorkflowEnd(started.workflowId);
         expect(ended.status).toBe("failed");
         expect(ended.tokensUsed).toBe(1500);
-        expect(ended.result).toContain('"produce":{"status":"passed"');
+        const reason = "Error: The workflow's budget of 1000 tokens is spent (1500 used).";
         expect(ended.result).toContain(
-          "The workflow's budget of 1000 tokens is spent (1500 used).",
+          `The workflow failed: Graph failed: 1 node failed. Consume: ${reason}`,
         );
+        const row = (yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        )).subagents.find((task) => task.id === started.workflowId);
+        expect(row?.workflow?.nodeOutcomes).toEqual({
+          produce: { status: "passed", attempts: 1 },
+          consume: { status: "failed", attempts: 0, reason },
+        });
       }).pipe(Effect.provide(layerTest)),
     ),
   );

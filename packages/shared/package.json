@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./workflowGraphResult": {
+      "types": "./src/workflowGraphResult.ts",
+      "import": "./src/workflowGraphResult.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"

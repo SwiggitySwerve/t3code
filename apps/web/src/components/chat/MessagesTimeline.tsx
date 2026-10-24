@@ -1,4 +1,8 @@
 import { ThreadFindTimelineContext } from "./ThreadFindProvider";
+import { useAtomValue } from "@effect/atom-react";
+import { Atom } from "effect/reactivity";
+import { isAppWorkflow } from "@t3tools/client-runtime/state/subagentRuntime";
+import { environmentThreadDetails } from "../../state/threads";
 import { MarkdownFindContext } from "./markdownFindContext";
 import { useChatCanvas } from "./ChatCanvasContext";
 import { WorkLogBlock } from "./WorkLog";
@@ -22,6 +26,18 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
+const appWorkflowIdsAtom = Atom.family((key: string) => {
+  const ref = parseScopedThreadKey(key);
+  let ids: ReadonlySet<string> = new Set();
+  return Atom.make((get) => {
+    const thread = ref === null ? null : get(environmentThreadDetails.threadAtom(ref));
+    const next = (thread?.projection.subagents ?? [])
+      .filter(isAppWorkflow)
+      .map((agent) => agent.id);
+    if (next.length !== ids.size || next.some((id) => !ids.has(id))) ids = new Set(next);
+    return ids;
+  });
+});
 
 import { resolveChatListAnchoredEndSpace } from "@t3tools/shared/chatList";
 import { observeVisibleAnimation } from "../../lib/visibleAnimation";
@@ -367,6 +383,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
   loadEarlier = null,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
+  const appWorkflowIds = useAtomValue(appWorkflowIdsAtom(listIdentityKey));
   // The remembered position is a snapshot taken when the list identity changes;
   // scrolling keeps rewriting the stored entry, which must not move the restore.
   const [listState, setListState] = useState(() => timelineListStateFor(listIdentityKey));
@@ -561,6 +578,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
         runningRunId,
         isWorking,
         runlessWorkActive,
+        appWorkflowIds,
       })
     : null;
   const activeFindRunId =
@@ -597,6 +615,7 @@ const ConversationTimeline = memo(function ConversationTimeline({
       : paintedExpandedAttemptIds;
 
   const rawRows = useIncrementalTimelineRows(`${listIdentityKey}\0${workspaceRoot ?? ""}`, {
+    appWorkflowIds,
     timelineEntries,
     latestRun,
     runningRunId,

@@ -25,6 +25,8 @@ const threadId = ThreadId.make("thread:workflow-runner");
 const workflowId = NodeId.make("workflow:runner-test");
 
 interface HarnessOptions {
+  readonly judgment?: (spawned: number) => boolean;
+  readonly model?: (spawned: number) => string | null;
   /** Whether the nth agent (1-based) finishes on its own, and how; otherwise it hangs. */
   readonly finish?: (spawned: number) => "completed" | "failed" | "hang";
   /** Workspace files by path, for declared outputs. */
@@ -105,7 +107,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
           return {
             taskId,
             childThreadId: ThreadId.make(`thread:agent-${spawned}`),
-            model: null,
+            model: options.model?.(spawned) ?? null,
             providerInstanceId: ProviderInstanceId.make("codex"),
             driver: ProviderDriverKind.make("codex"),
           };
@@ -117,6 +119,14 @@ const makeHarness = (options: HarnessOptions = {}) =>
           cancelledByServerRestart: false,
           outcomeCategory: statuses.get(taskId) === "completed" ? "completed" : "cancelled",
           usage: aggregateWorkflowUsage([]),
+          ...(options.judgment === undefined
+            ? {}
+            : {
+                structuredResult: {
+                  outcome: options.judgment(Number(taskId.split("-").at(-1))) ? "passed" : "failed",
+                  reasons: "Checked the result",
+                },
+              }),
           ...(options.structuredResultError === undefined
             ? {}
             : { structuredResultError: options.structuredResultError }),
@@ -447,6 +457,30 @@ describe("workflow runner", () => {
   );
 
   describe("graph plan", () => {
+    it.effect(
+      "records the started model and clears a previous model when a retry reports none",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, workflowUpdates } = yield* makeHarness({
+            finish: (spawned) => (spawned === 1 ? "failed" : "completed"),
+            model: (spawned) => (spawned === 1 ? "actual-first-model" : null),
+          });
+          yield* launch(
+            runner,
+            'return await agent("x", { node: "a", target: { model: "planned-model" } })',
+            twoNodePlan,
+          );
+          yield* Deferred.await(completed);
+          expect(
+            workflowUpdates.some((update) => update.agents[0]?.model === "actual-first-model"),
+          ).toBe(true);
+          expect(workflowUpdates.at(-1)?.agents[0]).toMatchObject({
+            childThreadId: "thread:agent-2",
+            providerInstanceId: "codex",
+          });
+          expect(workflowUpdates.at(-1)?.agents[0]?.model).toBeUndefined();
+        }),
+    );
     it.effect("sends the plan from the first update, then node outcomes and node keys", () =>
       Effect.gen(function* () {
         const { runner, completed, workflowUpdates } = yield* makeHarness();
@@ -519,7 +553,7 @@ return errors`,
       }),
     );
 
-    it.effect("tags the worker with its node but not the agent that checks it", () =>
+    it.effect("tags the worker and checker with explicit node and attempt identity", () =>
       Effect.gen(function* () {
         const { runner, completed, workflowUpdates } = yield* makeHarness();
         yield* launch(
@@ -534,7 +568,44 @@ return errors`,
           "a",
           ...agents.slice(1).map(() => null),
         ]);
+        expect(agents.slice(1).map((agent) => agent.judgmentFor)).toEqual(
+          agents.slice(1).map((_, attempt) => ({ agentIndex: 0, attempt, graphNodeKey: "a" })),
+        );
       }),
+    );
+
+    it.effect(
+      "keeps checker associations through a judgment retry and duplicate worker labels",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, workflowUpdates } = yield* makeHarness({
+            judgment: (spawned) => spawned !== 2,
+          });
+          yield* launch(
+            runner,
+            `
+          await agent("first", { node: "a", label: "same", verify: { type: "judgment", rubric: ["Correct"] } });
+          return await agent("second", { node: "b", label: "same", verify: { type: "judgment", rubric: ["Correct"] } });
+        `,
+            twoNodePlan,
+          );
+          yield* Deferred.await(completed);
+          const agents = workflowUpdates.at(-1)!.agents;
+          expect(agents.map((agent) => [agent.graphNodeKey, agent.judgmentFor])).toEqual([
+            ["a", undefined],
+            [undefined, { agentIndex: 0, attempt: 0, graphNodeKey: "a" }],
+            [undefined, { agentIndex: 0, attempt: 1, graphNodeKey: "a" }],
+            ["b", undefined],
+            [undefined, { agentIndex: 3, attempt: 0, graphNodeKey: "b" }],
+          ]);
+          expect(agents.map((agent) => agent.childThreadId)).toEqual([
+            "thread:agent-3",
+            "thread:agent-2",
+            "thread:agent-4",
+            "thread:agent-5",
+            "thread:agent-6",
+          ]);
+        }),
     );
 
     it.effect("keeps a 30-node graph's row update under 64 KB", () =>
