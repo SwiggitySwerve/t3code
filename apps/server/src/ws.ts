@@ -6,6 +6,7 @@ import * as Orchestrator from "./orchestration-v2/Orchestrator.ts";
 import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Base64 from "effect/encoding/Base64";
+import * as Arr from "effect/Array";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
@@ -63,6 +64,7 @@ import {
   OrchestrationV2ThreadLaunchError,
   type OrchestrationProjectShell,
   type OrchestrationV2ShellSnapshot,
+  type OrchestrationV2ThreadStreamItem,
   type ApplicationStoredEvent,
   type ProjectEntriesFailure,
   type ProjectFileFailure,
@@ -142,7 +144,9 @@ import { ORCHESTRATION_V2_PROJECTION_SCHEMA_VERSION } from "./orchestration-v2/P
 import { bufferLiveStream } from "./orchestration-v2/LiveStreamBudget.ts";
 import { coalesceThreadLiveStream } from "./orchestration-v2/ThreadLiveEventCoalescer.ts";
 import {
+  asFullWorkflowRow,
   buildBoundedThreadStreamSnapshot,
+  boundWorkflowUpdateBatches,
   decideThreadResume,
   isThreadReplayRawPayloadSafe,
   threadReplayEncodedBytes,
@@ -785,8 +789,33 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
     readonly requestCompletionMarker?: boolean;
     readonly acceptBoundedSnapshot?: boolean;
     readonly acceptCompactTurnItems?: boolean;
+    readonly acceptWorkflowUpdates?: boolean;
   }) {
     const threadManagement = yield* ThreadManagementService.ThreadManagementService;
+    // Clients that do not apply workflow patches get the workflow's current full row instead.
+    // Whole batches are converted, so the stream keeps its batching and reads rows once per batch.
+    const withFullWorkflowRows = (
+      items: Arr.NonEmptyReadonlyArray<OrchestrationV2ThreadStreamItem>,
+    ) =>
+      !items.some((item) => item.kind === "event" && item.event.type === "workflow.updated")
+        ? Effect.succeed(items)
+        : threadManagement.getThreadRecords(input.threadId, ["subagents"]).pipe(
+            Effect.map(({ subagents }) =>
+              Arr.map(items, (item) => asFullWorkflowRow(item, subagents)),
+            ),
+            Effect.mapError(
+              (cause) =>
+                new OrchestrationV2GetThreadProjectionError({
+                  threadId: input.threadId,
+                  message: `Failed to read workflow rows for orchestration V2 thread ${input.threadId}`,
+                  cause,
+                }),
+            ),
+          );
+    const forClient = <E, R>(stream: Stream.Stream<OrchestrationV2ThreadStreamItem, E, R>) =>
+      input.acceptWorkflowUpdates === true
+        ? stream
+        : stream.pipe(Stream.mapArrayEffect(withFullWorkflowRows));
     const applicationEvents = yield* OrchestrationEventStore.OrchestrationEventStore;
 
     yield* Effect.annotateCurrentSpan({
@@ -816,6 +845,7 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
             event: projectDomainEventForWire(stored.event),
           })),
           coalesceThreadLiveStream,
+          boundWorkflowUpdateBatches,
           Stream.mapError(
             (cause) =>
               new OrchestrationV2GetThreadProjectionError({
@@ -824,6 +854,8 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
                 cause,
               }),
           ),
+          // After the stream's own error mapping, so a failed row read keeps its single error.
+          forClient,
         );
 
     const loadReplayThrough = (afterSequence: number, throughSequence: number) =>
@@ -964,8 +996,19 @@ export const subscribeOrchestrationV2Thread = Effect.fn("ws.orchestrationV2.subs
       if (plan.mode === "snapshot") {
         return yield* snapshotThenLive();
       }
+      // The replay limit counts stored patches. An older client would receive each patch as the
+      // workflow's full row, which can far exceed that limit, so it gets a snapshot instead.
+      if (
+        input.acceptWorkflowUpdates !== true &&
+        replay.some((item) => item.kind === "event" && item.event.type === "workflow.updated")
+      ) {
+        return yield* snapshotThenLive();
+      }
       return Stream.concat(
-        Stream.concat(rpcInitialItems(replay), completionMarker),
+        Stream.concat(
+          rpcInitialItems(replay).pipe(boundWorkflowUpdateBatches, forClient),
+          completionMarker,
+        ),
         eventStreamFrom(highWater),
       );
     }

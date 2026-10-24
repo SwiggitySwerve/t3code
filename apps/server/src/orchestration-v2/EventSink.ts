@@ -1,6 +1,7 @@
 import {
   CommandId,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
@@ -22,6 +23,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
+import { applyWorkflowUpdate, workflowLifecycleUpdate } from "@t3tools/shared/workflowUpdate";
 
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
@@ -338,6 +340,7 @@ const layerBase: Layer.Layer<
       });
 
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+      const workflows = new Map<NodeId, OrchestrationV2Subagent>();
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -347,15 +350,51 @@ const layerBase: Layer.Layer<
       );
       return Effect.forEach(
         events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
+        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> => {
+          if (
+            event.type === "workflow.updated" ||
+            (event.type === "subagent.updated" && event.payload.workflow !== undefined)
+          ) {
+            return Effect.gen(function* () {
+              const inBatch = workflows.get(event.payload.id);
+              const previous =
+                inBatch ??
+                (event.type === "workflow.updated" || event.payload.workflow?.revision !== undefined
+                  ? (yield* projectionStore.getThreadRecords(event.threadId, [
+                      "subagents",
+                    ])).subagents.find((task) => task.id === event.payload.id)
+                  : undefined);
+              const change =
+                event.type === "workflow.updated"
+                  ? event.payload
+                  : previous === undefined
+                    ? undefined
+                    : workflowLifecycleUpdate(previous, event.payload);
+              if (change === undefined) {
+                if (event.type === "subagent.updated")
+                  workflows.set(event.payload.id, event.payload);
+                return event;
+              }
+              // The sink sequences revisions: rebase every update on the latest row it knows, from this
+              // batch or the store. A producer that read an older row (for example two commands
+              // racing on one thread) would otherwise commit an event every projection ignores.
+              // Patches carry whole member entries and outcomes, so rebasing keeps the later value.
+              const revision = previous?.workflow?.revision ?? 0;
+              const payload = { ...change, previousRevision: revision, revision: revision + 1 };
+              const task = yield* Effect.try(() => applyWorkflowUpdate(previous, payload));
+              workflows.set(task.id, task);
+              return { ...event, type: "workflow.updated" as const, payload };
+            });
+          }
+          return event.type === "turn-item.updated"
             ? turnItemPositions
                 .normalize(
                   event.payload,
                   event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
                 )
                 .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
+            : Effect.succeed(event);
+        },
         { concurrency: 1 },
       );
     };

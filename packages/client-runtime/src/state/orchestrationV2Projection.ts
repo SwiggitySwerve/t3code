@@ -1,4 +1,5 @@
 import { applyThreadPullRequestLinkUpdate } from "@t3tools/shared/threadPullRequests";
+import { applyWorkflowProjectionUpdate } from "@t3tools/shared/workflowUpdate";
 import type {
   OrchestrationV2DomainEvent,
   OrchestrationV2Run,
@@ -276,6 +277,8 @@ export function applyOrchestrationV2ProjectionEvent(
       return { ...base, nodes: upsertEntity(base.nodes, event.payload) };
     case "subagent.updated":
       return { ...base, subagents: upsertEntity(base.subagents, event.payload) };
+    case "workflow.updated":
+      return applyWorkflowProjectionUpdate(base, event.payload);
     case "provider-session.attached":
     case "provider-session.updated":
       return {

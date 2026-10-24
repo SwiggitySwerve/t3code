@@ -18,13 +18,26 @@ import type {
 import { ChevronRightIcon, HistoryIcon } from "lucide-react";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { formatTokens } from "@t3tools/shared/usageFormat";
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
+import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Tooltip, TooltipCreateHandle, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Button } from "../ui/button";
-import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
+import {
+  Popover,
+  PopoverCreateHandle,
+  PopoverPopup,
+  PopoverTitle,
+  PopoverTrigger,
+} from "../ui/popover";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
-import { WAVE_CARD_HEIGHT, type WaveBox, workflowWaveLayout } from "./workflowWaveLayout";
+import {
+  WAVE_CARD_HEIGHT,
+  type WaveBox,
+  type WaveViewport,
+  visibleWaveCards,
+  workflowWaveLayout,
+} from "./workflowWaveLayout";
 
 /** The avatar dot for each node state; nodes that never ran share the stopped dot. */
 const AVATAR_STATUS: Readonly<Record<WorkflowGraphNodeState, OrchestrationV2TurnItem["status"]>> = {
@@ -36,6 +49,21 @@ const AVATAR_STATUS: Readonly<Record<WorkflowGraphNodeState, OrchestrationV2Turn
   waiting: "pending",
   not_run: "cancelled",
   interrupted: "interrupted",
+};
+
+type AttemptsPayload = {
+  readonly label: string;
+  readonly totals: string;
+  readonly accounting: ReturnType<typeof workflowNodeAccounting>;
+};
+
+/**
+ * One tooltip and one attempts popover serve every card. A 150-node graph would otherwise mount
+ * about 450 tooltip roots and 150 popover roots on each render.
+ */
+type CanvasOverlays = {
+  readonly tooltip: ReturnType<typeof TooltipCreateHandle<ReactNode>>;
+  readonly attempts: ReturnType<typeof PopoverCreateHandle<AttemptsPayload>>;
 };
 
 const MUTED_STATES: ReadonlySet<WorkflowGraphNodeState> = new Set([
@@ -59,11 +87,72 @@ export function WorkflowWaveCanvas(props: {
   const labels = new Map(nodes.map((node) => [node.key, node.label] as const));
   // Hovering or focusing a node highlights it, what it depends on and what depends on it.
   const [highlighted, setHighlighted] = useState<string | null>(null);
+  // Only cards in view (plus a margin) draw in full; a 150-node graph stays fast to render.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<WaveViewport | null>(null);
+  useLayoutEffect(() => {
+    const element = scrollRef.current;
+    if (element === null) return;
+    let frame = 0;
+    const read = () => {
+      frame = 0;
+      setViewport({
+        left: element.scrollLeft,
+        top: element.scrollTop,
+        width: element.clientWidth,
+        height: element.clientHeight,
+      });
+    };
+    const schedule = () => {
+      if (frame === 0) frame = requestAnimationFrame(read);
+    };
+    read();
+    element.addEventListener("scroll", schedule, { passive: true });
+    const stopObserving = observeResize(element, read);
+    return () => {
+      element.removeEventListener("scroll", schedule);
+      stopObserving();
+      if (frame !== 0) cancelAnimationFrame(frame);
+    };
+  }, []);
+  // The highlighted card and the card whose attempts are open stay drawn, so scrolling away
+  // never unmounts the element that holds focus, hover state or the popover's anchor.
+  const [attemptsOpenFor, setAttemptsOpenFor] = useState<string | null>(null);
+  const visible = viewport === null ? null : visibleWaveCards(layout, viewport);
+  const drawn =
+    visible === null
+      ? null
+      : new Set([
+          ...visible,
+          ...(highlighted === null ? [] : [highlighted]),
+          ...(attemptsOpenFor === null ? [] : [attemptsOpenFor]),
+        ]);
+  // Tabbing onto a placeholder draws that card in full; focus then moves to its main control.
+  const focusRequest = useRef<string | null>(null);
+  useLayoutEffect(() => {
+    const key = focusRequest.current;
+    if (key === null || key !== highlighted) return;
+    focusRequest.current = null;
+    scrollRef.current
+      ?.querySelector<HTMLElement>(`[data-workflow-node="${CSS.escape(key)}"] [data-node-state]`)
+      ?.focus();
+  }, [highlighted]);
+  const [overlays] = useState<CanvasOverlays>(() => ({
+    tooltip: TooltipCreateHandle<ReactNode>(),
+    attempts: PopoverCreateHandle<AttemptsPayload>(),
+  }));
   const focus = nodes.find((node) => node.key === highlighted);
   const related =
     focus === undefined ? null : new Set([focus.key, ...focus.dependsOn, ...focus.dependents]);
   return (
-    <div className="overflow-x-auto overflow-y-hidden px-1 pb-1" data-workflow-waves>
+    <div
+      ref={scrollRef}
+      className="max-h-120 overflow-auto px-1 pb-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
+      data-workflow-waves
+      role="region"
+      aria-label="Workflow graph"
+      tabIndex={0}
+    >
       <div className="relative" style={{ width: layout.width, height: layout.height }}>
         <svg
           aria-hidden
@@ -110,7 +199,23 @@ export function WorkflowWaveCanvas(props: {
               </h4>
               {nodes.map((node) => {
                 const box = layout.cards.get(node.key);
-                return box === undefined ? null : (
+                if (box === undefined) return null;
+                const emphasis = related === null ? null : related.has(node.key);
+                if (drawn === null || !drawn.has(node.key)) {
+                  return (
+                    <WorkflowNodePlaceholder
+                      key={node.key}
+                      node={node}
+                      box={box}
+                      emphasis={emphasis}
+                      onFocus={() => {
+                        focusRequest.current = node.key;
+                        setHighlighted(node.key);
+                      }}
+                    />
+                  );
+                }
+                return (
                   <WorkflowNodeCard
                     key={node.key}
                     node={node}
@@ -122,7 +227,9 @@ export function WorkflowWaveCanvas(props: {
                     // is the coordinator's, not the node's, so its avatar stays neutral.
                     driver={node.member?.driver}
                     onOpenThread={props.onOpenThread}
-                    emphasis={related === null ? null : related.has(node.key)}
+                    overlays={overlays}
+                    onAttemptsOpen={() => setAttemptsOpenFor(node.key)}
+                    emphasis={emphasis}
                     onHighlight={(on) =>
                       setHighlighted((current) =>
                         on ? node.key : current === node.key ? null : current,
@@ -135,6 +242,79 @@ export function WorkflowWaveCanvas(props: {
           );
         })}
       </div>
+      <Tooltip handle={overlays.tooltip}>
+        {({ payload }) =>
+          payload === undefined ? null : (
+            <TooltipPopup className="max-w-80">
+              <div className="max-h-64 overflow-y-auto">{payload}</div>
+            </TooltipPopup>
+          )
+        }
+      </Tooltip>
+      <Popover
+        handle={overlays.attempts}
+        onOpenChange={(open) => {
+          if (!open) setAttemptsOpenFor(null);
+        }}
+      >
+        {({ payload }) =>
+          payload === undefined ? null : (
+            <PopoverPopup width="md">
+              <PopoverTitle>{payload.label} attempts</PopoverTitle>
+              <p className="my-2 text-xs text-muted-foreground">
+                {payload.totals}.
+                {payload.accounting.live ? " Running time is as of the latest update." : ""}
+              </p>
+              <div className="max-h-64 overflow-y-auto">
+                <WorkflowAttemptList
+                  accounting={payload.accounting}
+                  onOpenThread={props.onOpenThread}
+                />
+              </div>
+            </PopoverPopup>
+          )
+        }
+      </Popover>
+    </div>
+  );
+}
+
+/**
+ * A card outside the view: its label and state only, so find-in-thread and screen readers still
+ * reach every node while the full card waits until it scrolls into view.
+ */
+function WorkflowNodePlaceholder(props: {
+  readonly node: WorkflowGraphNodeView<RuntimeSubagent>;
+  readonly box: WaveBox;
+  readonly emphasis: boolean | null;
+  readonly onFocus: () => void;
+}) {
+  const { node, box } = props;
+  return (
+    <div
+      role="group"
+      aria-label={node.label}
+      aria-description={WORKFLOW_GRAPH_STATE_LABEL[node.state]}
+      tabIndex={0}
+      onFocus={props.onFocus}
+      className={cn(
+        "absolute overflow-hidden rounded-md border border-border/70 bg-card px-2 py-2",
+        node.state === "failed" && "border-destructive/50",
+        props.emphasis === false ? "opacity-35" : MUTED_STATES.has(node.state) && "opacity-60",
+      )}
+      style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
+      data-workflow-node={node.key}
+      data-workflow-node-placeholder
+    >
+      <span
+        className="block truncate text-xs font-medium text-foreground"
+        data-thread-find-text="true"
+      >
+        {node.label}
+      </span>
+      <span className="block truncate text-2xs text-muted-foreground">
+        {WORKFLOW_GRAPH_STATE_LABEL[node.state]}
+      </span>
     </div>
   );
 }
@@ -147,6 +327,8 @@ interface WorkflowNodeCardProps {
   readonly providerInstanceId: ProviderInstanceId | null;
   readonly driver: ProviderDriverKind | undefined;
   readonly onOpenThread: (threadId: string) => void;
+  readonly overlays: CanvasOverlays;
+  readonly onAttemptsOpen: () => void;
   /** Null when nothing is highlighted; otherwise whether this node relates to the highlighted one. */
   readonly emphasis: boolean | null;
   readonly onHighlight: (on: boolean) => void;
@@ -217,85 +399,85 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
         props.emphasis === true && "border-foreground/40",
       )}
       style={style}
+      data-workflow-node={node.key}
     >
       <div className="flex items-center">
-        <Tooltip>
-          <TooltipTrigger
-            delay={200}
-            render={
-              threadId === null ? (
-                <div
-                  role="group"
-                  aria-label={node.label}
-                  aria-description={description}
-                  className={className}
-                  style={{ height: WAVE_CARD_HEIGHT }}
-                  data-node-state={node.state}
-                  data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
-                  tabIndex={0}
-                  {...highlight}
-                />
-              ) : (
-                <button
-                  type="button"
-                  aria-label={`Open ${node.label}`}
-                  aria-description={description}
-                  onClick={() => props.onOpenThread(threadId)}
-                  className={cn(
-                    className,
-                    "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-                  )}
-                  style={{ height: WAVE_CARD_HEIGHT }}
-                  data-node-state={node.state}
-                  data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
-                  {...highlight}
-                />
-              )
-            }
-          >
-            {content}
-          </TooltipTrigger>
-          <TooltipPopup className="max-w-80">
-            <div className="max-h-64 overflow-y-auto">
+        <TooltipTrigger
+          handle={props.overlays.tooltip}
+          payload={
+            <>
               <p>
                 <span className="font-medium">{node.label}</span>
                 {": "}
                 {description}
               </p>
               <WorkflowAttemptList accounting={accounting} />
-            </div>
-          </TooltipPopup>
-        </Tooltip>
+            </>
+          }
+          delay={200}
+          render={
+            threadId === null ? (
+              <div
+                role="group"
+                aria-label={node.label}
+                aria-description={description}
+                className={className}
+                style={{ height: WAVE_CARD_HEIGHT }}
+                data-node-state={node.state}
+                data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
+                tabIndex={0}
+                {...highlight}
+              />
+            ) : (
+              <button
+                type="button"
+                aria-label={`Open ${node.label}`}
+                aria-description={description}
+                onClick={() => props.onOpenThread(threadId)}
+                className={cn(
+                  className,
+                  "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+                )}
+                style={{ height: WAVE_CARD_HEIGHT }}
+                data-node-state={node.state}
+                data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
+                {...highlight}
+              />
+            )
+          }
+        >
+          {content}
+        </TooltipTrigger>
         {accounting.attempts.length > 0 ? (
-          <Popover>
-            <PopoverTrigger
-              render={
-                <Button variant="ghost" size="icon-sm" aria-label={`Attempts for ${node.label}`} />
-              }
-            >
-              <HistoryIcon aria-hidden />
-            </PopoverTrigger>
-            <PopoverPopup width="md">
-              <PopoverTitle>{node.label} attempts</PopoverTitle>
-              <p className="my-2 text-xs text-muted-foreground">
-                {totals}. Running time is as of the latest update.
-              </p>
-              <div className="max-h-64 overflow-y-auto">
-                <WorkflowAttemptList accounting={accounting} onOpenThread={props.onOpenThread} />
-              </div>
-            </PopoverPopup>
-          </Popover>
+          <PopoverTrigger
+            handle={props.overlays.attempts}
+            onClick={props.onAttemptsOpen}
+            payload={{ label: node.label, totals, accounting }}
+            render={
+              <Button variant="ghost" size="icon-sm" aria-label={`Attempts for ${node.label}`} />
+            }
+          >
+            <HistoryIcon aria-hidden />
+          </PopoverTrigger>
         ) : null}
       </div>
-      {node.checkers.map((checker) => (
-        <WorkflowChecker key={checker.id} checker={checker} onOpenThread={props.onOpenThread} />
-      ))}
+      <div className="h-14 overflow-y-auto" data-workflow-checkers>
+        {node.checkers.map((checker) => (
+          <WorkflowChecker
+            key={checker.id}
+            checker={checker}
+            tooltip={props.overlays.tooltip}
+            onOpenThread={props.onOpenThread}
+          />
+        ))}
+      </div>
     </div>
   );
 }
 
 function WorkflowChecker(props: {
   readonly checker: RuntimeSubagent;
+  readonly tooltip: CanvasOverlays["tooltip"];
   readonly onOpenThread: (threadId: string) => void;
 }) {
   const { checker } = props;
@@ -307,39 +489,38 @@ function WorkflowChecker(props: {
   const className =
     "block h-7 w-full truncate border-t border-border/50 px-2 text-left text-2xs text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70";
   return (
-    <Tooltip>
-      <TooltipTrigger
-        render={
-          threadId === null ? (
-            <div
-              role="group"
-              aria-label={checker.title}
-              aria-description={description}
-              className={className}
-              tabIndex={0}
-            />
-          ) : (
-            <button
-              type="button"
-              className={cn(className, "cursor-pointer hover:bg-accent/20")}
-              aria-label={`Open ${checker.title}, ${label}`}
-              aria-description={description}
-              onClick={() => props.onOpenThread(threadId)}
-            />
-          )
-        }
-      >
-        {label} · {identity}
-      </TooltipTrigger>
-      <TooltipPopup className="max-w-80">
-        <div className="max-h-64 overflow-y-auto">
+    <TooltipTrigger
+      handle={props.tooltip}
+      payload={
+        <>
           <p>
             {checker.title}: {label} · {identity}
           </p>
           {result ? <p className="whitespace-pre-wrap break-words">{result}</p> : null}
-        </div>
-      </TooltipPopup>
-    </Tooltip>
+        </>
+      }
+      render={
+        threadId === null ? (
+          <div
+            role="group"
+            aria-label={checker.title}
+            aria-description={description}
+            className={className}
+            tabIndex={0}
+          />
+        ) : (
+          <button
+            type="button"
+            className={cn(className, "cursor-pointer hover:bg-accent/20")}
+            aria-label={`Open ${checker.title}, ${label}`}
+            aria-description={description}
+            onClick={() => props.onOpenThread(threadId)}
+          />
+        )
+      }
+    >
+      {label} · {identity}
+    </TooltipTrigger>
   );
 }
 

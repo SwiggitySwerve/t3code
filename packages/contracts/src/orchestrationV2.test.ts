@@ -15,6 +15,7 @@ import {
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
   OrchestrationV2WorkflowAgent,
+  OrchestrationV2WorkflowUpdateCommand,
 } from "./orchestrationV2.ts";
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
@@ -39,6 +40,24 @@ const encodeWorkflowAgent = Schema.encodeSync(workflowAgentCodec);
 const decodeWorkflowAgentJson = Schema.decodeUnknownSync(workflowAgentCodec);
 
 describe("orchestration V2 contracts", () => {
+  it("keeps patch identity when phases and agents also match the legacy snapshot shape", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2WorkflowUpdateCommand);
+    const encode = Schema.encodeSync(OrchestrationV2WorkflowUpdateCommand);
+    const base = {
+      type: "workflow.update",
+      commandId: "command",
+      threadId: "thread",
+      workflowId: "workflow",
+    };
+    const fields = {
+      phases: [{ index: 0, title: "Audit" }],
+      agents: [{ index: 0, label: "Worker", state: "queued" }],
+    };
+    const patch = { ...base, workflow: { kind: "patch", ...fields } };
+    expect(encode(decode(patch))).toEqual(patch);
+    const legacy = { ...base, workflow: fields };
+    expect(encode(decode(legacy))).toEqual(legacy);
+  });
   it("round-trips attempt history and accepts legacy workflow members without it", () => {
     const roundTrip = (value: unknown) =>
       decodeWorkflowAgentJson(encodeWorkflowAgent(decodeWorkflowAgent(value)));

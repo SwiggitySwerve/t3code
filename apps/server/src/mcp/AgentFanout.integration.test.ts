@@ -15,6 +15,8 @@ import {
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
+  OrchestrationV2ThreadStreamItem,
+  type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2Run,
   type ModelSelection,
   type OrchestrationV2Subagent,
@@ -30,9 +32,23 @@ import {
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import { storedWorkflowScript } from "@t3tools/shared/storedWorkflowScript";
+import { subscribeOrchestrationV2Thread } from "../ws.ts";
+import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
+import { workflowPatches } from "@t3tools/shared/workflowUpdate";
+import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
+import { projectDomainEventForWire } from "../orchestration-v2/WireProjection.ts";
+import {
+  buildBoundedThreadStreamSnapshot,
+  boundWorkflowUpdateBatches,
+} from "../orchestration-v2/ThreadStream.ts";
+import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
+import * as SqlClient from "effect/sql/SqlClient";
+import { json as rpcJson } from "effect/rpc/RpcSerialization";
+import type { ResponseChunkEncoded } from "effect/rpc/RpcMessage";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Context from "effect/Context";
+import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
@@ -606,13 +622,14 @@ const awaitWorkflowEnd = (workflowId: string) =>
       .streamStoredEventsFrom({
         threadId: parentThreadId,
         afterSequence: 0,
-        eventType: "subagent.updated",
       })
       .pipe(
         Stream.filter(
           (stored) =>
-            stored.event.type === "subagent.updated" &&
+            (stored.event.type === "subagent.updated" ||
+              stored.event.type === "workflow.updated") &&
             stored.event.payload.id === workflowId &&
+            stored.event.payload.status !== undefined &&
             stored.event.payload.status !== "running",
         ),
         Stream.runHead,
@@ -621,6 +638,396 @@ const awaitWorkflowEnd = (workflowId: string) =>
       (yield* invoke("workflow_status", { workflowId })).structuredContent,
     );
   });
+
+it.effect(
+  "C7 reconstructs bounded 150-node commands, persisted events, wire replay and reconnect",
+  () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sql = yield* SqlClient.SqlClient;
+      const initial = yield* orchestrator.getThreadProjection(parentThreadId);
+      const workflowId = NodeId.make("workflow:scale");
+      yield* orchestrator.dispatch({
+        type: "workflow.start",
+        commandId: CommandId.make("scale-start"),
+        createdBy: "agent",
+        creationSource: "mcp",
+        threadId: parentThreadId,
+        runId: initial.runs.at(-1)!.id,
+        workflowId,
+        title: "Scale 日本語 🧪",
+        script: "// frozen reviewed graph\n" + "Long prompt 日本語 🧪\n".repeat(150),
+      });
+      const base = yield* orchestrator.getThreadProjection(parentThreadId);
+      const highWater = yield* sql<{
+        sequence: number;
+      }>`SELECT max(sequence) AS sequence FROM orchestration_events`;
+      const workflow: OrchestrationV2SubagentWorkflow = {
+        phases: [{ index: 0, title: "Audit 日本語" }],
+        budget: { limit: 100000, exhausted: true },
+        plan: {
+          nodes: Array.from({ length: 150 }, (_, i) => ({
+            key: `n${i}`,
+            label: `Audit ${i} données 日本語 🧪`,
+            wave: Math.floor(i / 10),
+            dependsOn: i < 10 ? [] : [`n${i - 10}`],
+          })),
+        },
+        agents: Array.from({ length: 450 }, (_, index) => ({
+          index,
+          label: `${index < 150 ? "Worker" : "Check"} ${index}`,
+          state: "completed",
+          ...(index < 150
+            ? { graphNodeKey: `n${index}` }
+            : {
+                judgmentFor: {
+                  agentIndex: index % 150,
+                  attempt: index < 300 ? 0 : 1,
+                  graphNodeKey: `n${index % 150}`,
+                },
+                judgmentOutcome: "passed",
+              }),
+          prompt: "Inspect données 日本語 🧪 ".repeat(20),
+          result: "Evidence and reasons 日本語 🧪 ".repeat(50),
+          agentId: `task-${index}-1`,
+          childThreadId: ThreadId.make(`child-${index}-1`),
+          attemptTaskIds: [NodeId.make(`task-${index}-0`), NodeId.make(`task-${index}-1`)],
+          attemptHistory: [0, 1].map((attempt) => ({
+            taskId: NodeId.make(`task-${index}-${attempt}`),
+            childThreadId: ThreadId.make(`child-${index}-${attempt}`),
+            attempt,
+            state: attempt === 0 ? "failed" : "completed",
+            providerInstanceId: instanceId,
+            model,
+            usageStatus: "complete",
+            totalTokens: 1234,
+            durationMs: 3210,
+            timingComplete: true,
+          })),
+        })),
+        nodeOutcomes: Object.fromEntries(
+          Array.from({ length: 150 }, (_, i) => [
+            `n${i}`,
+            { status: "passed", attempts: 2, reason: "Reviewed evidence 日本語 🧪 ".repeat(20) },
+          ]),
+        ),
+      };
+      const commands = workflowPatches({ phases: [], agents: [] }, workflow).map(
+        (patch, index) => ({
+          type: "workflow.update" as const,
+          commandId: CommandId.make(`scale-update-${index}`),
+          threadId: parentThreadId,
+          workflowId,
+          workflow: patch,
+        }),
+      );
+      for (const command of commands) yield* orchestrator.dispatch(command);
+      // A producer that read an older row still lands: the sink rebases it on the current revision.
+      {
+        const sink = yield* EventSink.EventSinkV2;
+        const before = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === workflowId,
+        )!;
+        const stale = before.workflow!.revision! - 1;
+        const now = yield* DateTime.now;
+        yield* sink.commitCommand({
+          commandId: CommandId.make("scale-stale-revision"),
+          threadId: parentThreadId,
+          commandType: "test.stale-workflow-update",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make("event:scale-stale-revision"),
+              type: "workflow.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: {
+                id: workflowId,
+                previousRevision: stale - 1,
+                revision: stale,
+                progress: "Stale producer progress",
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        const after = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === workflowId,
+        )!;
+        expect(after.workflow!.revision).toBe(before.workflow!.revision! + 1);
+        expect(after.progress).toBe("Stale producer progress");
+        // Restore the progress the remaining assertions expect.
+        yield* sink.commitCommand({
+          commandId: CommandId.make("scale-stale-revision-restore"),
+          threadId: parentThreadId,
+          commandType: "test.stale-workflow-update",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make("event:scale-stale-revision-restore"),
+              type: "workflow.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: {
+                id: workflowId,
+                previousRevision: 0,
+                revision: 1,
+                ...(before.progress === undefined ? {} : { progress: before.progress }),
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+      }
+      // Retried delivery uses the command receipt; it must not add a revision or reapply usage.
+      yield* orchestrator.dispatch(commands.at(-1)!);
+      const oversized = yield* Effect.result(
+        orchestrator.dispatch({
+          ...commands[0]!,
+          commandId: CommandId.make("scale-oversized"),
+          workflow: {
+            kind: "patch",
+            agents: [{ ...workflow.agents[0]!, result: "日本語".repeat(20000) }],
+          },
+        }),
+      );
+      expect(oversized._tag).toBe("Failure");
+      const changedPlan = yield* Effect.result(
+        orchestrator.dispatch({
+          ...commands[0]!,
+          commandId: CommandId.make("scale-changed-plan"),
+          workflow: { kind: "patch", plan: { nodes: [] } },
+        }),
+      );
+      expect(changedPlan._tag).toBe("Failure");
+      const complete = {
+        type: "workflow.complete" as const,
+        commandId: CommandId.make("scale-complete"),
+        threadId: parentThreadId,
+        workflowId,
+        status: "completed" as const,
+        result: "Recorded result 日本語 🧪",
+      };
+      yield* orchestrator.dispatch(complete);
+      const acknowledgements = [1, 2].map((index) => ({
+        type: "delegated_task.completion-delivery.acknowledge" as const,
+        commandId: CommandId.make(`scale-observed-${index}`),
+        parentThreadId,
+        taskId: workflowId,
+        observedByRunId: initial.runs.at(-1)!.id,
+      }));
+      for (const command of acknowledgements) yield* orchestrator.dispatch(command);
+      const projected = yield* orchestrator.getThreadProjection(parentThreadId);
+      const final = projected.subagents.find((task) => task.id === workflowId)!;
+      // Commands, the two stale-producer events, completion and two acknowledgements.
+      expect(final.workflow).toEqual({ ...workflow, revision: commands.length + 5 });
+      const rows = yield* sql<{
+        event_type: string;
+        payload_json: string;
+      }>`SELECT event_type, payload_json FROM orchestration_events WHERE sequence > ${highWater[0]!.sequence} AND event_type = 'workflow.updated' ORDER BY sequence`;
+      expect(rows).toHaveLength(commands.length + 5);
+      const stored = yield* orchestrator
+        .streamStoredEventsFrom({
+          threadId: parentThreadId,
+          afterSequence: highWater[0]!.sequence,
+          eventType: "workflow.updated",
+        })
+        .pipe(Stream.take(rows.length), Stream.runCollect);
+      const encode = Schema.encodeEffect(Schema.toCodecJson(OrchestrationV2ThreadStreamItem));
+      const decode = Schema.decodeUnknownEffect(
+        Schema.toCodecJson(OrchestrationV2ThreadStreamItem),
+      );
+      const wire = yield* Effect.forEach(stored, (item) =>
+        encode({
+          kind: "event",
+          sequence: item.sequence,
+          event: projectDomainEventForWire(item.event),
+        }),
+      );
+      const batches = yield* Stream.fromArray(
+        stored.map((item) => ({
+          kind: "event" as const,
+          sequence: item.sequence,
+          event: item.event,
+        })),
+      ).pipe(boundWorkflowUpdateBatches, Stream.chunks, Stream.runCollect);
+      const serializer = rpcJson.makeUnsafe();
+      const rpcFrames = yield* Effect.forEach(batches, (batch) =>
+        Effect.gen(function* () {
+          const values = yield* Effect.forEach(batch, (item) => encode(item));
+          const message: ResponseChunkEncoded = {
+            _tag: "Chunk",
+            requestId: "workflow-scale-subscription",
+            values: [values[0]!, ...values.slice(1)],
+          };
+          const frame = serializer.encode(message);
+          if (typeof frame !== "string")
+            throw new Error("Expected the production JSON RPC serializer");
+          return frame;
+        }),
+      );
+      let client = base;
+      for (const encoded of wire) {
+        const item = yield* decode(encoded);
+        if (item.kind !== "event") throw new Error("Expected event");
+        client = applyOrchestrationV2ProjectionEvent(client, item.event)!;
+      }
+      expect(client.subagents.find((task) => task.id === workflowId)).toEqual(final);
+      // The finished workflow's timeline item changes through its own event, for every client.
+      const itemEvents = yield* sql<{
+        payload_json: string;
+      }>`SELECT payload_json FROM orchestration_events WHERE sequence > ${highWater[0]!.sequence} AND event_type = 'turn-item.updated' ORDER BY sequence`;
+      const workflowItems = itemEvents
+        .map((row) => JSON.parse(row.payload_json))
+        .filter((item) => item.type === "subagent" && item.subagentId === workflowId);
+      expect(workflowItems.at(-1)).toMatchObject({ status: "completed" });
+      expect(
+        projected.turnItems.find(
+          (item) => item.type === "subagent" && item.subagentId === workflowId,
+        ),
+      ).toMatchObject({ status: "completed", result: complete.result });
+      // Older clients do not apply patches.
+      const subscribe = (input: { afterSequence?: number; acceptWorkflowUpdates?: true }) =>
+        subscribeOrchestrationV2Thread({ threadId: parentThreadId, ...input }).pipe(
+          // Replay reads the same in-memory database the orchestrator writes.
+          Effect.provide(OrchestrationEventStore.layer),
+        );
+      // A replay holding a patch sends an older client a snapshot rather than one full row per
+      // patch, which could far exceed the replay byte limit.
+      const tail = stored.slice(-3);
+      const legacyResume = yield* subscribe({ afterSequence: tail[0]!.sequence - 1 }).pipe(
+        Effect.flatMap((stream) => Stream.runHead(stream)),
+        Effect.timeout("20 seconds"),
+      );
+      if (legacyResume._tag !== "Some" || legacyResume.value.kind !== "snapshot")
+        throw new Error("Expected an older client's resume to start from a snapshot");
+      expect(
+        boundedSnapshotProjection(legacyResume.value).subagents.find(
+          (task) => task.id === workflowId,
+        ),
+      ).toEqual(final);
+      // A current client replays the patches themselves.
+      const currentResume = yield* subscribe({
+        afterSequence: tail[0]!.sequence - 1,
+        acceptWorkflowUpdates: true,
+      }).pipe(
+        Effect.flatMap((stream) =>
+          stream.pipe(
+            Stream.filter(
+              (item) =>
+                item.kind === "event" &&
+                item.event.type === "workflow.updated" &&
+                item.event.payload.id === workflowId,
+            ),
+            Stream.take(tail.length),
+            Stream.runCollect,
+          ),
+        ),
+        Effect.timeout("20 seconds"),
+      );
+      expect(Array.from(currentResume)).toHaveLength(tail.length);
+      // Live, an older client receives each new patch as the workflow's full row.
+      const subscribed = yield* Deferred.make<void>();
+      const live = yield* subscribe({}).pipe(
+        Effect.flatMap((stream) =>
+          stream.pipe(
+            // Commit only after the snapshot, so the change arrives as a live event.
+            Stream.tap((item) =>
+              item.kind === "snapshot" ? Deferred.succeed(subscribed, undefined) : Effect.void,
+            ),
+            Stream.filter(
+              (item) =>
+                item.kind === "event" &&
+                (item.event.type === "workflow.updated" ||
+                  item.event.type === "subagent.updated") &&
+                item.event.payload.id === workflowId,
+            ),
+            Stream.runHead,
+          ),
+        ),
+        Effect.forkChild,
+      );
+      yield* Deferred.await(subscribed).pipe(Effect.timeout("20 seconds"));
+      {
+        const sink = yield* EventSink.EventSinkV2;
+        const now = yield* DateTime.now;
+        yield* sink.commitCommand({
+          commandId: CommandId.make("scale-live-legacy"),
+          threadId: parentThreadId,
+          commandType: "test.live-workflow-update",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make("event:scale-live-legacy"),
+              type: "workflow.updated",
+              threadId: parentThreadId,
+              occurredAt: now,
+              payload: {
+                id: workflowId,
+                previousRevision: 0,
+                revision: 1,
+                progress: "Live progress for older clients",
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+      }
+      const liveItem = yield* Fiber.join(live).pipe(Effect.timeout("20 seconds"));
+      if (liveItem._tag !== "Some" || liveItem.value.kind !== "event")
+        throw new Error("Expected a live workflow event");
+      expect(liveItem.value.event.type).toBe("subagent.updated");
+      expect(
+        liveItem.value.event.type === "subagent.updated"
+          ? liveItem.value.event.payload.progress
+          : null,
+      ).toBe("Live progress for older clients");
+      const snapshot = buildBoundedThreadStreamSnapshot({
+        snapshotSequence: stored.at(-1)!.sequence,
+        projection: projected,
+      });
+      const encodedSnapshot = yield* encode(snapshot);
+      const reconnect = yield* decode(encodedSnapshot);
+      if (reconnect.kind !== "snapshot") throw new Error("Expected snapshot");
+      expect(
+        boundedSnapshotProjection(reconnect).subagents.find((task) => task.id === workflowId),
+      ).toEqual(final);
+      const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
+      expect(Math.max(...commands.map(bytes))).toBeLessThan(65536);
+      expect(
+        Math.max(...rows.map((row) => Buffer.byteLength(row.payload_json, "utf8"))),
+      ).toBeLessThan(65536);
+      expect(Math.max(...wire.map(bytes))).toBeLessThan(65536);
+      expect(Math.max(...rpcFrames.map((frame) => Buffer.byteLength(frame, "utf8")))).toBeLessThan(
+        65536,
+      );
+      expect(bytes(encodedSnapshot)).toBeGreaterThan(65536);
+      if (process.env.C7_BOUNDARY_ARTIFACT)
+        NodeFS.writeFileSync(
+          process.env.C7_BOUNDARY_ARTIFACT,
+          JSON.stringify(
+            {
+              commands: [...commands, complete, ...acknowledgements],
+              persistedPayloads: rows,
+              wire,
+              rpcFrames,
+              snapshot: encodedSnapshot,
+              commandBytes: [...commands, complete, ...acknowledgements].map(bytes),
+              persistedBytes: rows.map((row) => Buffer.byteLength(row.payload_json, "utf8")),
+              wireBytes: wire.map(bytes),
+              rpcFrameBytes: rpcFrames.map((frame) => Buffer.byteLength(frame, "utf8")),
+              snapshotBytes: bytes(encodedSnapshot),
+            },
+            null,
+            2,
+          ),
+        );
+    }).pipe(Effect.provide(Layer.merge(layerTest, layerDatabase))),
+);
 
 const startWorkflow = (script: string, args?: unknown) =>
   Effect.gen(function* () {
@@ -1458,14 +1865,17 @@ describe("workflow resume", () => {
           .streamStoredEventsFrom({
             threadId: parentThreadId,
             afterSequence: 0,
-            eventType: "subagent.updated",
           })
           .pipe(
             Stream.filter(
               (stored) =>
-                stored.event.type === "subagent.updated" &&
+                (stored.event.type === "subagent.updated" ||
+                  stored.event.type === "workflow.updated") &&
                 stored.event.payload.id === workflowId &&
-                (stored.event.payload.workflow?.agents.some((agent) =>
+                ((stored.event.type === "workflow.updated"
+                  ? stored.event.payload.patch?.agents
+                  : stored.event.payload.workflow?.agents
+                )?.some((agent) =>
                   agent.attemptHistory?.some(
                     (attempt) => attempt.taskId === member.id && attempt.state === status,
                   ),
@@ -1573,16 +1983,17 @@ describe("workflow resume", () => {
           .streamStoredEventsFrom({
             threadId: parentThreadId,
             afterSequence: 0,
-            eventType: "subagent.updated",
           })
           .pipe(
             Stream.filter(
               (stored) =>
-                stored.event.type === "subagent.updated" &&
+                (stored.event.type === "subagent.updated" ||
+                  stored.event.type === "workflow.updated") &&
                 stored.event.payload.id === started.workflowId &&
-                (stored.event.payload.workflow?.agents.some((agent) =>
-                  agent.attemptHistory?.some(matches),
-                ) ??
+                ((stored.event.type === "workflow.updated"
+                  ? stored.event.payload.patch?.agents
+                  : stored.event.payload.workflow?.agents
+                )?.some((agent) => agent.attemptHistory?.some(matches)) ??
                   false),
             ),
             Stream.runHead,
@@ -2363,7 +2774,8 @@ describe("workflow resume", () => {
       expect(JSON.parse(ended.result!)).toEqual({
         a: "1",
         b: "2",
-        refused: "The workflow's budget of 1500 tokens is spent (1800 used).",
+        refused:
+          "The workflow's budget of 1500 tokens is spent (1800 recorded). New agents will not start; already-running agents may exceed this budget.",
         remaining: 0,
       });
       expect(ended.tokensUsed).toBe(1800);
@@ -3343,7 +3755,8 @@ describe("graphs", () => {
         const ended = yield* awaitWorkflowEnd(started.workflowId);
         expect(ended.status).toBe("failed");
         expect(ended.tokensUsed).toBe(1500);
-        const reason = "Error: The workflow's budget of 1000 tokens is spent (1500 used).";
+        const reason =
+          "Error: The workflow's budget of 1000 tokens is spent (1500 recorded). New agents will not start; already-running agents may exceed this budget.";
         expect(ended.result).toContain(
           `The workflow failed: Graph failed: 1 node failed. Consume: ${reason}`,
         );
@@ -3354,6 +3767,7 @@ describe("graphs", () => {
           produce: { status: "passed", attempts: 1 },
           consume: { status: "failed", attempts: 0, reason },
         });
+        expect(row?.workflow?.budget).toEqual({ limit: 1000, exhausted: true });
       }).pipe(Effect.provide(layerTest)),
     ),
   );

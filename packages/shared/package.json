@@ -3,6 +3,14 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./workflowUpdate": {
+      "types": "./src/workflowUpdate.ts",
+      "import": "./src/workflowUpdate.ts"
+    },
+    "./workflowBudget": {
+      "types": "./src/workflowBudget.ts",
+      "import": "./src/workflowBudget.ts"
+    },
     "./workflowGraphResult": {
       "types": "./src/workflowGraphResult.ts",
       "import": "./src/workflowGraphResult.ts"

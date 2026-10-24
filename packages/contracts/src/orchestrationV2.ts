@@ -773,7 +773,13 @@ export const OrchestrationV2WorkflowRunHandles = Schema.Struct({
 });
 export type OrchestrationV2WorkflowRunHandles = typeof OrchestrationV2WorkflowRunHandles.Type;
 
+const WorkflowBudget = Schema.Struct({
+  limit: NonNegativeInt,
+  exhausted: Schema.Boolean,
+});
 export const OrchestrationV2SubagentWorkflow = Schema.Struct({
+  revision: Schema.optional(NonNegativeInt),
+  budget: Schema.optional(WorkflowBudget),
   name: Schema.optional(TrimmedNonEmptyString),
   runHandles: Schema.optional(OrchestrationV2WorkflowRunHandles),
   phases: Schema.Array(OrchestrationV2WorkflowPhase),
@@ -826,6 +832,44 @@ export const OrchestrationV2Subagent = Schema.Struct({
   updatedAt: Schema.DateTimeUtc,
 });
 export type OrchestrationV2Subagent = typeof OrchestrationV2Subagent.Type;
+
+/** Member entries replace by index; omitted fields and entries are retained. */
+export const OrchestrationV2WorkflowPatch = Schema.Struct({
+  kind: Schema.Literal("patch"),
+  name: Schema.optional(TrimmedNonEmptyString),
+  phases: Schema.optional(Schema.Array(OrchestrationV2WorkflowPhase)),
+  plan: Schema.optional(OrchestrationV2WorkflowPlan),
+  agents: Schema.optional(Schema.Array(OrchestrationV2WorkflowAgent)),
+  nodeOutcomes: Schema.optional(
+    Schema.Record(TrimmedNonEmptyString, OrchestrationV2WorkflowNodeOutcome),
+  ),
+  budget: Schema.optional(WorkflowBudget),
+});
+export type OrchestrationV2WorkflowPatch = typeof OrchestrationV2WorkflowPatch.Type;
+
+export const OrchestrationV2WorkflowUpdateCommand = Schema.Struct({
+  type: Schema.Literal("workflow.update"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  workflowId: NodeId,
+  workflow: Schema.Union([OrchestrationV2WorkflowPatch, OrchestrationV2SubagentWorkflow]),
+  progress: Schema.optional(Schema.String),
+});
+
+export const OrchestrationV2WorkflowUpdate = Schema.Struct({
+  id: NodeId,
+  previousRevision: NonNegativeInt,
+  revision: PositiveInt,
+  patch: Schema.optional(OrchestrationV2WorkflowPatch),
+  progress: Schema.optional(Schema.String),
+  status: Schema.optional(OrchestrationV2Subagent.fields.status),
+  result: Schema.optional(Schema.NullOr(Schema.String)),
+  completedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtc)),
+  completionDelivery: Schema.optional(OrchestrationV2DelegatedCompletionTaskDelivery),
+  completionWake: Schema.optional(Schema.Literals(["always", "settled_only"])),
+  updatedAt: Schema.DateTimeUtc,
+});
+export type OrchestrationV2WorkflowUpdate = typeof OrchestrationV2WorkflowUpdate.Type;
 
 export function isOrchestrationV2WorkActive(
   status: OrchestrationV2ExecutionNode["status"],
@@ -1773,6 +1817,11 @@ export const OrchestrationV2DomainEvent = Schema.Union([
   }),
   Schema.Struct({
     ...OrchestrationV2EventBase.fields,
+    type: Schema.Literal("workflow.updated"),
+    payload: OrchestrationV2WorkflowUpdate,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2EventBase.fields,
     type: Schema.Literals(["provider-session.attached", "provider-session.updated"]),
     payload: OrchestrationV2ProviderSession,
   }),
@@ -2099,6 +2148,14 @@ export const OrchestrationV2SubagentJson = OrchestrationV2Subagent.mapFields((fi
   updatedAt: Schema.DateTimeUtcFromString,
 }));
 export type OrchestrationV2SubagentJson = typeof OrchestrationV2SubagentJson.Type;
+
+export const OrchestrationV2WorkflowUpdateJson = OrchestrationV2WorkflowUpdate.mapFields(
+  (fields) => ({
+    ...fields,
+    completedAt: Schema.optional(Schema.NullOr(Schema.DateTimeUtcFromString)),
+    updatedAt: Schema.DateTimeUtcFromString,
+  }),
+);
 
 export const OrchestrationV2CheckpointScopeJson = OrchestrationV2CheckpointScope.mapFields(
   (fields) => ({
@@ -2584,6 +2641,11 @@ export const OrchestrationV2DomainEventJson = Schema.Union([
     ...OrchestrationV2JsonEventBaseFields,
     type: Schema.Literal("subagent.updated"),
     payload: OrchestrationV2SubagentJson,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2JsonEventBaseFields,
+    type: Schema.Literal("workflow.updated"),
+    payload: OrchestrationV2WorkflowUpdateJson,
   }),
   Schema.Struct({
     ...OrchestrationV2JsonEventBaseFields,
@@ -3186,14 +3248,7 @@ const OrchestrationV2InternalCommand = Schema.Union([
     title: TrimmedNonEmptyString,
     script: TrimmedNonEmptyString,
   }),
-  Schema.Struct({
-    type: Schema.Literal("workflow.update"),
-    commandId: CommandId,
-    threadId: ThreadId,
-    workflowId: NodeId,
-    workflow: OrchestrationV2SubagentWorkflow,
-    progress: Schema.optional(Schema.String),
-  }),
+  OrchestrationV2WorkflowUpdateCommand,
   Schema.Struct({
     type: Schema.Literal("workflow.complete"),
     commandId: CommandId,
@@ -3360,6 +3415,8 @@ export const OrchestrationV2SubscribeThreadInput = Schema.Struct({
   requestCompletionMarker: Schema.optionalKey(Schema.Boolean),
   acceptBoundedSnapshot: Schema.optionalKey(Schema.Boolean),
   acceptCompactTurnItems: Schema.optionalKey(Schema.Boolean),
+  /** Clients that apply `workflow.updated` patches; others receive full `subagent.updated` rows. */
+  acceptWorkflowUpdates: Schema.optionalKey(Schema.Boolean),
 });
 export type OrchestrationV2SubscribeThreadInput = typeof OrchestrationV2SubscribeThreadInput.Type;
 

@@ -1,8 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
+// @effect-diagnostics-next-line nodeBuiltinImport:off -- optional external payload evidence from the test harness, never application IO.
+import * as NodeFS from "node:fs";
+import { mergeWorkflowPatch } from "@t3tools/shared/workflowUpdate";
 import {
   NodeId,
   type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2WorkflowPlan,
+  type OrchestrationV2WorkflowPatch,
   ProviderDriverKind,
   ProviderInstanceId,
   type OrchestrationV2StoredEvent,
@@ -65,6 +69,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const keys = new Map<string, string>();
     const firstSpawn = yield* Deferred.make<void>();
     const workflowUpdates: Array<OrchestrationV2SubagentWorkflow> = [];
+    const workflowCommands: Array<unknown> = [];
     let spawned = 0;
     const update = (id: string, status: string) => {
       statuses.set(id, status);
@@ -85,12 +90,20 @@ const makeHarness = (options: HarnessOptions = {}) =>
       dispatch: (command: {
         readonly type: string;
         readonly result?: string;
-        readonly workflow?: OrchestrationV2SubagentWorkflow;
+        readonly workflow?: OrchestrationV2SubagentWorkflow | OrchestrationV2WorkflowPatch;
       }) => {
         if (command.type === "workflow.update" && command.workflow !== undefined) {
-          workflowUpdates.push(command.workflow);
+          workflowCommands.push(command);
+          const workflow =
+            "kind" in command.workflow
+              ? mergeWorkflowPatch(
+                  workflowUpdates.at(-1) ?? { phases: [], agents: [] },
+                  command.workflow,
+                )
+              : command.workflow;
+          workflowUpdates.push(workflow);
           if (options.onWorkflowUpdate !== undefined)
-            return options.onWorkflowUpdate(command.workflow).pipe(Effect.as({} as never));
+            return options.onWorkflowUpdate(workflow).pipe(Effect.as({} as never));
         }
         return command.type === "workflow.complete"
           ? Deferred.succeed(completed, command.result ?? "").pipe(Effect.as({} as never))
@@ -203,6 +216,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
       firstSpawn,
       /** Every row update the runner sent, oldest first. */
       workflowUpdates,
+      workflowCommands,
       /** Ends the workflow row as a stop would. */
       stopWorkflow: () => update(workflowId, "cancelled"),
       updateAgent: update,
@@ -239,6 +253,65 @@ const twoNodePlan: OrchestrationV2WorkflowPlan = {
 };
 
 describe("workflow runner", () => {
+  it.effect(
+    "stops new starts at zero and after parallel overshoot without charging replay twice",
+    () =>
+      Effect.gen(function* () {
+        const zero = yield* makeHarness();
+        yield* zero.runner.launch({
+          workflowId,
+          threadId,
+          source: 'return await agent("zero")',
+          args: null,
+          afterSequence: 0,
+          budgetTokens: 0,
+        });
+        expect(yield* Deferred.await(zero.completed)).toContain("budget of 0 tokens is spent");
+        expect(zero.spawned()).toBe(0);
+        expect(zero.workflowUpdates.at(-1)?.budget).toEqual({ limit: 0, exhausted: true });
+        const parallel = yield* makeHarness({
+          usage: () => ({ ...aggregateWorkflowUsage([]), status: "complete", totalTokens: 60 }),
+        });
+        yield* parallel.runner.launch({
+          workflowId,
+          threadId,
+          source:
+            'await parallel([() => agent("a"), () => agent("b")]); return await agent("too late")',
+          args: null,
+          afterSequence: 0,
+          budgetTokens: 100,
+        });
+        expect(yield* Deferred.await(parallel.completed)).toContain("120 recorded");
+        expect(parallel.spawned()).toBe(2);
+        expect(
+          parallel.workflowUpdates
+            .at(-1)
+            ?.agents.slice(0, 2)
+            .map((agent) => agent.totalTokens),
+        ).toEqual([60, 60]);
+      }),
+  );
+  it.effect("uses recorded budget on restart before starting new work", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* harness.runner.launch({
+        workflowId,
+        threadId,
+        source: 'return await agent("new work")',
+        args: null,
+        afterSequence: 0,
+        budgetTokens: 50,
+        previousWorkflow: {
+          phases: [],
+          agents: [
+            { index: 0, label: "Old", state: "completed", agentId: "old-task", totalTokens: 60 },
+          ],
+        },
+      });
+      expect(yield* Deferred.await(harness.completed)).toContain("60 recorded");
+      expect(harness.spawned()).toBe(0);
+    }),
+  );
   it.effect("refuses the agent past the per-workflow limit of 1000", () =>
     Effect.gen(function* () {
       const { runner, completed, spawned } = yield* makeHarness();
@@ -676,9 +749,9 @@ describe("workflow runner", () => {
             twoNodePlan,
           );
           yield* Deferred.await(completed);
-          expect(
-            workflowUpdates.some((update) => update.agents[0]?.model === "actual-first-model"),
-          ).toBe(true);
+          expect(workflowUpdates.at(-1)?.agents[0]?.attemptHistory?.[0]?.model).toBe(
+            "actual-first-model",
+          );
           expect(workflowUpdates.at(-1)?.agents[0]).toMatchObject({
             childThreadId: "thread:agent-2",
             providerInstanceId: "codex",
@@ -813,38 +886,49 @@ return errors`,
         }),
     );
 
-    it.effect("keeps a 30-node graph's row update under 64 KB", () =>
+    it.effect("measures a realistic 150-node UTF-8 workflow", () =>
       Effect.gen(function* () {
-        const { runner, completed, workflowUpdates } = yield* makeHarness({
+        const harness = yield* makeHarness({
           finish: (n) => (n % 3 === 0 ? "failed" : "completed"),
+          usage: () => ({ ...aggregateWorkflowUsage([]), status: "complete", totalTokens: 12345 }),
+          timing: () => ({ durationMs: 3210, timingComplete: true }),
+          model: () => "gpt-6.1-sol",
         });
-        const plan: OrchestrationV2WorkflowPlan = {
-          nodes: Array.from({ length: 30 }, (_, index) => ({
-            key: `node-${String(index).padStart(2, "0")}`,
-            label: `Audit package number ${index} for token usage`,
-            wave: Math.floor(index / 5),
-            dependsOn: index < 5 ? [] : [`node-${String(index - 5).padStart(2, "0")}`],
+        const plan = {
+          nodes: Array.from({ length: 150 }, (_, index) => ({
+            key: `node-${index}`,
+            label: `Audit ${index}: données 日本語 🧪`,
+            wave: Math.floor(index / 10),
+            dependsOn: index < 10 ? [] : [`node-${index - 10}`],
           })),
         };
-        // Prompts at the preview limit and reasons past it: the largest a row gets from these fields.
-        yield* launch(
-          runner,
-          `await parallel(${JSON.stringify(plan.nodes.map((node) => node.key))}.map((key) => async () => {
-  await agent(key + " " + "p".repeat(800), { node: key, label: key });
-  node(key, { status: "failed", reason: "r".repeat(2000), attempts: 3 });
-}))`,
-          plan,
-        );
-        yield* Deferred.await(completed);
-        const sizes = workflowUpdates.map((update) => JSON.stringify(update).length);
-        const planBytes = JSON.stringify({
-          plan: workflowUpdates.at(-1)!.plan,
-          nodeOutcomes: workflowUpdates.at(-1)!.nodeOutcomes,
-        }).length;
-        expect(Object.keys(workflowUpdates.at(-1)!.nodeOutcomes ?? {})).toHaveLength(30);
-        expect(Math.max(...sizes)).toBeLessThan(64 * 1024);
-        // The plan and outcomes stay a minority of the row.
-        expect(planBytes).toBeLessThan(24 * 1024);
+        const source = `await parallel(${JSON.stringify(plan.nodes.map((node) => node.key))}.map((key) => async () => {
+          await agent(key + " données 日本語 🧪".repeat(100), { node: key, label: key });
+          node(key, { status: "failed", reason: "raison 日本語 🧪".repeat(100), attempts: 3 });
+        }))`;
+        yield* launch(harness.runner, source, plan);
+        yield* Deferred.await(harness.completed);
+        const commands = harness.workflowCommands;
+        const sizes = commands.map((command) => Buffer.byteLength(JSON.stringify(command), "utf8"));
+        if (process.env.C7_PAYLOAD_ARTIFACT) {
+          NodeFS.writeFileSync(
+            process.env.C7_PAYLOAD_ARTIFACT,
+            JSON.stringify(
+              {
+                boundary: "actual workflow runner dispatch commands",
+                sizes,
+                maxBytes: Math.max(...sizes),
+                source,
+                plan,
+                commands,
+              },
+              null,
+              2,
+            ),
+          );
+        }
+        expect(harness.workflowUpdates.at(-1)?.agents).toHaveLength(150);
+        expect(Math.max(...sizes)).toBeLessThanOrEqual(65536);
       }),
     );
   });

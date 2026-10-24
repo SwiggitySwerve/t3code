@@ -1,11 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  WAVE_CARD_HEIGHT,
+  WAVE_NODE_HEIGHT,
   WAVE_CARD_WIDTH,
   WAVE_COLUMN_GAP,
   WAVE_HEADER_HEIGHT,
   WAVE_ROW_GAP,
+  visibleWaveCards,
   workflowWaveLayout,
 } from "./workflowWaveLayout";
 
@@ -20,10 +21,22 @@ const waves = [
 ];
 
 describe("workflowWaveLayout", () => {
+  it("keeps geometry fixed as checker histories grow across 150 nodes", () => {
+    const graph = Array.from({ length: 15 }, (_, wave) =>
+      Array.from({ length: 10 }, (_, row) => ({ key: `${wave}-${row}`, wave })),
+    );
+    const checked = graph.map((nodes) =>
+      nodes.map((node, index) => ({
+        ...node,
+        checkers: Array.from({ length: index * 4 }, () => ({})),
+      })),
+    );
+    expect(workflowWaveLayout(checked)).toEqual(workflowWaveLayout(graph));
+  });
   it("sizes the canvas to its widest column and tallest wave", () => {
     const layout = workflowWaveLayout(waves);
     expect(layout.width).toBe(3 * WAVE_CARD_WIDTH + 2 * WAVE_COLUMN_GAP);
-    expect(layout.height).toBe(WAVE_HEADER_HEIGHT + 3 * WAVE_CARD_HEIGHT + 2 * WAVE_ROW_GAP);
+    expect(layout.height).toBe(WAVE_HEADER_HEIGHT + 3 * WAVE_NODE_HEIGHT + 2 * WAVE_ROW_GAP);
     expect(layout.columns.map((column) => column.wave)).toEqual([0, 1, 2]);
   });
 
@@ -33,9 +46,9 @@ describe("workflowWaveLayout", () => {
     expect(boxes.map(([key]) => key)).toEqual(["a", "b", "c", "d", "e"]);
     expect(layout.cards.get("c")).toEqual({
       x: WAVE_CARD_WIDTH + WAVE_COLUMN_GAP,
-      y: WAVE_HEADER_HEIGHT + WAVE_CARD_HEIGHT + WAVE_ROW_GAP,
+      y: WAVE_HEADER_HEIGHT + WAVE_NODE_HEIGHT + WAVE_ROW_GAP,
       width: WAVE_CARD_WIDTH,
-      height: WAVE_CARD_HEIGHT,
+      height: WAVE_NODE_HEIGHT,
     });
     for (const [, box] of boxes) {
       expect(box.x + box.width).toBeLessThanOrEqual(layout.width);
@@ -116,5 +129,37 @@ describe("workflowWaveLayout", () => {
     const b = skipping.cards.get("b")!;
     expect(lane).toBeGreaterThanOrEqual(b.y + b.height);
     expect(lane).toBeLessThanOrEqual(skipping.height);
+  });
+
+  it("draws in full only the cards inside the viewport and its margin", () => {
+    const grid = workflowWaveLayout(
+      Array.from({ length: 10 }, (_, wave) =>
+        Array.from({ length: 10 }, (_, row) => ({ key: `n${wave}-${row}`, wave })),
+      ),
+    );
+    const viewport = { left: 0, top: 0, width: 736, height: 480 };
+    const drawn = visibleWaveCards(grid, viewport, 0);
+    for (const [key, box] of grid.cards) {
+      const inside =
+        box.x < viewport.width &&
+        box.x + box.width > 0 &&
+        box.y < viewport.height &&
+        box.y + box.height > 0;
+      expect(drawn.has(key)).toBe(inside);
+    }
+    expect(drawn.size).toBeGreaterThan(0);
+    expect(drawn.size).toBeLessThan(grid.cards.size / 4);
+    // The margin draws the next column and row before they scroll in.
+    const widened = visibleWaveCards(grid, viewport);
+    expect(widened.size).toBeGreaterThan(drawn.size);
+    for (const key of drawn) expect(widened.has(key)).toBe(true);
+    // Scrolled to the far corner, only the far cards remain.
+    const far = visibleWaveCards(
+      grid,
+      { left: grid.width - 736, top: grid.height - 480, width: 736, height: 480 },
+      0,
+    );
+    expect(far.has("n9-9")).toBe(true);
+    expect(far.has("n0-0")).toBe(false);
   });
 });

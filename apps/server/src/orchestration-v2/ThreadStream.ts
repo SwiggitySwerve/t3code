@@ -1,7 +1,10 @@
 import type {
+  OrchestrationV2DomainEvent,
+  OrchestrationV2Subagent,
   OrchestrationV2ThreadProjection,
   OrchestrationV2ThreadStreamItem,
 } from "@t3tools/contracts";
+import * as Stream from "effect/Stream";
 
 import { omitLocalVisibleTurnItems } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
 
@@ -12,6 +15,61 @@ import {
 import { projectThreadProjectionForWire } from "./WireProjection.ts";
 
 export const THREAD_RESUME_MAX_REPLAY_EVENTS = 128;
+
+/** A queue may drain many bounded patches at once; do not turn them into one large RPC frame. */
+export const boundWorkflowUpdateBatches = <A extends OrchestrationV2ThreadStreamItem, E, R>(
+  source: Stream.Stream<A, E, R>,
+): Stream.Stream<A, E, R> =>
+  source.pipe(
+    Stream.chunks,
+    Stream.flatMap((items) => {
+      const batches: Array<Array<A>> = [];
+      let pending: Array<A> = [];
+      for (const item of items) {
+        if (item.kind === "event" && item.event.type === "workflow.updated") {
+          if (pending.length > 0) batches.push(pending);
+          batches.push([item]);
+          pending = [];
+        } else pending.push(item);
+      }
+      if (pending.length > 0) batches.push(pending);
+      return Stream.fromArrays(...batches);
+    }),
+  );
+
+/**
+ * For a client that does not apply workflow patches: replaces a `workflow.updated` item with a
+ * `subagent.updated` item carrying the workflow's current full row. Such a client would otherwise
+ * skip the event as unknown and keep a stale row. The row may already include later updates;
+ * whole-row replacement keeps such a client correct.
+ */
+export function asFullWorkflowRow(
+  item: OrchestrationV2ThreadStreamItem,
+  subagents: ReadonlyArray<OrchestrationV2Subagent>,
+): OrchestrationV2ThreadStreamItem {
+  if (item.kind !== "event" || item.event.type !== "workflow.updated") return item;
+  const event = fullWorkflowRowEvent(item.event, subagents);
+  return event === undefined ? item : { ...item, event };
+}
+
+type WorkflowUpdatedEvent = Extract<
+  OrchestrationV2DomainEvent,
+  { readonly type: "workflow.updated" }
+>;
+type SubagentUpdatedEvent = Extract<
+  OrchestrationV2DomainEvent,
+  { readonly type: "subagent.updated" }
+>;
+
+/** The `subagent.updated` event a patch amounts to: same identity, the workflow's current row. */
+export function fullWorkflowRowEvent(
+  event: WorkflowUpdatedEvent,
+  subagents: ReadonlyArray<OrchestrationV2Subagent>,
+): SubagentUpdatedEvent | undefined {
+  const { type: _type, payload, ...base } = event;
+  const row = subagents.find((task) => task.id === payload.id);
+  return row === undefined ? undefined : { ...base, type: "subagent.updated", payload: row };
+}
 
 export const THREAD_RESUME_MAX_REPLAY_ENCODED_BYTES = 1_048_576;
 

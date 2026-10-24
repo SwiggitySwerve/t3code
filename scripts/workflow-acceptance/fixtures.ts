@@ -6,7 +6,8 @@ export const worker = {
   providerInstanceId: "cliproxy",
   model: "gpt-6.1-sol",
   options: [
-    { id: "serviceTier", value: "ultrafast" },
+    // GPT-6.1 Sol on its normal tier; the ultrafast tier is no longer available.
+    { id: "serviceTier", value: "default" },
     { id: "reasoningEffort", value: "high" },
   ],
 };

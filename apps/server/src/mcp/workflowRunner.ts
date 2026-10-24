@@ -6,6 +6,8 @@
  */
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- agent keys are hashed synchronously inside QuickJS host callbacks.
 import * as NodeCrypto from "node:crypto";
+import { mergeWorkflowPatch, workflowPatches } from "@t3tools/shared/workflowUpdate";
+import { workflowRecordedUsage } from "@t3tools/shared/workflowBudget";
 
 import type { workflowExecutionTiming } from "./workflowUsage.ts";
 import {
@@ -91,12 +93,13 @@ export interface WorkflowContext {
     Record<string, { readonly target: OrchestratorMcpTarget } | { readonly error: string }>
   >;
   readonly callerSelection?: ModelSelection;
-  /** New agents stop starting once finished agents used this many tokens. */
+  /** New agents stop starting once recorded child usage reaches this limit. */
   readonly budgetTokens?: number;
   /** Stored event sequence before the workflow row was created. */
   readonly afterSequence: number;
   /** The reviewed graph's plan; only then may the script tag agents and record node outcomes. */
   readonly plan?: OrchestrationV2WorkflowPlan;
+  readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
 }
 
 /** Select one whole request before the provider resolver applies caller inheritance. */
@@ -293,8 +296,10 @@ class WorkflowSession {
   private readonly waiting = new Map<string, WaitingAgent>();
   private readonly stalled = new Set<string>();
   private readonly timedOut = new Set<string>();
-  private spentTokens = 0;
-  private readonly accountedTokens = new Map<string, number>();
+  private budgetExhausted = false;
+  private sent: OrchestrationV2SubagentWorkflow = { phases: [], agents: [] };
+  private sentProgress: string | undefined;
+  private updateError: unknown;
   private readonly writeHolds = new Map<number, ReadonlyArray<string>>();
   private readonly scopeWaiters = new Set<() => void>();
   private updating: Promise<void> | undefined;
@@ -305,6 +310,8 @@ class WorkflowSession {
   constructor(workflow: WorkflowContext, deps: WorkflowRunnerDeps) {
     this.workflow = workflow;
     this.deps = deps;
+    this.sent = workflow.previousWorkflow ?? this.sent;
+    this.budgetExhausted = workflow.previousWorkflow?.budget?.exhausted ?? false;
   }
 
   /** Agents being waited on, for the stall sweep. */
@@ -325,8 +332,13 @@ class WorkflowSession {
     if (task.id === this.workflow.workflowId && task.status !== "running") this.abort.abort();
   }
 
+  observeWorkflowStatus(id: NodeId, status: OrchestrationV2Subagent["status"] | undefined): void {
+    if (id === this.workflow.workflowId && status !== undefined && status !== "running")
+      this.abort.abort();
+  }
+
   async run(): Promise<void> {
-    const outcome = await runWorkflowScript({
+    let outcome = await runWorkflowScript({
       source: this.workflow.source,
       args: this.workflow.args,
       signal: this.abort.signal,
@@ -340,7 +352,11 @@ class WorkflowSession {
     );
     // Stopped by Stop or the thread's own stop: the row is already final.
     if (this.abort.signal.aborted) return;
-    await this.flush();
+    try {
+      await this.flush();
+    } catch (error) {
+      outcome = { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
     await this.dispatch({
       type: "workflow.complete",
       commandId: CommandId.make(`command:workflow-complete:${this.workflow.workflowId}`),
@@ -365,7 +381,10 @@ class WorkflowSession {
         this.addPhase(title);
         this.scheduleUpdate();
       },
-      budget: () => ({ total: this.workflow.budgetTokens ?? null, spent: this.spentTokens }),
+      budget: () => ({
+        total: this.workflow.budgetTokens ?? null,
+        spent: this.recordedUsage().spent ?? 0,
+      }),
       meta: (meta) => {
         const record = asRecord(meta);
         if (typeof record.name === "string") this.name = record.name;
@@ -381,6 +400,13 @@ class WorkflowSession {
         ? {}
         : { node: (key: string, outcome: unknown) => this.recordNode(key, outcome) }),
     };
+  }
+
+  private recordedUsage() {
+    return workflowRecordedUsage([
+      ...(this.workflow.previousWorkflow?.agents ?? []),
+      ...this.agents,
+    ]);
   }
 
   /** The plan node a script names, refusing names outside a reviewed graph's plan. */
@@ -694,12 +720,13 @@ class WorkflowSession {
       // An agent the budget allowed before a restart is re-attached, not refused.
       if (
         budget !== undefined &&
-        this.spentTokens >= budget &&
+        (this.recordedUsage().spent ?? 0) >= budget &&
         !(await Effect.runPromise(
           this.deps.agentStarted(this.workflow, key).pipe(Effect.orElseSucceed(() => false)),
         ))
       ) {
-        const message = `The workflow's budget of ${budget} tokens is spent (${this.spentTokens} used).`;
+        this.budgetExhausted = true;
+        const message = `The workflow's budget of ${budget} tokens is spent (${this.recordedUsage().spent ?? 0} recorded). New agents will not start; already-running agents may exceed this budget.`;
         settle("failed", message);
         throw new Error(message);
       }
@@ -778,11 +805,6 @@ class WorkflowSession {
       }
       const { status, summary, structuredResult, structuredResultError } = outcome.value;
       recordAttempt(outcome.value);
-      const tokens = outcome.value.usage.totalTokens;
-      if (tokens !== null) {
-        this.spentTokens += tokens - (this.accountedTokens.get(started.value.taskId) ?? 0);
-        this.accountedTokens.set(started.value.taskId, tokens);
-      }
       const knownTokens = (entry.attemptHistory ?? []).flatMap((record) =>
         record.totalTokens === undefined ? [] : [record.totalTokens],
       );
@@ -987,6 +1009,9 @@ class WorkflowSession {
       ...(this.name === undefined ? {} : { name: this.name }),
       phases: this.phases.map((title, index) => ({ index, title })),
       agents: this.agents.map((agent) => ({ ...agent })),
+      ...(this.workflow.budgetTokens === undefined
+        ? {}
+        : { budget: { limit: this.workflow.budgetTokens, exhausted: this.budgetExhausted } }),
       ...(this.workflow.plan === undefined
         ? {}
         : { plan: this.workflow.plan, nodeOutcomes: { ...this.nodeOutcomes } }),
@@ -996,50 +1021,52 @@ class WorkflowSession {
   private dispatch(
     command: Parameters<WorkflowRunnerDeps["threads"]["dispatch"]>[0],
   ): Promise<void> {
-    return Effect.runPromise(
-      this.deps.threads.dispatch(command).pipe(
-        Effect.asVoid,
-        Effect.catchCause((cause) =>
-          Effect.logDebug("A workflow row update was refused", {
-            workflowId: this.workflow.workflowId,
-            commandType: command.type,
-            cause,
-          }),
-        ),
-      ),
-    );
+    return Effect.runPromise(this.deps.threads.dispatch(command).pipe(Effect.asVoid));
   }
 
-  private update(): Promise<void> {
-    return this.dispatch({
-      type: "workflow.update",
-      commandId: CommandId.make(`command:workflow-update:${NodeCrypto.randomUUID()}`),
-      threadId: this.workflow.threadId,
-      workflowId: this.workflow.workflowId,
-      workflow: this.snapshot(),
-      ...(this.progress === undefined ? {} : { progress: this.progress }),
-    });
+  private async update(): Promise<void> {
+    const patches = workflowPatches(this.sent, this.snapshot());
+    if (patches.length === 0 && this.progress !== this.sentProgress)
+      patches.push({ kind: "patch" });
+    for (const patch of patches) {
+      const progress = this.progress;
+      await this.dispatch({
+        type: "workflow.update",
+        commandId: CommandId.make(`command:workflow-update:${NodeCrypto.randomUUID()}`),
+        threadId: this.workflow.threadId,
+        workflowId: this.workflow.workflowId,
+        workflow: patch,
+        ...(progress === undefined ? {} : { progress }),
+      });
+      this.sent = mergeWorkflowPatch(this.sent, patch);
+      this.sentProgress = progress;
+    }
   }
 
   // One row update in flight at a time; changes made meanwhile ride the next one,
   // so a burst of agent state changes costs one or two writes.
   private scheduleUpdate(): void {
-    if (this.abort.signal.aborted) return;
+    if (this.abort.signal.aborted || this.updateError !== undefined) return;
     if (this.updating !== undefined) {
       this.updatePending = true;
       return;
     }
-    this.updating = this.update().finally(() => {
-      this.updating = undefined;
-      if (this.updatePending) {
-        this.updatePending = false;
-        this.scheduleUpdate();
-      }
-    });
+    this.updating = this.update()
+      .catch((error: unknown) => {
+        this.updateError = error;
+      })
+      .finally(() => {
+        this.updating = undefined;
+        if (this.updatePending) {
+          this.updatePending = false;
+          this.scheduleUpdate();
+        }
+      });
   }
 
   private async flush(): Promise<void> {
     while (this.updating !== undefined) await this.updating;
+    if (this.updateError !== undefined) throw this.updateError;
     await this.update();
   }
 }
@@ -1061,6 +1088,8 @@ export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
         Stream.runForEach((stored) =>
           Effect.sync(() => {
             if (stored.event.type === "subagent.updated") session.observe(stored.event.payload);
+            if (stored.event.type === "workflow.updated")
+              session.observeWorkflowStatus(stored.event.payload.id, stored.event.payload.status);
           }),
         ),
         Effect.ignore,

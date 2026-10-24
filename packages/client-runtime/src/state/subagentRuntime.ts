@@ -13,6 +13,7 @@ import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript
 import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
 import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
+import { workflowBudget } from "@t3tools/shared/workflowBudget";
 
 export {
   WORKFLOW_GRAPH_STATE_LABEL,
@@ -461,6 +462,7 @@ type ProjectedSubagent = Parameters<typeof projectedSubagentsToRuntime>[0][numbe
   Pick<OrchestrationV2Subagent, "driver" | "providerInstanceId">;
 
 export interface WorkflowOpening {
+  readonly budget?: ReturnType<typeof workflowBudget>;
   readonly messageId: string;
   readonly script: string;
   readonly name: string | null;
@@ -616,6 +618,9 @@ export function appWorkflowMemberThreads(
 export function resolveAppWorkflowView(subagent: AppWorkflowCandidate): WorkflowOpening | null {
   if (!isAppWorkflow(subagent)) return null;
   return {
+    ...(subagent.workflow?.budget === undefined
+      ? {}
+      : { budget: workflowBudget(subagent.workflow) }),
     messageId: subagent.id,
     script: storedWorkflowScriptSource(subagent.prompt),
     name: subagent.workflow?.name ?? null,

@@ -5,6 +5,8 @@
  */
 export const WAVE_CARD_WIDTH = 208;
 export const WAVE_CARD_HEIGHT = 72;
+/** Two visible checker rows; further attempts scroll without changing the chat row. */
+export const WAVE_NODE_HEIGHT = WAVE_CARD_HEIGHT + 56;
 export const WAVE_COLUMN_GAP = 28;
 /** Wide enough for a line that skips a wave to run between two cards. */
 export const WAVE_ROW_GAP = 12;
@@ -43,8 +45,7 @@ export function workflowWaveLayout(
   >,
 ): WaveLayout {
   const cards = new Map<string, WaveBox>();
-  const cardHeight =
-    WAVE_CARD_HEIGHT + Math.max(0, ...waves.flat().map((node) => node.checkers?.length ?? 0)) * 28;
+  const cardHeight = WAVE_NODE_HEIGHT;
   const columns = waves.map((nodes, column) => {
     const x = column * (WAVE_CARD_WIDTH + WAVE_COLUMN_GAP);
     nodes.forEach((node, row) => {
@@ -115,4 +116,34 @@ export function workflowWaveLayout(
     cards,
     edges,
   };
+}
+
+/** The part of the canvas the scroll area shows, in canvas coordinates. */
+export interface WaveViewport {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * The cards to draw in full: those inside the viewport, widened by `margin` on every side so a
+ * short scroll finds them already drawn. The rest stay as light placeholders.
+ */
+export function visibleWaveCards(
+  layout: Pick<WaveLayout, "cards">,
+  viewport: WaveViewport,
+  margin = WAVE_CARD_WIDTH,
+): ReadonlySet<string> {
+  const left = viewport.left - margin;
+  const top = viewport.top - margin;
+  const right = viewport.left + viewport.width + margin;
+  const bottom = viewport.top + viewport.height + margin;
+  const visible = new Set<string>();
+  for (const [key, box] of layout.cards) {
+    if (box.x < right && box.x + box.width > left && box.y < bottom && box.y + box.height > top) {
+      visible.add(key);
+    }
+  }
+  return visible;
 }

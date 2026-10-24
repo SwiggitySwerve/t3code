@@ -13,6 +13,7 @@ import type {
   ServerProvider,
 } from "@t3tools/contracts";
 import { ChevronRightIcon, LoaderCircleIcon, SquareIcon, WorkflowIcon } from "lucide-react";
+import { formatTokens } from "@t3tools/shared/usageFormat";
 import { useEffect, useId, useRef, useState } from "react";
 
 import { observeResize } from "../../lib/observeResize";
@@ -120,6 +121,7 @@ export function WorkflowOpeningBlock(props: {
           </Button>
         ) : null}
       </header>
+      {opening.budget === undefined ? null : <WorkflowBudgetMeter budget={opening.budget} />}
       {props.progress ? <WorkflowProgress text={props.progress} /> : null}
       {graphHeadline?.waitingOn ? (
         <p className="truncate px-2 text-2xs text-foreground" data-thread-find-text="true">
@@ -159,6 +161,37 @@ export function WorkflowOpeningBlock(props: {
       ) : null}
       <WorkflowScript script={opening.script} />
     </section>
+  );
+}
+
+function WorkflowBudgetMeter({
+  budget,
+}: {
+  readonly budget: NonNullable<WorkflowOpening["budget"]>;
+}) {
+  const spent =
+    budget.spent === null
+      ? "Unknown usage"
+      : `${budget.complete ? "" : "At least "}${formatTokens(budget.spent)} tokens recorded`;
+  return (
+    <div className="px-2 text-2xs text-muted-foreground" data-workflow-budget>
+      <p>
+        {spent} / {budget.limit === null ? "no" : formatTokens(budget.limit)} token budget
+      </p>
+      {budget.limit !== null && budget.limit > 0 && budget.spent !== null ? (
+        <progress
+          className="h-1 w-full"
+          aria-label="Recorded workflow token usage"
+          value={Math.min(budget.spent, budget.limit)}
+          max={budget.limit}
+        />
+      ) : null}
+      <p className={budget.exhausted ? "text-warning" : undefined}>
+        {budget.overshot ? "Budget exceeded. " : budget.exhausted ? "Budget exhausted. " : ""}
+        The budget stops new starts. Already-running agents may exceed it.
+        {budget.complete ? "" : " Usage is incomplete."}
+      </p>
+    </div>
   );
 }
 
