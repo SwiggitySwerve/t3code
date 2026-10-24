@@ -1,5 +1,6 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
+  appWorkflowHeading,
   resolveAppWorkflowView,
   workflowProgressText,
 } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -11,14 +12,6 @@ import { environmentThreadDetails } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { toastManager } from "../ui/toast";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
-
-const HEADINGS: Record<string, string> = {
-  running: "Workflow running",
-  completed: "Workflow finished",
-  failed: "Workflow failed",
-  cancelled: "Workflow stopped",
-  interrupted: "Workflow stopped",
-};
 
 /**
  * A workflow T3 runs for this thread (workflow_start): its phases and agents in the timeline,
@@ -58,7 +51,7 @@ export function AppWorkflowTimelineBlock(props: {
       opening={opening}
       environmentId={props.parentRef.environmentId}
       onOpenThread={(threadId) => props.onOpenThread(threadId as ThreadId)}
-      heading={HEADINGS[row.status] ?? "Workflow"}
+      heading={appWorkflowHeading(row.status)}
       // While it runs, the script's latest log line; afterwards, what it returned or why it ended.
       progress={workflowProgressText(row)}
       {...(canStop && row.status === "running"

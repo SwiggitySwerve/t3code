@@ -9,6 +9,7 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
+  appWorkflowHeading,
   appWorkflowMemberThreads,
   workflowGraphHeadline,
   workflowGraphNodeDetail,
@@ -640,5 +641,22 @@ describe("workflow progress text", () => {
     expect(workflowProgressText({ ...row, status: "running", progress: "Working" })).toBe(
       "Working",
     );
+  });
+});
+
+describe("appWorkflowHeading", () => {
+  it("names each run state, and stays generic before the run has one", () => {
+    expect(
+      (["running", "completed", "failed", "cancelled", "interrupted", "pending"] as const).map(
+        appWorkflowHeading,
+      ),
+    ).toEqual([
+      "Workflow running",
+      "Workflow finished",
+      "Workflow failed",
+      "Workflow stopped",
+      "Workflow stopped",
+      "Workflow",
+    ]);
   });
 });

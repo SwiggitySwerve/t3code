@@ -622,6 +622,23 @@ export function appWorkflowMemberThreads(
   return members;
 }
 
+/** The heading of a T3-run workflow's timeline block for each run status. */
+export function appWorkflowHeading(status: OrchestrationV2Subagent["status"]): string {
+  switch (status) {
+    case "running":
+      return "Workflow running";
+    case "completed":
+      return "Workflow finished";
+    case "failed":
+      return "Workflow failed";
+    case "cancelled":
+    case "interrupted":
+      return "Workflow stopped";
+    default:
+      return "Workflow";
+  }
+}
+
 /**
  * A T3-run workflow described as a workflow opening: its plan and agents.
  * The opening also carries the workflow script as data; this view does not
