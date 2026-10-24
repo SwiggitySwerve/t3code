@@ -49,6 +49,7 @@ import {
   deriveLegacyProjectOverrides,
   fallbackTextGenerationModelSelection,
   isModelSelectionProviderEnabled,
+  serverSettingsWriteProblems,
 } from "@t3tools/shared/serverSettings";
 import * as ServerSecretStore from "./auth/ServerSecretStore.ts";
 import {
@@ -153,6 +154,28 @@ export function applyProviderInstanceMutation(
   return { ...settings, providerInstances };
 }
 
+/**
+ * The one place a settings patch becomes a new value, so write-only rules (profile name
+ * uniqueness and length, trigger phrases) apply to every writer and never to what is stored.
+ */
+function applyCheckedSettingsPatch(
+  current: ServerSettings,
+  patch: ServerSettingsPatch,
+  settingsPath: string,
+): Effect.Effect<ServerSettings, ServerSettingsError> {
+  const patched = applyServerSettingsPatch(current, patch);
+  const problems = serverSettingsWriteProblems(current, patched);
+  return problems.length === 0
+    ? Effect.succeed(patched)
+    : Effect.fail(
+        new ServerSettingsError({
+          settingsPath,
+          operation: "normalize",
+          detail: problems.join(" "),
+        }),
+      );
+}
+
 function ensureProviderInstanceMutationAllowed(
   settings: ServerSettings,
   mutation: ProviderInstanceMutation,
@@ -244,13 +267,13 @@ const makeTest = Effect.fn("serverSettings.makeTest")(function* (
     getSettings,
     updateSettings: (patch) =>
       updateTestSettings((currentSettings) =>
-        Effect.succeed(applyServerSettingsPatch(currentSettings, patch)),
+        applyCheckedSettingsPatch(currentSettings, patch, "test settings"),
       ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateTestSettings((currentSettings) =>
         Effect.gen(function* () {
           yield* ensureProviderInstanceMutationAllowed(currentSettings, mutation, "test settings");
-          const patched = applyServerSettingsPatch(currentSettings, patch);
+          const patched = yield* applyCheckedSettingsPatch(currentSettings, patch, "test settings");
           return applyProviderInstanceMutation(patched, mutation);
         }),
       ),
@@ -1165,13 +1188,13 @@ const make = Effect.gen(function* () {
     ),
     updateSettings: (patch) =>
       updateAndPersistSettings((current) =>
-        Effect.succeed(applyServerSettingsPatch(current, patch)),
+        applyCheckedSettingsPatch(current, patch, settingsPath),
       ),
     updateProviderInstance: (mutation, patch = {}) =>
       updateAndPersistSettings((current) =>
         Effect.gen(function* () {
           yield* ensureProviderInstanceMutationAllowed(current, mutation, settingsPath);
-          const patched = applyServerSettingsPatch(current, patch);
+          const patched = yield* applyCheckedSettingsPatch(current, patch, settingsPath);
           return applyProviderInstanceMutation(patched, mutation);
         }),
       ),

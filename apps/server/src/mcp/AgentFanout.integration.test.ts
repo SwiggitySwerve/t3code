@@ -4013,3 +4013,435 @@ describe("graphs", () => {
     ),
   );
 });
+
+describe("profile model preference", () => {
+  const effortModel = (slug: string, efforts: ReadonlyArray<string> = ["low", "high"]) => ({
+    slug,
+    name: slug,
+    isCustom: false,
+    capabilities: {
+      optionDescriptors: [
+        {
+          id: "effort",
+          label: "Effort",
+          type: "select" as const,
+          options: efforts.map((id) => ({ id, label: id })),
+        },
+      ],
+    },
+  });
+  const codexWithEffort: ServerProvider = { ...provider, models: [effortModel(model)] };
+  const claudeOffline: ServerProvider = { ...claudeProvider, enabled: false };
+  const node = { subject: "worker", description: "work", dependsOn: [], preset: "worker" };
+  const graph = { schemaVersion: 1, nodes: { a: node } };
+  const claudeEntry = { providerInstanceId: claudeInstanceId, model: claudeModel };
+  const codexEntry = { providerInstanceId: instanceId, model };
+  const saveProfile = (
+    target: {
+      providerInstanceId: ProviderInstanceId;
+      model: string;
+      options?: ReadonlyArray<{ id: string; value: string }>;
+    },
+    fallbacks?: ReadonlyArray<{
+      providerInstanceId: ProviderInstanceId;
+      model: string;
+      options?: ReadonlyArray<{ id: string; value: string }>;
+    }>,
+  ) =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      yield* settings.updateSettings({
+        workflowPresets: {
+          presets: [
+            {
+              id: "worker",
+              name: "Worker",
+              target,
+              ...(fallbacks === undefined ? {} : { fallbacks }),
+            },
+          ],
+          defaultPresetId: null,
+        },
+      });
+    });
+
+  it.effect(
+    "graph review picks the first entry that is enabled, serves the model and supports the options, and reports what it skipped",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* saveProfile(claudeEntry, [
+          { providerInstanceId: instanceId, model: "missing-model" },
+          { ...codexEntry, options: [{ id: "turbo", value: "x" }] },
+          { ...codexEntry, options: [{ id: "effort", value: "high" }] },
+        ]);
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.ready).toBe(true);
+        const chosen = {
+          providerInstanceId: instanceId,
+          model,
+          options: [{ id: "effort", value: "high" }],
+          inheritOptions: false,
+        };
+        expect(reviewed.targets).toHaveLength(1);
+        expect(reviewed.targets[0]).toMatchObject({
+          source: "preset",
+          target: chosen,
+          presetId: "worker",
+        });
+        // The profile's choice is listed once, not repeated on the node.
+        expect(reviewed.targets[0]).not.toHaveProperty("preference");
+        expect(reviewed.profiles).toHaveLength(1);
+        expect(reviewed.profiles?.[0]).toMatchObject({
+          presetId: "worker",
+          presetName: "Worker",
+          chosenIndex: 3,
+        });
+        const skipped = reviewed.profiles![0]!.skipped;
+        expect(
+          skipped.map((entry) => [entry.index, entry.providerInstanceId, entry.model]),
+        ).toEqual([
+          [0, claudeInstanceId, claudeModel],
+          [1, instanceId, "missing-model"],
+          [2, instanceId, model],
+        ]);
+        expect(skipped[0]!.reason).toContain("disabled");
+        expect(skipped[1]!.reason).toContain("not advertised");
+        expect(skipped[2]!.reason).toContain("rejected options");
+        expect(reviewed.expandedGraph).toMatchObject({ nodes: { a: { target: chosen } } });
+      }).pipe(Effect.provide(makeLayerTest(undefined, [codexWithEffort, claudeOffline]))),
+  );
+
+  it.effect(
+    "graph review blocks a profile with no usable entry and never inherits the caller",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* saveProfile(claudeEntry, [
+          { providerInstanceId: instanceId, model: "missing-model" },
+        ]);
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed).toMatchObject({
+          ready: false,
+          digest: null,
+          expandedGraph: null,
+          targets: [],
+        });
+        expect(reviewed.blockers).toHaveLength(1);
+        expect(reviewed.blockers[0]).toContain('a: Profile "Worker" has no available model.');
+        expect(reviewed.blockers[0]).toContain(`1. ${claudeInstanceId} / ${claudeModel}:`);
+        expect(reviewed.blockers[0]).toContain("disabled");
+        expect(reviewed.blockers[0]).toContain(`2. ${instanceId} / missing-model:`);
+        expect(reviewed.blockers[0]).toContain("not advertised");
+      }).pipe(Effect.provide(makeLayerTest(undefined, [provider, claudeOffline]))),
+  );
+  it.effect(
+    "graph start keeps the reviewed fallback while it is served, even after the preferred model returns",
+    () => {
+      const providers: ServerProvider[] = [provider, claudeProvider];
+      return Effect.gen(function* () {
+        yield* startParent;
+        yield* saveProfile(claudeEntry, [codexEntry]);
+        providers[1] = claudeOffline;
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.targets[0]).toMatchObject({
+          target: { providerInstanceId: instanceId, model },
+          presetId: "worker",
+        });
+        expect(reviewed.profiles).toMatchObject([
+          {
+            presetId: "worker",
+            chosenIndex: 1,
+            skipped: [{ index: 0, providerInstanceId: claudeInstanceId }],
+          },
+        ]);
+        providers[1] = claudeProvider;
+        const fresh = yield* reviewGraph(graph);
+        expect(fresh.targets[0]?.target.providerInstanceId).toBe(claudeInstanceId);
+        expect(fresh.digest).not.toBe(reviewed.digest);
+        const started = yield* decodeWorkflow(
+          (yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest }))
+            .structuredContent,
+        );
+        expect(yield* awaitMember(started.workflowId, 1)).toMatchObject({
+          providerInstanceId: instanceId,
+          model,
+        });
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+
+  it.effect(
+    "graph start refuses when the reviewed model is gone instead of moving to the next entry",
+    () => {
+      const providers: ServerProvider[] = [provider, claudeProvider];
+      return Effect.gen(function* () {
+        yield* startParent;
+        yield* saveProfile(claudeEntry, [codexEntry]);
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.targets[0]).toMatchObject({
+          target: { providerInstanceId: claudeInstanceId },
+          presetId: "worker",
+        });
+        expect(reviewed.profiles).toMatchObject([{ chosenIndex: 0, skipped: [] }]);
+        providers[1] = claudeOffline;
+        const refused = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
+        expect(refused.isError).toBe(true);
+        expect(errorText(refused)).toContain("no longer available");
+        expect(errorText(refused)).toContain("does not switch to another model");
+        expect(errorText(refused)).toContain("Review the graph again");
+        expect(yield* childTasks).toEqual([]);
+        // A server restart forgets the review; the order alone must still not start the fallback.
+        const afterRestart = yield* withServerProcess((service) =>
+          service
+            .graphStart(invocation, { graph, acceptedDigest: reviewed.digest! })
+            .pipe(Effect.flip),
+        );
+        expect(afterRestart.message).toContain("Review not found");
+        expect(yield* childTasks).toEqual([]);
+        const again = yield* reviewGraph(graph);
+        expect(again.profiles?.[0]).toMatchObject({ chosenIndex: 1 });
+        expect(again.digest).not.toBe(reviewed.digest);
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+
+  // One model listed more than once, told apart by options: the shape of a profile that
+  // asks for "this model with turbo, else with high effort, else plain".
+  const turboEntry = { ...codexEntry, options: [{ id: "turbo", value: "x" }] };
+  const highEntry = { ...codexEntry, options: [{ id: "effort", value: "high" }] };
+  const highSelection = { instanceId, model, options: [{ id: "effort", value: "high" }] };
+
+  it.effect(
+    "graph start runs the reviewed entry when the profile lists one model more than once",
+    () => {
+      const providers: ServerProvider[] = [codexWithEffort, claudeOffline];
+      return Effect.gen(function* () {
+        yield* startParent;
+        yield* saveProfile(claudeEntry, [
+          { providerInstanceId: instanceId, model: "missing-model" },
+          turboEntry,
+          highEntry,
+        ]);
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.profiles?.[0]).toMatchObject({ chosenIndex: 3 });
+        // The preferred provider returns after review; a fresh review would move to it.
+        providers[1] = claudeProvider;
+        const started = yield* decodeWorkflow(
+          (yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest }))
+            .structuredContent,
+        );
+        const member = yield* awaitMember(started.workflowId, 1);
+        expect(member).toMatchObject({ providerInstanceId: instanceId, model });
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        expect(
+          (yield* orchestrator.getThreadProjection(member.childThreadId!)).thread.modelSelection,
+        ).toEqual(highSelection);
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+
+  it.effect(
+    "graph start refuses when the reviewed entry lost its option and does not take a later entry",
+    () => {
+      const providers: ServerProvider[] = [codexWithEffort];
+      return Effect.gen(function* () {
+        yield* startParent;
+        yield* saveProfile(turboEntry, [highEntry, codexEntry]);
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.profiles?.[0]).toMatchObject({ chosenIndex: 1 });
+        // The catalog stops offering "high"; the plain entry after it is still servable.
+        providers[0] = { ...provider, models: [effortModel(model, ["low"])] };
+        const refused = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
+        expect(refused.isError).toBe(true);
+        expect(errorText(refused)).toContain("no longer available");
+        expect(errorText(refused)).toContain("does not switch to another model");
+        expect(yield* childTasks).toEqual([]);
+        // Review again and the profile moves on openly, with a different digest.
+        const again = yield* reviewGraph(graph);
+        expect(again.profiles?.[0]).toMatchObject({ chosenIndex: 2 });
+        expect(again.digest).not.toBe(reviewed.digest);
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+
+  it.effect("graph start keeps the reviewed entry when the profile is reordered", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* saveProfile(turboEntry, [highEntry]);
+      const reviewed = yield* reviewGraph(graph);
+      expect(reviewed.profiles?.[0]).toMatchObject({ chosenIndex: 1 });
+      yield* saveProfile(highEntry, [turboEntry]);
+      const started = yield* decodeWorkflow(
+        (yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest }))
+          .structuredContent,
+      );
+      const member = yield* awaitMember(started.workflowId, 1);
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      expect(
+        (yield* orchestrator.getThreadProjection(member.childThreadId!)).thread.modelSelection,
+      ).toEqual(highSelection);
+    }).pipe(Effect.provide(makeLayerTest(undefined, [codexWithEffort]))),
+  );
+
+  it.effect("graph start refuses when the profile no longer lists the reviewed entry", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* saveProfile(turboEntry, [highEntry]);
+      const reviewed = yield* reviewGraph(graph);
+      // Same model, different options: not the entry that was reviewed.
+      yield* saveProfile(turboEntry, [
+        { ...codexEntry, options: [{ id: "effort", value: "low" }] },
+      ]);
+      const refused = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
+      expect(refused.isError).toBe(true);
+      expect(errorText(refused)).toContain("no longer lists the model that was reviewed");
+      expect(errorText(refused)).toContain("Review the graph again");
+      expect(yield* childTasks).toEqual([]);
+      const again = yield* reviewGraph(graph);
+      expect(again.profiles?.[0]).toMatchObject({ chosenIndex: 1 });
+      expect(again.digest).not.toBe(reviewed.digest);
+    }).pipe(Effect.provide(makeLayerTest(undefined, [codexWithEffort]))),
+  );
+
+  it.effect("graph review lists a profile once however many nodes use it", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* saveProfile(claudeEntry, [
+        { providerInstanceId: instanceId, model: "missing-model" },
+        turboEntry,
+        highEntry,
+      ]);
+      const nodes = Object.fromEntries(
+        Array.from({ length: 150 }, (_, index) => [`n${index}`, node] as const),
+      );
+      const reviewed = yield* reviewGraph({ schemaVersion: 1, nodes });
+      expect(reviewed.ready).toBe(true);
+      expect(reviewed.targets).toHaveLength(150);
+      expect(reviewed.targets.every((entry) => entry.presetId === "worker")).toBe(true);
+      expect(reviewed.profiles).toHaveLength(1);
+      expect(reviewed.profiles![0]!.skipped).toHaveLength(3);
+      // The reasons are text, so they appear once in the whole result, not once per node.
+      const text = JSON.stringify(reviewed);
+      expect(text.split("rejected options").length - 1).toBe(1);
+      expect(text.split("not advertised").length - 1).toBe(1);
+      expect(text.split("disabled").length - 1).toBe(1);
+    }).pipe(Effect.provide(makeLayerTest(undefined, [codexWithEffort, claudeOffline]))),
+  );
+
+  it.effect("workflow_start resolves a profile once and a resumed script keeps that choice", () => {
+    const providers: ServerProvider[] = [provider, claudeProvider];
+    return Effect.gen(function* () {
+      yield* startParent;
+      yield* saveProfile(claudeEntry, [codexEntry]);
+      providers[1] = claudeOffline;
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            script:
+              'await agent("first", { preset: "worker" }); await agent("second", { preset: "worker" }); return await agent("third", { preset: "worker" })',
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          expect(first).toMatchObject({ providerInstanceId: instanceId, model });
+          yield* completeChild(first.childThreadId!, "one");
+          expect(yield* awaitMember(started.workflowId, 2)).toMatchObject({
+            providerInstanceId: instanceId,
+            model,
+          });
+          return started.workflowId;
+        }),
+      );
+      // A fresh resolution would now pick the preferred model, and the profile lost its fallbacks.
+      providers[1] = claudeProvider;
+      yield* saveProfile(claudeEntry);
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          expect(yield* service.resumeWorkflows).toBe(1);
+          yield* answerWorkflowAgents((prompt) => (prompt === "first" ? "one" : undefined));
+          const second = yield* awaitMember(workflowId, 2);
+          yield* completeChild(second.childThreadId!, "two");
+          yield* answerWorkflowAgents((prompt) => (prompt === "third" ? "three" : undefined));
+          const ended = yield* awaitWorkflowEnd(workflowId);
+          expect(yield* awaitMember(workflowId, 3)).toMatchObject({
+            providerInstanceId: instanceId,
+            model,
+          });
+          expect(ended.status).toBe("completed");
+        }),
+      );
+    }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+  });
+
+  it.effect("a script with no usable profile entry fails its agent with every reason", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* saveProfile(claudeEntry, [{ providerInstanceId: instanceId, model: "missing-model" }]);
+      const started = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", {
+          workerTarget: { providerInstanceId: instanceId, model },
+          script: 'return await agent("only", { preset: "worker" })',
+        })).structuredContent,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.agents[0]?.result).toContain('Profile "Worker" has no available model.');
+      expect(ended.agents[0]?.result).toContain("not advertised");
+      expect(
+        (yield* childTasks).filter((task) => task.parentNodeId === started.workflowId),
+      ).toEqual([]);
+    }).pipe(Effect.provide(makeLayerTest(undefined, [provider, claudeOffline]))),
+  );
+
+  it.effect(
+    "a script stored before profiles still resumes, with duplicate and 400-character names",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+        const frozen = (entry: typeof claudeEntry) => ({
+          target: { ...entry, options: [], inheritOptions: false },
+        });
+        const workflowPresets = {
+          presets: [
+            { id: "a", name: "Same", target: codexEntry },
+            { id: "b", name: "Same", target: claudeEntry },
+            { id: "c", name: "N".repeat(400), target: codexEntry },
+          ],
+          defaultPresetId: null,
+        };
+        const source = 'return await agent("legacy", { preset: "b" })';
+        for (const [index, settings] of [
+          { workflowPresets },
+          {
+            workflowPresets,
+            presetTargets: { a: frozen(codexEntry), b: frozen(claudeEntry), c: frozen(codexEntry) },
+          },
+        ].entries()) {
+          const workflowId = NodeId.make(`workflow:before-profiles-${index}`);
+          yield* orchestrator.dispatch({
+            type: "workflow.start",
+            createdBy: "agent",
+            creationSource: "mcp",
+            commandId: CommandId.make(`command:before-profiles-${index}`),
+            threadId: parentThreadId,
+            runId: parent.runs.at(-1)!.id,
+            workflowId,
+            title: "Before profiles",
+            script: storedWorkflowScript(source, settings),
+          });
+          yield* withServerProcess((service) =>
+            Effect.gen(function* () {
+              expect(yield* service.resumeWorkflows).toBe(1);
+              const member = yield* awaitMember(workflowId, 1);
+              expect(member).toMatchObject({
+                providerInstanceId: claudeInstanceId,
+                model: claudeModel,
+              });
+              yield* completeChild(member.childThreadId!, "done");
+              expect((yield* awaitWorkflowEnd(workflowId)).status).toBe("completed");
+            }),
+          );
+        }
+      }).pipe(Effect.provide(layerTest)),
+  );
+});

@@ -84,6 +84,116 @@ it.effect("C4 persists preset CRUD and refuses invalid settings without changing
   }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 
+it.effect(
+  "refuses a profile name that is too long or taken, and a bad trigger, without touching disk",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+      const worker = { id: "worker", name: "Worker", target };
+      yield* service.updateSettings({
+        workflowPresets: { presets: [worker], defaultPresetId: null },
+        workflowTriggers: { extras: ["fan out"] },
+      });
+      const before = yield* fs.readFileString(config.settingsPath);
+      for (const [patch, reason] of [
+        [
+          {
+            workflowPresets: {
+              presets: [{ ...worker, name: "x".repeat(81) }],
+              defaultPresetId: null,
+            },
+          },
+          "A profile name can be at most 80 characters.",
+        ],
+        [
+          {
+            workflowPresets: {
+              presets: [worker, { ...worker, id: "other", name: "worker" }],
+              defaultPresetId: null,
+            },
+          },
+          'Another profile is already named "worker".',
+        ],
+        [{ workflowTriggers: { extras: ["fan out", "Fan  Out"] } }, "is listed twice."],
+        [{ workflowTriggers: { extras: ["workflow"] } }, "is always a trigger."],
+        [{ workflowTriggers: { extras: ["x".repeat(65)] } }, "is longer than 64 characters."],
+      ] as const) {
+        const refused = yield* service.updateSettings(patch).pipe(Effect.flip);
+        assert.equal(refused._tag, "ServerSettingsError");
+        // Refused with the operation every client already decodes, and the reason in the message.
+        assert.equal(refused.operation, "normalize");
+        assert.include(refused.message, reason);
+        assert.equal(refused.message.startsWith("Server settings normalize failed at "), true);
+        assert.equal(yield* fs.readFileString(config.settingsPath), before);
+      }
+      const saved = yield* service.updateSettings({
+        workflowPresets: {
+          presets: [{ ...worker, fallbacks: [{ ...target, model: "gpt-5.5" }] }],
+          defaultPresetId: "worker",
+        },
+        workflowTriggers: { enabled: false, extras: ["orchestrate", "fan out"] },
+      });
+      assert.deepEqual(saved.workflowTriggers, {
+        enabled: false,
+        extras: ["orchestrate", "fan out"],
+      });
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(persisted.workflowPresets.presets[0]?.fallbacks, [
+        { ...target, model: "gpt-5.5" },
+      ]);
+      assert.deepEqual(persisted.workflowTriggers, saved.workflowTriggers);
+      yield* service.updateSettings({ workflowTriggers: { enabled: true, extras: [] } });
+      assert.equal(
+        "workflowTriggers" in JSON.parse(yield* fs.readFileString(config.settingsPath)),
+        false,
+      );
+    }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("keeps profiles saved before name rules and lets unrelated settings change", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    const legacy = {
+      presets: [
+        { id: "a", name: "Same", target },
+        { id: "b", name: "Same", target },
+        { id: "c", name: "N".repeat(400), target },
+      ],
+      defaultPresetId: "a",
+    };
+    yield* fs.writeFileString(config.settingsPath, JSON.stringify({ workflowPresets: legacy }));
+    const loaded = yield* service.getSettings;
+    assert.deepEqual(loaded.workflowPresets, legacy);
+    assert.deepEqual(loaded.workflowTriggers, { enabled: true, extras: [] });
+    yield* service.updateSettings({ ultracode: "off" });
+    yield* service.updateSettings({ workflowTriggers: { extras: ["fan out"] } });
+    const persisted = yield* decodeServerSettingsJson(
+      yield* fs.readFileString(config.settingsPath),
+    );
+    assert.deepEqual(persisted.workflowPresets, legacy);
+    assert.equal(persisted.ultracode, "off");
+    // Writing the same profiles back is not a new violation; adding another "same" is.
+    yield* service.updateSettings({ workflowPresets: legacy });
+    const refused = yield* service
+      .updateSettings({
+        workflowPresets: {
+          ...legacy,
+          presets: [...legacy.presets, { id: "d", name: "same", target }],
+        },
+      })
+      .pipe(Effect.flip);
+    assert.equal(refused._tag, "ServerSettingsError");
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
 const layerServerSettings = () =>
   ServerSettingsModule.layer.pipe(
     Layer.provide(ServerSecretStore.layer),

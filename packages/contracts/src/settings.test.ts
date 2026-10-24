@@ -15,6 +15,8 @@ import {
   resolveProjectProviderInstanceEnabled,
   resolveProviderInstanceEnabled,
   ServerSettings,
+  ServerSettingsError,
+  ServerSettingsOperation,
   ServerSettingsPatch,
   withIdleCompaction,
   requiredScopesForServerSettingsPatch,
@@ -63,6 +65,143 @@ describe("workflow preset settings", () => {
   });
 });
 
+describe("workflow profile compatibility", () => {
+  const target = { providerInstanceId: "codex", model: "gpt-5.4" };
+  it("decodes presets stored before profiles unchanged, duplicate and very long names included", () => {
+    const longName = "N".repeat(400);
+    const stored = {
+      presets: [
+        { id: "a", name: "Same", target },
+        { id: "b", name: "Same", target },
+        { id: "c", name: longName, target },
+      ],
+      defaultPresetId: "a",
+    };
+    const decoded = decodeServerSettings({ workflowPresets: stored });
+    expect(decoded.workflowPresets).toEqual(stored);
+    expect(decoded.workflowPresets.presets[2]?.name).toBe(longName);
+    expect("fallbacks" in decoded.workflowPresets.presets[0]!).toBe(false);
+    expect(decodeServerSettingsPatch({ workflowPresets: stored })).toEqual({
+      workflowPresets: stored,
+    });
+  });
+
+  it("keeps an ordered fallback list next to the primary target", () => {
+    const fallbacks = [
+      { providerInstanceId: "claude", model: "sonnet", options: [{ id: "effort", value: "high" }] },
+      { providerInstanceId: "codex", model: "gpt-5.5" },
+    ];
+    const workflowPresets = {
+      presets: [{ id: "a", name: "A", target, fallbacks }],
+      defaultPresetId: null,
+    };
+    expect(decodeServerSettings({ workflowPresets }).workflowPresets).toEqual(workflowPresets);
+    expect(encodeServerSettings(decodeServerSettings({ workflowPresets })).workflowPresets).toEqual(
+      workflowPresets,
+    );
+    expect(() =>
+      decodeServerSettings({
+        workflowPresets: {
+          presets: [{ id: "a", name: "A", target, fallbacks: [{ model: "no-instance" }] }],
+          defaultPresetId: null,
+        },
+      }),
+    ).toThrow();
+  });
+});
+
+describe("workflow trigger settings", () => {
+  it("defaults to on with no extras, for settings written before triggers existed", () => {
+    expect(decodeServerSettings({}).workflowTriggers).toEqual({ enabled: true, extras: [] });
+    expect(DEFAULT_SERVER_SETTINGS.workflowTriggers).toEqual({ enabled: true, extras: [] });
+    expect(decodeServerSettings({ workflowTriggers: {} }).workflowTriggers).toEqual({
+      enabled: true,
+      extras: [],
+    });
+    expect(decodeServerSettings({ workflowTriggers: { enabled: false } }).workflowTriggers).toEqual(
+      {
+        enabled: false,
+        extras: [],
+      },
+    );
+  });
+
+  it("decodes partial patches and trims extras", () => {
+    expect(decodeServerSettingsPatch({ workflowTriggers: { enabled: false } })).toEqual({
+      workflowTriggers: { enabled: false },
+    });
+    expect(decodeServerSettingsPatch({ workflowTriggers: { extras: ["  fan out "] } })).toEqual({
+      workflowTriggers: { extras: ["fan out"] },
+    });
+    expect(() => decodeServerSettingsPatch({ workflowTriggers: { extras: [" "] } })).toThrow();
+  });
+});
+
+// The operations a client built before profiles decodes; a new literal would break it.
+const legacyOperations = [
+  "normalize",
+  "check-exists",
+  "create-provider-instance",
+  "read-file",
+  "read-provider-history",
+  "read-project-settings",
+  "read-secret",
+  "remove-secret",
+  "remove-stale-secret",
+  "write-secret",
+  "write-file",
+  "prepare-directory",
+] as const;
+class LegacyServerSettingsError extends Schema.TaggedError<LegacyServerSettingsError>()(
+  "ServerSettingsError",
+  {
+    settingsPath: Schema.String,
+    operation: Schema.Literals(legacyOperations),
+    providerInstanceId: Schema.optional(Schema.String),
+    environmentVariable: Schema.optional(Schema.String),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
+const encodeServerSettingsError = Schema.encodeSync(ServerSettingsError);
+const decodeServerSettingsError = Schema.decodeUnknownSync(ServerSettingsError);
+const decodeLegacyServerSettingsError = Schema.decodeUnknownSync(LegacyServerSettingsError);
+describe("settings write refusal", () => {
+  const reason = 'Another profile is already named "A".';
+  const refusal = new ServerSettingsError({
+    settingsPath: "/x/settings.json",
+    operation: "normalize",
+    detail: reason,
+  });
+  it("keeps the reason through the codec and shows it in the message", () => {
+    const wire = JSON.parse(JSON.stringify(encodeServerSettingsError(refusal)));
+    expect(wire.operation).toBe("normalize");
+    expect(wire.detail).toBe(reason);
+    const decoded = decodeServerSettingsError(wire);
+    expect(decoded.detail).toBe(reason);
+    expect(decoded.message).toBe(`Server settings normalize failed at /x/settings.json. ${reason}`);
+  });
+
+  it("decodes on a client that predates profiles, which ignores the extra key", () => {
+    expect([...ServerSettingsOperation.literals].toSorted()).toEqual(
+      [...legacyOperations].toSorted(),
+    );
+    const wire = JSON.parse(JSON.stringify(encodeServerSettingsError(refusal)));
+    const legacy = decodeLegacyServerSettingsError(wire);
+    expect(legacy._tag).toBe("ServerSettingsError");
+    expect(legacy.operation).toBe("normalize");
+    expect(legacy.settingsPath).toBe("/x/settings.json");
+  });
+
+  it("never copies a cause into the message", () => {
+    const withCause = new ServerSettingsError({
+      settingsPath: "/x/settings.json",
+      operation: "normalize",
+      cause: new Error("token=secret-value"),
+    });
+    expect(withCause.message).toBe("Server settings normalize failed at /x/settings.json.");
+  });
+});
 describe("storage cleanup settings", () => {
   it("keeps cleanup disabled for existing installations", () => {
     expect(decodeServerSettings({}).worktreeCleanup).toBeNull();

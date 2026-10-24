@@ -373,6 +373,29 @@ export const OrchestratorMcpGraphReviewInput = Schema.Struct({
 });
 export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
 
+/**
+ * How a profile chose a worker: the first entry in its model preference order that is enabled,
+ * serves the exact model and supports the options. The chosen target is part of the digest;
+ * this record only explains it.
+ */
+export const OrchestratorMcpProfileChoice = Schema.Struct({
+  presetId: Schema.String,
+  presetName: Schema.String,
+  chosenIndex: NonNegativeInt.annotate({
+    description:
+      "Position of the chosen entry in the model preference order; 0 is the first choice.",
+  }),
+  skipped: Schema.Array(
+    Schema.Struct({
+      index: NonNegativeInt,
+      providerInstanceId: ProviderInstanceId,
+      model: Schema.String,
+      reason: Schema.String,
+    }),
+  ).annotate({ description: "Entries tried before the chosen one, each with why it was skipped." }),
+});
+export type OrchestratorMcpProfileChoice = typeof OrchestratorMcpProfileChoice.Type;
+
 export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   digest: Schema.NullOr(Schema.String).annotate({
     description:
@@ -396,10 +419,17 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
       ]),
       target: OrchestratorMcpTarget,
       judgmentTarget: Schema.optional(OrchestratorMcpTarget),
+      presetId: Schema.optional(Schema.String).annotate({
+        description: "The profile that chose this worker; its choice is listed once in profiles.",
+      }),
     }),
   ).annotate({
     description:
-      "Concrete worker and judgment assignments included in the digest; source describes only how the worker was selected.",
+      "Concrete worker and judgment assignments included in the digest; source describes only how the worker was selected. presetId appears when a profile chose the worker.",
+  }),
+  profiles: Schema.optional(Schema.Array(OrchestratorMcpProfileChoice)).annotate({
+    description:
+      "One entry per profile that chose a worker in this review, with the entry chosen and why earlier ones were skipped. Look a node's profile up by its targets[].presetId.",
   }),
   layers: Schema.Array(Schema.Array(Schema.String)),
   writeConflicts: Schema.Array(
@@ -424,7 +454,8 @@ export const OrchestratorMcpGraphStartInput = Schema.Struct({
   workerTarget: OrchestratorMcpGraphReviewInput.fields.workerTarget,
   graph: OrchestratorMcpGraphReviewInput.fields.graph,
   acceptedDigest: Schema.String.check(Schema.isPattern(/^sha256:[a-f0-9]{64}$/)).annotate({
-    description: "Digest returned by graph_review for the exact graph and input files to run.",
+    description:
+      "Digest returned by graph_review for the exact graph and input files to run. The reviewed model of each profile-assigned node is fixed by the digest: graph_start checks it is still served and refuses (review again) if not; it never moves to the next model in a profile.",
   }),
   budgetTokens: OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
   title: Schema.optional(OrchestratorMcpTitle),
@@ -841,7 +872,7 @@ export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCa
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
   workflowPresets: Schema.optional(WorkflowPresets).annotate({
     description:
-      "Named worker presets and the configured workflow worker default in this environment. Use a preset id in workflow agent options or graph nodes.",
+      "Named worker presets and the configured workflow worker default in this environment. Use a preset id in workflow agent options or graph nodes. A preset lists its model preference order as target, then fallbacks; T3 picks the first entry that is available when the graph is reviewed or the script starts, and keeps it for the run. Presets do not affect delegate_task.",
   }),
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),

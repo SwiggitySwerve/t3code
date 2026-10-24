@@ -94,6 +94,47 @@ describe("orchestrator MCP contracts", () => {
     ).toThrow();
   });
 
+  it("decodes a review with and without the profile choices listed beside its targets", () => {
+    const base = {
+      digest: `sha256:${"b".repeat(64)}`,
+      ready: true,
+      expandedGraph: null,
+      layers: [["a"]],
+      writeConflicts: [],
+      inputs: [],
+      blockers: [],
+    };
+    const target = { providerInstanceId: "codex", model: "gpt-5.4", options: [] };
+    const legacy = { ...base, targets: [{ nodeId: "a", source: "preset", target }] };
+    expect(decodeGraphReviewResult(legacy)).toEqual(legacy);
+    const profile = {
+      presetId: "worker",
+      presetName: "Worker",
+      chosenIndex: 1,
+      skipped: [
+        {
+          index: 0,
+          providerInstanceId: "claude",
+          model: "sonnet",
+          reason: "Provider is disabled.",
+        },
+      ],
+    };
+    const chosen = {
+      ...base,
+      targets: [
+        { nodeId: "a", source: "preset", target, presetId: "worker" },
+        { nodeId: "b", source: "preset", target, presetId: "worker" },
+      ],
+      profiles: [profile],
+    };
+    expect(decodeGraphReviewResult(chosen)).toEqual(chosen);
+    expect(() =>
+      decodeGraphReviewResult({ ...chosen, profiles: [{ ...profile, chosenIndex: -1 }] }),
+    ).toThrow();
+    // A profile's skipped list is not repeated per node.
+    expect(JSON.stringify(chosen).split("Provider is disabled.").length - 1).toBe(1);
+  });
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",

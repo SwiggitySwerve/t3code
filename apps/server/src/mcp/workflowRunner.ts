@@ -27,6 +27,7 @@ import {
   type OrchestratorMcpWorkflowUsage,
   type ModelSelection,
   type WorkflowPresets,
+  type WorkflowPresetTarget,
   type OrchestratorMcpTarget,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -102,7 +103,49 @@ export interface WorkflowContext {
   readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
 }
 
-/** Select one whole request before the provider resolver applies caller inheritance. */
+export interface WorkflowPreference {
+  readonly presetId: string;
+  readonly presetName: string;
+  readonly entries: ReadonlyArray<WorkflowPresetTarget>;
+}
+
+/**
+ * Whether two profile entries are the same choice: provider instance, model and options. An
+ * entry without `options` inherits the caller's, so it is not the same as one with `options: []`.
+ */
+export function sameWorkflowPresetTarget(
+  a: WorkflowPresetTarget,
+  b: WorkflowPresetTarget,
+): boolean {
+  if (a.providerInstanceId !== b.providerInstanceId || a.model !== b.model) return false;
+  const left = a.options;
+  const right = b.options;
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.length === right.length &&
+    left.every(
+      (option, index) => option.id === right[index]!.id && option.value === right[index]!.value,
+    )
+  );
+}
+
+/** A profile's model preference order: its primary target, then its fallbacks. */
+export function presetPreference(preset: WorkflowPresets["presets"][number]): WorkflowPreference {
+  return {
+    presetId: preset.id,
+    presetName: preset.name,
+    entries: [preset.target, ...(preset.fallbacks ?? [])],
+  };
+}
+
+/**
+ * Select one whole request before the provider resolver applies caller inheritance.
+ *
+ * A preset selected without a frozen snapshot also reports its `preference`: the model
+ * preference order the caller may resolve (review, workflow start). `target` is always the
+ * first entry, which is all a script run with no snapshot (stored before profiles) uses.
+ * A snapshot is the resolved choice and carries no order, so a resume never re-reads one.
+ */
 export function selectWorkflowTarget(
   own: {
     readonly target?: unknown;
@@ -116,6 +159,7 @@ export function selectWorkflowTarget(
   readonly target: unknown;
   readonly source: "target" | "model" | "preset" | "workerTarget" | "defaultPreset" | "caller";
   readonly error?: string;
+  readonly preference?: WorkflowPreference;
 } {
   if (own.target !== undefined) return { target: own.target, source: "target" };
   if (own.model !== undefined) return { target: { model: own.model }, source: "model" };
@@ -144,7 +188,7 @@ export function selectWorkflowTarget(
         source,
         ...("error" in snapshot ? { error: snapshot.error } : {}),
       };
-    return { target: preset.target, source };
+    return { target: preset.target, source, preference: presetPreference(preset) };
   }
   if (workerTarget !== undefined) return { target: workerTarget, source: "workerTarget" };
   return { target: undefined, source: "caller" };

@@ -20,12 +20,14 @@ import {
   type ServerProvider,
   ServerSettings,
   type ServerSettingsPatch,
+  type WorkflowPresets,
   withIdleCompaction,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
+import { workflowTriggerExtrasProblems } from "./workflowIntent.ts";
 import { createModelSelection, readCustomModelEntries } from "./model.ts";
 import {
   getBackgroundActivityBaseProfile,
@@ -34,6 +36,95 @@ import {
   resolveBackgroundActivitySettings,
 } from "./backgroundActivitySettings.ts";
 
+/**
+ * A profile name is a label in a picker, not a description; this is the longest the settings
+ * write boundary accepts. Stored presets can be longer: they decode and run unchanged.
+ */
+export const WORKFLOW_PRESET_NAME_MAX_CHARS = 80;
+
+export interface WorkflowPresetWriteProblem {
+  readonly presetId: string;
+  readonly kind: "name_too_long" | "name_duplicate";
+  readonly message: string;
+}
+
+/**
+ * What a settings write may not introduce into the workflow profiles: a name longer than
+ * `WORKFLOW_PRESET_NAME_MAX_CHARS`, or one another profile already has (compared ignoring
+ * case). Presets saved before these rules keep working: a profile whose id and name already
+ * stand in `current` is never reported, so an unrelated edit is not blocked by old data.
+ * The settings service and the settings page both call this; the decode schema does not.
+ */
+export function workflowPresetsWriteProblems(
+  next: WorkflowPresets,
+  current?: WorkflowPresets,
+): ReadonlyArray<WorkflowPresetWriteProblem> {
+  const storedNames = new Map(current?.presets.map((preset) => [preset.id, preset.name]));
+  const problems: WorkflowPresetWriteProblem[] = [];
+  const nameCounts = new Map<string, number>();
+  for (const preset of next.presets) {
+    const key = preset.name.toLowerCase();
+    nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+  }
+  for (const preset of next.presets) {
+    const unchanged = storedNames.get(preset.id) === preset.name;
+    if (!unchanged && Array.from(preset.name).length > WORKFLOW_PRESET_NAME_MAX_CHARS) {
+      problems.push({
+        presetId: preset.id,
+        kind: "name_too_long",
+        message: `A profile name can be at most ${WORKFLOW_PRESET_NAME_MAX_CHARS} characters.`,
+      });
+    }
+    if (!unchanged && (nameCounts.get(preset.name.toLowerCase()) ?? 0) > 1) {
+      problems.push({
+        presetId: preset.id,
+        kind: "name_duplicate",
+        message: `Another profile is already named "${preset.name.slice(0, WORKFLOW_PRESET_NAME_MAX_CHARS)}".`,
+      });
+    }
+  }
+  return problems;
+}
+
+/**
+ * A writer that predates `fallbacks` decodes presets without the key and sends every preset
+ * back whole, which would erase the list. A preset that is already stored and omits the key
+ * keeps its stored list; an explicit `[]` clears it. A new preset starts with none, and a
+ * preset the patch no longer lists is not kept.
+ */
+function keepStoredWorkflowFallbacks(
+  next: WorkflowPresets,
+  current: WorkflowPresets,
+): WorkflowPresets {
+  const stored = new Map(current.presets.map((preset) => [preset.id, preset.fallbacks]));
+  return {
+    ...next,
+    presets: next.presets.map((preset) => {
+      const fallbacks = stored.get(preset.id);
+      return "fallbacks" in preset || fallbacks === undefined ? preset : { ...preset, fallbacks };
+    }),
+  };
+}
+
+/**
+ * Every reason a write from `current` to `next` is refused; empty when it is accepted. Trigger
+ * extras are checked only when the write changes them, so a hand-edited list that is already
+ * stored does not block unrelated writes.
+ */
+export function serverSettingsWriteProblems(
+  current: ServerSettings,
+  next: ServerSettings,
+): ReadonlyArray<string> {
+  const extrasChanged =
+    JSON.stringify(current.workflowTriggers.extras) !==
+    JSON.stringify(next.workflowTriggers.extras);
+  return [
+    ...workflowPresetsWriteProblems(next.workflowPresets, current.workflowPresets).map(
+      (problem) => problem.message,
+    ),
+    ...(extrasChanged ? workflowTriggerExtrasProblems(next.workflowTriggers.extras) : []),
+  ];
+}
 const ServerSettingsJson = fromLenientJson(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownOption(ServerSettingsJson);
 
@@ -491,6 +582,14 @@ export function applyServerSettingsPatch(
   const next = deepMerge(current, patchForMerge);
   const nextWithReplacementsBase = {
     ...next,
+    ...(patch.workflowPresets === undefined
+      ? {}
+      : {
+          workflowPresets: keepStoredWorkflowFallbacks(
+            next.workflowPresets,
+            current.workflowPresets,
+          ),
+        }),
     favorites,
     providerModelPreferences: nextModelPreferences,
     ...(worktreeCleanupPatch === undefined
