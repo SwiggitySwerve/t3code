@@ -24,6 +24,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, MessageId, RunId } from "@t3tools/contracts";
 import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
 import {
+  appWorkflowLookupThreadKey,
   computeStableMessagesTimelineRows,
   computeMessageDurationStart,
   deriveMessagesTimelineRows,
@@ -3752,6 +3753,27 @@ describe("live subagents after their parent turn settles", () => {
       ]);
     },
   );
+
+  it("reads workflow rows only when an item could be a T3 workflow", () => {
+    const entriesFor = (children: ReadonlyArray<OrchestrationV2TurnItem>) =>
+      deriveTimelineEntriesFromVisibleTurnItems({
+        visibleTurnItems: children.map(projected),
+        optimisticMessages: [],
+      });
+    // A draft or ordinary thread must not open the detail subscription for its key.
+    expect(appWorkflowLookupThreadKey("env:thread", [])).toBeNull();
+    expect(
+      appWorkflowLookupThreadKey("env:thread", entriesFor([child("task", 3, "running")])),
+    ).toBeNull();
+    expect(
+      appWorkflowLookupThreadKey(
+        "env:thread",
+        entriesFor([child("native", 3, "running", "provider_native")]),
+      ),
+    ).toBeNull();
+    const workflow = { ...child("workflow", 3, "running"), childThreadId: null };
+    expect(appWorkflowLookupThreadKey("env:thread", entriesFor([workflow]))).toBe("env:thread");
+  });
 
   it("keeps a launch batch visible while any member is still running", () => {
     const rows = rowsFor([child("done", 3, "completed"), child("live", 4, "running")]);

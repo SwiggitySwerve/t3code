@@ -129,6 +129,14 @@ export function isLiveSubagentTurnItem(item: OrchestrationV2TurnItem): boolean {
   return item.type === "subagent" && isOrchestrationV2WorkActive(item.status);
 }
 
+/**
+ * A subagent item that may be a workflow T3 runs: app-owned with no thread of its own.
+ * Only the parent's subagent row can confirm it (see isAppWorkflow).
+ */
+export function isAppWorkflowCandidateTurnItem(item: OrchestrationV2TurnItem): boolean {
+  return item.type === "subagent" && item.origin === "app_owned" && item.childThreadId === null;
+}
+
 /** Matches the app-owned workflow entry point, never a completed child thread. */
 export function isAppWorkflowTurnItem(
   item: OrchestrationV2TurnItem,

@@ -26,11 +26,14 @@ import { useStableCallback } from "~/hooks/useStableCallback";
 
 const NOOP_USE_ARTIFACT_TEMPLATE = () => {};
 const NOOP_OPEN_ATTACHMENT = (_attachment: ChatFileAttachment) => {};
+const NO_APP_WORKFLOWS: ReadonlySet<string> = new Set();
+// Keyed by appWorkflowLookupThreadKey; the empty key reads nothing.
 const appWorkflowIdsAtom = Atom.family((key: string) => {
-  const ref = parseScopedThreadKey(key);
-  let ids: ReadonlySet<string> = new Set();
+  const ref = key === "" ? null : parseScopedThreadKey(key);
+  if (ref === null) return Atom.make(NO_APP_WORKFLOWS);
+  let ids: ReadonlySet<string> = NO_APP_WORKFLOWS;
   return Atom.make((get) => {
-    const thread = ref === null ? null : get(environmentThreadDetails.threadAtom(ref));
+    const thread = get(environmentThreadDetails.threadAtom(ref));
     const next = (thread?.projection.subagents ?? [])
       .filter(isAppWorkflow)
       .map((agent) => agent.id);
@@ -75,6 +78,7 @@ import type { AssistantCitationSourceAnchor } from "~/lib/assistantTextSelection
 import { type AssistantCitationRequest } from "./AssistantCitationSource";
 import { useAssistantCitationTarget, type CitationHistoryPage } from "./useAssistantCitationTarget";
 import {
+  appWorkflowLookupThreadKey,
   resolveTimelineIsAtEnd,
   resolveTimelineMinimapHasPersistentGutter,
   resolveTimelineMinimapCurrentIndex,
@@ -383,7 +387,9 @@ const ConversationTimeline = memo(function ConversationTimeline({
   loadEarlier = null,
 }: MessagesTimelineProps) {
   const listIdentityKey = displayThreadKey ?? routeThreadKey;
-  const appWorkflowIds = useAtomValue(appWorkflowIdsAtom(listIdentityKey));
+  const appWorkflowIds = useAtomValue(
+    appWorkflowIdsAtom(appWorkflowLookupThreadKey(listIdentityKey, timelineEntries) ?? ""),
+  );
   // The remembered position is a snapshot taken when the list identity changes;
   // scrolling keeps rewriting the stored entry, which must not move the restore.
   const [listState, setListState] = useState(() => timelineListStateFor(listIdentityKey));

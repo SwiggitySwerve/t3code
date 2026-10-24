@@ -1,6 +1,7 @@
 import { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 export { worktreeSetupAgentStarted } from "@t3tools/client-runtime/worktree-setup";
 import {
+  isAppWorkflowCandidateTurnItem,
   isAppWorkflowTurnItem,
   isLiveSubagentTurnItem,
 } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -1418,6 +1419,22 @@ function deriveTimelineTurnFolds(
     liveSubagentEntryIds: liveSubagentCardEntryIds(timelineEntries, input.appWorkflowIds),
     completeSupersededReplyEntryIds: completeSupersededReplyEntryIds(timelineEntries),
   });
+}
+
+/**
+ * The thread whose subagent rows confirm which timeline items are T3 workflows, or null when no
+ * item could be one. Reading those rows opens the thread's detail subscription, so a timeline
+ * without candidates (including a draft that has not been launched yet) must not read them.
+ */
+export function appWorkflowLookupThreadKey(
+  threadKey: string,
+  entries: ReadonlyArray<TimelineEntry>,
+): string | null {
+  return entries.some(
+    (entry) => entry.kind === "event" && isAppWorkflowCandidateTurnItem(entry.projectedItem.item),
+  )
+    ? threadKey
+    : null;
 }
 
 export function deriveMessagesTimelineRows(input: {

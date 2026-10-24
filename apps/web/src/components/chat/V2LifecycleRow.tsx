@@ -1,7 +1,10 @@
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { AgentElapsed } from "./AgentElapsed";
 import { AppWorkflowTimelineBlock } from "./AppWorkflowTimelineBlock";
-import { projectedSubagentsToRuntime } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  isAppWorkflowCandidateTurnItem,
+  projectedSubagentsToRuntime,
+} from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ReactNode } from "react";
 import { useThreadShell, useProject } from "../../state/entities";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
@@ -208,7 +211,7 @@ export function V2LifecycleRow(props: {
         onOpenThread={props.onOpenThread}
       />
     );
-    return item.origin === "app_owned" && item.childThreadId === null ? (
+    return isAppWorkflowCandidateTurnItem(item) ? (
       <AppWorkflowTimelineBlock
         parentRef={scopeThreadRef(props.environmentId, item.threadId)}
         subagentId={item.subagentId}
