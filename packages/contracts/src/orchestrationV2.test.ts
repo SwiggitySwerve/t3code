@@ -14,6 +14,7 @@ import {
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
+  OrchestrationV2WorkflowAgent,
 } from "./orchestrationV2.ts";
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
@@ -32,8 +33,44 @@ const decodeOrchestrationV2ProviderThread = Schema.decodeUnknownSync(Orchestrati
 const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
   OrchestrationV2ProviderCapabilities,
 );
+const workflowAgentCodec = Schema.toCodecJson(OrchestrationV2WorkflowAgent);
+const decodeWorkflowAgent = Schema.decodeUnknownSync(OrchestrationV2WorkflowAgent);
+const encodeWorkflowAgent = Schema.encodeSync(workflowAgentCodec);
+const decodeWorkflowAgentJson = Schema.decodeUnknownSync(workflowAgentCodec);
 
 describe("orchestration V2 contracts", () => {
+  it("round-trips attempt history and accepts legacy workflow members without it", () => {
+    const roundTrip = (value: unknown) =>
+      decodeWorkflowAgentJson(encodeWorkflowAgent(decodeWorkflowAgent(value)));
+    const legacy = {
+      index: 0,
+      label: "Worker",
+      state: "completed",
+      totalTokens: 55561,
+      attempt: 1,
+    };
+    expect(roundTrip(legacy)).toEqual(legacy);
+    const current = {
+      ...legacy,
+      attemptHistory: [
+        {
+          taskId: "task-1",
+          childThreadId: "child-1",
+          attempt: 0,
+          state: "failed",
+          providerInstanceId: "provider-1",
+          model: "model-1",
+          totalTokens: 12,
+          usageStatus: "partial",
+          durationMs: 2000,
+          timingComplete: true,
+          startedAt: 1000,
+        },
+      ],
+      judgmentOutcome: "failed",
+    };
+    expect(roundTrip(current)).toEqual(current);
+  });
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),

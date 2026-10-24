@@ -30,6 +30,7 @@ export interface WorkflowGraphNodeView<Member> {
   readonly attempts: number | null;
   /** The agent that runs this node, once one started. */
   readonly member: Member | null;
+  readonly members?: ReadonlyArray<Member>;
   readonly checkers: ReadonlyArray<Member>;
 }
 
@@ -69,6 +70,7 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
 }): WorkflowGraphView<Member> {
   const keys = new Set(input.plan.nodes.map((node) => node.key));
   const memberByKey = new Map<string, Member>();
+  const membersByKey = new Map<string, Array<Member>>();
   const otherMembers: Array<Member> = [];
   const checkersByKey = new Map<string, Array<Member>>();
   for (const member of input.members) {
@@ -81,6 +83,9 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
       } else otherMembers.push(member);
     } else if (member.graphNodeKey !== undefined && keys.has(member.graphNodeKey)) {
       memberByKey.set(member.graphNodeKey, member);
+      const members = membersByKey.get(member.graphNodeKey) ?? [];
+      members.push(member);
+      membersByKey.set(member.graphNodeKey, members);
     } else {
       otherMembers.push(member);
     }
@@ -106,6 +111,7 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
       reason: outcome?.reason ?? null,
       attempts: outcome?.attempts ?? null,
       member,
+      members: membersByKey.get(node.key) ?? [],
       checkers: checkersByKey.get(node.key) ?? [],
     };
   });

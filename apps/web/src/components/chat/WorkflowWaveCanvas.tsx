@@ -1,7 +1,9 @@
+import { useNowSecond } from "../../hooks/useNowSecond";
 import {
   WORKFLOW_GRAPH_STATE_LABEL,
   workflowGraphNodeDetail,
   workflowMemberIdentity,
+  workflowNodeAccounting,
   type RuntimeSubagent,
   type WorkflowGraphNodeState,
   type WorkflowGraphNodeView,
@@ -13,11 +15,14 @@ import type {
   ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
-import { ChevronRightIcon } from "lucide-react";
+import { ChevronRightIcon, HistoryIcon } from "lucide-react";
+import { formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { formatTokens } from "@t3tools/shared/usageFormat";
 import { useState } from "react";
 import { cn } from "../../lib/utils";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { AgentElapsed } from "./AgentElapsed";
+import { Button } from "../ui/button";
+import { Popover, PopoverPopup, PopoverTitle, PopoverTrigger } from "../ui/popover";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import { WAVE_CARD_HEIGHT, type WaveBox, workflowWaveLayout } from "./workflowWaveLayout";
 
@@ -134,7 +139,7 @@ export function WorkflowWaveCanvas(props: {
   );
 }
 
-function WorkflowNodeCard(props: {
+interface WorkflowNodeCardProps {
   readonly node: WorkflowGraphNodeView<RuntimeSubagent>;
   readonly box: WaveBox;
   readonly labels: ReadonlyMap<string, string>;
@@ -145,15 +150,21 @@ function WorkflowNodeCard(props: {
   /** Null when nothing is highlighted; otherwise whether this node relates to the highlighted one. */
   readonly emphasis: boolean | null;
   readonly onHighlight: (on: boolean) => void;
-}) {
+}
+
+function WorkflowNodeCard(props: WorkflowNodeCardProps) {
+  const snapshot = workflowNodeAccounting(props.node);
+  const now = useNowSecond(snapshot.live);
+  const accounting = snapshot.live ? workflowNodeAccounting(props.node, now) : snapshot;
   const { node, box } = props;
   const { detail, retries } = workflowGraphNodeDetail(node, props.labels);
   const threadId = node.member?.childThreadId ?? null;
   const state = WORKFLOW_GRAPH_STATE_LABEL[node.state];
   const identity = workflowMemberIdentity(node.member);
-  const description = [state, identity, retries, detail].filter(Boolean).join(", ");
+  const totals = `${countText(accounting.tokens, formatTokens)} tokens · ${countText(accounting.elapsed, formatDuration)}`;
+  const description = [state, identity, retries, detail, totals].filter(Boolean).join(", ");
   const className = cn(
-    "group/node flex min-w-0 items-center gap-2 px-2 text-left w-full rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+    "group/node flex min-w-0 flex-1 items-center gap-2 px-2 text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
     props.emphasis === false ? "opacity-35" : MUTED_STATES.has(node.state) && "opacity-60",
   );
   const highlight = {
@@ -187,12 +198,8 @@ function WorkflowNodeCard(props: {
           {retries ? <span className="font-medium">{retries} · </span> : null}
           {detail ?? state}
         </span>
+        <span className="truncate text-2xs text-muted-foreground tabular-nums">{totals}</span>
       </span>
-      {node.member?.startedAt ? (
-        <span className="shrink-0 text-2xs text-muted-foreground tabular-nums">
-          <AgentElapsed agent={node.member} compact />
-        </span>
-      ) : null}
       {threadId !== null ? (
         <ChevronRightIcon
           aria-hidden
@@ -211,48 +218,75 @@ function WorkflowNodeCard(props: {
       )}
       style={style}
     >
-      <Tooltip>
-        <TooltipTrigger
-          delay={200}
-          render={
-            threadId === null ? (
-              <div
-                role="group"
-                aria-label={node.label}
-                aria-description={description}
-                className={className}
-                style={{ height: WAVE_CARD_HEIGHT }}
-                data-node-state={node.state}
-                data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
-                tabIndex={0}
-                {...highlight}
-              />
-            ) : (
-              <button
-                type="button"
-                aria-label={`Open ${node.label}`}
-                aria-description={description}
-                onClick={() => props.onOpenThread(threadId)}
-                className={cn(
-                  className,
-                  "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-                )}
-                style={{ height: WAVE_CARD_HEIGHT }}
-                data-node-state={node.state}
-                data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
-                {...highlight}
-              />
-            )
-          }
-        >
-          {content}
-        </TooltipTrigger>
-        <TooltipPopup className="max-w-80">
-          <span className="font-medium">{node.label}</span>
-          {": "}
-          {description}
-        </TooltipPopup>
-      </Tooltip>
+      <div className="flex items-center">
+        <Tooltip>
+          <TooltipTrigger
+            delay={200}
+            render={
+              threadId === null ? (
+                <div
+                  role="group"
+                  aria-label={node.label}
+                  aria-description={description}
+                  className={className}
+                  style={{ height: WAVE_CARD_HEIGHT }}
+                  data-node-state={node.state}
+                  data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
+                  tabIndex={0}
+                  {...highlight}
+                />
+              ) : (
+                <button
+                  type="button"
+                  aria-label={`Open ${node.label}`}
+                  aria-description={description}
+                  onClick={() => props.onOpenThread(threadId)}
+                  className={cn(
+                    className,
+                    "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+                  )}
+                  style={{ height: WAVE_CARD_HEIGHT }}
+                  data-node-state={node.state}
+                  data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
+                  {...highlight}
+                />
+              )
+            }
+          >
+            {content}
+          </TooltipTrigger>
+          <TooltipPopup className="max-w-80">
+            <div className="max-h-64 overflow-y-auto">
+              <p>
+                <span className="font-medium">{node.label}</span>
+                {": "}
+                {description}
+              </p>
+              <WorkflowAttemptList accounting={accounting} />
+            </div>
+          </TooltipPopup>
+        </Tooltip>
+        {accounting.attempts.length > 0 ? (
+          <Popover>
+            <PopoverTrigger
+              render={
+                <Button variant="ghost" size="icon-sm" aria-label={`Attempts for ${node.label}`} />
+              }
+            >
+              <HistoryIcon aria-hidden />
+            </PopoverTrigger>
+            <PopoverPopup width="md">
+              <PopoverTitle>{node.label} attempts</PopoverTitle>
+              <p className="my-2 text-xs text-muted-foreground">
+                {totals}. Running time is as of the latest update.
+              </p>
+              <div className="max-h-64 overflow-y-auto">
+                <WorkflowAttemptList accounting={accounting} onOpenThread={props.onOpenThread} />
+              </div>
+            </PopoverPopup>
+          </Popover>
+        ) : null}
+      </div>
       {node.checkers.map((checker) => (
         <WorkflowChecker key={checker.id} checker={checker} onOpenThread={props.onOpenThread} />
       ))}
@@ -266,7 +300,7 @@ function WorkflowChecker(props: {
 }) {
   const { checker } = props;
   const threadId = checker.childThreadId;
-  const label = `Check attempt ${(checker.judgmentFor?.attempt ?? 0) + 1}: ${checker.status}`;
+  const label = `Check attempt ${(checker.judgmentFor?.attempt ?? 0) + 1}: ${checker.status}${checker.judgmentOutcome === undefined ? "" : `, judgment ${checker.judgmentOutcome}`}`;
   const identity = workflowMemberIdentity(checker);
   const result = checker.error ?? checker.result;
   const description = [label, identity, result].filter(Boolean).join(" · ");
@@ -298,9 +332,59 @@ function WorkflowChecker(props: {
         {label} · {identity}
       </TooltipTrigger>
       <TooltipPopup className="max-w-80">
-        {checker.title}: {label} · {identity}
-        {result ? <p className="whitespace-pre-wrap break-words">{result}</p> : null}
+        <div className="max-h-64 overflow-y-auto">
+          <p>
+            {checker.title}: {label} · {identity}
+          </p>
+          {result ? <p className="whitespace-pre-wrap break-words">{result}</p> : null}
+        </div>
       </TooltipPopup>
     </Tooltip>
+  );
+}
+
+function countText(
+  count: { readonly value: number | null; readonly complete: boolean },
+  format: (value: number) => string,
+): string {
+  return count.value === null ? "Unknown" : `${count.complete ? "" : "≥"}${format(count.value)}`;
+}
+
+function WorkflowAttemptList(props: {
+  readonly accounting: ReturnType<typeof workflowNodeAccounting>;
+  readonly onOpenThread?: (threadId: string) => void;
+}) {
+  return (
+    <>
+      <ul className="space-y-2 text-xs">
+        {props.accounting.attempts.map((attempt) => (
+          <li key={attempt.key}>
+            <p>
+              Attempt {attempt.number}: {attempt.status}
+            </p>
+            <p className="break-words">
+              {attempt.providerInstanceId ?? "Unknown provider"} /{" "}
+              {attempt.model ?? "Unknown model"}
+            </p>
+            <p>
+              {countText(attempt.tokens, formatTokens)} tokens ·{" "}
+              {countText(attempt.elapsed, formatDuration)}
+            </p>
+            {props.onOpenThread !== undefined && attempt.childThreadId !== null ? (
+              <Button
+                variant="link"
+                size="sm"
+                onClick={() => props.onOpenThread?.(attempt.childThreadId!)}
+              >
+                Open attempt {attempt.number}
+              </Button>
+            ) : null}
+          </li>
+        ))}
+      </ul>
+      {props.accounting.missing ? (
+        <p className="mt-2 text-xs">Earlier attempt details are unavailable.</p>
+      ) : null}
+    </>
   );
 }

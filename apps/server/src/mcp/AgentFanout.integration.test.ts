@@ -22,6 +22,8 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderTurnId,
+  RunId,
+  RunAttemptId,
   type ServerProvider,
   type TurnTokenUsage,
   ThreadId,
@@ -350,7 +352,7 @@ const completeChild = (
           threadId: childThreadId,
           runId: run.id,
           occurredAt: now,
-          payload: { ...run, status: "completed", ...runPatch, startedAt: now, completedAt: now },
+          payload: { ...run, status: "completed", startedAt: now, completedAt: now, ...runPatch },
         },
       ],
     });
@@ -1226,6 +1228,483 @@ const twoStepScript =
   'const first = await agent("first")\nconst second = await agent("second after " + first)\nreturn [first, second]';
 
 describe("workflow resume", () => {
+  it.effect.each([
+    { status: "failed", runStatus: "completed", restart: false, legacy: false, tokens: 17 },
+    { status: "failed", runStatus: "failed", restart: true, legacy: true, tokens: 17 },
+    { status: "cancelled", runStatus: "cancelled", restart: true, legacy: true, tokens: undefined },
+  ] as const)(
+    "settles orphan turns for $status tasks (restart=$restart, legacy=$legacy)",
+    (scenario) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const orphan = Effect.fn("test.orphanTurn")(function* (workflowId: NodeId) {
+          const member = yield* awaitMember(workflowId, 1);
+          const run = (yield* orchestrator.getThreadProjection(member.childThreadId!)).runs.at(-1)!;
+          const start = DateTime.makeUnsafe(1000);
+          const end = DateTime.makeUnsafe(4001);
+          const { delegatedTaskId: _taskId, ...legacyRun } = run;
+          yield* sink.commitCommand({
+            commandId: CommandId.make("command:orphan-turn"),
+            threadId: member.childThreadId!,
+            commandType: "test.orphan-turn",
+            acceptedAt: end,
+            effects: [],
+            events: [
+              {
+                id: EventId.make("event:orphan-turn"),
+                type: "provider-turn.updated",
+                threadId: member.childThreadId!,
+                runId: run.id,
+                occurredAt: start,
+                payload: {
+                  id: ProviderTurnId.make("provider-turn:orphan"),
+                  providerThreadId: run.providerThreadId!,
+                  nodeId: run.rootNodeId!,
+                  runAttemptId: run.activeAttemptId,
+                  nativeTurnRef: null,
+                  ordinal: 1,
+                  status: "running",
+                  startedAt: start,
+                  completedAt: null,
+                  ...(scenario.tokens === undefined
+                    ? {}
+                    : {
+                        // Even a provider's complete counter cannot finalize an open turn.
+                        turnTokenUsage: {
+                          usageStatus: "complete" as const,
+                          usageScope: "main_agent" as const,
+                          hasSubagents: false,
+                          inputTokens: scenario.tokens,
+                          outputTokens: 0,
+                        },
+                      }),
+                },
+              },
+              {
+                id: EventId.make("event:orphan-run-end"),
+                type: "run.updated",
+                threadId: member.childThreadId!,
+                runId: run.id,
+                occurredAt: end,
+                payload: {
+                  ...(scenario.legacy ? legacyRun : run),
+                  status: scenario.runStatus,
+                  startedAt: start,
+                  completedAt: end,
+                },
+              },
+              ...(!scenario.legacy
+                ? [
+                    {
+                      id: EventId.make("event:unrelated-run"),
+                      type: "run.updated" as const,
+                      threadId: member.childThreadId!,
+                      runId: RunId.make("run:unrelated"),
+                      occurredAt: start,
+                      payload: {
+                        ...run,
+                        id: RunId.make("run:unrelated"),
+                        ordinal: 2,
+                        delegatedTaskId: NodeId.make("task:unrelated"),
+                        activeAttemptId: RunAttemptId.make("attempt:unrelated"),
+                        rootNodeId: NodeId.make("node:unrelated"),
+                        status: "running" as const,
+                        startedAt: start,
+                        completedAt: null,
+                      },
+                    },
+                    {
+                      id: EventId.make("event:unrelated-turn"),
+                      type: "provider-turn.updated" as const,
+                      threadId: member.childThreadId!,
+                      runId: RunId.make("run:unrelated"),
+                      occurredAt: start,
+                      payload: {
+                        id: ProviderTurnId.make("provider-turn:unrelated"),
+                        providerThreadId: run.providerThreadId!,
+                        nodeId: NodeId.make("node:unrelated"),
+                        runAttemptId: RunAttemptId.make("attempt:unrelated"),
+                        nativeTurnRef: null,
+                        ordinal: 2,
+                        status: "running" as const,
+                        startedAt: start,
+                        completedAt: null,
+                        turnTokenUsage: {
+                          usageStatus: "complete" as const,
+                          usageScope: "main_agent" as const,
+                          hasSubagents: false,
+                          inputTokens: 999,
+                          outputTokens: 0,
+                        },
+                      },
+                    },
+                  ]
+                : []),
+              {
+                id: EventId.make("event:orphan-task-end"),
+                type: "subagent.updated",
+                threadId: parentThreadId,
+                runId: member.runId!,
+                occurredAt: end,
+                payload: {
+                  ...member,
+                  status: scenario.status,
+                  result: "provider stopped",
+                  completedAt: end,
+                  updatedAt: end,
+                },
+              },
+            ],
+          });
+          return member;
+        });
+        const finish = Effect.fn("test.finishOrphanWorkflow")(function* (workflowId: NodeId) {
+          if (scenario.status === "failed") {
+            const retry = yield* awaitMember(workflowId, 2);
+            yield* completeChild(retry.childThreadId!, "recovered", { status: "completed" }, 23);
+          }
+          const ended = yield* awaitWorkflowEnd(workflowId);
+          expect(JSON.parse(ended.result!)).toBe(scenario.status === "failed" ? "recovered" : null);
+          expect(ended.usage).toMatchObject({
+            status: scenario.tokens === undefined ? "unavailable" : "partial",
+            totalTokens: scenario.tokens === undefined ? null : 40,
+          });
+          const worker = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+            (task) => task.id === workflowId,
+          )!.workflow!.agents[0]!;
+          expect(worker.attemptHistory?.[0]).toMatchObject({
+            state: scenario.status,
+            durationMs: 3001,
+            timingComplete: true,
+            usageStatus: scenario.tokens === undefined ? "unavailable" : "partial",
+          });
+          expect(worker.attemptHistory?.[0]?.totalTokens).toBe(scenario.tokens);
+          expect(worker.attemptTaskIds).toHaveLength(scenario.status === "failed" ? 2 : 1);
+        });
+        if (scenario.restart) {
+          const workflowId = yield* withServerProcess((service) =>
+            Effect.gen(function* () {
+              const started = yield* service.workflowStart(invocation, {
+                script: 'return await agent("orphan")',
+              });
+              yield* awaitMember(started.workflowId, 1);
+              return started.workflowId;
+            }),
+          );
+          // No service is observing when these terminal legacy records arrive.
+          yield* orphan(workflowId);
+          yield* withServerProcess((service) =>
+            Effect.gen(function* () {
+              expect(yield* service.resumeWorkflows).toBe(1);
+              yield* finish(workflowId);
+            }),
+          );
+        } else {
+          const started = yield* startWorkflow('return await agent("orphan")');
+          yield* orphan(started.workflowId);
+          yield* finish(started.workflowId);
+        }
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("settles terminal tasks after late run and usage completion across replay", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const terminalBeforeRun = Effect.fn("test.terminalBeforeRun")(function* (
+        workflowId: NodeId,
+        member: OrchestrationV2Subagent,
+        status: "failed" | "completed",
+        startedAt: number,
+      ) {
+        const run = (yield* orchestrator.getThreadProjection(member.childThreadId!)).runs.at(-1)!;
+        const now = DateTime.makeUnsafe(startedAt);
+        yield* sink.commitCommand({
+          commandId: CommandId.make(`command:early-task:${member.id}`),
+          threadId: member.childThreadId!,
+          commandType: "test.early-task",
+          acceptedAt: now,
+          effects: [],
+          events: [
+            {
+              id: EventId.make(`event:open-run:${member.id}`),
+              type: "run.updated",
+              threadId: member.childThreadId!,
+              runId: run.id,
+              occurredAt: now,
+              payload: { ...run, status: "running", startedAt: now, completedAt: null },
+            },
+            {
+              id: EventId.make(`event:early-task:${member.id}`),
+              type: "subagent.updated",
+              threadId: parentThreadId,
+              runId: member.runId!,
+              occurredAt: now,
+              payload: {
+                ...member,
+                status,
+                result: "early result",
+                completedAt: now,
+                updatedAt: now,
+              },
+            },
+          ],
+        });
+        // The runner has consumed the terminal task while the run is still open.
+        yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentThreadId,
+            afterSequence: 0,
+            eventType: "subagent.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.id === workflowId &&
+                (stored.event.payload.workflow?.agents.some((agent) =>
+                  agent.attemptHistory?.some(
+                    (attempt) => attempt.taskId === member.id && attempt.state === status,
+                  ),
+                ) ??
+                  false),
+            ),
+            Stream.runHead,
+          );
+      });
+      const workflowId = yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          const started = yield* service.workflowStart(invocation, {
+            script: 'return await agent("retry")',
+          });
+          const first = yield* awaitMember(started.workflowId, 1);
+          yield* terminalBeforeRun(started.workflowId, first, "failed", 1000);
+          return started.workflowId;
+        }),
+      );
+      // Shutdown interrupted the settlement wait. Replay must read the persisted open run.
+      yield* withServerProcess((service) =>
+        Effect.gen(function* () {
+          yield* service.resumeWorkflows;
+          const first = yield* awaitMember(workflowId, 1);
+          yield* completeChild(
+            first.childThreadId!,
+            "failed",
+            {
+              status: "failed",
+              startedAt: DateTime.makeUnsafe(1000),
+              completedAt: DateTime.makeUnsafe(4001),
+            },
+            30,
+          );
+          const second = yield* awaitMember(workflowId, 2);
+          yield* terminalBeforeRun(workflowId, second, "completed", 10000);
+          yield* completeChild(
+            second.childThreadId!,
+            "done",
+            {
+              startedAt: DateTime.makeUnsafe(10000),
+              completedAt: DateTime.makeUnsafe(14590),
+            },
+            70,
+          );
+          yield* awaitWorkflowEnd(workflowId);
+        }),
+      );
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      const worker = parent.subagents.find((task) => task.id === workflowId)!.workflow!.agents[0]!;
+      expect(
+        worker.attemptHistory?.map((attempt) => [
+          attempt.durationMs,
+          attempt.timingComplete,
+          attempt.totalTokens,
+        ]),
+      ).toEqual([
+        [3001, true, 30],
+        [4590, true, 70],
+      ]);
+      expect(worker.attemptHistory?.reduce((sum, attempt) => sum + attempt.durationMs!, 0)).toBe(
+        7591,
+      );
+      expect(worker.totalTokens).toBe(100);
+      expect(new Set(worker.attemptTaskIds).size).toBe(2);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("observes run start and retains late usage while execution is open", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow('return await agent("late usage")');
+      const member = yield* awaitMember(started.workflowId, 1);
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sink = yield* EventSink.EventSinkV2;
+      const run = (yield* orchestrator.getThreadProjection(member.childThreadId!)).runs.at(-1)!;
+      const start = DateTime.makeUnsafe(1000);
+      const end = DateTime.makeUnsafe(4001);
+      const turn = {
+        id: ProviderTurnId.make("provider-turn:late-usage"),
+        providerThreadId: run.providerThreadId!,
+        nodeId: run.rootNodeId!,
+        runAttemptId: run.activeAttemptId,
+        nativeTurnRef: null,
+        ordinal: 1,
+        status: "running" as const,
+        startedAt: start,
+        completedAt: null,
+        turnTokenUsage: {
+          usageScope: "main_agent" as const,
+          usageStatus: "partial" as const,
+          hasSubagents: false,
+          inputTokens: 10,
+          outputTokens: 0,
+        },
+      };
+      const awaitAttempt = (
+        matches: (
+          attempt: NonNullable<
+            NonNullable<OrchestrationV2Subagent["workflow"]>["agents"][number]["attemptHistory"]
+          >[number],
+        ) => boolean,
+      ) =>
+        orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentThreadId,
+            afterSequence: 0,
+            eventType: "subagent.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "subagent.updated" &&
+                stored.event.payload.id === started.workflowId &&
+                (stored.event.payload.workflow?.agents.some((agent) =>
+                  agent.attemptHistory?.some(matches),
+                ) ??
+                  false),
+            ),
+            Stream.runHead,
+          );
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:start"),
+        threadId: member.childThreadId!,
+        commandType: "test.run-start",
+        acceptedAt: start,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:start"),
+            type: "run.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: start,
+            payload: { ...run, status: "running", startedAt: start },
+          },
+          {
+            id: EventId.make("event:late-usage:turn-start"),
+            type: "provider-turn.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: start,
+            payload: turn,
+          },
+        ],
+      });
+      // No parent task update accompanies admission: the child run event must publish the clock anchor.
+      yield* awaitAttempt((attempt) => attempt.activeStartedAt === 1000);
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:task-end"),
+        threadId: member.childThreadId!,
+        commandType: "test.task-end",
+        acceptedAt: end,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:task-end"),
+            type: "subagent.updated",
+            threadId: parentThreadId,
+            runId: member.runId!,
+            occurredAt: end,
+            payload: {
+              ...member,
+              status: "completed",
+              result: "done",
+              completedAt: end,
+              updatedAt: end,
+            },
+          },
+        ],
+      });
+      yield* awaitAttempt(
+        (attempt) => attempt.state === "completed" && attempt.usageStatus === "partial",
+      );
+      expect(
+        (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === started.workflowId,
+        )?.status,
+      ).toBe("running");
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:turn-end"),
+        threadId: member.childThreadId!,
+        commandType: "test.turn-end",
+        acceptedAt: end,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:turn-end"),
+            type: "provider-turn.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: end,
+            payload: {
+              ...turn,
+              status: "completed",
+              completedAt: end,
+              turnTokenUsage: { ...turn.turnTokenUsage, usageStatus: "complete", inputTokens: 20 },
+            },
+          },
+        ],
+      });
+      // Adapters finalize usage before emitting the terminal that ends the run.
+      yield* awaitAttempt((attempt) => attempt.totalTokens === 20 && !attempt.timingComplete);
+      expect(
+        (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === started.workflowId,
+        )?.status,
+      ).toBe("running");
+      yield* sink.commitCommand({
+        commandId: CommandId.make("command:late-usage:run-end"),
+        threadId: member.childThreadId!,
+        commandType: "test.run-end",
+        acceptedAt: end,
+        effects: [],
+        events: [
+          {
+            id: EventId.make("event:late-usage:run-end"),
+            type: "run.updated",
+            threadId: member.childThreadId!,
+            runId: run.id,
+            occurredAt: end,
+            payload: { ...run, status: "completed", startedAt: start, completedAt: end },
+          },
+        ],
+      });
+      yield* awaitWorkflowEnd(started.workflowId);
+      const worker = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+        (task) => task.id === started.workflowId,
+      )!.workflow!.agents[0]!;
+      expect(worker.attemptHistory?.[0]).toMatchObject({
+        durationMs: 3001,
+        timingComplete: true,
+        usageStatus: "complete",
+        totalTokens: 20,
+      });
+      expect(worker.totalTokens).toBe(20);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("C4 preserves historical script inheritance despite a new configured default", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -1689,6 +2168,59 @@ describe("workflow resume", () => {
         ]);
         expect(ended.usage.status).toBe("unavailable");
         expect(ended.tokensUsed).toBeNull();
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "replays persisted retry history without losing usage or duplicating child identity",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const workflowId = yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            const started = yield* service.workflowStart(invocation, {
+              script: 'return await agent("retry")',
+            });
+            const first = yield* awaitMember(started.workflowId, 1);
+            yield* completeChild(first.childThreadId!, "failed", { status: "failed" }, 30);
+            yield* awaitMember(started.workflowId, 2);
+            return started.workflowId;
+          }),
+        );
+        const second = yield* awaitMember(workflowId, 2);
+        yield* withServerProcess((service) =>
+          Effect.gen(function* () {
+            expect(yield* service.resumeWorkflows).toBe(1);
+            yield* completeChild(second.childThreadId!, "done", { status: "completed" }, 70);
+            yield* awaitWorkflowEnd(workflowId);
+          }),
+        );
+        const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
+          parentThreadId,
+        );
+        const worker = parent.subagents.find((task) => task.id === workflowId)?.workflow?.agents[0];
+        expect(worker?.totalTokens).toBe(100);
+        expect(
+          worker?.attemptHistory?.map((attempt) => [
+            attempt.state,
+            attempt.totalTokens,
+            attempt.usageStatus,
+          ]),
+        ).toEqual([
+          ["failed", 30, "complete"],
+          ["completed", 70, "complete"],
+        ]);
+        expect(worker?.attemptHistory?.map((attempt) => attempt.taskId)).toEqual(
+          worker?.attemptTaskIds,
+        );
+        expect(worker?.attemptHistory?.[1]?.childThreadId).toBe(second.childThreadId);
+        expect(
+          worker?.attemptHistory?.map((attempt) => [attempt.durationMs, attempt.timingComplete]),
+        ).toEqual([
+          [0, true],
+          [0, true],
+        ]);
+        expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
       }).pipe(Effect.provide(layerTest)),
   );
 
@@ -2676,6 +3208,15 @@ describe("graphs", () => {
           parentThreadId,
         )).subagents.find((task) => task.id === started.workflowId);
         expect(row?.workflow?.agents.map((agent) => agent.graphNodeKey)).toEqual(["produce"]);
+        const attempts = row?.workflow?.agents[0]?.attemptHistory;
+        expect(attempts).toHaveLength(3);
+        expect(new Set(attempts?.map((attempt) => attempt.taskId)).size).toBe(3);
+        expect(attempts?.map((attempt) => attempt.attempt)).toEqual([0, 1, 2]);
+        expect(
+          attempts?.every(
+            (attempt) => attempt.state === "completed" && attempt.childThreadId.length > 0,
+          ),
+        ).toBe(true);
         expect(row?.workflow?.nodeOutcomes).toEqual({
           produce: { status: "failed", attempts: 3, reason },
           consume: { status: "skipped", attempts: 0, reason: "Predecessor produce did not pass." },
@@ -2767,6 +3308,11 @@ describe("graphs", () => {
         expect(parent.subagents.filter((task) => task.parentNodeId === workflowId)).toHaveLength(2);
         // The plan comes back from the stored settings, so the resumed row still shows the graph.
         const row = parent.subagents.find((task) => task.id === workflowId);
+        expect(row?.workflow?.agents.map((agent) => agent.attemptHistory?.length)).toEqual([1, 1]);
+        expect(row?.workflow?.agents[0]?.attemptHistory?.[0]?.childThreadId).toBe(
+          parent.subagents.find((task) => task.id === row?.workflow?.agents[0]?.agentId)
+            ?.childThreadId,
+        );
         expect(
           row?.workflow?.plan?.nodes.map((node) => [node.key, node.wave, node.dependsOn]),
         ).toEqual([

@@ -22,6 +22,7 @@ export {
   type WorkflowGraphNodeView,
   type WorkflowGraphView,
 } from "./workflowGraphView.ts";
+export { workflowNodeAccounting } from "./workflowAttempts.ts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -98,6 +99,10 @@ export interface RuntimeSubagent {
   /** The graph node a workflow member runs. */
   readonly graphNodeKey?: string | undefined;
   readonly judgmentFor?: OrchestrationV2SubagentWorkflow["agents"][number]["judgmentFor"];
+  readonly judgmentOutcome?: OrchestrationV2SubagentWorkflow["agents"][number]["judgmentOutcome"];
+  readonly attemptHistory?: OrchestrationV2SubagentWorkflow["agents"][number]["attemptHistory"];
+  readonly attemptTaskIds?: ReadonlyArray<string> | undefined;
+  readonly taskId?: string | undefined;
   readonly firstSeenAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -289,6 +294,10 @@ function workflowMembersToRuntime(
       graph: undefined,
       graphNodeKey: agent.graphNodeKey,
       judgmentFor: agent.judgmentFor,
+      judgmentOutcome: agent.judgmentOutcome,
+      attemptHistory: agent.attemptHistory,
+      attemptTaskIds: agent.attemptTaskIds,
+      taskId: agent.agentId,
       firstSeenAt: isoFromEpochMillis(agent.queuedAt) ?? startedAt ?? coordinator.firstSeenAt,
       startedAt,
       completedAt,

@@ -7,6 +7,7 @@
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- agent keys are hashed synchronously inside QuickJS host callbacks.
 import * as NodeCrypto from "node:crypto";
 
+import type { workflowExecutionTiming } from "./workflowUsage.ts";
 import {
   CommandId,
   type NodeId,
@@ -155,6 +156,7 @@ export interface WorkflowAgentStart {
 }
 
 export interface WorkflowAgentOutcome {
+  readonly timing?: ReturnType<typeof workflowExecutionTiming> | undefined;
   readonly status: string;
   readonly summary: string | null;
   readonly structuredResult?: unknown;
@@ -202,9 +204,10 @@ export interface WorkflowRunnerDeps {
     item: OrchestratorMcpDelegateTasksItem,
     requestKey: string,
   ) => Effect.Effect<WorkflowAgentStart, OrchestratorMcpFailure>;
-  readonly readAgent: (
+  readonly awaitAgent: (
     workflow: WorkflowContext,
     taskId: NodeId,
+    onUpdate: (outcome: WorkflowAgentOutcome) => void,
   ) => Effect.Effect<WorkflowAgentOutcome, OrchestratorMcpFailure>;
   /** Whether an agent with this retry key was already started, by this run or an earlier one. */
   readonly agentStarted: (
@@ -287,14 +290,13 @@ class WorkflowSession {
   private progress: string | undefined;
   private readonly occurrences = new Map<string, number>();
   private readonly nodeOutcomes: Record<string, OrchestrationV2WorkflowNodeOutcome> = {};
-  private readonly terminal = new Set<string>();
   private readonly waiting = new Map<string, WaitingAgent>();
   private readonly stalled = new Set<string>();
   private readonly timedOut = new Set<string>();
   private spentTokens = 0;
+  private readonly accountedTokens = new Map<string, number>();
   private readonly writeHolds = new Map<number, ReadonlyArray<string>>();
   private readonly scopeWaiters = new Set<() => void>();
-  private readonly waiters = new Map<string, () => void>();
   private updating: Promise<void> | undefined;
   private updatePending = false;
   private readonly workflow: WorkflowContext;
@@ -318,16 +320,9 @@ class WorkflowSession {
     this.timedOut.add(taskId);
   }
 
-  /** Members and the row itself report through the thread's subagent updates. */
+  /** Stopping the coordinator also releases every child settlement subscription. */
   observe(task: OrchestrationV2Subagent): void {
-    if (task.id === this.workflow.workflowId) {
-      if (task.status !== "running") this.abort.abort();
-      return;
-    }
-    if (!TERMINAL_TASK_STATUSES.has(task.status) || task.result === null) return;
-    this.terminal.add(task.id);
-    this.waiters.get(task.id)?.();
-    this.waiters.delete(task.id);
+    if (task.id === this.workflow.workflowId && task.status !== "running") this.abort.abort();
   }
 
   async run(): Promise<void> {
@@ -722,7 +717,33 @@ class WorkflowSession {
         return null;
       }
       entry.agentId = started.value.taskId;
-      entry.attemptTaskIds = [...(entry.attemptTaskIds ?? []), started.value.taskId];
+      entry.attemptTaskIds = [...new Set([...(entry.attemptTaskIds ?? []), started.value.taskId])];
+      const recordAttempt = (outcome?: WorkflowAgentOutcome) => {
+        const history = (entry.attemptHistory ?? []).filter(
+          (record) => record.taskId !== started.value.taskId,
+        );
+        entry.attemptHistory = [
+          ...history,
+          {
+            taskId: started.value.taskId,
+            childThreadId: started.value.childThreadId,
+            attempt,
+            providerInstanceId: started.value.providerInstanceId,
+            ...(started.value.model === null ? {} : { model: started.value.model }),
+            state:
+              outcome !== undefined && TERMINAL_TASK_STATUSES.has(outcome.status)
+                ? (outcome.status as "completed" | "failed" | "cancelled" | "interrupted")
+                : "running",
+            usageStatus: outcome?.usage.status ?? "unavailable",
+            ...(outcome?.usage.totalTokens == null
+              ? {}
+              : { totalTokens: outcome.usage.totalTokens }),
+            timingComplete: false,
+            ...outcome?.timing,
+          },
+        ];
+      };
+      recordAttempt();
       delete entry.outcomeCategory;
       entry.childThreadId = started.value.childThreadId;
       if (started.value.model !== null) entry.model = started.value.model;
@@ -740,20 +761,33 @@ class WorkflowSession {
         ),
         ...(attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs }),
       });
-      await this.waitForTask(started.value.taskId);
-      this.waiting.delete(started.value.taskId);
       const outcome = await Effect.runPromiseExit(
-        this.deps.readAgent(this.workflow, started.value.taskId),
+        this.deps.awaitAgent(this.workflow, started.value.taskId, (current) => {
+          if (this.abort.signal.aborted) return;
+          if (TERMINAL_TASK_STATUSES.has(current.status)) this.waiting.delete(started.value.taskId);
+          recordAttempt(current);
+          this.scheduleUpdate();
+        }),
+        { signal: this.abort.signal },
       );
+      this.waiting.delete(started.value.taskId);
+      if (this.abort.signal.aborted) return null;
       if (Exit.isFailure(outcome)) {
         settle("failed", failureMessage(outcome, "The agent's result could not be read."));
         return null;
       }
       const { status, summary, structuredResult, structuredResultError } = outcome.value;
-      this.spentTokens += outcome.value.usage.totalTokens ?? 0;
-      if (outcome.value.usage.totalTokens !== null) {
-        entry.totalTokens = (entry.totalTokens ?? 0) + outcome.value.usage.totalTokens;
+      recordAttempt(outcome.value);
+      const tokens = outcome.value.usage.totalTokens;
+      if (tokens !== null) {
+        this.spentTokens += tokens - (this.accountedTokens.get(started.value.taskId) ?? 0);
+        this.accountedTokens.set(started.value.taskId, tokens);
       }
+      const knownTokens = (entry.attemptHistory ?? []).flatMap((record) =>
+        record.totalTokens === undefined ? [] : [record.totalTokens],
+      );
+      if (knownTokens.length > 0)
+        entry.totalTokens = knownTokens.reduce((sum, count) => sum + count, 0);
       if (outcome.value.outcomeCategory !== null)
         entry.outcomeCategory = outcome.value.outcomeCategory;
       if (status !== "completed" && this.timedOut.has(started.value.taskId)) {
@@ -921,7 +955,7 @@ class WorkflowSession {
     }
     // An agent of its own, so it is independent of the work it judges and shows in the workflow.
     const target = check.target ?? input.target;
-    const verdict = await this.agent({
+    const verdict = await this.runAgent({
       prompt: judgmentPrompt({
         task: input.prompt,
         result: resultText,
@@ -938,13 +972,10 @@ class WorkflowSession {
         schema: JUDGMENT_RESULT_SCHEMA,
       },
     });
-    return judgmentOutcome(verdict);
-  }
-
-  private waitForTask(taskId: string): Promise<void> {
-    return this.terminal.has(taskId)
-      ? Promise.resolve()
-      : new Promise((resolve) => this.waiters.set(taskId, resolve));
+    const outcome = judgmentOutcome(verdict.value);
+    verdict.entry.judgmentOutcome = outcome.outcome;
+    this.scheduleUpdate();
+    return outcome;
   }
 
   private addPhase(title: string): void {

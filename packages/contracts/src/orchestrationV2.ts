@@ -711,6 +711,27 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
     }),
   ),
   attemptTaskIds: Schema.optional(Schema.Array(NodeId)),
+  /** One record per child task; totals on the member already include all attempts. */
+  attemptHistory: Schema.optional(
+    Schema.Array(
+      Schema.Struct({
+        taskId: NodeId,
+        childThreadId: ThreadId,
+        attempt: NonNegativeInt,
+        state: Schema.Literals(["running", "completed", "failed", "cancelled", "interrupted"]),
+        providerInstanceId: ProviderInstanceId,
+        model: Schema.optional(TrimmedNonEmptyString),
+        totalTokens: Schema.optional(NonNegativeInt),
+        usageStatus: Schema.Literals(["complete", "partial", "unavailable"]),
+        durationMs: Schema.optional(NonNegativeInt),
+        timingComplete: Schema.Boolean,
+        activeStartedAt: Schema.optional(NonNegativeInt),
+        completedDurationMs: Schema.optional(NonNegativeInt),
+        startedAt: Schema.optional(NonNegativeInt),
+      }),
+    ),
+  ),
+  judgmentOutcome: Schema.optional(Schema.Literals(["passed", "failed", "error"])),
   outcomeCategory: Schema.optional(WorkflowAgentOutcomeCategory),
   runnerSettledAt: Schema.optional(NonNegativeInt),
   index: NonNegativeInt,

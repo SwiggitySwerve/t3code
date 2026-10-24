@@ -144,7 +144,11 @@ import {
   selectWorkflowTarget,
   workflowAgentOutcomeCategory,
 } from "./workflowRunner.ts";
-import { aggregateWorkflowUsage } from "./workflowUsage.ts";
+import {
+  aggregateWorkflowUsage,
+  workflowExecutionTiming,
+  workflowTurnUsage,
+} from "./workflowUsage.ts";
 import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -575,6 +579,32 @@ function delegatedTaskRun(
     : childProjection.runs.find((run) => run.id === spawnTransfer.targetRunId);
 }
 
+/** Modern runs name their task; untagged legacy child threads retain thread-level ownership. */
+function workflowTaskRecords(
+  taskId: NodeId,
+  child: Pick<OrchestrationV2ThreadProjection, "runs" | "attempts" | "providerTurns">,
+) {
+  const runs = child.runs.filter(
+    (run) => run.delegatedTaskId === taskId || run.delegatedTaskId === undefined,
+  );
+  const runIds = new Set(runs.map((run) => run.id));
+  const attempts = child.attempts.filter((attempt) => runIds.has(attempt.runId));
+  const attemptIds = new Set([
+    ...attempts.map((attempt) => attempt.id),
+    ...runs.flatMap((run) => (run.activeAttemptId === null ? [] : [run.activeAttemptId])),
+  ]);
+  const rootNodeIds = new Set([
+    ...runs.map((run) => run.rootNodeId),
+    ...attempts.map((attempt) => attempt.rootNodeId),
+  ]);
+  return {
+    runs,
+    providerTurns: child.providerTurns.filter((turn) =>
+      turn.runAttemptId === null ? rootNodeIds.has(turn.nodeId) : attemptIds.has(turn.runAttemptId),
+    ),
+  };
+}
+
 function hasPendingChildRuns(
   childProjection: Pick<OrchestrationV2ThreadProjection, "runs">,
   delegatedRun: OrchestrationV2Run | undefined,
@@ -587,9 +617,7 @@ function hasPendingChildRuns(
   );
 }
 
-function isTerminalTaskStatus(
-  status: OrchestratorMcpDelegateTaskResult["status"],
-): status is TerminalTaskStatus {
+function isTerminalTaskStatus(status: string): status is TerminalTaskStatus {
   return (
     status === "completed" ||
     status === "failed" ||
@@ -2203,32 +2231,112 @@ const make = Effect.gen(function* () {
           .pipe(Effect.mapError(threadManagementFailure));
       },
     ),
-    readAgent: Effect.fn("OrchestratorMcpService.readWorkflowAgent")(function* (workflow, taskId) {
-      const scope = workflowScopes.get(workflow.workflowId);
-      if (scope === undefined) {
-        return yield* failure("orchestration_error", "The workflow is not running here.");
-      }
-      const task = yield* readTask(scope, taskId);
-      const { runs, providerTurns } = yield* threadManagement
-        .getThreadRecords(task.childThreadId, ["runs", "providerTurns"])
-        .pipe(Effect.mapError(threadManagementFailure));
-      const lastRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
-      return {
-        status: task.status,
-        summary: task.summary,
-        cancelledByServerRestart: lastRun?.cancelledByServerRestart === true,
-        outcomeCategory: workflowAgentOutcomeCategory({ status: task.status, started: true }),
-        usage: aggregateWorkflowUsage(
-          providerTurns.length === 0
-            ? [undefined]
-            : providerTurns.map((turn) => turn.turnTokenUsage),
-        ),
-        ...(task.structuredResult === undefined ? {} : { structuredResult: task.structuredResult }),
-        ...(task.structuredResultError === undefined
-          ? {}
-          : { structuredResultError: task.structuredResultError }),
-      };
-    }),
+    awaitAgent: Effect.fn("OrchestratorMcpService.awaitWorkflowAgent")(
+      function* (workflow, taskId, onUpdate) {
+        const scope = workflowScopes.get(workflow.workflowId);
+        if (scope === undefined) {
+          return yield* failure("orchestration_error", "The workflow is not running here.");
+        }
+        // Capture the global cursor before reading either thread, so late commits are replayed.
+        const afterSequence = yield* threadManagement
+          .getThreadEventSequence(scope.thread.threadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        const read = Effect.fn("OrchestratorMcpService.readWorkflowAgent")(function* () {
+          const task = yield* readTask(scope, taskId);
+          const child = yield* threadManagement
+            .getThreadRecords(task.childThreadId, ["runs", "attempts", "providerTurns"])
+            .pipe(Effect.mapError(threadManagementFailure));
+          const { runs, providerTurns } = workflowTaskRecords(taskId, child);
+          const lastRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
+          const parent = yield* threadManagement
+            .getThreadRecords(scope.thread.threadId, ["subagents"])
+            .pipe(Effect.mapError(threadManagementFailure));
+          const recorded = parent.subagents.find((member) => member.id === taskId);
+          const timing = workflowExecutionTiming(
+            runs.map((run) => ({
+              startedAt: run.startedAt === null ? null : DateTime.toEpochMillis(run.startedAt),
+              completedAt:
+                run.completedAt === null ? null : DateTime.toEpochMillis(run.completedAt),
+            })),
+            task.status === "running" || task.status === "waiting"
+              ? yield* Clock.currentTimeMillis
+              : undefined,
+          );
+          const outcome = {
+            timing,
+            status: task.status,
+            summary: task.summary,
+            cancelledByServerRestart: lastRun?.cancelledByServerRestart === true,
+            outcomeCategory: workflowAgentOutcomeCategory({ status: task.status, started: true }),
+            usage: aggregateWorkflowUsage(
+              providerTurns.length === 0 ? [undefined] : providerTurns.map(workflowTurnUsage),
+            ),
+            ...(task.structuredResult === undefined
+              ? {}
+              : { structuredResult: task.structuredResult }),
+            ...(task.structuredResultError === undefined
+              ? {}
+              : { structuredResultError: task.structuredResultError }),
+          };
+          return {
+            outcome,
+            settled:
+              isTerminalTaskStatus(task.status) &&
+              recorded !== undefined &&
+              isTerminalTaskStatus(recorded.status) &&
+              // Adapters persist final usage before the terminal that ends the run.
+              // Ingestion/interrupt failures and legacy rows can leave an open turn
+              // with no event producer. The run is authoritative; its counts stay partial.
+              runs.every(
+                (run) =>
+                  run.completedAt !== null ||
+                  (ThreadManagementService.isTerminalRunStatus(run.status) &&
+                    run.startedAt === null),
+              ),
+          };
+        });
+        const initial = yield* read();
+        onUpdate(initial.outcome);
+        if (initial.settled) return initial.outcome;
+        const task = yield* readTask(scope, taskId);
+        const settled = yield* Stream.mergeAll(
+          [
+            threadManagement
+              .streamStoredEventsFrom({
+                threadId: scope.thread.threadId,
+                afterSequence,
+                eventType: "subagent.updated",
+              })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "subagent.updated" && stored.event.payload.id === taskId,
+                ),
+              ),
+            ...(["run.updated", "provider-turn.updated"] as const).map((eventType) =>
+              threadManagement.streamStoredEventsFrom({
+                threadId: task.childThreadId,
+                afterSequence,
+                eventType,
+              }),
+            ),
+          ],
+          { concurrency: "unbounded" },
+        ).pipe(
+          Stream.mapError(threadManagementFailure),
+          Stream.mapEffect(read),
+          Stream.tap((snapshot) => Effect.sync(() => onUpdate(snapshot.outcome))),
+          Stream.filter((snapshot) => snapshot.settled),
+          Stream.runHead,
+        );
+        if (Option.isNone(settled))
+          return yield* failure(
+            "orchestration_error",
+            "The child event stream ended before settlement.",
+          );
+        return settled.value.outcome;
+      },
+    ),
   });
 
   type GraphReview = ReturnType<typeof reviewGraph> & {
@@ -2511,19 +2619,20 @@ const make = Effect.gen(function* () {
       [...members.values()],
       (member) =>
         Effect.gen(function* () {
-          const child =
+          const childRecords =
             member.childThreadId === null
               ? null
               : yield* threadManagement
-                  .getThreadRecords(member.childThreadId, ["runs", "providerTurns"])
+                  .getThreadRecords(member.childThreadId, ["runs", "attempts", "providerTurns"])
                   .pipe(Effect.mapError(threadManagementFailure));
+          const child = childRecords === null ? null : workflowTaskRecords(member.id, childRecords);
           return {
             member,
             child,
             usage:
               child === null || child.providerTurns.length === 0
                 ? [undefined]
-                : child.providerTurns.map((turn) => turn.turnTokenUsage),
+                : child.providerTurns.map(workflowTurnUsage),
           };
         }),
       { concurrency: 8 },
