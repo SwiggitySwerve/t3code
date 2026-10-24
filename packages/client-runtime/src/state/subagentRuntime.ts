@@ -622,7 +622,11 @@ export function appWorkflowMemberThreads(
   return members;
 }
 
-/** A T3-run workflow drawn like a workflow opening: its plan, agents and script. */
+/**
+ * A T3-run workflow described as a workflow opening: its plan and agents.
+ * The opening also carries the workflow script as data; this view does not
+ * decide whether or where a client displays it.
+ */
 export function resolveAppWorkflowView(subagent: AppWorkflowCandidate): WorkflowOpening | null {
   if (!isAppWorkflow(subagent)) return null;
   return {

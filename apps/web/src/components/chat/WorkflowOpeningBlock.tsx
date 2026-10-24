@@ -19,27 +19,19 @@ import { useEffect, useId, useRef, useState } from "react";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
-import ChatMarkdown from "../ChatMarkdown";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipTrigger } from "../ui/tooltip";
 import { AgentElapsed } from "./AgentElapsed";
 import { findRevealRef } from "./markdownFindContext";
-import { shouldCollapseUserMessage } from "./MessagesTimeline.logic";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
 
-const FOLDED_SCRIPT_MASK = "linear-gradient(to bottom, black calc(100% - 1.75rem), transparent)";
-
-/** The script as a fenced block, so it renders like any other code in the thread. */
-function scriptMarkdown(script: string) {
-  const longestRun = Math.max(2, ...(script.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(longestRun + 1);
-  return `${fence}javascript\n${script.trimEnd()}\n${fence}`;
-}
-
-/** Opens a workflow coordinator's thread in place of its script: the plan, its agents, then the script. */
+/**
+ * A workflow's plan and agents in the timeline. The script, or a graph's generated runner, is debug
+ * detail: it stays on `opening.script` and is never drawn here.
+ */
 export function WorkflowOpeningBlock(props: {
   readonly opening: WorkflowOpening;
   readonly environmentId: EnvironmentId;
@@ -159,7 +151,6 @@ export function WorkflowOpeningBlock(props: {
       {graph === null && opening.group && opening.group.unphasedMembers.length > 0 ? (
         <ul className="m-0 list-none p-0">{opening.group.unphasedMembers.map(memberRow)}</ul>
       ) : null}
-      <WorkflowScript script={opening.script} />
     </section>
   );
 }
@@ -334,44 +325,5 @@ function WorkflowMemberRow(props: {
         </ThreadHoverCardPopup>
       </Tooltip>
     </li>
-  );
-}
-
-/** The script as highlighted code, folded like a long message until opened or found. */
-function WorkflowScript(props: { readonly script: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const revealRef = findRevealRef(() => setExpanded(true));
-  const canFold = shouldCollapseUserMessage(props.script);
-  const folded = canFold && !expanded;
-  return (
-    <div>
-      <div
-        ref={revealRef}
-        className={cn("relative", folded && "max-h-44 overflow-hidden")}
-        data-thread-find-text="true"
-        data-thread-find-fold={folded ? "" : undefined}
-        style={
-          folded
-            ? { WebkitMaskImage: FOLDED_SCRIPT_MASK, maskImage: FOLDED_SCRIPT_MASK }
-            : undefined
-        }
-      >
-        <ChatMarkdown text={scriptMarkdown(props.script)} cwd={undefined} />
-      </div>
-      {canFold ? (
-        <div className="-ms-1">
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost-muted"
-            aria-expanded={expanded}
-            data-scroll-anchor-ignore
-            onClick={() => setExpanded((value) => !value)}
-          >
-            {expanded ? "Show less" : "Show full script"}
-          </Button>
-        </div>
-      ) : null}
-    </div>
   );
 }

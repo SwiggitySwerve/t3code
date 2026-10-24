@@ -21,8 +21,8 @@ const HEADINGS: Record<string, string> = {
 };
 
 /**
- * A workflow T3 runs for this thread (workflow_start): its phases, agents and script in the
- * timeline, with Stop while it runs. Any other subagent item renders `fallback`.
+ * A workflow T3 runs for this thread (workflow_start): its phases and agents in the timeline,
+ * with Stop while it runs. Any other subagent item renders `fallback`.
  */
 export function AppWorkflowTimelineBlock(props: {
   readonly parentRef: ScopedThreadRef;

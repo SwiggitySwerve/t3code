@@ -81,7 +81,7 @@ it("shows exact recorded usage, partial usage and budget overshoot honestly", as
   await expect.element(screen.getByRole("progressbar")).not.toBeInTheDocument();
 });
 
-function retryGraph(running = false) {
+function retryGroup(running = false) {
   return deriveWorkflowGroups(
     projectedSubagentsToRuntime([
       {
@@ -140,7 +140,59 @@ function retryGraph(running = false) {
         },
       },
     ]),
-  )[0]!.graph!;
+  )[0]!;
+}
+
+function retryGraph(running = false) {
+  return retryGroup(running).graph!;
+}
+
+function scriptGroup() {
+  return deriveWorkflowGroups(
+    projectedSubagentsToRuntime([
+      {
+        id: "script-workflow",
+        title: "State audit",
+        prompt: "",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: DateTime.makeUnsafe(0),
+        completedAt: null,
+        updatedAt: DateTime.makeUnsafe(1000),
+        workflow: {
+          phases: [],
+          agents: [
+            {
+              index: 0,
+              label: "Read files",
+              state: "running",
+              phaseIndex: 0,
+              phaseTitle: "Research",
+              childThreadId: ThreadId.make("reader"),
+              model: "model-a",
+              providerInstanceId: ProviderInstanceId.make("provider-a"),
+            },
+          ],
+        },
+      },
+    ]),
+  )[0]!;
+}
+
+// Long enough that the retired folded renderer would also have offered "Show full script".
+function longSource(marker: string) {
+  return [
+    "export const meta = { name: 'state' };",
+    ...Array.from({ length: 60 }, (_, line) => `await agent("${marker} ${line}");`),
+  ].join("\n");
+}
+
+function expectNoScript(root: HTMLElement, marker: string) {
+  expect(root.textContent).not.toContain(marker);
+  expect(root.textContent).not.toContain("export const meta");
+  expect(root.querySelector("pre, code")).toBeNull();
+  expect(root.textContent).not.toMatch(/show (full )?script/i);
 }
 
 it("keeps a 150-node canvas and card height stable during checks and scrolling", async () => {
@@ -365,6 +417,53 @@ it("opens current and earlier attempts by keyboard and restores history-trigger 
   expect(onOpenThread).toHaveBeenLastCalledWith("earlier");
   await userEvent.keyboard("{Escape}");
   await expect.element(history).toHaveFocus();
+});
+
+it("keeps a script workflow's script out of the timeline block and its phases usable", async () => {
+  const marker = "SCRIPT_BODY_MARKER";
+  const onOpenThread = vi.fn();
+  await using screen = await render(
+    <WorkflowOpeningBlock
+      opening={{ ...opening, script: longSource(marker), group: scriptGroup() }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={onOpenThread}
+    />,
+  );
+  await expect.element(screen.getByRole("region", { name: "Research phase" })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Open Read files" }));
+  expect(onOpenThread).toHaveBeenLastCalledWith("reader");
+  expectNoScript(screen.container, marker);
+});
+
+it("never shows the generated runner of a graph workflow", async () => {
+  const marker = "GENERATED_RUNNER_MARKER";
+  const onOpenThread = vi.fn();
+  await using screen = await render(
+    <WorkflowOpeningBlock
+      opening={{ ...opening, script: longSource(marker), group: retryGroup() }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={onOpenThread}
+    />,
+  );
+  await expect.element(screen.getByRole("region", { name: "Workflow graph" })).toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "Open Audit", exact: true }));
+  expect(onOpenThread).toHaveBeenLastCalledWith("latest");
+  expectNoScript(screen.container, marker);
+});
+
+it("shows no script before the workflow's agents have loaded", async () => {
+  const marker = "UNLOADED_SCRIPT_MARKER";
+  await using screen = await render(
+    <WorkflowOpeningBlock
+      opening={{ ...opening, script: longSource(marker) }}
+      environmentId={EnvironmentId.make("test")}
+      progress="Reading files"
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(screen.getByText("Script workflow", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("Reading files", { exact: true })).toBeVisible();
+  expectNoScript(screen.container, marker);
 });
 
 it("reveals and refolds the complete long result with the keyboard", async () => {
