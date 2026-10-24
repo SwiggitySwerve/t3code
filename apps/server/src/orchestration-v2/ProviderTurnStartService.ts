@@ -1161,6 +1161,9 @@ export const layer: Layer.Layer<
             );
       const startWithHandoffs = Effect.fn("ProviderTurnStartService.startWithHandoffs")(
         function* (turnInput: Parameters<typeof session.startTurn>[0], compact = false) {
+          // Run execution has already shaped this text (per-turn notes); the wrapper only
+          // prepends context, so it must not rebuild the message from the stored text.
+          const turnText = turnInput.message.text;
           const retryHandoff =
             missedItems.length === 0
               ? []
@@ -1191,7 +1194,7 @@ export const layer: Layer.Layer<
               return handoffBudget({
                 tokenCap,
                 modelContextWindow,
-                userText: restartNote === "" ? userText : `${restartNote}\n\n${userText}`,
+                userText: restartNote === "" ? turnText : `${restartNote}\n\n${turnText}`,
                 attachments: message.attachments,
                 providerThread: budgetProviderThread,
                 nativeContextEstimate:
@@ -1239,7 +1242,7 @@ export const layer: Layer.Layer<
             ...(noteContinuation ? promptedInput : turnInput),
             message: {
               ...turnInput.message,
-              text: context === "" ? userText : `${context}\n\nUser message:\n${userText}`,
+              text: context === "" ? turnText : `${context}\n\nUser message:\n${turnText}`,
             },
           }).pipe(
             // A pending marker would make the next turn abandon this native
