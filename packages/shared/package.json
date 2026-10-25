@@ -15,6 +15,10 @@
       "types": "./src/workflowGraphResult.ts",
       "import": "./src/workflowGraphResult.ts"
     },
+    "./workflowOpeningText": {
+      "types": "./src/workflowOpeningText.ts",
+      "import": "./src/workflowOpeningText.ts"
+    },
     "./workflowIntent": {
       "types": "./src/workflowIntent.ts",
       "import": "./src/workflowIntent.ts"

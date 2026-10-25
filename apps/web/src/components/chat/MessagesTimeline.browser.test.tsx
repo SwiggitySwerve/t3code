@@ -370,6 +370,32 @@ describe("MessagesTimeline agent messages", () => {
   });
 });
 
+describe("MessagesTimeline workflow coordinator opening", () => {
+  it("activates the match the server reports on the opening's title, not on the hidden script", async () => {
+    setup();
+    const script = "export const meta = { name: 'zebra pipeline' };\nawait agent('quokka review');";
+    await using screen = await renderTimeline([message(script, {}, "script-message")], {
+      workflowOpening: {
+        messageId: "script-message",
+        name: "Quarterly audit",
+        description: "Reconcile ledgers",
+        script,
+        driver: null,
+        providerInstanceId: null,
+        group: null,
+      },
+      findExpanded: true,
+      findQuery: "quarterly",
+      activeFindMatch: { entryId: "entry-script-message", runId: null, occurrence: 0 },
+    });
+    const painted = (name: string) =>
+      [...(CSS.highlights.get(name) ?? [])].map((range) => (range as Range).toString());
+    await vi.waitFor(() => expect(painted("t3-thread-find-active")).toEqual(["Quarterly"]));
+    expect(screen.text()).not.toContain("zebra");
+    expect(collectThreadFindRanges(screen.container, "zebra")).toEqual([]);
+  });
+});
+
 describe("compact reasoning math", () => {
   it("keeps formulas while flattening compact reasoning previews", () => {
     const tree = parseMarkdownWithMath("## Reasoning\n\nUse **norm** $|x|$ and \\[x^2\\]");

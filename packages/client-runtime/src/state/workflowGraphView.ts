@@ -7,6 +7,7 @@ import type {
   OrchestrationV2WorkflowNodeOutcome,
   OrchestrationV2WorkflowPlan,
 } from "@t3tools/contracts";
+import { groupWorkflowNodesByWave } from "@t3tools/shared/workflowOpeningText";
 
 export type WorkflowGraphNodeState =
   | "passed"
@@ -141,9 +142,7 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
     }
   }
 
-  const waves = [...new Set(nodes.map((node) => node.wave))]
-    .sort((a, b) => a - b)
-    .map((wave) => nodes.filter((node) => node.wave === wave));
+  const waves = groupWorkflowNodesByWave(nodes);
   return { waves, counts, waitingOn, otherMembers };
 }
 

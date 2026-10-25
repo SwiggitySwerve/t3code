@@ -15,7 +15,6 @@ import {
   workflowGraphNodeDetail,
   deriveWorkflowGroups,
   resolveAppWorkflowView,
-  isWorkflowScriptMessage,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
   workflowProgressText,
@@ -264,10 +263,6 @@ describe("resolveWorkflowOpening", () => {
         parentSubagents: null,
       }),
     ).toBeNull();
-    expect(isWorkflowScriptMessage({ role: "user", text: "Explain `export const meta`." })).toBe(
-      false,
-    );
-    expect(isWorkflowScriptMessage({ role: "assistant", text: SCRIPT })).toBe(false);
   });
 });
 

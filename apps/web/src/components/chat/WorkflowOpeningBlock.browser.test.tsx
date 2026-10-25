@@ -6,8 +6,18 @@ import type {
 import {
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
+  resolveWorkflowOpening,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { EnvironmentId, ProviderInstanceId, NodeId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  NodeId,
+  ThreadId,
+  type OrchestrationV2Subagent,
+} from "@t3tools/contracts";
+import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
+import { searchableWorkflowOpeningSegments } from "@t3tools/shared/workflowOpeningText";
 import * as DateTime from "effect/DateTime";
 import type { ComponentProps } from "react";
 import { expect, it, vi } from "vite-plus/test";
@@ -16,6 +26,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 import "../../index.css";
 import { act, fakeTimers, render } from "../../../test/render";
 import type ChatMarkdown from "../ChatMarkdown";
+import { collectThreadFindRanges } from "./threadFindHighlights";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
 
@@ -598,3 +609,190 @@ it("lets keyboard users inspect a checker with no child thread", async () => {
   await userEvent.keyboard("{Escape}");
   await expect.element(popup).not.toBeInTheDocument();
 });
+
+// Find paints what the server counts: the drawn declaration, never a status line, and nothing at
+// all in a block whose thread the server does not index.
+function foundText(root: HTMLElement, query: string) {
+  return collectThreadFindRanges(root, query).map(({ range }) => range.toString());
+}
+
+function declaredGraphGroup() {
+  return deriveWorkflowGroups(
+    projectedSubagentsToRuntime([
+      {
+        id: "graph-workflow",
+        title: "Quarterly run",
+        prompt: "",
+        model: null,
+        status: "running",
+        result: null,
+        startedAt: DateTime.makeUnsafe(0),
+        completedAt: null,
+        updatedAt: DateTime.makeUnsafe(1000),
+        workflow: {
+          phases: [],
+          plan: {
+            nodes: [
+              { key: "draft", label: "Draft ledger", wave: 0, dependsOn: [] },
+              { key: "review", label: "Review ledger", wave: 1, dependsOn: ["draft"] },
+            ],
+          },
+          agents: [
+            {
+              index: 0,
+              label: "Draft ledger",
+              state: "running",
+              graphNodeKey: "draft",
+              childThreadId: ThreadId.make("drafter"),
+              model: "model-a",
+              providerInstanceId: ProviderInstanceId.make("provider-a"),
+            },
+          ],
+        },
+      },
+    ]),
+  )[0]!;
+}
+
+it("finds a script opening's declaration but not its status line", async () => {
+  const block = (findable: boolean) => (
+    <div data-timeline-row-id="opening">
+      <WorkflowOpeningBlock
+        opening={{ ...opening, description: "Reconcile ledgers", group: scriptGroup() }}
+        environmentId={EnvironmentId.make("test")}
+        progress="Reading billing files"
+        findable={findable}
+        onOpenThread={() => {}}
+      />
+    </div>
+  );
+  await using screen = await render(block(true));
+  expect(foundText(screen.container, "script workflow")).toEqual(["Script workflow"]);
+  expect(foundText(screen.container, "RECONCILE")).toEqual(["Reconcile"]);
+  expect(foundText(screen.container, "research")).toEqual(["Research"]);
+  expect(foundText(screen.container, "billing")).toEqual([]);
+  // The agents inside a phase are not part of the declaration.
+  expect(foundText(screen.container, "read files")).toEqual([]);
+  await screen.rerender(block(false));
+  for (const query of ["script workflow", "reconcile", "research", "billing"]) {
+    expect(foundText(screen.container, query), query).toEqual([]);
+  }
+});
+
+it("finds a graph opening's node labels once, not the line that names the blocking node", async () => {
+  await using screen = await render(
+    <div data-timeline-row-id="opening">
+      <WorkflowOpeningBlock
+        opening={{ ...opening, group: declaredGraphGroup() }}
+        environmentId={EnvironmentId.make("test")}
+        findable
+        onOpenThread={() => {}}
+      />
+    </div>,
+  );
+  await expect.element(screen.getByText("Waiting on Draft ledger", { exact: false })).toBeVisible();
+  expect(foundText(screen.container, "draft")).toEqual(["Draft"]);
+  expect(foundText(screen.container, "ledger")).toEqual(["ledger", "ledger"]);
+  expect(foundText(screen.container, "depends")).toEqual([]);
+});
+
+// The server counts find matches from `searchableWorkflowOpeningSegments(row)`; the block draws
+// the same row through the client's own path. Every occurrence must land in the same element,
+// in the same order, or the counter and the highlighted match disagree.
+function coordinatorRow(
+  title: string | null,
+  workflow: NonNullable<OrchestrationV2Subagent["workflow"]>,
+) {
+  return {
+    id: "coordinator-row",
+    title,
+    prompt: "export const meta = {}",
+    model: null,
+    status: "running" as const,
+    result: null,
+    startedAt: DateTime.makeUnsafe(0),
+    completedAt: null,
+    updatedAt: DateTime.makeUnsafe(1000),
+    childThreadId: ThreadId.make("coordinator"),
+    driver: ProviderDriverKind.make("codex"),
+    providerInstanceId: ProviderInstanceId.make("provider-a"),
+    workflow,
+  };
+}
+
+function drawnOpening(row: ReturnType<typeof coordinatorRow>): WorkflowOpening {
+  const parent = ThreadId.make("parent");
+  const opening = resolveWorkflowOpening({
+    thread: {
+      id: ThreadId.make("coordinator"),
+      lineage: { parentThreadId: parent, relationshipToParent: "subagent", rootThreadId: parent },
+      creationSource: "provider",
+    },
+    messages: [
+      { id: "script", role: "user", text: "export const meta = {}", workflowScript: true },
+    ],
+    parentSubagents: [row],
+  });
+  if (opening === null) throw new Error("A script message on a provider subagent thread opens.");
+  return opening;
+}
+
+const AGREEMENT_ROWS = {
+  "a script with declared, guessed and unstarted phases": coordinatorRow("Reconcile ledgers", {
+    name: "Quarterly\naudit",
+    phases: [
+      { index: 1, title: "Second quarter" },
+      { index: 3, title: "Unstarted quarter" },
+    ],
+    agents: [
+      { index: 0, label: "Read", state: "running", phaseIndex: 0 },
+      { index: 1, label: "Write", state: "queued", phaseIndex: 1 },
+      { index: 2, label: "Late", state: "queued", phaseIndex: 2, phaseTitle: "Third quarter" },
+      { index: 3, label: "Loose", state: "queued" },
+    ],
+  }),
+  "a graph whose plan lists a later wave first": coordinatorRow("Quarterly audit", {
+    phases: [],
+    plan: {
+      nodes: [
+        { key: "b", label: "Beta review", wave: 1, dependsOn: ["a"] },
+        { key: "c", label: "Gamma review", wave: 1, dependsOn: ["a"] },
+        { key: "a", label: "Alpha review", wave: 0, dependsOn: [] },
+      ],
+    },
+    agents: [],
+  }),
+  "a coordinator with no workflow detail yet": coordinatorRow(null, { phases: [], agents: [] }),
+} satisfies Record<string, ReturnType<typeof coordinatorRow>>;
+
+it.each(Object.entries(AGREEMENT_ROWS))(
+  "draws exactly the text the server counts for %s",
+  async (_name, row) => {
+    const segments = searchableWorkflowOpeningSegments(row);
+    await using screen = await render(
+      <div data-timeline-row-id="opening">
+        <WorkflowOpeningBlock
+          opening={drawnOpening(row)}
+          environmentId={EnvironmentId.make("test")}
+          findable
+          onOpenThread={() => {}}
+        />
+      </div>,
+    );
+    const drawn = (query: string) =>
+      collectThreadFindRanges(screen.container, query).map(({ range }) =>
+        (range.startContainer.textContent ?? "").replace(/\r?\n/g, " "),
+      );
+    const counted = (query: string) =>
+      segments.flatMap((segment) =>
+        Array<string>(countThreadSearchOccurrences(segment, query)).fill(segment),
+      );
+    for (const query of ["quarter", "audit", "review", "phase", "a", "e", "workflow", "audit "]) {
+      expect(drawn(query), query).toEqual(counted(query));
+    }
+    expect(drawn("quarterly audit")).toEqual(counted("quarterly audit"));
+    // The script's own words are in neither.
+    expect(drawn("meta")).toEqual([]);
+    expect(counted("meta")).toEqual([]);
+  },
+);

@@ -105,6 +105,7 @@ function AssistantForkButton({
             size="xs"
             variant="ghost"
             disabled={busy}
+            aria-busy={busy || undefined}
             onClick={() => {
               setBusy(true);
               void onForkFromRun({ sourceThreadId: projectedItem.sourceThreadId, runId }).finally(
@@ -115,7 +116,7 @@ function AssistantForkButton({
           />
         }
       >
-        <GitForkIcon className={cn("size-3", busy && "animate-pulse")} />
+        <GitForkIcon className="size-3" />
       </TooltipTrigger>
       <TooltipPopup side="top">Fork from this response</TooltipPopup>
     </Tooltip>

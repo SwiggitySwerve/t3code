@@ -1,10 +1,11 @@
 import type { InlineSkill } from "@t3tools/shared/inlineSkills";
 import type { OrchestrationV2SearchThreadResult, ScopedThreadRef } from "@t3tools/contracts";
-import { scopedThreadKey } from "@t3tools/client-runtime/environment";
+import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
+import { workflowOpeningParentThreadId } from "@t3tools/shared/workflowOpeningText";
 import { useEffect, useLayoutEffect, useRef, useState, type RefObject } from "react";
 import { useStableCallback } from "~/hooks/useStableCallback";
 import { orchestrationEnvironment } from "~/state/orchestration";
-import { useThreadProjection } from "~/state/entities";
+import { useQuietThreadProjection, useThreadProjection } from "~/state/entities";
 import { useEnvironmentQuery } from "~/state/query";
 import { useDebouncedValue } from "~/state/queries";
 import {
@@ -52,11 +53,23 @@ export function useThreadFind({
   // Read here rather than passed in: a streamed delta re-renders only the find
   // provider, which refreshes open results from it.
   const content = useThreadProjection(enabled ? thread : null)?.projection;
+  // A workflow coordinator's opening is drawn from its row on the parent thread, and the server
+  // counts matches from that row, so a change to it must refresh open results too.
+  const openingParentId =
+    thread === null || content === undefined
+      ? null
+      : workflowOpeningParentThreadId({ thread: content.thread, messages: content.messages });
+  const coordinatorRow = useQuietThreadProjection(
+    thread === null || openingParentId === null
+      ? null
+      : scopeThreadRef(thread.environmentId, openingParentId),
+  )?.projection.subagents.find((subagent) => subagent.childThreadId === thread?.threadId);
   // Held in state so the timeline props that carry it can be stored in state too.
   const [positionReader] = useState<RefObject<ThreadFindPositionReader | null>>(() => ({
     current: null,
   }));
   const lastContentRef = useRef(content);
+  const lastCoordinatorRowRef = useRef(coordinatorRow);
   const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshAfterSearchRef = useRef(false);
   const threadKey = thread ? scopedThreadKey(thread) : null;
@@ -204,7 +217,8 @@ export function useThreadFind({
               entry.entryId === local.match.entryId && local.match.occurrence < entry.count,
           )) &&
         refreshTimerRef.current === null &&
-        lastContentRef.current === content
+        lastContentRef.current === content &&
+        lastCoordinatorRowRef.current === coordinatorRow
       ) {
         return {
           ...previous,
@@ -272,14 +286,16 @@ export function useThreadFind({
     if (!remote.error) refreshLiveResultsRef.current();
   }, [remote.isPending, remote.error]);
   useEffect(() => {
-    if (lastContentRef.current === content) return;
+    if (lastContentRef.current === content && lastCoordinatorRowRef.current === coordinatorRow)
+      return;
     lastContentRef.current = content;
+    lastCoordinatorRowRef.current = coordinatorRow;
     if (!isOpen || !state.query.trim() || refreshTimerRef.current !== null) return;
     refreshTimerRef.current = setTimeout(() => {
       refreshTimerRef.current = null;
       refreshLiveResultsRef.current();
     }, 300);
-  }, [content, isOpen, state.query]);
+  }, [content, coordinatorRow, isOpen, state.query]);
   useEffect(() => {
     if (!isOpen || threadKey === null || !state.query.trim()) return;
     return () => {

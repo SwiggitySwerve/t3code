@@ -12,7 +12,7 @@ import type {
   ProviderInstanceId,
   ServerProvider,
 } from "@t3tools/contracts";
-import { ChevronRightIcon, LoaderCircleIcon, SquareIcon, WorkflowIcon } from "lucide-react";
+import { ChevronRightIcon, SquareIcon, WorkflowIcon } from "lucide-react";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -21,9 +21,9 @@ import { cn } from "../../lib/utils";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { Button } from "../ui/button";
+import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipTrigger } from "../ui/tooltip";
 import { AgentElapsed } from "./AgentElapsed";
-import { findRevealRef } from "./markdownFindContext";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
@@ -40,6 +40,12 @@ export function WorkflowOpeningBlock(props: {
   readonly heading?: string;
   /** The script's latest log line, for a workflow T3 runs. */
   readonly progress?: string | null;
+  /**
+   * Whether find-in-thread reads this block's declaration (title, description, phase titles, node
+   * labels), as for a coordinator thread, where the server counts the same text from the same
+   * row. Other blocks are not searchable, so find never paints text it cannot count.
+   */
+  readonly findable?: boolean;
   readonly stop?: {
     readonly onStop: () => void;
     readonly stopping: boolean;
@@ -47,6 +53,7 @@ export function WorkflowOpeningBlock(props: {
   };
 }) {
   const { opening } = props;
+  const find = props.findable === true ? "true" : undefined;
   const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const headline = workflowOpeningHeadline(opening);
   // A graph shows node by node; a script, which declares no dependencies, keeps its phases.
@@ -81,11 +88,11 @@ export function WorkflowOpeningBlock(props: {
           <p className="text-2xs font-medium text-muted-foreground">
             {props.heading ?? "Workflow started"}
           </p>
-          <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text="true">
+          <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text={find}>
             {headline.title}
           </h3>
           {headline.description ? (
-            <p className="text-xs text-muted-foreground" data-thread-find-text="true">
+            <p className="text-xs text-muted-foreground" data-thread-find-text={find}>
               {headline.description}
             </p>
           ) : null}
@@ -105,7 +112,7 @@ export function WorkflowOpeningBlock(props: {
             onClick={props.stop.onStop}
           >
             {props.stop.stopping ? (
-              <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+              <Spinner size="xs" aria-hidden />
             ) : (
               <SquareIcon aria-hidden className="size-3 fill-current" />
             )}
@@ -116,14 +123,13 @@ export function WorkflowOpeningBlock(props: {
       {opening.budget === undefined ? null : <WorkflowBudgetMeter budget={opening.budget} />}
       {props.progress ? <WorkflowProgress text={props.progress} /> : null}
       {graphHeadline?.waitingOn ? (
-        <p className="truncate px-2 text-2xs text-foreground" data-thread-find-text="true">
-          {graphHeadline.waitingOn}
-        </p>
+        <p className="truncate px-2 text-2xs text-foreground">{graphHeadline.waitingOn}</p>
       ) : null}
       {graph !== null ? (
         <WorkflowWaveCanvas
           graph={graph}
           environmentId={props.environmentId}
+          findable={props.findable === true}
           onOpenThread={props.onOpenThread}
         />
       ) : null}
@@ -138,7 +144,7 @@ export function WorkflowOpeningBlock(props: {
       {phases.map((phase) => (
         <section key={phase.index} aria-label={`${phase.title} phase`}>
           <h4 className="flex items-baseline gap-2 px-2 pb-0.5 text-2xs font-medium text-muted-foreground">
-            <span className="min-w-0 truncate" data-thread-find-text="true">
+            <span className="min-w-0 truncate" data-thread-find-text={find}>
               {phase.title}
             </span>
             <span className="shrink-0 font-normal tabular-nums">
@@ -191,7 +197,6 @@ function WorkflowProgress(props: { readonly text: string }) {
   const [overflows, setOverflows] = useState(false);
   const textRef = useRef<HTMLParagraphElement>(null);
   const contentId = useId();
-  const revealRef = findRevealRef(() => setExpanded(true));
   useEffect(() => {
     const element = textRef.current;
     if (element === null || expanded) return;
@@ -200,7 +205,7 @@ function WorkflowProgress(props: { readonly text: string }) {
     return observeResize(element, measure);
   });
   return (
-    <div ref={revealRef} data-thread-find-fold={expanded ? undefined : ""}>
+    <div>
       <p
         ref={textRef}
         id={contentId}
@@ -208,7 +213,6 @@ function WorkflowProgress(props: { readonly text: string }) {
           "break-words whitespace-pre-wrap px-2 text-2xs text-muted-foreground",
           !expanded && "line-clamp-3",
         )}
-        data-thread-find-text="true"
       >
         {props.text}
       </p>

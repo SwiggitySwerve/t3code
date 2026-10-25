@@ -14,6 +14,12 @@ import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult
 
 import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
 import { workflowBudget } from "@t3tools/shared/workflowBudget";
+import {
+  isWorkflowScriptMessage,
+  workflowOpeningParentThreadId,
+  workflowOpeningTitles,
+  workflowPhaseTitles,
+} from "@t3tools/shared/workflowOpeningText";
 
 export {
   WORKFLOW_GRAPH_STATE_LABEL,
@@ -392,21 +398,10 @@ export function deriveWorkflowGroups(
 
   return workflows.map((workflow) => {
     const workflowMembers = Object.hasOwn(members, workflow.id) ? members[workflow.id]! : [];
-    // Union, not either/or: the declared plan lags the members, because the
-    // provider only admits a phase once something in it starts. Members seed
-    // the map; the declared titles then overwrite whatever they guessed.
-    const phaseTitles = new Map<number, string>();
-    for (const member of workflowMembers) {
-      if (member.phaseIndex === null) continue;
-      phaseTitles.set(
-        member.phaseIndex,
-        member.phaseTitle ?? phaseTitles.get(member.phaseIndex) ?? `Phase ${member.phaseIndex + 1}`,
-      );
-    }
-    for (const phase of workflow.phases) phaseTitles.set(phase.index, phase.title);
-    const knownPhases = Array.from(phaseTitles.entries())
-      .map(([index, title]) => ({ index, title }))
-      .sort((a, b) => a.index - b.index);
+    const knownPhases = workflowPhaseTitles({
+      declared: workflow.phases,
+      members: workflowMembers,
+    });
 
     const phases = knownPhases.map((phase) => {
       const phaseMembers = workflowMembers
@@ -449,22 +444,9 @@ export function deriveWorkflowGroups(
   });
 }
 
-// Workflow scripts open with their `meta` export, after any leading comments.
-const WORKFLOW_SCRIPT_START = /^\s*(?:(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*)*export\s+const\s+meta\b/;
-
-/**
- * Whether a user message is the script a provider-native workflow runs. Servers mark every
- * subagent prompt either way; only threads recorded before the mark fall back to the text.
- */
-export function isWorkflowScriptMessage(message: {
-  readonly role: string;
-  readonly text: string;
-  readonly workflowScript?: boolean | undefined;
-}): boolean {
-  return (
-    message.role === "user" && (message.workflowScript ?? WORKFLOW_SCRIPT_START.test(message.text))
-  );
-}
+// The rules for what a workflow opening is, and the text it draws, live in one shared module so the
+// server counts find matches from the same strings.
+export { workflowOpeningParentThreadId };
 
 type ProjectedSubagent = Parameters<typeof projectedSubagentsToRuntime>[0][number] &
   Pick<OrchestrationV2Subagent, "driver" | "providerInstanceId">;
@@ -518,29 +500,16 @@ export function resolveWorkflowOpening(input: {
   };
 }
 
-/**
- * The parent thread whose subagent rows describe this thread's workflow, or null when the thread
- * does not open with a workflow script. Gates loading the parent so ordinary subagent threads
- * never subscribe to their parent's detail.
- */
-export function workflowOpeningParentThreadId(input: {
-  readonly thread: Pick<OrchestrationV2AppThread, "lineage" | "creationSource">;
-  readonly messages: ReadonlyArray<Parameters<typeof isWorkflowScriptMessage>[0]>;
-}): OrchestrationV2AppThread["id"] | null {
-  if (!isProviderNativeSubagentThread(input.thread)) return null;
-  const first = input.messages.find((message) => message.role === "user");
-  return first !== undefined && isWorkflowScriptMessage(first)
-    ? input.thread.lineage.parentThreadId
-    : null;
-}
-
 /** The opening block's heading: the workflow, what it does, and how its agents stand. */
 export function workflowOpeningHeadline(opening: WorkflowOpening): {
   readonly title: string;
   readonly description: string | null;
   readonly agents: string | null;
 } {
-  const title = opening.name ?? opening.description ?? "Workflow";
+  const { title, description } = workflowOpeningTitles({
+    name: opening.name,
+    description: opening.description,
+  });
   const members =
     opening.group === null
       ? []
@@ -571,12 +540,7 @@ export function workflowOpeningHeadline(opening: WorkflowOpening): {
           .filter((key) => counts.has(key))
           .map((key) => `${counts.get(key)} ${key}`)
           .join(" · ")}`;
-  return {
-    title,
-    description:
-      opening.description !== null && opening.description !== title ? opening.description : null,
-    agents,
-  };
+  return { title, description, agents };
 }
 
 type AppWorkflowCandidate = ProjectedSubagent &

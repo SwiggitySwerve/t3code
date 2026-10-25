@@ -4,7 +4,12 @@ import { applyThreadPullRequestLinkUpdate } from "../sourceControl/threadPullReq
 import { projectTurnItemForWire } from "./WireProjection.ts";
 import * as Stream from "effect/Stream";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
-import { makeThreadFind, findProjectedThreadItems } from "./ThreadFind.ts";
+import {
+  makeThreadFind,
+  findProjectedThreadItems,
+  workflowOpening,
+  workflowOpeningText,
+} from "./ThreadFind.ts";
 import type {
   OrchestrationV2SearchThreadInput,
   OrchestrationV2SearchThreadResult,
@@ -7554,22 +7559,43 @@ export const layerMemory: Layer.Layer<ProjectionStoreV2> = Layer.effect(
         ),
       searchThreadStream: (input) => Stream.fromEffect(service.searchThread(input)),
       searchThread: (input) =>
-        service
-          .getThreadSnapshot(input.threadId)
-          .pipe(
-            Effect.flatMap(({ projection, snapshotSequence }) =>
-              projection.thread.deletedAt !== null
-                ? Effect.fail(new ProjectionStoreThreadNotFoundError({ threadId: input.threadId }))
-                : Effect.succeed(
-                    findProjectedThreadItems(
-                      projection.visibleTurnItems,
-                      input,
-                      snapshotSequence,
-                      projection.thread.worktreePath ?? undefined,
-                    ),
-                  ),
-            ),
+        service.getThreadSnapshot(input.threadId).pipe(
+          Effect.flatMap(({ projection, snapshotSequence }) =>
+            Effect.gen(function* () {
+              if (projection.thread.deletedAt !== null)
+                return yield* new ProjectionStoreThreadNotFoundError({ threadId: input.threadId });
+              const first = projection.visibleTurnItems.find(
+                ({ item }) => item.type === "user_message",
+              )?.item;
+              const opening = workflowOpening(
+                projection.thread,
+                first?.type === "user_message" ? first : undefined,
+              );
+              // A parent that is not here yet leaves the coordinator row absent, as in SQLite.
+              const coordinator =
+                opening === undefined
+                  ? null
+                  : yield* service.getThreadProjection(opening.parentThreadId).pipe(
+                      Effect.map(
+                        (parent) =>
+                          parent.subagents.find(
+                            (subagent) => subagent.childThreadId === input.threadId,
+                          ) ?? null,
+                      ),
+                      Effect.catchTags({
+                        ProjectionStoreThreadNotFoundError: () => Effect.succeed(null),
+                      }),
+                    );
+              return findProjectedThreadItems(
+                projection.visibleTurnItems,
+                input,
+                snapshotSequence,
+                projection.thread.worktreePath ?? undefined,
+                opening && workflowOpeningText(opening, coordinator),
+              );
+            }),
           ),
+        ),
       getThreadHistoryPage: (threadId, cursor, throughEntryId, conversationOnly) =>
         service.getThreadSnapshot(threadId).pipe(
           Effect.flatMap(({ projection, snapshotSequence }) =>

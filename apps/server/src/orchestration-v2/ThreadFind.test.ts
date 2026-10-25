@@ -2,14 +2,18 @@ import { assert, it, describe } from "@effect/vitest";
 import {
   EventId,
   MessageId,
+  NodeId,
   PlanId,
   RunId,
   RuntimeRequestId,
   TurnItemId,
   type OrchestrationV2TurnItem,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
+  type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2ThreadHistoryPage,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type OrchestrationV2DomainEvent,
@@ -17,6 +21,7 @@ import {
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as Stream from "effect/Stream";
 
@@ -38,30 +43,31 @@ const layerTest = Layer.mergeAll(EventStore.layer, ProjectionStore.layer, Projec
 const providerInstanceId = ProviderInstanceId.make("codex");
 const at = (minute: number) => DateTime.makeUnsafe(Date.UTC(2026, 8, 27, 0, minute));
 
-const createProject = (projectId: ProjectId) =>
-  Effect.flatMap(ProjectStore.ProjectStoreV2, (projects) =>
-    projects.apply({
-      sequence: 0,
-      eventId: EventId.make(`created:${projectId}`),
-      aggregateKind: "project",
-      aggregateId: projectId,
-      occurredAt: DateTime.formatIso(at(0)),
-      commandId: null,
-      causationEventId: null,
-      correlationId: null,
-      metadata: {},
-      type: "project.created",
-      payload: {
-        projectId,
-        title: projectId,
-        workspaceRoot: `/work/${projectId}`,
-        defaultModelSelection: null,
-        scripts: [],
-        createdAt: DateTime.formatIso(at(0)),
-        updatedAt: DateTime.formatIso(at(0)),
-      },
-    }),
-  );
+const createProject = (
+  projects: typeof ProjectStore.ProjectStoreV2.Service,
+  projectId: ProjectId,
+) =>
+  projects.apply({
+    sequence: 0,
+    eventId: EventId.make(`created:${projectId}`),
+    aggregateKind: "project",
+    aggregateId: projectId,
+    occurredAt: DateTime.formatIso(at(0)),
+    commandId: null,
+    causationEventId: null,
+    correlationId: null,
+    metadata: {},
+    type: "project.created",
+    payload: {
+      projectId,
+      title: projectId,
+      workspaceRoot: `/work/${projectId}`,
+      defaultModelSelection: null,
+      scripts: [],
+      createdAt: DateTime.formatIso(at(0)),
+      updatedAt: DateTime.formatIso(at(0)),
+    },
+  });
 
 const thread = (
   threadId: ThreadId,
@@ -178,9 +184,9 @@ function run(
 const commit = Effect.fn("ThreadFindTest.commit")(function* (
   events: readonly OrchestrationV2DomainEvent[],
 ) {
-  const store = yield* EventStore.EventStoreV2;
+  const store = yield* Effect.serviceOption(EventStore.EventStoreV2);
   const projection = yield* ProjectionStore.ProjectionStoreV2;
-  yield* store.append({ events });
+  if (Option.isSome(store)) yield* store.value.append({ events });
   yield* Effect.forEach(events, projection.apply, { discard: true });
 });
 const putItems = (items: readonly OrchestrationV2TurnItem[], version = "initial") =>
@@ -194,7 +200,8 @@ const putItems = (items: readonly OrchestrationV2TurnItem[], version = "initial"
     })),
   );
 const setup = Effect.gen(function* () {
-  yield* createProject(projectId);
+  const projects = yield* Effect.serviceOption(ProjectStore.ProjectStoreV2);
+  if (Option.isSome(projects)) yield* createProject(projects.value, projectId);
   yield* commit([thread(threadId, projectId), run()]);
   return yield* ProjectionStore.ProjectionStoreV2;
 });
@@ -656,6 +663,286 @@ describe("V2 thread find", () => {
   );
 });
 
+// A provider-native workflow coordinator draws its title, description and phases where its first
+// message, the script, sits. The coordinator row that says what to draw lives on the parent thread.
+describe("V2 thread find, workflow coordinator threads", () => {
+  const coordinatorThread = ThreadId.make("thread:coordinator");
+  const coordinatorRun = RunId.make("run:coordinator");
+  const SCRIPT = "export const meta = { name: 'zebra pipeline' };\nawait agent('quokka review');";
+  const GATHER = { index: 0, title: "Gather evidence" };
+  const DRAFT = { index: 1, title: "Draft report" };
+
+  const coordinatorRow = (
+    childThreadId: ThreadId,
+    updatedAt: number,
+    workflow: OrchestrationV2SubagentWorkflow,
+  ): OrchestrationV2DomainEvent => {
+    const payload: OrchestrationV2Subagent = {
+      id: NodeId.make(`node:${childThreadId}`),
+      threadId,
+      runId: null,
+      parentNodeId: NodeId.make("node:parent"),
+      origin: "provider_native",
+      createdBy: "agent",
+      driver: ProviderDriverKind.make("codex"),
+      providerInstanceId,
+      providerThreadId: null,
+      childThreadId,
+      nativeTaskRef: null,
+      prompt: SCRIPT,
+      title: "Reconcile ledgers",
+      model: null,
+      status: "running",
+      result: null,
+      startedAt: at(1),
+      completedAt: null,
+      updatedAt: at(updatedAt),
+      workflow,
+    };
+    return {
+      id: EventId.make(`subagent:${childThreadId}:${updatedAt}`),
+      type: "subagent.updated",
+      threadId,
+      nodeId: payload.id,
+      driver: payload.driver,
+      providerInstanceId,
+      occurredAt: at(updatedAt),
+      payload,
+    };
+  };
+  const startedWorkflow: OrchestrationV2SubagentWorkflow = {
+    name: "Quarterly audit",
+    phases: [GATHER, DRAFT, { index: 3, title: "Unstarted phase" }],
+    agents: [
+      {
+        index: 0,
+        label: "Read ledgers",
+        state: "running",
+        phaseIndex: 0,
+        phaseTitle: "Gather evidence",
+      },
+      { index: 1, label: "Write summary", state: "queued", phaseIndex: 1 },
+    ],
+  };
+
+  const subagentThread = (id: ThreadId): OrchestrationV2DomainEvent => {
+    const created = thread(id, projectId);
+    if (created.type !== "thread.created") return created;
+    return {
+      ...created,
+      payload: {
+        ...created.payload,
+        creationSource: "provider",
+        lineage: {
+          parentThreadId: threadId,
+          relationshipToParent: "subagent",
+          rootThreadId: threadId,
+        },
+      },
+    };
+  };
+
+  const coordinatorSetup = Effect.gen(function* () {
+    const projection = yield* setup;
+    yield* commit([
+      subagentThread(coordinatorThread),
+      run(coordinatorThread, coordinatorRun),
+      coordinatorRow(coordinatorThread, 2, startedWorkflow),
+    ]);
+    yield* putItems([
+      {
+        ...item("script-message", 0, SCRIPT, "user_message", coordinatorThread),
+        runId: coordinatorRun,
+      },
+      {
+        ...item(
+          "coordinator-reply",
+          1,
+          "The quarterly report is ready.",
+          "assistant_message",
+          coordinatorThread,
+        ),
+        runId: coordinatorRun,
+      },
+    ]);
+    return projection;
+  });
+  // Both stores implement ProjectionStoreV2.searchThread and must count the same text.
+  const stores = [
+    ["sqlite", layerTest],
+    ["memory", ProjectionStore.layerMemory],
+  ] as const;
+  const search = (
+    projection: ProjectionStore.ProjectionStoreV2Shape,
+    query: string,
+    target: ThreadId = coordinatorThread,
+  ) => projection.searchThread({ threadId: target, query });
+
+  it.effect.each(stores)(
+    "%s: finds the title, description and phases the opening draws, never its script",
+    ([, layer]) =>
+      Effect.gen(function* () {
+        const projection = yield* coordinatorSetup;
+        const opening = { entryId: "script-message", runId: coordinatorRun, occurrence: 0 };
+        for (const query of [
+          "Quarterly audit",
+          "RECONCILE ledgers",
+          "gather evidence",
+          "draft report",
+        ]) {
+          const result = yield* search(projection, query);
+          assert.equal(result.totalMatches, 1, query);
+          assert.deepEqual(result.match, opening, query);
+        }
+        // Hidden script text, and text the opening draws without making it searchable.
+        for (const query of ["zebra", "quokka", "export const meta", "unstarted", "read ledgers"]) {
+          const result = yield* search(projection, query);
+          assert.equal(result.totalMatches, 0, query);
+          assert.isNull(result.match, query);
+        }
+      }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect.each(stores)(
+    "%s: replaces only the first message and numbers matches in the order they are drawn",
+    ([, layer]) =>
+      Effect.gen(function* () {
+        const projection = yield* coordinatorSetup;
+        yield* putItems([
+          {
+            ...item("later-message", 2, "zebra again", "user_message", coordinatorThread),
+            runId: coordinatorRun,
+          },
+        ]);
+        const quarterly = [
+          yield* search(projection, "quarterly"),
+          yield* projection.searchThread({
+            threadId: coordinatorThread,
+            query: "quarterly",
+            index: 1,
+          }),
+        ];
+        assert.deepEqual(
+          quarterly.map((result) => [result.totalMatches, result.match?.entryId]),
+          [
+            [2, "script-message"],
+            [2, "coordinator-reply"],
+          ],
+        );
+        const zebra = yield* search(projection, "zebra");
+        assert.equal(zebra.totalMatches, 1);
+        assert.equal(zebra.match?.entryId, "later-message");
+      }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect.each(stores)(
+    "%s: follows the coordinator row as phases start, with no change to the thread itself",
+    ([, layer]) =>
+      Effect.gen(function* () {
+        const projection = yield* coordinatorSetup;
+        assert.equal((yield* search(projection, "archive")).totalMatches, 0);
+        assert.equal((yield* search(projection, "quarterly")).totalMatches, 2);
+        yield* commit([
+          coordinatorRow(coordinatorThread, 5, {
+            ...startedWorkflow,
+            name: "Quarterly archive audit",
+            phases: [...startedWorkflow.phases, { index: 2, title: "Archive findings" }],
+            agents: [
+              ...startedWorkflow.agents,
+              { index: 2, label: "File results", state: "running", phaseIndex: 2 },
+            ],
+          }),
+        ]);
+        const archive = yield* search(projection, "archive");
+        assert.equal(archive.totalMatches, 2);
+        assert.deepEqual(archive.match, {
+          entryId: "script-message",
+          runId: coordinatorRun,
+          occurrence: 0,
+        });
+        assert.equal((yield* search(projection, "quarterly")).totalMatches, 2);
+      }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect.each(stores)(
+    "%s: leaves other subagent threads, and a coordinator still without its row, as they were",
+    ([, layer]) =>
+      Effect.gen(function* () {
+        const projection = yield* coordinatorSetup;
+        const plain = ThreadId.make("thread:plain-child");
+        const orphan = ThreadId.make("thread:orphan-coordinator");
+        const plainRun = RunId.make("run:plain");
+        const orphanRun = RunId.make("run:orphan");
+        yield* commit([
+          subagentThread(plain),
+          run(plain, plainRun),
+          coordinatorRow(plain, 3, { phases: [], agents: [] }),
+          subagentThread(orphan),
+          run(orphan, orphanRun),
+        ]);
+        yield* putItems([
+          {
+            ...item("plain-message", 0, "A plain quarterly note", "user_message", plain),
+            runId: plainRun,
+          },
+          { ...item("orphan-script", 0, SCRIPT, "user_message", orphan), runId: orphanRun },
+        ]);
+        const note = yield* search(projection, "quarterly", plain);
+        assert.equal(note.totalMatches, 1);
+        assert.equal(note.match?.entryId, "plain-message");
+        // The opening says "Workflow" until the coordinator row arrives; the script stays hidden.
+        assert.equal((yield* search(projection, "workflow", orphan)).totalMatches, 1);
+        assert.equal((yield* search(projection, "zebra", orphan)).totalMatches, 0);
+      }).pipe(Effect.provide(layer)),
+  );
+
+  // Only the SQLite store caches scans, so only it can tell whether a parent's event moved a result.
+  it.effect(
+    "ties a subagent thread's results to its parent only while the thread opens with a workflow",
+    () =>
+      Effect.gen(function* () {
+        const projection = yield* coordinatorSetup;
+        const plain = ThreadId.make("thread:plain-child");
+        const plainRun = RunId.make("run:plain");
+        yield* commit([
+          subagentThread(plain),
+          run(plain, plainRun),
+          coordinatorRow(plain, 3, { phases: [], agents: [] }),
+        ]);
+        yield* putItems([
+          {
+            ...item("plain-message", 0, "A plain quarterly note", "user_message", plain),
+            runId: plainRun,
+          },
+        ]);
+        const plainBefore = yield* search(projection, "quarterly", plain);
+        const coordinatorBefore = yield* search(projection, "quarterly");
+        // The parent keeps working while its children run.
+        yield* putItems([item("parent-news", 5, "quarterly news")], "parent-only");
+        const plainAfter = yield* search(projection, "quarterly", plain);
+        assert.equal(plainAfter.totalMatches, plainBefore.totalMatches);
+        assert.equal(plainAfter.snapshotSequence, plainBefore.snapshotSequence);
+        // A coordinator draws what its parent holds, so the same event reaches its results.
+        const coordinatorAfter = yield* search(projection, "quarterly");
+        assert.isAbove(coordinatorAfter.snapshotSequence, coordinatorBefore.snapshotSequence);
+        assert.equal(coordinatorAfter.totalMatches, coordinatorBefore.totalMatches);
+        yield* commit([
+          coordinatorRow(coordinatorThread, 6, {
+            ...startedWorkflow,
+            name: "Quarterly quarterly audit",
+          }),
+        ]);
+        assert.equal(
+          (yield* search(projection, "quarterly")).totalMatches,
+          coordinatorBefore.totalMatches + 1,
+        );
+        assert.equal(
+          (yield* search(projection, "quarterly", plain)).snapshotSequence,
+          plainBefore.snapshotSequence,
+        );
+      }).pipe(Effect.provide(layerTest)),
+  );
+});
 describe("V2 history materialization", () => {
   it.effect(
     "combines history pages through a match's message identity without skipping intervening turns",

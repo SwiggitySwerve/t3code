@@ -79,9 +79,12 @@ const MUTED_STATES: ReadonlySet<WorkflowGraphNodeState> = new Set([
 export function WorkflowWaveCanvas(props: {
   readonly graph: WorkflowGraphView<RuntimeSubagent>;
   readonly environmentId: EnvironmentId;
+  /** Whether find-in-thread reads the node labels; see `WorkflowOpeningBlock`. */
+  readonly findable?: boolean;
   readonly onOpenThread: (threadId: string) => void;
 }) {
   const { graph } = props;
+  const find = props.findable === true ? "true" : undefined;
   const layout = workflowWaveLayout(graph.waves);
   const nodes = graph.waves.flat();
   const labels = new Map(nodes.map((node) => [node.key, node.label] as const));
@@ -207,6 +210,7 @@ export function WorkflowWaveCanvas(props: {
                       key={node.key}
                       node={node}
                       box={box}
+                      find={find}
                       emphasis={emphasis}
                       onFocus={() => {
                         focusRequest.current = node.key;
@@ -221,6 +225,7 @@ export function WorkflowWaveCanvas(props: {
                     node={node}
                     box={box}
                     labels={labels}
+                    find={find}
                     environmentId={props.environmentId}
                     providerInstanceId={node.member?.providerInstanceId ?? null}
                     // A node without an agent has no provider yet; the workflow's own provider
@@ -286,6 +291,7 @@ export function WorkflowWaveCanvas(props: {
 function WorkflowNodePlaceholder(props: {
   readonly node: WorkflowGraphNodeView<RuntimeSubagent>;
   readonly box: WaveBox;
+  readonly find: "true" | undefined;
   readonly emphasis: boolean | null;
   readonly onFocus: () => void;
 }) {
@@ -308,7 +314,7 @@ function WorkflowNodePlaceholder(props: {
     >
       <span
         className="block truncate text-xs font-medium text-foreground"
-        data-thread-find-text="true"
+        data-thread-find-text={props.find}
       >
         {node.label}
       </span>
@@ -323,6 +329,7 @@ interface WorkflowNodeCardProps {
   readonly node: WorkflowGraphNodeView<RuntimeSubagent>;
   readonly box: WaveBox;
   readonly labels: ReadonlyMap<string, string>;
+  readonly find: "true" | undefined;
   readonly environmentId: EnvironmentId;
   readonly providerInstanceId: ProviderInstanceId | null;
   readonly driver: ProviderDriverKind | undefined;
@@ -367,7 +374,10 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
         />
       )}
       <span className="flex min-w-0 flex-1 flex-col">
-        <span className="truncate text-xs font-medium text-foreground" data-thread-find-text="true">
+        <span
+          className="truncate text-xs font-medium text-foreground"
+          data-thread-find-text={props.find}
+        >
           {node.label}
         </span>
         <span className="truncate text-2xs text-muted-foreground">{identity}</span>
