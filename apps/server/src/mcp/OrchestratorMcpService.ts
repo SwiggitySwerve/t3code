@@ -122,6 +122,7 @@ import { delegatedRunOutcome, runOutcome } from "../orchestration-v2/RestartBack
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as WorkflowApprovalGate from "../orchestration-v2/WorkflowApprovalGate.ts";
+import { sendWithFreshId } from "../orchestration-v2/WorkflowCommandRetry.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
@@ -2354,12 +2355,27 @@ const make = Effect.gen(function* () {
           why === "timed_out"
             ? "The agent passed its attempt's time budget, so its workflow stopped it."
             : "The agent recorded no activity for too long, so its workflow starts it again.";
-        yield* threadManagement
-          .dispatch({ type: "thread.stop", commandId, threadId: childThreadId, reason })
-          .pipe(Effect.mapError(threadManagementFailure));
-        yield* threadManagement
-          .stopDelegatedTasks({ threadId: childThreadId, commandId, reason })
-          .pipe(Effect.mapError(threadManagementFailure));
+        // The sweep asks again after a refusal, and a failed decide stores a rejection under this
+        // id, so the same id would be refused on every sweep. A stopped thread takes a second stop
+        // without effect, so one more try under a fresh id is safe.
+        yield* sendWithFreshId(commandId, (stopCommandId) =>
+          threadManagement
+            .dispatch({
+              type: "thread.stop",
+              commandId: stopCommandId,
+              threadId: childThreadId,
+              reason,
+            })
+            .pipe(
+              Effect.andThen(
+                threadManagement.stopDelegatedTasks({
+                  threadId: childThreadId,
+                  commandId: stopCommandId,
+                  reason,
+                }),
+              ),
+            ),
+        ).pipe(Effect.mapError(threadManagementFailure));
       },
     ),
     awaitAgent: Effect.fn("OrchestratorMcpService.awaitWorkflowAgent")(
@@ -3029,16 +3045,19 @@ const make = Effect.gen(function* () {
       (stored.value.workflowPresets !== undefined && Option.isNone(workflowPresets)) ||
       (stored.value.presetTargets !== undefined && Option.isNone(presetTargets))
     ) {
-      yield* threadManagement
-        .dispatch({
-          type: "workflow.complete",
-          commandId: CommandId.make(`command:workflow-complete:${row.id}`),
-          threadId: row.threadId,
-          workflowId: row.id,
-          status: "failed",
-          result: "The workflow could not resume: its stored arguments are unreadable.",
-        })
-        .pipe(Effect.ignore);
+      // An earlier start may have left a rejection under the usual id; the row is still running.
+      yield* sendWithFreshId(
+        CommandId.make(`command:workflow-complete:${row.id}`),
+        (completeCommandId) =>
+          threadManagement.dispatch({
+            type: "workflow.complete",
+            commandId: completeCommandId,
+            threadId: row.threadId,
+            workflowId: row.id,
+            status: "failed",
+            result: "The workflow could not resume: its stored arguments are unreadable.",
+          }),
+      ).pipe(Effect.ignore);
       return false;
     }
     workflowScopes.set(row.id, scope);

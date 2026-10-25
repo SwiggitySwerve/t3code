@@ -34,10 +34,12 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { freshCommandId, isCommandIdSpent } from "../orchestration-v2/WorkflowCommandRetry.ts";
 import {
   type CheckOutcome,
   checkFeedback,
@@ -78,6 +80,9 @@ const STALL_SWEEP_INTERVAL = "30 seconds";
 const RESULT_TEXT_LIMIT = 2_000;
 const WORKFLOW_RESULT_LIMIT = 16_000;
 const PREVIEW_LIMIT = 500;
+/** A failed workflow.complete is sent again after a pause that doubles from 1 s up to 30 s. */
+const COMPLETION_RETRY_MIN_MS = 1_000;
+const COMPLETION_RETRY_MAX_MS = 30_000;
 
 export interface WorkflowContext {
   readonly workflowId: NodeId;
@@ -318,6 +323,12 @@ function failureMessage<A>(exit: Exit.Exit<A, OrchestratorMcpFailure>, fallback:
 
 const decodeNodeOutcome = Schema.decodeUnknownExit(OrchestrationV2WorkflowNodeOutcome);
 
+/** The command that settles the workflow row with the script's outcome. */
+type WorkflowCompletion = Extract<
+  Parameters<WorkflowRunnerDeps["threads"]["dispatch"]>[0],
+  { readonly type: "workflow.complete" }
+>;
+
 type MutableAgent = {
   -readonly [Key in keyof OrchestrationV2WorkflowAgent]: OrchestrationV2WorkflowAgent[Key];
 };
@@ -366,6 +377,15 @@ class WorkflowSession {
     this.timedOut.add(taskId);
   }
 
+  /** Finishes once the workflow is stopped or the server detaches this runner. */
+  readonly stopped = Effect.callback<void>((resume) => {
+    const signal = this.abort.signal;
+    if (signal.aborted) return resume(Effect.void);
+    const onAbort = () => resume(Effect.void);
+    signal.addEventListener("abort", onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+
   /** Stopping the coordinator also releases every child settlement subscription. */
   observe(task: OrchestrationV2Subagent): void {
     if (task.id === this.workflow.workflowId && task.status !== "running") this.abort.abort();
@@ -376,7 +396,11 @@ class WorkflowSession {
       this.abort.abort();
   }
 
-  async run(): Promise<void> {
+  /**
+   * Runs the script once and returns the command that settles its row, or nothing when the row
+   * is already final. Sending the command is the caller's job, so a failed send never reruns it.
+   */
+  async run(): Promise<WorkflowCompletion | undefined> {
     let outcome = await runWorkflowScript({
       source: this.workflow.source,
       args: this.workflow.args,
@@ -390,13 +414,13 @@ class WorkflowSession {
       }),
     );
     // Stopped by Stop or the thread's own stop: the row is already final.
-    if (this.abort.signal.aborted) return;
+    if (this.abort.signal.aborted) return undefined;
     try {
       await this.flush();
     } catch (error) {
       outcome = { ok: false, message: error instanceof Error ? error.message : String(error) };
     }
-    await this.dispatch({
+    return {
       type: "workflow.complete",
       commandId: CommandId.make(`command:workflow-complete:${this.workflow.workflowId}`),
       threadId: this.workflow.threadId,
@@ -405,7 +429,7 @@ class WorkflowSession {
       result: outcome.ok
         ? truncate(JSON.stringify(outcome.value ?? null, null, 2), WORKFLOW_RESULT_LIMIT)
         : truncate(`The workflow failed: ${outcome.message}`, WORKFLOW_RESULT_LIMIT),
-    });
+    };
   }
 
   private host(): WorkflowScriptHost {
@@ -1113,6 +1137,57 @@ class WorkflowSession {
 export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
   const running = new Map<NodeId, WorkflowSession>();
 
+  // Whether the workflow's row still needs its completion. A failed read says nothing either way.
+  const completionRowState = (completion: WorkflowCompletion) =>
+    deps.threads.getThreadRecords(completion.threadId, ["subagents"]).pipe(
+      Effect.map(({ subagents }) =>
+        subagents.find((row) => row.id === completion.workflowId)?.status === "running"
+          ? ("running" as const)
+          : ("settled" as const),
+      ),
+      Effect.catchCause(() => Effect.succeed("unknown" as const)),
+    );
+
+  // Sends the script's outcome until the row is settled, stopped or detached; only the send is
+  // repeated, never the script. The runner stays registered meanwhile, so nothing resumes the row.
+  // Domain-wise the command is safe to send again: a row takes one completion, and its single
+  // commit plans the one parent wake.
+  const complete = Effect.fn("WorkflowRunner.complete")(function* (
+    session: WorkflowSession,
+    completion: WorkflowCompletion,
+  ) {
+    let commandId = completion.commandId;
+    let pauses = 0;
+    // Checked before every try: a try that wakes as the runner is detached or the row stopped
+    // must not send a completion.
+    while (!session.abort.signal.aborted) {
+      // A started try is never interrupted. Its own commit publishes the row's final event, which
+      // stops this runner, and cutting the dispatcher off after the commit would lose the wake.
+      const exit = yield* deps.threads
+        .dispatch({ ...completion, commandId })
+        .pipe(Effect.asVoid, Effect.uninterruptible, Effect.exit);
+      if (Exit.isSuccess(exit)) return;
+      yield* Effect.logWarning("Unable to record a workflow's completion", {
+        workflowId: completion.workflowId,
+        commandId,
+        cause: exit.cause,
+      });
+      const row = yield* completionRowState(completion);
+      if (row === "settled") return;
+      const refusal = Exit.findErrorOption(exit);
+      // A stored rejection answers its id for good. The row is known to be running, so a fresh id
+      // cannot complete it twice, and nothing else is waiting on the old id.
+      if (row === "running" && refusal._tag === "Some" && isCommandIdSpent(refusal.value)) {
+        commandId = yield* freshCommandId(completion.commandId);
+        continue;
+      }
+      pauses += 1;
+      const pause = Math.min(COMPLETION_RETRY_MIN_MS * 2 ** (pauses - 1), COMPLETION_RETRY_MAX_MS);
+      const jitter = yield* Random.nextBetween(0.8, 1.2);
+      yield* Effect.sleep(Math.round(pause * jitter)).pipe(Effect.raceFirst(session.stopped));
+    }
+  });
+
   const run = Effect.fn("WorkflowRunner.run")(function* (
     session: WorkflowSession,
     workflow: WorkflowContext,
@@ -1144,7 +1219,8 @@ export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
       Effect.forever,
       Effect.forkChild,
     );
-    yield* Effect.promise(() => session.run());
+    const completion = yield* Effect.promise(() => session.run());
+    if (completion !== undefined) yield* complete(session, completion);
     yield* Fiber.interrupt(sweep);
     yield* Fiber.interrupt(watcher);
   });

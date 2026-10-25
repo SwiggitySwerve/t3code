@@ -3115,7 +3115,60 @@ describe("workflow checks", () => {
       ).toBe("interrupted");
     }).pipe(Effect.provide(layerTest)),
   );
+
+  it.effect("stops an attempt past its deadline although its stop command id was rejected", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("slow", { attemptTimeoutMs: 60000, stallTimeoutMs: 3600000 })',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      // A failed decide under this id stored a rejection, which would answer every later stop.
+      yield* spendCommandId(`command:workflow-stall:${first.id}`);
+      yield* TestClock.adjust("2 minutes");
+      const second = yield* awaitMember(started.workflowId, 2);
+      expect(second.prompt).toContain("passed its time budget of 60000 ms");
+      yield* completeChild(second.childThreadId!, "in time");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toBe("in time");
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      expect(
+        (yield* orchestrator.getThreadProjection(first.childThreadId!)).runs.at(-1)?.status,
+      ).toBe("interrupted");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("records a finished script's completion although its command id was rejected", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow('return await agent("work")');
+      // As after a restart: an earlier process stored a rejection under the completion's id.
+      yield* spendCommandId(`command:workflow-complete:${started.workflowId}`);
+      const member = yield* awaitMember(started.workflowId, 1);
+      yield* completeChild(member.childThreadId!, "done");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("completed");
+      expect(JSON.parse(ended.result!)).toBe("done");
+    }).pipe(Effect.provide(layerTest)),
+  );
 });
+
+/**
+ * Stores a rejection under `commandId` the way a failed decide does: a stop for a thread that does
+ * not exist fails while deciding, and the dispatcher keeps that refusal for the id from then on.
+ */
+const spendCommandId = (commandId: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const command = {
+      type: "thread.stop" as const,
+      commandId: CommandId.make(commandId),
+      threadId: ThreadId.make("thread:spent-command-id"),
+    };
+    yield* Effect.flip(orchestrator.dispatch(command));
+    const again = yield* Effect.flip(orchestrator.dispatch(command));
+    expect(again._tag).toBe("OrchestratorCommandPreviouslyRejectedError");
+  });
 
 const decodeReview = Schema.decodeUnknownEffect(OrchestratorMcpGraphReviewResult);
 const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
@@ -3894,6 +3947,31 @@ describe("graphs", () => {
         title: "Bad plan",
         script: storedWorkflowScript("return 1", { plan: { nodes: "not a list" } }),
       });
+      yield* withServerProcess((service) => service.resumeWorkflows);
+      const ended = yield* awaitWorkflowEnd(workflowId);
+      expect(ended.status).toBe("failed");
+      expect(ended.result).toContain("its stored arguments are unreadable");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("fails a resumed workflow with unreadable arguments although its id was rejected", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+      const workflowId = NodeId.make("workflow:bad-plan-rejected");
+      yield* orchestrator.dispatch({
+        type: "workflow.start",
+        createdBy: "agent",
+        creationSource: "mcp",
+        commandId: CommandId.make("command:workflow-start:bad-plan-rejected"),
+        threadId: parentThreadId,
+        runId: parent.runs.at(-1)!.id,
+        workflowId,
+        title: "Bad plan",
+        script: storedWorkflowScript("return 1", { plan: { nodes: "not a list" } }),
+      });
+      yield* spendCommandId(`command:workflow-complete:${workflowId}`);
       yield* withServerProcess((service) => service.resumeWorkflows);
       const ended = yield* awaitWorkflowEnd(workflowId);
       expect(ended.status).toBe("failed");

@@ -13,6 +13,7 @@ import {
   CommandId,
   isOrchestrationV2WorkActive,
   MessageId,
+  type NodeId,
   OrchestrationV2StopWorkflowError,
   type OrchestrationV2StopWorkflowInput,
   type ModelSelection,
@@ -56,6 +57,7 @@ import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
 import { DispatchModeLimit, exceededDispatchModeLimit } from "./DispatchModeLimit.ts";
 import { projectTurnItemForDetail } from "./WireProjection.ts";
+import { sendWithFreshId } from "./WorkflowCommandRetry.ts";
 import * as LegacyV1ThreadImporter from "./legacy/LegacyV1ThreadImporter.ts";
 import * as ServerSettings from "../serverSettings.ts";
 
@@ -1031,44 +1033,81 @@ const make = Effect.gen(function* () {
     return { type: "interrupt_requested", run: interruptibleRun, dispatch } as const;
   });
 
-  // A T3-run workflow is a row on this thread whose members are delegated tasks. Stopping
-  // dispatches through the normal command path, which takes each thread's lock itself.
+  // A T3-run workflow is a row whose members are delegated tasks. The row stops first so its runner
+  // starts nothing more, and that commit closes admission, so the members are read after it. A stop
+  // repeats while any member is active, whatever the row's own status.
+  const activeWorkflowMembers = (
+    subagents: ReadonlyArray<OrchestrationV2ThreadProjection["subagents"][number]>,
+    workflowId: NodeId,
+  ) =>
+    subagents.flatMap((member) =>
+      member.origin === "app_owned" &&
+      member.parentNodeId === workflowId &&
+      member.childThreadId !== null &&
+      isOrchestrationV2WorkActive(member.status)
+        ? [member.childThreadId]
+        : [],
+    );
+
   const stopAppOwnedWorkflow = Effect.fn("ThreadManagementService.stopAppOwnedWorkflow")(function* (
     input: OrchestrationV2StopWorkflowInput,
     task: OrchestrationV2ThreadProjection["subagents"][number],
     subagents: ReadonlyArray<OrchestrationV2ThreadProjection["subagents"][number]>,
   ) {
-    if (task.status !== "running") {
+    const snapshotMembers = activeWorkflowMembers(subagents, task.id);
+    if (task.status !== "running" && snapshotMembers.length === 0) {
       return yield* new OrchestrationV2StopWorkflowError({ ...input, reason: "not-running" });
     }
     const stopFailed = (cause: unknown) =>
       new OrchestrationV2StopWorkflowError({ ...input, reason: "stop-failed", cause });
     const commandId = CommandId.make(`command:workflow-stop:${task.id}`);
-    yield* dispatch({
-      type: "workflow.stop",
-      commandId,
-      threadId: input.threadId,
-      workflowId: task.id,
-    }).pipe(Effect.mapError(stopFailed));
-    for (const member of subagents) {
-      if (
-        member.origin !== "app_owned" ||
-        member.parentNodeId !== task.id ||
-        member.childThreadId === null ||
-        !isOrchestrationV2WorkActive(member.status)
-      )
-        continue;
-      const memberCommandId = CommandId.make(`${commandId}:${member.childThreadId}`);
-      yield* dispatch({
-        type: "thread.stop",
-        commandId: memberCommandId,
-        threadId: member.childThreadId,
-        reason: "The workflow was stopped.",
-      }).pipe(
-        Effect.andThen(
-          stopDelegatedTasks({ threadId: member.childThreadId, commandId: memberCommandId }),
+    const stopRow = Effect.gen(function* () {
+      // Nothing else is stopped if this fails: the script would go on starting agents.
+      yield* sendWithFreshId(commandId, (stopCommandId) =>
+        dispatch({
+          type: "workflow.stop",
+          commandId: stopCommandId,
+          threadId: input.threadId,
+          workflowId: task.id,
+        }),
+      ).pipe(Effect.mapError(stopFailed));
+      const stopped = yield* orchestrator
+        .getThreadRecords(input.threadId, ["subagents"])
+        .pipe(Effect.mapError(stopFailed));
+      return activeWorkflowMembers(stopped.subagents, task.id);
+    });
+    const memberThreadIds = task.status === "running" ? yield* stopRow : snapshotMembers;
+    const failures: Array<unknown> = [];
+    for (const childThreadId of memberThreadIds) {
+      yield* sendWithFreshId(CommandId.make(`${commandId}:${childThreadId}`), (memberCommandId) =>
+        dispatch({
+          type: "thread.stop",
+          commandId: memberCommandId,
+          threadId: childThreadId,
+          reason: "The workflow was stopped.",
+        }).pipe(
+          Effect.andThen(
+            stopDelegatedTasks({ threadId: childThreadId, commandId: memberCommandId }),
+          ),
         ),
-        Effect.mapError(stopFailed),
+      ).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("Unable to stop a workflow member", {
+            workflowId: task.id,
+            threadId: childThreadId,
+            error,
+          }).pipe(Effect.andThen(Effect.sync(() => failures.push(error)))),
+        ),
+      );
+    }
+    if (failures.length > 0) {
+      return yield* stopFailed(
+        failures.length === 1
+          ? failures[0]
+          : new AggregateError(
+              failures,
+              `${failures.length} workflow members could not be stopped.`,
+            ),
       );
     }
   });

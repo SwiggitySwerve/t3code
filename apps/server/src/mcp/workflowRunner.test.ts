@@ -56,6 +56,26 @@ interface HarnessOptions {
    * starting, with no start stamp yet and a request stamp from the epoch.
    */
   readonly releasedAt?: number;
+  /** Whether the nth stop request (1-based, counting every request) is refused. */
+  readonly failStop?: (attempt: number) => boolean;
+  /** Whether an accepted stop leaves the agent running, as a provider that finalizes later does. */
+  readonly stopLeavesRunning?: boolean;
+  /**
+   * How the nth workflow.complete dispatch (1-based, counting replays of a stored rejection)
+   * fails: "transient", a storage error before any receipt exists, or "decide", a failure while
+   * deciding the command, which stores a rejection under its id as the dispatcher does.
+   */
+  readonly failCompletion?: (attempt: number) => "transient" | "decide" | undefined;
+  /** Command ids the dispatcher already rejected, as after an earlier server start. */
+  readonly rejectedCommandIds?: ReadonlyArray<string>;
+  /** Command ids that belong to another thread's receipt. */
+  readonly conflictCommandIds?: ReadonlyArray<string>;
+  /** Whether the nth read of the workflow row (1-based) fails. */
+  readonly failRead?: (read: number) => boolean;
+  /** Settles the row without an event right after the nth completion dispatch fails. */
+  readonly settleRowAfterAttempt?: number;
+  /** An asynchronous step after the commit, such as the dispatcher's offer of the parent wake. */
+  readonly afterCommit?: Effect.Effect<void>;
 }
 
 /** A runner whose agents finish as told, recording what it dispatches and stops. */
@@ -81,8 +101,16 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const stops: Array<string> = [];
     const keys = new Map<string, string>();
     const firstSpawn = yield* Deferred.make<void>();
+    const firstCompletion = yield* Deferred.make<void>();
     const workflowUpdates: Array<OrchestrationV2SubagentWorkflow> = [];
     const workflowCommands: Array<unknown> = [];
+    const stopRequests: Array<string> = [];
+    const completions: Array<{ readonly commandId: string; readonly result: string }> = [];
+    const receipts = new Map<string, "accepted" | "rejected" | "conflict">();
+    for (const id of options.rejectedCommandIds ?? []) receipts.set(id, "rejected");
+    for (const id of options.conflictCommandIds ?? []) receipts.set(id, "conflict");
+    const acceptedCompletions: Array<string> = [];
+    let rowReads = 0;
     let spawned = 0;
     const update = (id: string, status: string) => {
       statuses.set(id, status);
@@ -112,6 +140,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
         ),
       dispatch: (command: {
         readonly type: string;
+        readonly commandId?: string;
+        readonly status?: string;
         readonly result?: string;
         readonly workflow?: OrchestrationV2SubagentWorkflow | OrchestrationV2WorkflowPatch;
       }) => {
@@ -128,10 +158,61 @@ const makeHarness = (options: HarnessOptions = {}) =>
           if (options.onWorkflowUpdate !== undefined)
             return options.onWorkflowUpdate(workflow).pipe(Effect.as({} as never));
         }
-        return command.type === "workflow.complete"
-          ? Deferred.succeed(completed, command.result ?? "").pipe(Effect.as({} as never))
-          : Effect.succeed({} as never);
+        if (command.type === "workflow.complete") {
+          return Effect.gen(function* () {
+            const commandId = command.commandId ?? "";
+            completions.push({ commandId, result: command.result ?? "" });
+            yield* Deferred.succeed(firstCompletion, undefined);
+            // Like the dispatcher: a stored rejection answers its id for good, and a failure
+            // while deciding a command stores one.
+            const receipt = receipts.get(commandId);
+            if (receipt === "rejected") {
+              return yield* Effect.fail({
+                _tag: "OrchestratorCommandPreviouslyRejectedError",
+              } as never);
+            }
+            if (receipt === "conflict") {
+              return yield* Effect.fail({ _tag: "OrchestratorCommandIdConflictError" } as never);
+            }
+            if (receipt === "accepted") return {} as never;
+            const failure = options.failCompletion?.(completions.length);
+            if (failure !== undefined && options.settleRowAfterAttempt === completions.length) {
+              statuses.set(workflowId, "cancelled");
+            }
+            if (failure === "transient") {
+              return yield* Effect.fail({ _tag: "OrchestratorDispatchError" } as never);
+            }
+            // The domain refuses a row that is no longer running, and that refusal is stored too.
+            if (failure === "decide" || (statuses.get(workflowId) ?? "running") !== "running") {
+              receipts.set(commandId, "rejected");
+              return yield* Effect.fail({
+                _tag:
+                  failure === "decide"
+                    ? "OrchestratorProjectionError"
+                    : "OrchestratorDispatchError",
+              } as never);
+            }
+            receipts.set(commandId, "accepted");
+            acceptedCompletions.push(commandId);
+            // The commit publishes the row's final status; the dispatcher then finishes its work.
+            yield* update(workflowId, command.status ?? "completed");
+            if (options.afterCommit !== undefined) yield* options.afterCommit;
+            yield* Deferred.succeed(completed, command.result ?? "");
+            return {} as never;
+          });
+        }
+        return Effect.succeed({} as never);
       },
+      getThreadRecords: () =>
+        Effect.suspend(() => {
+          rowReads += 1;
+          if (options.failRead?.(rowReads) === true) {
+            return Effect.fail({ _tag: "OrchestratorProjectionError" } as never);
+          }
+          return Effect.succeed({
+            subagents: [{ id: workflowId, status: statuses.get(workflowId) ?? "running" }],
+          } as never);
+        }),
       // Every attempt's run started at the epoch, which is where the test clock starts.
       getThreadShell: () =>
         options.releasedAt !== undefined
@@ -226,8 +307,15 @@ const makeHarness = (options: HarnessOptions = {}) =>
       },
       stopAgent: (_workflow, taskId, _childThreadId, why) =>
         Effect.gen(function* () {
+          stopRequests.push(`${taskId}:${why}`);
+          if (options.failStop?.(stopRequests.length) === true) {
+            return yield* Effect.fail({
+              code: "orchestration_error",
+              message: "The stop could not be dispatched.",
+            } as never);
+          }
           stops.push(`${taskId}:${why}`);
-          yield* update(taskId, "cancelled");
+          if (options.stopLeavesRunning !== true) yield* update(taskId, "cancelled");
         }),
     };
     return {
@@ -235,6 +323,14 @@ const makeHarness = (options: HarnessOptions = {}) =>
       completed,
       spawned: () => spawned,
       stops,
+      /** Every stop the runner asked for, accepted or not. */
+      stopRequests,
+      /** Every workflow.complete the runner dispatched, accepted or not. */
+      completions,
+      /** The command ids of the completions the dispatcher committed. */
+      acceptedCompletions,
+      /** Done once the runner has dispatched its first workflow.complete. */
+      firstCompletion,
       keys,
       firstSpawn,
       /** Every row update the runner sent, oldest first. */
@@ -262,6 +358,17 @@ const sweepUntilDone = (completed: Deferred.Deferred<string>) =>
   Effect.gen(function* () {
     for (let step = 0; step < 240 && !(yield* Deferred.isDone(completed)); step += 1) {
       yield* TestClock.adjust("30 seconds");
+    }
+  });
+
+/** Moves the test clock in steps until the condition holds, at most 240 steps. */
+const sweepUntil = (
+  reached: () => boolean,
+  stepSize: "1 millis" | "1 second" | "30 seconds" = "30 seconds",
+) =>
+  Effect.gen(function* () {
+    for (let step = 0; step < 240 && !reached(); step += 1) {
+      yield* TestClock.adjust(stepSize);
     }
   });
 
@@ -492,6 +599,45 @@ describe("workflow runner", () => {
         expect(stops).toEqual(["node:agent-1:timed_out", "node:agent-2:timed_out"]);
       }),
     );
+    it.effect("asks again to stop an attempt past its deadline when the first request failed", () =>
+      Effect.gen(function* () {
+        // The first attempt hangs until a stop lands; the second finishes.
+        const { runner, completed, spawned, stops, stopRequests } = yield* makeHarness({
+          finish: (n) => (n < 2 ? "hang" : "completed"),
+          failStop: (request) => request === 1,
+        });
+        yield* launch(
+          runner,
+          'return await agent("x", { attemptTimeoutMs: 60000, stallTimeoutMs: 3600000, report: true })',
+        );
+        yield* sweepUntilDone(completed);
+        expect(yield* Deferred.isDone(completed)).toBe(true);
+        // The deadline still classifies the stopped attempt, so the script gets a second attempt.
+        expect(JSON.parse(yield* Deferred.await(completed))).toMatchObject({
+          ok: true,
+          attempts: 2,
+        });
+        expect(stopRequests).toEqual(["node:agent-1:timed_out", "node:agent-1:timed_out"]);
+        expect(stops).toEqual(["node:agent-1:timed_out"]);
+        expect(spawned()).toBe(2);
+      }),
+    );
+    it.effect("does not repeat an accepted deadline stop while the attempt is still ending", () =>
+      Effect.gen(function* () {
+        const { runner, stopRequests } = yield* makeHarness({
+          finish: () => "hang",
+          stopLeavesRunning: true,
+        });
+        yield* launch(
+          runner,
+          'return await agent("x", { attemptTimeoutMs: 60000, stallTimeoutMs: 3600000, report: true })',
+        );
+        yield* sweepUntil(() => stopRequests.length > 0);
+        yield* sweepUntil(() => false);
+        expect(stopRequests).toEqual(["node:agent-1:timed_out"]);
+        yield* runner.detachAll;
+      }),
+    );
     it.effect("fails once every attempt passes its deadline", () =>
       Effect.gen(function* () {
         const { runner, completed, spawned } = yield* makeHarness({ finish: () => "hang" });
@@ -506,6 +652,188 @@ describe("workflow runner", () => {
           "Every attempt passed its time budget of 60000 ms and was stopped.",
         );
         expect(spawned()).toBe(3);
+      }),
+    );
+  });
+
+  describe("final completion", () => {
+    const completionId = `command:workflow-complete:${workflowId}`;
+
+    it.effect.each([
+      { outcome: "a finished script", source: 'return await agent("work")' },
+      { outcome: "a failed script", source: 'await agent("work"); throw new Error("boom")' },
+    ])("keeps its runner until a failed completion is recorded, for $outcome", ({ source }) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          failCompletion: (attempt) => (attempt <= 2 ? "transient" : undefined),
+        });
+        yield* launch(harness.runner, source);
+        yield* Deferred.await(harness.firstCompletion);
+        // The row is still running, so the runner still owns finishing it.
+        expect(harness.runner.isRunning(workflowId)).toBe(true);
+        yield* sweepUntilDone(harness.completed);
+        expect(yield* Deferred.isDone(harness.completed)).toBe(true);
+        // Only the completion is retried: the script ran once, and a failure that stored no
+        // rejection keeps its id, so the dispatcher records one completion and one wake.
+        expect(harness.spawned()).toBe(1);
+        expect(harness.completions).toHaveLength(3);
+        expect(new Set(harness.completions.map((completion) => completion.commandId)).size).toBe(1);
+        expect(new Set(harness.completions.map((completion) => completion.result)).size).toBe(1);
+        expect(harness.completions[0]!.commandId).toBe(completionId);
+      }),
+    );
+    it.effect("keeps its runner past twenty failed tries until the row is recorded", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          failCompletion: (attempt) => (attempt <= 30 ? "transient" : undefined),
+        });
+        yield* launch(harness.runner, 'return await agent("work")');
+        yield* Deferred.await(harness.firstCompletion);
+        yield* sweepUntil(() => harness.completions.length >= 25);
+        // A bounded retry would have let go by now with the row still running.
+        expect(harness.completions.length).toBeGreaterThanOrEqual(25);
+        expect(harness.runner.isRunning(workflowId)).toBe(true);
+        expect(yield* Deferred.isDone(harness.completed)).toBe(false);
+        yield* sweepUntilDone(harness.completed);
+        expect(yield* Deferred.isDone(harness.completed)).toBe(true);
+        expect(harness.completions).toHaveLength(31);
+        expect(harness.acceptedCompletions).toHaveLength(1);
+        expect(harness.spawned()).toBe(1);
+      }),
+    );
+    it.effect(
+      "records its completion under a fresh id after a failed decide stored a rejection",
+      () =>
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({
+            failCompletion: (attempt) => (attempt === 1 ? "decide" : undefined),
+          });
+          yield* launch(harness.runner, 'return await agent("work")');
+          yield* sweepUntilDone(harness.completed);
+          expect(yield* Deferred.isDone(harness.completed)).toBe(true);
+          yield* sweepUntil(() => !harness.runner.isRunning(workflowId), "1 millis");
+          const ids = harness.completions.map((completion) => completion.commandId);
+          // The first failure leaves no sign of a stored rejection; the second try finds it, and
+          // only then does the runner move to a fresh id.
+          expect(ids).toHaveLength(3);
+          expect(ids.slice(0, 2)).toEqual([completionId, completionId]);
+          expect(ids[2]!.startsWith(`${completionId}:`)).toBe(true);
+          expect(harness.acceptedCompletions).toEqual([ids[2]]);
+          expect(new Set(harness.completions.map((completion) => completion.result)).size).toBe(1);
+          expect(harness.spawned()).toBe(1);
+          expect(harness.runner.isRunning(workflowId)).toBe(false);
+        }),
+    );
+    it.effect.each([{ kind: "rejected" as const }, { kind: "conflict" as const }])(
+      "moves to a fresh id when its id was already spent before this start ($kind)",
+      ({ kind }) =>
+        Effect.gen(function* () {
+          const harness = yield* makeHarness(
+            kind === "rejected"
+              ? { rejectedCommandIds: [completionId] }
+              : { conflictCommandIds: [completionId] },
+          );
+          yield* launch(harness.runner, 'return await agent("work")');
+          yield* sweepUntilDone(harness.completed);
+          expect(yield* Deferred.isDone(harness.completed)).toBe(true);
+          const ids = harness.completions.map((completion) => completion.commandId);
+          expect(ids).toHaveLength(2);
+          expect(ids[0]).toBe(completionId);
+          expect(ids[1]!.startsWith(`${completionId}:`)).toBe(true);
+          expect(harness.acceptedCompletions).toEqual([ids[1]]);
+        }),
+    );
+    it.effect(
+      "keeps its id while the row cannot be read, since a refusal alone proves nothing",
+      () =>
+        Effect.gen(function* () {
+          const harness = yield* makeHarness({
+            failCompletion: (attempt) => (attempt === 1 ? "decide" : undefined),
+            failRead: (read) => read <= 2,
+          });
+          yield* launch(harness.runner, 'return await agent("work")');
+          yield* sweepUntilDone(harness.completed);
+          expect(yield* Deferred.isDone(harness.completed)).toBe(true);
+          const ids = harness.completions.map((completion) => completion.commandId);
+          // The runner switches only after a read shows the row still running.
+          expect(ids).toHaveLength(4);
+          expect(ids.slice(0, 3)).toEqual([completionId, completionId, completionId]);
+          expect(ids[3]!.startsWith(`${completionId}:`)).toBe(true);
+          expect(harness.acceptedCompletions).toEqual([ids[3]]);
+        }),
+    );
+    it.effect("lets go once a failed try finds the row settled by someone else", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          failCompletion: () => "transient",
+          settleRowAfterAttempt: 1,
+        });
+        yield* launch(harness.runner, 'return await agent("work")');
+        yield* Deferred.await(harness.firstCompletion);
+        yield* sweepUntil(() => !harness.runner.isRunning(workflowId));
+        expect(harness.runner.isRunning(workflowId)).toBe(false);
+        expect(harness.completions).toHaveLength(1);
+        expect(harness.acceptedCompletions).toHaveLength(0);
+      }),
+    );
+    it.effect("stops retrying the completion when a stop settles the row", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ failCompletion: () => "transient" });
+        yield* launch(harness.runner, 'return await agent("work")');
+        yield* Deferred.await(harness.firstCompletion);
+        yield* harness.stopWorkflow();
+        // Single milliseconds: the retry pause cannot elapse, so a retry could only be a bug.
+        yield* sweepUntil(() => !harness.runner.isRunning(workflowId), "1 millis");
+        expect(harness.runner.isRunning(workflowId)).toBe(false);
+        expect(harness.completions).toHaveLength(1);
+      }),
+    );
+    it.effect("stops retrying the completion once the runner is detached", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          failCompletion: (attempt) => (attempt <= 2 ? "transient" : undefined),
+        });
+        yield* launch(harness.runner, 'return await agent("work")');
+        yield* Deferred.await(harness.firstCompletion);
+        // One-second steps, so the clock cannot pass the third try before the runner is detached.
+        yield* sweepUntil(() => harness.completions.length >= 2, "1 second");
+        yield* harness.runner.detachAll;
+        yield* sweepUntil(() => false);
+        // The third try would have succeeded, so a runner still retrying would have finished.
+        expect(harness.completions).toHaveLength(2);
+        expect(yield* Deferred.isDone(harness.completed)).toBe(false);
+      }),
+    );
+    it.effect("lets an accepted completion finish its post-commit step despite its own event", () =>
+      Effect.gen(function* () {
+        const gate = yield* Deferred.make<void>();
+        const steps = { started: 0, finished: 0, interrupted: 0 };
+        const harness = yield* makeHarness({
+          afterCommit: Effect.suspend(() => {
+            steps.started += 1;
+            return Deferred.await(gate).pipe(
+              Effect.andThen(
+                Effect.sync(() => {
+                  steps.finished += 1;
+                }),
+              ),
+              Effect.onInterrupt(() =>
+                Effect.sync(() => {
+                  steps.interrupted += 1;
+                }),
+              ),
+            );
+          }),
+        });
+        yield* launch(harness.runner, 'return await agent("work")');
+        yield* Deferred.await(harness.firstCompletion);
+        // The commit's event reaches the runner while the post-commit step is still pending.
+        yield* sweepUntil(() => false, "1 millis");
+        yield* Deferred.succeed(gate, undefined);
+        yield* sweepUntil(() => false, "1 millis");
+        expect(steps).toEqual({ started: 1, finished: 1, interrupted: 0 });
+        expect(harness.completions).toHaveLength(1);
+        expect(yield* Deferred.isDone(harness.completed)).toBe(true);
       }),
     );
   });

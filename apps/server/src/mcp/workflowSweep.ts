@@ -18,8 +18,11 @@ export interface WaitingAgent {
   seenAt?: number;
   /** When this runner first saw the attempt, if its thread records no run start. */
   firstSeenAt?: number;
-  /** Its deadline passed and the runner asked it to stop. */
-  timedOut?: boolean;
+  /**
+   * Its deadline passed and a stop request was accepted. A refused request leaves this unset, so
+   * the next sweep asks again; the attempt counts as timed out either way (see markTimedOut).
+   */
+  deadlineStopAccepted?: boolean;
 }
 
 /** The runner state the sweep reads and marks. */
@@ -40,7 +43,7 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
       .getThreadShell(agent.childThreadId)
       .pipe(Effect.orElseSucceed(() => null));
     if (shell === null) continue;
-    if (agent.timedOut === true) continue;
+    if (agent.deadlineStopAccepted === true) continue;
     // A run still preparing (queued for a running slot, or setting up its checkout) has not
     // started its work: neither its deadline nor its silence counts yet.
     if (shell.activityRunStatus === "preparing") {
@@ -61,16 +64,21 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
           ? agent.firstSeenAt
           : Math.min(recorded, agent.firstSeenAt);
       if (now - start >= agent.attemptTimeoutMs) {
-        agent.timedOut = true;
+        // Marked before the stop: the stop can end the attempt before it returns, and the deadline
+        // has passed whether or not the stop is accepted.
         session.markTimedOut(taskId);
-        yield* deps.stopAgent(workflow, taskId as NodeId, agent.childThreadId, "timed_out").pipe(
-          Effect.catchCause((cause) =>
-            Effect.logWarning("Unable to stop a workflow agent past its deadline", {
-              taskId,
-              cause,
-            }),
-          ),
-        );
+        const accepted = yield* deps
+          .stopAgent(workflow, taskId as NodeId, agent.childThreadId, "timed_out")
+          .pipe(
+            Effect.as(true),
+            Effect.catchCause((cause) =>
+              Effect.logWarning("Unable to stop a workflow agent past its deadline", {
+                taskId,
+                cause,
+              }).pipe(Effect.as(false)),
+            ),
+          );
+        if (accepted) agent.deadlineStopAccepted = true;
         continue;
       }
     }
