@@ -1,12 +1,8 @@
 /**
- * The atom reads the workflow fixtures stub. A fixture reads the same atoms the app does
- * (`providersValueAtom`, `providersIgnoringCheckedAtAtom`) and gets the shared catalog, so model
- * names and avatars come from the same lookup as in the app. An atom with no stub throws:
- * silently answering `[]` would make a permission or capability atom read as "allowed".
- *
- * This module imports the app's state, so a `vi.mock` factory for the atom library must not import
- * it (the state imports the library, which would wait on the factory); the factory calls
- * `readQaAtom` through a static import instead.
+ * The atom reads the workflow fixtures stub, so fixtures read the same atoms as the app and get
+ * the shared catalog. An atom with no stub throws: answering `[]` would make a permission or
+ * capability atom read as "allowed". This module imports app state, so a `vi.mock` factory for
+ * the atom library must not import it; the factory calls `readQaAtom` through a static import.
  */
 import { providersIgnoringCheckedAtAtom, serverEnvironment } from "../../src/state/server";
 import { QA_ENVIRONMENT, QA_PROVIDERS } from "./providers";

@@ -1,40 +1,8 @@
 /**
- * The approval gate for workflows. When a person's message asks for a workflow, the thread's
- * agent plans it with graph_review and the person approves the reviewed graph in the client;
- * until then graph_start and workflow_start are refused here, on the server.
- *
- * One owner for the state and for the rule behind it. The state is per thread and in memory:
- * the request that armed the gate, the reviews graph_review produced for it, and the digests
- * the person approved. It is never an event, a projection or a stored approval, so it cannot
- * outlive the server and nothing else can grant it. A restart drops it. The next time a start
- * is checked, the gate is armed again from the thread's latest started person-typed message,
- * asked with the same rule turn start uses (`workflowRequestOf`), and every review and approval
- * must be made again. A request that was dismissed or already started is armed again too.
- *
- * A request is armed until it is settled, and only an armed request refuses anything:
- * - Dismiss settles it at once. Starts run as on a thread nobody asked for a workflow on.
- * - A successful start of the approved digest settles it. Until then every other digest, and
- *   every script, stays refused.
- * - The person's next message settles it too: a plain one lifts it, a triggering one replaces it.
- * A settled request keeps what a retry needs: its reviews (a repeated Dismiss is the same
- * Dismiss) and its approvals (a retried start of an approved digest is the same start).
- *
- * Every approved start carries one start key, made here from the thread, the request message
- * and the digest. The caller's own key is replaced by it, so a start that committed its workflow
- * and then failed or was interrupted can be retried, with any key or none, and finds that
- * workflow. The key does not depend on the decision, so it survives a restart: a fresh review
- * and approval of the same request and digest finds the workflow the first one began, running
- * or finished. Running the same graph again takes a new message from the person, which is a new
- * request. A restart does not make the key an approval: the approval itself is in memory and
- * must be made again before any start runs.
- *
- * Two identities, kept apart. The decision id names the message sent to the agent about one
- * decision (the approval service builds it from thread, request and decision); a decision made
- * after a restart is a new decision and is told again. The start key names the launch.
- *
- * State changes are synchronous steps on a plain map, so no fiber can interleave inside one;
- * the only awaits are the persisted read that arms a thread after a restart and the caller's
- * own work, and neither is held between a check and the change it guards.
+ * The approval gate for workflows. When a person's message asks for a workflow, the agent plans
+ * it with graph_review and the person approves the reviewed graph in the client; until then
+ * graph_start and workflow_start are refused here. State is per thread and in memory only (never
+ * an event, projection or stored approval), so nothing else grants it and a restart drops it.
  */
 import {
   type EnvironmentId,
@@ -90,8 +58,9 @@ interface Review {
 }
 
 /**
- * Where a request stands. Only "armed" refuses starts; the other two are settled, and a settled
- * request is never armed again by the same message.
+ * Where a request stands. Only "armed" refuses starts. Dismiss, a successful start of the
+ * approved digest, or the person's next message settles it. A settled request keeps its reviews
+ * and approvals, so a retried Dismiss or approved start is the same one.
  */
 type RequestStatus =
   | { readonly _tag: "armed" }
@@ -179,12 +148,10 @@ export class WorkflowApprovalGate extends Context.Service<
       threadId: ThreadId,
     ) => Effect.Effect<void, WorkflowApprovalRequiredError>;
     /**
-     * graph_start, around the whole start, before the graph is rebuilt from what the agent
-     * sent. `start` receives the start key it must use as its clientRequestId, or undefined to
-     * keep the caller's own. While a request is armed it runs only for a digest the person
-     * approved, with that digest's start key; a success settles the request. After the request is
-     * settled, a digest the person approved keeps its key, so a retry of an approved start finds
-     * the workflow it began; any other start runs as on a thread nobody asked a workflow on.
+     * graph_start, around the whole start, before the graph is rebuilt from what the agent sent.
+     * `start` gets the start key to use as its clientRequestId, or undefined to keep the caller's
+     * own. While a request is armed it runs only for an approved digest, and a success settles
+     * the request; once settled, an approved digest keeps its key so a retry finds its workflow.
      */
     readonly guardGraphStart: <A, E, R>(
       input: { readonly threadId: ThreadId; readonly digest: string },
@@ -202,8 +169,10 @@ export class WorkflowApprovalGate extends Context.Service<
 >()("t3/orchestration-v2/WorkflowApprovalGate") {}
 
 /**
- * The one start key of an approved digest: every start of it, in this process or after a restart,
- * uses it. Thread, request message and digest identify the launch; the decision does not.
+ * The one start key of an approved digest, made from thread, request message and digest (never
+ * the decision), so it survives a restart. It replaces the caller's key: a start that committed
+ * its workflow and then failed or was interrupted is retried with any key and finds it. Running
+ * the same graph again takes a new message from the person, a new request.
  */
 const startKeyOf = (threadId: ThreadId, request: PendingRequest, digest: string) =>
   `approval:${threadId}:${request.request}:${digest}`;
@@ -231,8 +200,8 @@ const make = Effect.gen(function* () {
 
   /**
    * The request a restart made the gate forget: the thread's latest started person-typed
-   * message, if it asked for a workflow. Steers are not starts, so they are skipped like the
-   * other messages the turn rule ignores.
+   * message, if `workflowRequestOf` says it asked for a workflow (steers are not starts). A
+   * request dismissed or already started is armed again, and reviews and approvals are redone.
    */
   const persistedRequest = Effect.fn("WorkflowApprovalGate.persistedRequest")(function* (
     threadId: ThreadId,

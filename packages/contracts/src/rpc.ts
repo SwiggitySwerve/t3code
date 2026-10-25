@@ -161,6 +161,11 @@ import {
   ProviderUploadFeedbackResult,
 } from "./provider.ts";
 import { ProviderInstanceId, ProviderInstanceMutation } from "./providerInstance.ts";
+import {
+  GuestShareCreateError,
+  GuestShareCreateInput,
+  GuestShareCreateResult,
+} from "./guestShare.ts";
 import { PullRequestReviewGuideResult } from "./pullRequestReviewGuide.ts";
 import {
   PullRequestActionInput,
@@ -180,6 +185,8 @@ import {
   PullRequestListResult,
   PullRequestListStatsInput,
   PullRequestListStatsResult,
+  PullRequestFilterOptions,
+  PullRequestFilterOptionsInput,
   PullRequestOperationError,
   PullRequestReactionInput,
   PullRequestRef,
@@ -519,6 +526,7 @@ export const WS_METHODS = {
   scheduledTasksRunNow: "scheduledTasks.runNow",
   scheduledTasksRotateWebhookToken: "scheduledTasks.rotateWebhookToken",
   secretsAnswerRequest: "secrets.answerRequest",
+  guestShareCreate: "guestShare.create",
   scheduledTasksListWebhookDeliveries: "scheduledTasks.listWebhookDeliveries",
   scheduledTasksGetWebhookDelivery: "scheduledTasks.getWebhookDelivery",
 
@@ -527,6 +535,7 @@ export const WS_METHODS = {
 
   pullRequestsList: "pullRequests.list",
   pullRequestsListStats: "pullRequests.listStats",
+  pullRequestsFilterOptions: "pullRequests.filterOptions",
   pullRequestsSummary: "pullRequests.summary",
   pullRequestsRouting: "pullRequests.routing",
   pullRequestsRoutingIdentity: "pullRequests.routingIdentity",
@@ -611,8 +620,7 @@ const WsServerRefreshProvidersRpc = Rpc.make(WS_METHODS.serverRefreshProviders, 
     instanceId: Schema.optional(ProviderInstanceId),
     cwd: Schema.optional(TrimmedNonEmptyString),
     fresh: Schema.optional(Schema.Boolean),
-    /** Explicit user request: bypass T3-owned caches and rediscover models.
-     * Background status refreshes must not open agent sessions. */
+    /** Bypass model caches; explicit rediscovery may open sessions, background refreshes must not. */
     refreshModels: Schema.optional(Schema.Boolean),
   }),
   success: ServerProviderUpdatedPayload,
@@ -953,14 +961,16 @@ const WsPullRequestsListRpc = Rpc.make(WS_METHODS.pullRequestsList, {
   error: PullRequestRpcError,
 });
 
-/**
- * The line counts for rows already on the page. Its own call because on GitHub the pair costs
- * 40-60% of the listing read that answers everything else on the row, so the rows arrive first
- * and their stats a moment later.
- */
+// GitHub line counts cost 40-60% of the listing read; fetch separately so rows arrive first.
 const WsPullRequestsListStatsRpc = Rpc.make(WS_METHODS.pullRequestsListStats, {
   payload: PullRequestListStatsInput,
   success: PullRequestListStatsResult,
+  error: PullRequestRpcError,
+});
+
+const WsPullRequestsFilterOptionsRpc = Rpc.make(WS_METHODS.pullRequestsFilterOptions, {
+  payload: PullRequestFilterOptionsInput,
+  success: PullRequestFilterOptions,
   error: PullRequestRpcError,
 });
 
@@ -1127,11 +1137,7 @@ const WsPullRequestsSubscribeRefreshesRpc = Rpc.make(WS_METHODS.pullRequestsSubs
   stream: true,
 });
 
-/**
- * Read on its own rather than as part of the detail: the people who may be asked are only wanted
- * once somebody opens the menu, and reading them with every change request would spend a request
- * per host on a list nobody looked at.
- */
+// Fetch reviewer candidates only when the menu opens to avoid unused host requests.
 const WsPullRequestsReviewerCandidatesRpc = Rpc.make(WS_METHODS.pullRequestsReviewerCandidates, {
   payload: PullRequestRef,
   success: PullRequestReviewerCandidateList,
@@ -1168,8 +1174,7 @@ const WsSourceControlCloneRepositoryRpc = Rpc.make(WS_METHODS.sourceControlClone
   error: Schema.Union([SourceControlRepositoryError, EnvironmentAuthorizationError]),
 });
 
-// Clone-backed project creation. `start` returns once the project exists and
-// the clone is running; progress arrives on the subscription.
+// Returns when the project exists and cloning starts; progress uses the subscription.
 const WsProjectCloneStartRpc = Rpc.make(WS_METHODS.projectCloneStart, {
   payload: ProjectCloneStartInput,
   success: ProjectCloneStartResult,
@@ -1403,9 +1408,7 @@ const WsVcsListRefsRpc = Rpc.make(WS_METHODS.vcsListRefs, {
 });
 
 const WsVcsCreateWorktreeRpc = Rpc.make(WS_METHODS.vcsCreateWorktree, {
-  // Clients cannot choose the folder: new worktrees go in the server's managed
-  // worktrees folder. `path` stays a required null because older servers
-  // require the key.
+  // Worktrees use the managed folder; required null path preserves compatibility with older servers.
   payload: Schema.Struct({ ...VcsCreateWorktreeInput.fields, path: Schema.Null }),
   success: VcsCreateWorktreeResult,
   error: Schema.Union([GitCommandError, EnvironmentAuthorizationError]),
@@ -1673,6 +1676,21 @@ const WsOrchestrationV2GetArchivedShellSnapshotRpc = Rpc.make(
   },
 );
 
+const WsOrchestrationV2GetThreadFamilyRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.getThreadFamily, {
+  payload: OrchestrationV2RpcSchemas.getThreadFamily.input,
+  success: OrchestrationV2RpcSchemas.getThreadFamily.output,
+  error: Schema.Union([OrchestrationV2GetShellSnapshotError, EnvironmentAuthorizationError]),
+});
+
+const WsOrchestrationV2GetWorktreeThreadIdsRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.getWorktreeThreadIds,
+  {
+    payload: OrchestrationV2RpcSchemas.getWorktreeThreadIds.input,
+    success: OrchestrationV2RpcSchemas.getWorktreeThreadIds.output,
+    error: Schema.Union([OrchestrationV2GetShellSnapshotError, EnvironmentAuthorizationError]),
+  },
+);
+
 const WsOrchestrationV2GetThreadProjectionRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getThreadProjection,
   {
@@ -1777,18 +1795,10 @@ const WsSubscribeTerminalMetadataRpc = Rpc.make(WS_METHODS.subscribeTerminalMeta
 
 export const WsSubscribeServerConfigRpc = Rpc.make(WS_METHODS.subscribeServerConfig, {
   payload: Schema.Struct({
-    /**
-     * Already-shipped clients decode the stream against the old event union and
-     * would die on an unknown member, so the server emits the theme stream only
-     * to subscribers that ask for it.
-     */
+    /** Opt-in protects older clients that reject unknown theme event types. */
     environmentThemes: Schema.optional(Schema.Boolean),
     usageLimitSources: Schema.optional(Schema.Boolean),
-    /**
-     * Whether this client answers `/usage-limits` itself. The server injects
-     * that command into provider catalogs only for such clients; an older
-     * client would send it to the provider as an ordinary prompt.
-     */
+    /** Advertise client handling before the server offers /usage-limits, or older clients send it as a prompt. */
     usageLimitsCommand: Schema.optional(Schema.Boolean),
   }),
   success: ServerConfigStreamEvent,
@@ -1849,6 +1859,12 @@ const WsScheduledTasksRotateWebhookTokenRpc = Rpc.make(
   },
 );
 
+const WsGuestShareCreateRpc = Rpc.make(WS_METHODS.guestShareCreate, {
+  payload: GuestShareCreateInput,
+  success: GuestShareCreateResult,
+  error: Schema.Union([GuestShareCreateError, EnvironmentAuthorizationError]),
+});
+
 const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
   payload: SecretRequestAnswerInput,
   error: Schema.Union([SecretRequestError, EnvironmentAuthorizationError]),
@@ -1899,6 +1915,7 @@ export class RpcScopeAuthorization extends RpcMiddleware.Service<RpcScopeAuthori
 ) {}
 
 export const WsRpcGroup = RpcGroup.make(
+  WsGuestShareCreateRpc,
   WsServerProbeRpc,
   WsServerGetConfigRpc,
   WsServerRefreshProvidersRpc,
@@ -1967,6 +1984,7 @@ export const WsRpcGroup = RpcGroup.make(
   WsCloudInstallRelayClientRpc,
   WsPullRequestsListRpc,
   WsPullRequestsListStatsRpc,
+  WsPullRequestsFilterOptionsRpc,
   WsPullRequestsSummaryRpc,
   WsPullRequestsRoutingRpc,
   WsPullRequestsRoutingIdentityRpc,
@@ -2093,6 +2111,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2SearchThreadRpc,
   WsOrchestrationV2SearchThreadStreamRpc,
   WsOrchestrationV2GetArchivedShellSnapshotRpc,
+  WsOrchestrationV2GetThreadFamilyRpc,
+  WsOrchestrationV2GetWorktreeThreadIdsRpc,
   WsOrchestrationV2GetThreadProjectionRpc,
   WsOrchestrationV2LaunchThreadRpc,
   WsOrchestrationV2SubscribeArchivedShellRpc,

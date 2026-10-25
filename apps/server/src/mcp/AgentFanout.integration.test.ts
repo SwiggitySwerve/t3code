@@ -3574,17 +3574,10 @@ describe("graphs", () => {
   };
 
   /**
-   * Stores graph_review's real service result as two SYNTHETIC tool items, then returns what a
-   * client receives: the item in a snapshot and in a live event, and the item getTurnItem returns.
-   * No provider ran. Each item is hand-built from the service payload:
-   * - "claude": an explicitly duplicated full-content envelope, `{ content: <the text>,
-   *   structuredContent }`. It represents the shape recorded for a claude.ai connector result
-   *   (claude_mcp_tool_presentation transcript) and for a small live graph_review. It is not a
-   *   guarantee of what Claude Code stores for a large result: a live 150-node run stored a
-   *   notice in `content` plus one `structuredContent`, not the review text twice.
-   * - "codex": `mcpToolCall.result.structuredContent` as the output, the Codex adapter's shape.
-   * The labels name these shapes. They are not observations of either provider's large-output
-   * behavior, and neither model necessarily sees the complete stored result.
+   * Stores graph_review's real service result as two SYNTHETIC tool items and returns what a
+   * client receives (snapshot item, live event, getTurnItem). No provider ran: "claude" is a
+   * duplicated `{ content, structuredContent }` envelope, "codex" is `structuredContent` as the
+   * output. The labels name shapes, not observed large-output behavior of either provider.
    */
   const clientViewOfReview = (result: McpSchema.CallToolResult) =>
     Effect.gen(function* () {

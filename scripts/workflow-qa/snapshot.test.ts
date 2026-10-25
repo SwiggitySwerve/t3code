@@ -17,6 +17,17 @@ import {
 const git = (cwd: string, ...args: Array<string>) =>
   NodeChildProcess.execFileSync("git", args, { cwd, encoding: "utf8" }).trim();
 
+/** The index file git itself uses for `cwd`, which differs from `.git/index` in a linked worktree. */
+const indexFile = (cwd: string) =>
+  NodePath.resolve(cwd, git(cwd, "rev-parse", "--git-path", "index"));
+
+const blobId = (cwd: string, content: string) =>
+  NodeChildProcess.execFileSync("git", ["hash-object", "--stdin"], {
+    cwd,
+    input: content,
+    encoding: "utf8",
+  }).trim();
+
 function makeRepo(parent: string): string {
   const repo = NodePath.join(parent, "checkout");
   NodeFS.mkdirSync(repo);
@@ -67,6 +78,79 @@ it("snapshots uncommitted work in a sibling worktree without touching the checko
     removeSnapshot({ repo, label: "candidate" });
     expect(NodeFS.existsSync(snapshot.path)).toBe(false);
     expect(git(repo, "worktree", "list", "--porcelain")).not.toContain("candidate");
+  } finally {
+    NodeFS.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+it("keeps staged modes and removals when the filesystem reports no executable bit", () => {
+  const parent = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "workflow-qa-snapshot-"));
+  try {
+    const repo = makeRepo(parent);
+    NodeFS.writeFileSync(NodePath.join(repo, "gone.txt"), "removed in the index\n");
+    NodeFS.writeFileSync(NodePath.join(repo, "deleted.txt"), "deleted on disk only\n");
+    git(repo, "add", "-A");
+    git(repo, "commit", "-q", "-m", "more files");
+    git(repo, "config", "core.filemode", "false");
+    // A merge adds an executable like this: staged as 100755, then edited again without staging.
+    NodeFS.writeFileSync(NodePath.join(repo, "tool.sh"), "#!/bin/sh\necho staged\n");
+    git(repo, "add", "--chmod=+x", "tool.sh");
+    NodeFS.writeFileSync(NodePath.join(repo, "tool.sh"), "#!/bin/sh\necho edited\n");
+    git(repo, "rm", "-q", "gone.txt");
+    NodeFS.rmSync(NodePath.join(repo, "deleted.txt"));
+    NodeFS.writeFileSync(NodePath.join(repo, "tracked.txt"), "edited by someone\n");
+    NodeFS.writeFileSync(NodePath.join(repo, "untracked.txt"), "new work\n");
+    NodeFS.writeFileSync(NodePath.join(repo, "ignored.txt"), "never snapshotted\n");
+    const indexBefore = NodeFS.readFileSync(indexFile(repo));
+
+    const tree = workingTreeId(repo);
+    const snapshot = createSnapshot({ repo, label: "candidate", install: false });
+
+    const entry = (mode: string, path: string, content: string) =>
+      `${mode} blob ${blobId(repo, content)}\t${path}`;
+    const candidate = [
+      entry("100644", ".gitignore", "ignored.txt\n"),
+      entry("100755", "tool.sh", "#!/bin/sh\necho edited\n"),
+      entry("100644", "tracked.txt", "edited by someone\n"),
+      entry("100644", "untracked.txt", "new work\n"),
+    ].join("\n");
+    expect(git(repo, "ls-tree", "-r", tree)).toBe(candidate);
+    expect(snapshot.tree).toBe(tree);
+    expect(git(snapshot.path, "ls-tree", "-r", "HEAD")).toBe(candidate);
+    expect(NodeFS.readFileSync(indexFile(repo)).equals(indexBefore)).toBe(true);
+
+    // The mode is part of what the snapshot has to match, so dropping it makes the snapshot stale.
+    git(repo, "update-index", "--chmod=-x", "tool.sh");
+    expect(workingTreeId(repo)).not.toBe(snapshot.tree);
+    removeSnapshot({ repo, label: "candidate" });
+  } finally {
+    NodeFS.rmSync(parent, { recursive: true, force: true });
+  }
+});
+
+it("takes staged modes from a linked worktree's own index", () => {
+  const parent = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "workflow-qa-snapshot-"));
+  try {
+    const repo = makeRepo(parent);
+    git(repo, "config", "core.filemode", "false");
+    const linked = NodePath.join(parent, "linked");
+    git(repo, "worktree", "add", "-q", "-b", "linked", linked);
+    NodeFS.writeFileSync(NodePath.join(linked, "tool.sh"), "#!/bin/sh\n");
+    git(linked, "add", "--chmod=+x", "tool.sh");
+    expect(indexFile(linked)).not.toBe(indexFile(repo));
+    const indexes = {
+      checkout: NodeFS.readFileSync(indexFile(repo)),
+      linked: NodeFS.readFileSync(indexFile(linked)),
+    };
+
+    const tree = workingTreeId(linked);
+
+    expect(git(linked, "ls-tree", tree, "tool.sh")).toBe(
+      `100755 blob ${blobId(linked, "#!/bin/sh\n")}\ttool.sh`,
+    );
+    expect(workingTreeId(repo)).not.toBe(tree);
+    expect(NodeFS.readFileSync(indexFile(repo)).equals(indexes.checkout)).toBe(true);
+    expect(NodeFS.readFileSync(indexFile(linked)).equals(indexes.linked)).toBe(true);
   } finally {
     NodeFS.rmSync(parent, { recursive: true, force: true });
   }

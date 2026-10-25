@@ -3,14 +3,14 @@
 //
 // Checks and the QA lane run against the snapshot, so edits others make to the main checkout
 // while they run cannot change what is being verified, and nothing here formats, stages or
-// rewrites a file in the checkout itself. The snapshot is a commit built with a temporary index,
-// so the checkout's index, branch and stash are untouched.
+// rewrites a file in the checkout itself. The snapshot is a commit built with a temporary index
+// seeded from the checkout's staged entries, so its index, branch and stash are untouched.
 import * as NodeChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
-import { assertLabel, gitLine as git } from "./util.ts";
+import { assertLabel, git as gitOutput, gitLine as git } from "./util.ts";
 
 const SUBJECT_PREFIX = "qa snapshot ";
 
@@ -28,6 +28,24 @@ export function snapshotPath(repo: string, label: string): string {
   return NodePath.join(NodePath.dirname(root), `${NodePath.basename(root)}-qa-${label}`);
 }
 
+/**
+ * Copies the checkout's staged entries, modes included, into the index `env` points at. Seeding
+ * from HEAD instead would lose a staged executable bit: where the filesystem reports none
+ * (`core.filemode=false`), `git add -A` records a new file as 100644. Asking git for the entries,
+ * not reading the index file, finds the right index for a linked worktree too.
+ */
+function seedIndexFromCheckout(repo: string, env: NodeJS.ProcessEnv): void {
+  const staged = gitOutput(repo, ["--no-optional-locks", "ls-files", "--stage", "-z"]);
+  if (staged === "") return;
+  NodeChildProcess.execFileSync("git", ["update-index", "-z", "--index-info"], {
+    cwd: repo,
+    env: { ...process.env, ...env },
+    input: staged,
+    maxBuffer: 256 * 1024 * 1024,
+    stdio: ["pipe", "pipe", "pipe"],
+  });
+}
+
 /** Runs `use` with a throwaway git index holding the checkout's tracked and unignored untracked files. */
 function withWorkingTreeIndex<T>(
   repo: string,
@@ -42,7 +60,7 @@ function withWorkingTreeIndex<T>(
     GIT_COMMITTER_EMAIL: "workflow-qa@localhost",
   };
   try {
-    git(repo, ["read-tree", "HEAD"], env);
+    seedIndexFromCheckout(repo, env);
     git(repo, ["add", "-A"], env);
     return use(env, git(repo, ["write-tree"], env));
   } finally {

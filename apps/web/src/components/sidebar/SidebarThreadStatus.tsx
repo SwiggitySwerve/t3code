@@ -5,6 +5,7 @@ import {
   CircleDotDashedIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
+  UserRoundIcon,
 } from "lucide-react";
 
 import { formatWorkingDurationLabel } from "@t3tools/client-runtime/state/models";
@@ -15,7 +16,15 @@ import type { SidebarV2TopStatusKind } from "../Sidebar.logic";
 
 export interface SidebarTopStatus {
   readonly label: string;
-  readonly icon: "working" | "waiting" | "approval" | "input" | "failed" | "done" | "woke";
+  readonly icon:
+    | "working"
+    | "waiting"
+    | "approval"
+    | "input"
+    | "request"
+    | "failed"
+    | "done"
+    | "woke";
   readonly className: string;
 }
 
@@ -44,6 +53,8 @@ export function sidebarThreadTopStatus(input: {
         icon: "input",
         className: "text-indigo-600 dark:text-indigo-300",
       };
+    case "request":
+      return { label: "Request", icon: "request", className: "text-guest-foreground" };
     case "limited":
       return { label: "Limited", icon: "failed", className: "text-warning" };
     case "failed":
@@ -79,8 +90,6 @@ function WorkingDurationLabel(props: { startedMs: number }) {
  */
 export function SidebarTopStatusBadge(props: {
   readonly topStatus: SidebarTopStatus;
-  /** Whether the label is a live region; the open thread announces its own status instead. */
-  readonly announce: boolean;
   readonly durationStartedAt: string | null | undefined;
 }) {
   const { topStatus } = props;
@@ -92,6 +101,8 @@ export function SidebarTopStatusBadge(props: {
         <CircleDotDashedIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "input" ? (
         <MessageCircleQuestionIcon aria-hidden className="size-4 shrink-0" />
+      ) : topStatus.icon === "request" ? (
+        <UserRoundIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "approval" ? (
         <ShieldQuestionIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "failed" ? (
@@ -99,9 +110,9 @@ export function SidebarTopStatusBadge(props: {
       ) : topStatus.icon === "done" ? (
         <CircleCheckIcon aria-hidden className="size-4 shrink-0" />
       ) : null}
-      {/* The label alone is the live region: a role="status" wrapper around the ticking
-          duration would make screen readers announce every second. */}
-      <span role={props.announce ? "status" : undefined}>{topStatus.label}</span>
+      {/* Not a live region: a collapsed sidebar is inert, so BackgroundThreadAnnouncer and the open
+          thread's timeline speak status changes instead. */}
+      {topStatus.label}
       {props.durationStartedAt === undefined ? null : (
         <span aria-hidden>
           <WorkingDuration startedAt={props.durationStartedAt} />

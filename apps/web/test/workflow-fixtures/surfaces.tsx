@@ -265,10 +265,12 @@ export function SidebarStatusSurface(props: { readonly state: WorkflowQaSidebarS
       <div className="flex h-8 items-center gap-2 rounded-md px-2 text-[13px]">
         <span className="min-w-0 flex-1 truncate">{title}</span>
         <span className="ml-auto flex h-5 min-w-8 shrink-0 items-stretch justify-end text-xs">
-          <span className="flex items-center self-center justify-self-end tabular-nums text-secondary-label">
+          <span
+            className="flex items-center self-center justify-self-end tabular-nums text-secondary-label"
+            data-qa-sidebar-status
+          >
             <SidebarTopStatusBadge
               topStatus={topStatus}
-              announce
               durationStartedAt={
                 status === "working"
                   ? resolveWorkingStartedAt(thread)

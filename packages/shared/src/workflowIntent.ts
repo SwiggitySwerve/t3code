@@ -1,23 +1,8 @@
 /**
  * Whether a person's message asks for a workflow: the one detector the server (to arm graph
- * planning) and the composer (to show the chip) share, so they cannot disagree.
- *
- * It matches the built-in word "workflow" and the user's extra words or phrases as literal,
- * case-insensitive whole words in person-typed text. Composer context chips are stripped
- * first, using their owning parser. Whether the sender or thread may trigger anything is
- * decided by the caller, not here.
- *
- * Each occurrence is judged on its own, so an excluded one never hides a valid one elsewhere:
- * - code: inline code (also across a line break), fenced blocks (also inside quotes and list
- *   items) and indented blocks, as the Markdown parser reads them;
- * - URLs, paths, file names and identifiers (`workflow_start`, `.github/workflows/ci.yml`):
- *   a match must be the whole whitespace-delimited token, apart from quotes, brackets and
- *   sentence punctuation;
- * - CI compounds: "CI", "GitHub Actions", "pipeline", "build", "release" or "deploy"
- *   workflow, and workflow "file", "yaml", "yml" or "dispatch".
- *
- * Phrases are compared token by token, never compiled into a pattern, so a custom phrase
- * cannot inject pattern syntax.
+ * planning) and the composer (to show the chip) share. It matches the built-in word and the
+ * user's extra words or phrases as literal, case-insensitive whole words in person-typed text,
+ * with composer context chips stripped first. The caller decides whether the sender may trigger.
  */
 import type { Nodes } from "mdast";
 import remarkParse from "remark-parse";
@@ -51,6 +36,8 @@ const CLOSING_GLUE = ")\"'\u201D\u2019]}*~";
 const SENTENCE_PUNCTUATION = ",.;:!?\u2026";
 const POSSESSIVE = /^['\u2019]s/;
 
+// CI compounds are not asks: "CI", "GitHub Actions", "pipeline", "build", "release" or "deploy"
+// before the word, and "file", "yaml", "yml" or "dispatch" after it.
 const COMPOUND_BEFORE = new Set([
   "ci",
   "cd",
@@ -171,7 +158,11 @@ function bareWord(token: string, trailing: "keep" | "drop"): string {
   return token.slice(start, end);
 }
 
-/** Whether the words starting at `index` are exactly `words`, with only glue around them. */
+/**
+ * Whether the words starting at `index` are exactly `words`, with only glue around them, so a
+ * URL, path, file name or identifier (`workflow_start`) never matches. Phrases are compared
+ * token by token, never compiled into a pattern, so a custom phrase cannot inject syntax.
+ */
 function phraseAt(tokens: ReadonlyArray<string>, index: number, words: ReadonlyArray<string>) {
   const last = words.length - 1;
   for (let offset = 0; offset <= last; offset += 1) {
@@ -214,7 +205,8 @@ function isCiCompound(tokens: ReadonlyArray<string>, index: number, length: numb
 
 /**
  * The first valid trigger in a person's message, or null. `triggers` defaults to the built-in
- * word alone; `enabled: false` returns null for every word, the built-in one included.
+ * word alone; `enabled: false` returns null for every word, the built-in one included. Each
+ * occurrence is judged on its own, so an excluded one never hides a valid one elsewhere.
  */
 export function detectWorkflowIntent(
   text: string,

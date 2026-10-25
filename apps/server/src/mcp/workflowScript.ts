@@ -1,11 +1,8 @@
 /**
- * Runs a workflow script in QuickJS. The script sees only the workflow functions
- * (agent, parallel, pipeline, phase, log, budget) and its args: no filesystem,
- * network, process, clock, or randomness. Each run gets its own WASM module, so a
- * fault in one run cannot corrupt another.
- *
- * Scripts follow Claude Code's Workflow format: an optional `export const meta`
- * followed by a top-level body that may `await` and `return`.
+ * Runs a workflow script in QuickJS. The script sees only the workflow functions (agent,
+ * parallel, pipeline, phase, log, budget) and its args: no filesystem, network, process, clock,
+ * or randomness. Each run gets its own WASM module, so one fault cannot corrupt another.
+ * Scripts follow Claude Code's Workflow format: optional `export const meta`, then a body.
  */
 import {
   newQuickJSWASMModule,

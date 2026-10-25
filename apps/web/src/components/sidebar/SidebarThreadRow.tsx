@@ -3,7 +3,7 @@ import { ThreadTerminalStatusButton } from "../ThreadStatusIndicators";
 import { discardComposerDraft } from "../../lib/discardComposerDraft";
 import { requestCustomSnooze } from "../CustomSnoozeDialog";
 import { useSupportsMultiplePullRequests } from "~/hooks/useSupportsMultiplePullRequests";
-import { resolveThreadCurrentPullRequestLink } from "@t3tools/shared/threadPullRequests";
+import { resolveThreadCurrentPullRequestLink } from "@t3tools/client-runtime/thread-pull-requests";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
 import {
@@ -902,7 +902,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 "truncate",
                 shouldRecede
                   ? "text-secondary-label"
-                  : isUnread || isWoke || status === "input"
+                  : isUnread || isWoke || status === "input" || status === "request"
                     ? "text-foreground"
                     : status === "failed"
                       ? "text-foreground/95"
@@ -912,7 +912,7 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                 "truncate group-focus-within/sidebar-row:text-foreground group-hover/sidebar-row:text-foreground",
                 shouldRecede
                   ? "text-secondary-label/70"
-                  : props.isActive || isWoke || status === "input"
+                  : props.isActive || isWoke || status === "input" || status === "request"
                     ? "text-foreground"
                     : isUnread
                       ? "text-muted-foreground"
@@ -1259,7 +1259,6 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                       ) : (
                         <SidebarTopStatusBadge
                           topStatus={topStatus}
-                          announce={!props.isRouteThread}
                           durationStartedAt={
                             status === "working"
                               ? resolveWorkingStartedAt(thread)
@@ -1276,11 +1275,8 @@ const SidebarThreadRow = memo(function SidebarThreadRow(props: SidebarThreadRowP
                   {props.settlementSupported || showSnoozeButton || hasUnsentDraft ? (
                     <span
                       className={cn(
-                        // focus-visible, not focus-within: a mouse click leaves
-                        // the Settle button focused, and a plain focus-within
-                        // would keep the controls pinned over the status label
-                        // once the pointer moves away (e.g. after a failed
-                        // settle) instead of cross-fading back.
+                        // Mouse clicks leave Settle focused; focus-within would pin controls over
+                        // the status label after the pointer leaves. Use focus-visible instead.
                         "pointer-events-none absolute inset-y-0 right-0 flex items-stretch opacity-0 transition-opacity has-[:focus-visible]:pointer-events-auto has-[:focus-visible]:static has-[:focus-visible]:opacity-100 group-any-hover/sidebar-row:pointer-events-auto group-any-hover/sidebar-row:static group-any-hover/sidebar-row:opacity-100",
                         snoozeMenuOpen && "pointer-events-auto static opacity-100",
                       )}
@@ -1425,6 +1421,8 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
   resultId: string;
   searchMatch: EnvironmentThreadSearchMatch | null;
   searchQuery: string;
+  /** The query `searchMatch` was found for, which lags `searchQuery` while a search runs. */
+  searchMatchQuery?: string;
   onHighlight: () => void;
   onSelect: () => void;
   onFileDropThreads: (threadRef: ScopedThreadRef, files: File[]) => void;
@@ -1563,7 +1561,7 @@ export const SidebarSearchResultRow = memo(function SidebarSearchResultRow(props
                 match={{
                   source: props.searchMatch.source,
                   snippet: props.searchMatch.snippet,
-                  query: props.searchQuery,
+                  query: props.searchMatchQuery ?? props.searchQuery,
                 }}
               />
             ) : null}
