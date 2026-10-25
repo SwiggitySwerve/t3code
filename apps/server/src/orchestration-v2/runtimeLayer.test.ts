@@ -11,6 +11,7 @@ import {
   CheckpointRef,
   CommandId,
   ContextTransferId,
+  EnvironmentId,
   EventId,
   MessageId,
   NodeId,
@@ -75,6 +76,8 @@ import * as RuntimeLayer from "./runtimeLayer.ts";
 import { shellStreamItemFromThreadShell } from "./ShellStream.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ThreadManagementService from "./ThreadManagementService.ts";
+import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
+import * as WorkflowApprovalService from "./WorkflowApprovalService.ts";
 import * as ManagedProjectFolders from "../project/ManagedProjectFolders.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as Scheduler from "../scheduling/Scheduler.ts";
@@ -6657,3 +6660,234 @@ it.layer(layerQueueResumeDisabledInstanceTest)(
     );
   },
 );
+
+// The production composition of the workflow approval gate: the run that turn start belongs to,
+// the approval service and the workflow tools must all hold the one gate that `RuntimeLayer`
+// builds. A second gate would not see the request turn start armed, and would let starts through.
+const workflowTurns: Array<ProviderAdapter.ProviderAdapterV2TurnInput> = [];
+const workflowTurnAdapter = {
+  instanceId: modelSelection.instanceId,
+  driver,
+  getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
+  planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" }),
+  openSession: (input) =>
+    Effect.gen(function* () {
+      const now = yield* DateTime.now;
+      const events = yield* Queue.unbounded<ProviderAdapter.ProviderAdapterV2Event>();
+      return {
+        instanceId: modelSelection.instanceId,
+        driver,
+        providerSessionId: input.providerSessionId,
+        providerSession: {
+          id: input.providerSessionId,
+          driver,
+          providerInstanceId: modelSelection.instanceId,
+          status: "ready",
+          cwd: process.cwd(),
+          model: modelSelection.model,
+          capabilities: CodexProviderCapabilitiesV2,
+          createdAt: now,
+          updatedAt: now,
+          lastError: null,
+        },
+        events: Stream.fromQueue(events),
+        ensureThread: ({ threadId }) =>
+          Effect.succeed({
+            id: ProviderThreadId.make(`provider-thread:codex:${threadId}`),
+            driver,
+            providerInstanceId: modelSelection.instanceId,
+            providerSessionId: input.providerSessionId,
+            appThreadId: threadId,
+            ownerNodeId: null,
+            nativeThreadRef: { driver, nativeId: `native:${threadId}`, strength: "strong" },
+            nativeConversationHeadRef: null,
+            status: "idle",
+            firstRunOrdinal: null,
+            lastRunOrdinal: null,
+            handoffIds: [],
+            forkedFrom: null,
+            createdAt: now,
+            updatedAt: now,
+          }),
+        resumeThread: ({ providerThread }) => Effect.succeed(providerThread),
+        startTurn: (turn) =>
+          Effect.sync(() => {
+            workflowTurns.push(turn);
+          }),
+        steerTurn: () => Effect.die("unused"),
+        interruptTurn: () => Effect.void,
+        respondToRuntimeRequest: () => Effect.die("unused"),
+        readThreadSnapshot: () => Effect.die("unused"),
+        rollbackThread: () => Effect.die("unused"),
+        forkThread: () => Effect.die("unused"),
+      };
+    }),
+} as ProviderAdapter.ProviderAdapterV2["Service"];
+const workflowTurnInstance = {
+  ...providerInstance,
+  orchestrationAdapter: workflowTurnAdapter,
+} satisfies ProviderInstance;
+
+const layerWorkflowTurnTest = Layer.mergeAll(
+  RuntimeLayer.layer,
+  RuntimeLayer.layerWorkflowApprovalService,
+  RuntimeLayer.layerEventSink,
+  ProjectionStore.layer,
+).pipe(
+  Layer.provide(McpSessionRegistryTestkit.layer),
+  Layer.provide(McpProviderSessions.layer),
+  Layer.provide(SqlitePersistence.layerMemory),
+  Layer.provide(layerCheckpointStoreTest),
+  Layer.provide(layerServerConfig),
+  Layer.provide(ServerSettings.layerTest()),
+  Layer.provide(
+    Layer.succeed(ProviderInstanceRegistry.ProviderInstanceRegistry, {
+      getInstance: (instanceId) =>
+        Effect.succeed(
+          instanceId === workflowTurnInstance.instanceId ? workflowTurnInstance : undefined,
+        ),
+      listInstances: Effect.succeed([workflowTurnInstance]),
+      listUnavailable: Effect.succeed([]),
+      streamChanges: Stream.empty,
+      subscribeChanges: Effect.never,
+    }),
+  ),
+  Layer.provide(layerGitWorkflowTest),
+  Layer.provide(layerProjectServiceTest),
+  Layer.provide(layerPlatformTest),
+);
+
+it.layer(layerWorkflowTurnTest)("workflow approval in the runtime composition", (it) => {
+  const environmentId = EnvironmentId.make("environment:runtime-layer");
+  const digest = `sha256:${"a".repeat(64)}`;
+
+  const createThread = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      yield* orchestrator.dispatch({
+        type: "thread.create",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:create`),
+        threadId,
+        projectId: ProjectId.make("runtime-layer-workflow-approval-project"),
+        title: "Workflow approval",
+        modelSelection,
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        branch: null,
+        worktreePath: process.cwd(),
+      });
+    });
+
+  /** What a person types in the client, run through the real turn start. */
+  const typeMessage = (threadId: ThreadId, name: string, text: string) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+      yield* orchestrator.dispatch({
+        type: "message.dispatch",
+        createdBy: "user",
+        creationSource: "web",
+        commandId: CommandId.make(`${threadId}:${name}`),
+        threadId,
+        messageId: MessageId.make(`${threadId}:${name}`),
+        text,
+        attachments: [],
+        dispatchMode: { type: "start_immediately" },
+      });
+      yield* worker.drain();
+      const turn = workflowTurns.findLast((candidate) => candidate.threadId === threadId);
+      assert.isDefined(turn, "the message reached the provider");
+      assert.equal(turn.message.messageId, MessageId.make(`${threadId}:${name}`));
+      return turn;
+    });
+
+  const refusal = <X>(effect: Effect.Effect<X, { readonly reason: string }>) =>
+    effect.pipe(
+      Effect.flip,
+      Effect.map((error) => error.reason),
+    );
+
+  it.effect("a workflow request through turn start refuses every consumer of the shared gate", () =>
+    Effect.gen(function* () {
+      const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+      const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+      const threadId = ThreadId.make("runtime-layer-workflow-request");
+      yield* createThread(threadId);
+      // The gate answers for the thread before anything is asked. A gate that turn start did not
+      // arm would keep this answer.
+      yield* gate.requireNoRequest(threadId);
+
+      const turn = yield* typeMessage(threadId, "ask", "Plan this as a workflow");
+      assert.include(turn.message.text, "<t3-workflow>");
+      assert.equal(yield* refusal(gate.requireNoRequest(threadId)), "script-not-allowed");
+      assert.equal(
+        yield* refusal(gate.guardGraphStart({ threadId, digest }, () => Effect.void)),
+        "needs-approval",
+      );
+
+      // A review made through that gate is one the approval service can decide, and the
+      // approval it records is the one the start check honors.
+      const ticket = yield* gate.beginReview(threadId);
+      assert.deepEqual(
+        yield* gate.completeReview(ticket, {
+          environmentId,
+          reviewId: "review:1",
+          digest,
+          ready: true,
+        }),
+        { approvalRequired: true },
+      );
+      yield* approvals.approve({ environmentId, threadId, reviewId: "review:1", digest });
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const sent = (yield* orchestrator.getThreadProjection(threadId)).messages.filter(
+        (message) => message.creationSource === "server",
+      );
+      assert.lengthOf(sent, 1);
+      assert.include(sent[0]!.text, digest);
+      assert.equal(
+        yield* gate.guardGraphStart({ threadId, digest }, (key) => Effect.succeed(key)),
+        `approval:${threadId}:${MessageId.make(`${threadId}:ask`)}:${digest}`,
+      );
+    }),
+  );
+
+  it.effect("a plain message through turn start lifts the gate for the same consumers", () =>
+    Effect.gen(function* () {
+      const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const eventSink = yield* EventSink.EventSinkV2;
+      const threadId = ThreadId.make("runtime-layer-workflow-plain");
+      yield* createThread(threadId);
+      yield* gate.requireNoRequest(threadId);
+
+      yield* typeMessage(threadId, "ask", "Plan this as a workflow");
+      assert.equal(yield* refusal(gate.requireNoRequest(threadId)), "script-not-allowed");
+
+      // The coordinator's run ends, and the person writes something that asks for no workflow.
+      const run = (yield* orchestrator.getThreadProjection(threadId)).runs[0]!;
+      const now = yield* DateTime.now;
+      yield* eventSink.write({
+        commandId: CommandId.make(`${threadId}:ended`),
+        events: [
+          {
+            id: EventId.make(`${threadId}:ended`),
+            type: "run.updated",
+            threadId,
+            runId: run.id,
+            occurredAt: now,
+            payload: { ...run, status: "completed", completedAt: now },
+          },
+        ],
+      });
+      const turn = yield* typeMessage(threadId, "plain", "Thanks, now fix the typo");
+      assert.notInclude(turn.message.text, "<t3-workflow>");
+      yield* gate.requireNoRequest(threadId);
+      assert.equal(
+        yield* gate.guardGraphStart({ threadId, digest }, (key) => Effect.succeed(key ?? "open")),
+        "open",
+      );
+    }),
+  );
+});

@@ -8,8 +8,9 @@
  * do, or every child and every wake could start another fan-out. The note is the same for every
  * driver and names graph_review; it never adds a provider's own trigger word.
  *
- * This only adds planning guidance to the turn. It does not enforce approval: nothing here
- * stops an agent from calling graph_start or workflow_start.
+ * This module only adds planning guidance to the turn and answers whether a message asks for a
+ * workflow. The server refuses graph_start and workflow_start until the user approves, through
+ * the approval gate that asks the same question (`orchestration-v2/WorkflowApprovalGate.ts`).
  */
 import type {
   OrchestrationV2Actor,
@@ -67,20 +68,23 @@ export function workflowTurnNote(presets: WorkflowPresets): string {
     "1. Split the work into graph nodes with dependencies and call graph_review.",
     "2. Set a worker node's preset to a saved profile's id.",
     "3. Add a verify check to any node whose result needs checking. A check takes no preset: set its target to a concrete providerInstanceId, model and options copied from an available entry of one profile (its target, then its fallbacks) in orchestrator_capabilities workflowPresets. Pick the entry yourself; T3 does not try other entries for a check.",
-    "4. End your turn once graph_review has returned the plan. The user reviews it first: do not call graph_start or workflow_start in this turn.",
+    "4. End your turn once graph_review has returned the plan. The user approves it in T3 Code, which then sends you a message with the approved digest: do not call graph_start or workflow_start before that message.",
     profilesLine(presets),
     "</t3-workflow>",
   ].join("\n");
 }
 
-/** The text the provider receives for this turn: the workflow note, else the ultracode result. */
-export function applyTurnTriggers(input: {
-  readonly ultracode: UltracodeMode;
+/** What a turn's message asks of the workflow trigger. */
+export type WorkflowRequest =
+  /** A person's new message asks for a workflow. */
+  | "requested"
+  /** A person's new message does not. */
+  | "plain"
+  /** Not a person's new request (agent text, wakes, schedules, delegated threads, resumes). */
+  | "ignored";
+
+export interface WorkflowRequestInput {
   readonly workflowTriggers: WorkflowTriggers;
-  readonly workflowPresets: WorkflowPresets;
-  readonly driver: ProviderDriverKind;
-  /** The text the provider would receive. */
-  readonly text: string;
   /** The message as stored, before provider context projection: what the person wrote. */
   readonly typedText: string;
   readonly createdBy: OrchestrationV2Actor;
@@ -91,13 +95,37 @@ export function applyTurnTriggers(input: {
   readonly delegatedThread: boolean;
   /** A steering restart or restart continuation: it resumes work, so it is not a new request. */
   readonly resumesEarlierTurn: boolean;
-}): string {
-  if (
-    !input.delegatedThread &&
-    !input.resumesEarlierTurn &&
-    isPersonTypedMessage(input) &&
-    detectWorkflowIntent(input.typedText, input.workflowTriggers) !== null
-  ) {
+}
+
+/**
+ * The one rule for whether a message asks for a workflow. Turn start and the approval gate's
+ * re-arm after a restart both ask it, so a message never counts as a request for one and not
+ * the other.
+ */
+export function workflowRequestOf(input: WorkflowRequestInput): WorkflowRequest {
+  if (input.delegatedThread || input.resumesEarlierTurn || !isPersonTypedMessage(input)) {
+    return "ignored";
+  }
+  return detectWorkflowIntent(input.typedText, input.workflowTriggers) === null
+    ? "plain"
+    : "requested";
+}
+
+/**
+ * The text the provider receives for this turn: the workflow note, else the ultracode result.
+ * `request` is the answer `workflowRequestOf` already gave for this message.
+ */
+export function applyTurnTriggers(
+  input: WorkflowRequestInput & {
+    readonly ultracode: UltracodeMode;
+    readonly workflowPresets: WorkflowPresets;
+    readonly driver: ProviderDriverKind;
+    /** The text the provider would receive. */
+    readonly text: string;
+  },
+  request: WorkflowRequest = workflowRequestOf(input),
+): string {
+  if (request === "requested") {
     return `${input.text}\n\n${workflowTurnNote(input.workflowPresets)}`;
   }
   return applyUltracode({

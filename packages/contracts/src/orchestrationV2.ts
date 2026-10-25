@@ -12,6 +12,7 @@ import {
   CommandId,
   ContextHandoffId,
   ContextTransferId,
+  EnvironmentId,
   EventId,
   IsoDateTime,
   MessageId,
@@ -3292,6 +3293,8 @@ export const ORCHESTRATION_V2_WS_METHODS = {
   getThreadProjection: "orchestration.getThreadProjection",
   getWorkflowScript: "orchestration.getWorkflowScript",
   stopWorkflow: "orchestration.stopWorkflow",
+  approveWorkflowReview: "orchestration.approveWorkflowReview",
+  dismissWorkflowReview: "orchestration.dismissWorkflowReview",
   getTurnItem: "orchestration.getTurnItem",
   launchThread: "orchestration.launchThread",
   subscribeArchivedShell: "orchestration.subscribeArchivedShell",
@@ -3607,12 +3610,75 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
   }
 }
 
+/** The digest `graph_review` returns: `sha256:` and 64 lowercase hex digits. */
+export const OrchestrationV2WorkflowReviewDigest = Schema.String.check(
+  Schema.isPattern(/^sha256:[a-f0-9]{64}$/),
+);
+
+/**
+ * A decision on one graph review. The review id and digest come from the review the server
+ * produced; the environment must be the one that produced it. Neither says who is deciding:
+ * the connection's grant does.
+ */
+const OrchestrationV2WorkflowReviewDecisionFields = {
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+  reviewId: TrimmedNonEmptyString,
+} as const;
+
+export const OrchestrationV2ApproveWorkflowReviewInput = Schema.Struct({
+  ...OrchestrationV2WorkflowReviewDecisionFields,
+  digest: OrchestrationV2WorkflowReviewDigest,
+});
+export type OrchestrationV2ApproveWorkflowReviewInput =
+  typeof OrchestrationV2ApproveWorkflowReviewInput.Type;
+
+export const OrchestrationV2DismissWorkflowReviewInput = Schema.Struct({
+  ...OrchestrationV2WorkflowReviewDecisionFields,
+  /** Null for a review that could not be digested (it has blockers no user can approve). */
+  digest: Schema.NullOr(OrchestrationV2WorkflowReviewDigest),
+});
+export type OrchestrationV2DismissWorkflowReviewInput =
+  typeof OrchestrationV2DismissWorkflowReviewInput.Type;
+
+export class OrchestrationV2WorkflowApprovalError extends Schema.TaggedError<OrchestrationV2WorkflowApprovalError>()(
+  "OrchestrationV2WorkflowApprovalError",
+  {
+    threadId: ThreadId,
+    reviewId: TrimmedNonEmptyString,
+    reason: Schema.Literals([
+      "environment-mismatch",
+      "no-pending-request",
+      "review-not-found",
+      "review-blocked",
+      "unavailable",
+    ]),
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {
+  override get message(): string {
+    switch (this.reason) {
+      case "environment-mismatch":
+        return "This review belongs to a different environment.";
+      case "no-pending-request":
+        return "No workflow is waiting for approval on this thread.";
+      case "review-not-found":
+        return "This review is out of date. Ask the agent to review the graph again.";
+      case "review-blocked":
+        return "This review has blockers, so it cannot be approved.";
+      case "unavailable":
+        return "Could not send your decision to the agent.";
+    }
+  }
+}
+
 export const OrchestrationV2RpcError = Schema.Union([
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetThreadProjectionError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2ThreadLaunchError,
   OrchestrationV2StopWorkflowError,
+  OrchestrationV2WorkflowApprovalError,
 ]);
 export type OrchestrationV2RpcError = typeof OrchestrationV2RpcError.Type;
 
@@ -3788,6 +3854,14 @@ export const OrchestrationV2RpcSchemas = {
   },
   stopWorkflow: {
     input: OrchestrationV2StopWorkflowInput,
+    output: Schema.Void,
+  },
+  approveWorkflowReview: {
+    input: OrchestrationV2ApproveWorkflowReviewInput,
+    output: Schema.Void,
+  },
+  dismissWorkflowReview: {
+    input: OrchestrationV2DismissWorkflowReviewInput,
     output: Schema.Void,
   },
   getWorkflowScript: {

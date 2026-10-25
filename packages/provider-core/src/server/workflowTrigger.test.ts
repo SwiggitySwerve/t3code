@@ -4,7 +4,7 @@ import type { WorkflowPresets, WorkflowTriggers } from "@t3tools/contracts/setti
 import { detectWorkflowIntent } from "@t3tools/shared/workflowIntent";
 
 import { ULTRACODE_TURN_NOTE } from "./ultracode.ts";
-import { applyTurnTriggers, workflowTurnNote } from "./workflowTrigger.ts";
+import { applyTurnTriggers, workflowRequestOf, workflowTurnNote } from "./workflowTrigger.ts";
 
 const codex = ProviderDriverKind.make("codex");
 const claude = ProviderDriverKind.make("claudeAgent");
@@ -58,7 +58,8 @@ describe("applyTurnTriggers", () => {
   it("plans first and does not tell the agent to start a script", () => {
     const note = workflowTurnNote(noProfiles);
     expect(note).toContain("graph_review");
-    expect(note).toContain("do not call graph_start or workflow_start");
+    expect(note).toContain("The user approves it in T3 Code");
+    expect(note).toContain("do not call graph_start or workflow_start before that message");
   });
 
   it("gives a verify check a concrete target, not a preset, and promises no fallback", () => {
@@ -245,5 +246,66 @@ describe("workflowTurnNote", () => {
 
   it("is compact", () => {
     expect(workflowTurnNote(noProfiles).length).toBeLessThan(1200);
+  });
+});
+
+describe("workflowRequestOf", () => {
+  const ask = (overrides: Partial<Parameters<typeof workflowRequestOf>[0]> = {}) =>
+    workflowRequestOf({
+      workflowTriggers: triggersOn,
+      typedText: "Split this into a workflow",
+      ...person,
+      ...overrides,
+    });
+
+  it("tells a person's request from a plain message and from what is not theirs to ask", () => {
+    expect(ask()).toBe("requested");
+    expect(ask({ typedText: "Audit the parser" })).toBe("plain");
+    expect(ask({ creationSource: "mobile" })).toBe("requested");
+    for (const overrides of [
+      { createdBy: "agent", creationSource: "mcp" },
+      { createdBy: "agent", creationSource: "provider" },
+      { createdBy: "agent", creationSource: "server" },
+      { createdBy: "system", creationSource: "server" },
+      // The canned message the server sends when the user decides on a review.
+      { createdBy: "user", creationSource: "server" },
+      // Each of these alone is enough: a schedule or another thread typed nothing.
+      { scheduledTaskId: "task-1" },
+      { senderThreadId: "thread-1" },
+      { delegatedThread: true },
+      { resumesEarlierTurn: true },
+    ] as const) {
+      expect(ask(overrides), JSON.stringify(overrides)).toBe("ignored");
+      // Ignored even for words that are not a request, so a plain agent message lifts nothing.
+      expect(ask({ ...overrides, typedText: "Audit the parser" })).toBe("ignored");
+    }
+  });
+
+  it("follows the trigger settings", () => {
+    const extras = { enabled: true, extras: ["fan out"] };
+    expect(ask({ workflowTriggers: extras, typedText: "please fan out the audit" })).toBe(
+      "requested",
+    );
+    const off = { enabled: false, extras: ["fan out"] };
+    expect(ask({ workflowTriggers: off })).toBe("plain");
+    expect(ask({ workflowTriggers: off, typedText: "please fan out" })).toBe("plain");
+  });
+
+  it("is the answer applyTurnTriggers uses, and it uses a given answer without asking again", () => {
+    const text = "plan a workflow";
+    const input = {
+      ultracode: "off",
+      workflowTriggers: triggersOn,
+      workflowPresets: noProfiles,
+      driver: codex,
+      text,
+      typedText: text,
+      ...person,
+    } as const;
+    expect(isWorkflowTurn(applyTurnTriggers(input))).toBe(true);
+    expect(isWorkflowTurn(applyTurnTriggers(input, "requested"))).toBe(true);
+    // The caller asked once already; a different answer is the caller's, not a second reading.
+    expect(applyTurnTriggers(input, "plain")).toBe(text);
+    expect(applyTurnTriggers(input, "ignored")).toBe(text);
   });
 });

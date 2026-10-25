@@ -75,6 +75,8 @@ describe("orchestrator MCP contracts", () => {
 
   it("preserves graph review blockers and partial input facts", () => {
     const review = {
+      reviewId: "review-1",
+      approvalRequired: false,
       digest: `sha256:${"a".repeat(64)}`,
       ready: false,
       expandedGraph: null,
@@ -92,10 +94,17 @@ describe("orchestrator MCP contracts", () => {
     expect(() =>
       decodeGraphReviewResult({ ...review, inputs: [{ ...review.inputs[0], status: "unknown" }] }),
     ).toThrow();
+    // The server names every review, and says whether the user must approve it.
+    const { reviewId: _id, ...unnamed } = review;
+    expect(() => decodeGraphReviewResult(unnamed)).toThrow();
+    const { approvalRequired: _required, ...undecided } = review;
+    expect(() => decodeGraphReviewResult(undecided)).toThrow();
   });
 
   it("decodes a review with and without the profile choices listed beside its targets", () => {
     const base = {
+      reviewId: "review-2",
+      approvalRequired: true,
       digest: `sha256:${"b".repeat(64)}`,
       ready: true,
       expandedGraph: null,

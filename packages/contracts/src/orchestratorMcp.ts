@@ -37,6 +37,7 @@ import {
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2WorkflowReviewDigest,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
@@ -120,7 +121,7 @@ export const OrchestratorMcpTarget = Schema.Struct({
   inheritOptions: Schema.optional(
     Schema.Literal(false).annotate({
       description:
-        "false: use exactly these options, without inheriting the caller's. Targets T3 resolves for review and restart carry it, so caller changes cannot alter an approved assignment.",
+        "false: use exactly these options, without inheriting the caller's. Targets T3 resolves for review and restart carry it, so caller changes cannot alter a reviewed assignment.",
     }),
   ),
 });
@@ -368,7 +369,7 @@ export const OrchestratorMcpGraphReviewInput = Schema.Struct({
   workerTarget: OrchestratorMcpWorkflowStartInput.fields.workerTarget,
   graph: Schema.Unknown.annotate({
     description:
-      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to retain the approved targets after preset edits or a server restart.",
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to keep the reviewed targets after preset edits. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result).",
   }),
 });
 export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
@@ -397,6 +398,14 @@ export const OrchestratorMcpProfileChoice = Schema.Struct({
 export type OrchestratorMcpProfileChoice = typeof OrchestratorMcpProfileChoice.Type;
 
 export const OrchestratorMcpGraphReviewResult = Schema.Struct({
+  reviewId: Schema.String.annotate({
+    description:
+      "Identifies this review. T3 Code shows the review to the user, who approves or dismisses it by this id and digest.",
+  }),
+  approvalRequired: Schema.Boolean.annotate({
+    description:
+      "true when the user asked for a workflow and must approve this review in T3 Code before graph_start runs it: end your turn, and T3 Code sends you a message with the approved digest. false when no approval is pending.",
+  }),
   digest: Schema.NullOr(Schema.String).annotate({
     description:
       "Covers the graph with concrete worker and judgment targets and its input hashes; null when parsing or target resolution fails.",
@@ -404,7 +413,7 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   ready: Schema.Boolean,
   expandedGraph: Schema.NullOr(Schema.Unknown).annotate({
     description:
-      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to retain the approved assignments after preset edits or a server restart.",
+      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to keep the reviewed assignments after preset edits.",
   }),
   targets: Schema.Array(
     Schema.Struct({
@@ -459,9 +468,9 @@ export type OrchestratorMcpGraphReviewResult = typeof OrchestratorMcpGraphReview
 export const OrchestratorMcpGraphStartInput = Schema.Struct({
   workerTarget: OrchestratorMcpGraphReviewInput.fields.workerTarget,
   graph: OrchestratorMcpGraphReviewInput.fields.graph,
-  acceptedDigest: Schema.String.check(Schema.isPattern(/^sha256:[a-f0-9]{64}$/)).annotate({
+  acceptedDigest: OrchestrationV2WorkflowReviewDigest.annotate({
     description:
-      "Digest returned by graph_review for the exact graph and input files to run. The reviewed model of each profile-assigned node is fixed by the digest: graph_start checks it is still served and refuses (review again) if not; it never moves to the next model in a profile.",
+      "Digest returned by graph_review for the exact graph and input files to run. While the user's request for a workflow waits for their decision, graph_start accepts only a digest the user approved in T3 Code and refuses any other. The reviewed model of each profile-assigned node is fixed by the digest: graph_start checks it is still served and refuses (review again) if not; it never moves to the next model in a profile.",
   }),
   budgetTokens: OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
   title: Schema.optional(OrchestratorMcpTitle),
@@ -1027,6 +1036,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
   {
     code: Schema.Literals([
       "capability_denied",
+      "approval_required",
       "parent_not_active",
       "provider_unavailable",
       "model_unavailable",

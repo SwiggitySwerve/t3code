@@ -3,7 +3,7 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
 
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
@@ -73,7 +73,17 @@ import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as WorkflowApprovalGate from "../orchestration-v2/WorkflowApprovalGate.ts";
+import * as WorkflowApprovalService from "../orchestration-v2/WorkflowApprovalService.ts";
+import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
+import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
+import { HtmlToolkit } from "./toolkits/html/tools.ts";
+import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
+import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
+import { ProjectToolkit } from "./toolkits/project/tools.ts";
+import { ThreadToolkit } from "./toolkits/thread/tools.ts";
+import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
@@ -180,6 +190,7 @@ const makeLayerTest = (
       }),
     ),
     Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(WorkflowApprovalService.layer),
     Layer.provideMerge(layerOrchestration),
     Layer.provideMerge(layerAdapters),
     Layer.provideMerge(ProviderRegistryMock.layer(providers)),
@@ -245,7 +256,7 @@ const invoke = (name: string, args: Record<string, unknown>) =>
 const errorText = (result: McpSchema.CallToolResult) =>
   result.content.map((part) => ("text" in part ? part.text : "")).join("");
 
-const startParentWithSelection = (selection: ModelSelection) =>
+const startParentWithSelection = (selection: ModelSelection, text = "Fan out work.") =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     yield* orchestrator.dispatch({
@@ -269,7 +280,7 @@ const startParentWithSelection = (selection: ModelSelection) =>
       commandId: CommandId.make("command:delegate-tasks:start"),
       threadId: parentThreadId,
       messageId: MessageId.make("message:delegate-tasks:start"),
-      text: "Fan out work.",
+      text,
       attachments: [],
       modelSelection: selection,
       dispatchMode: { type: "start_immediately" },
@@ -4459,5 +4470,802 @@ describe("profile model preference", () => {
           );
         }
       }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+describe("workflow approval", () => {
+  const requestText = "Plan this as a workflow";
+  const startMessageId = MessageId.make("message:delegate-tasks:start");
+  const oneNode = {
+    schemaVersion: 1,
+    nodes: { a: { subject: "worker", description: "work", dependsOn: [] } },
+  };
+  const twoNodes = {
+    schemaVersion: 1,
+    nodes: {
+      a: { subject: "worker", description: "work", dependsOn: [] },
+      b: { subject: "second", description: "more work", dependsOn: ["a"] },
+    },
+  };
+
+  /** What run start tells the gate about a message the person typed in a client. */
+  const personTurn = (typedText: string, messageId: MessageId = startMessageId) =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettings.ServerSettingsService;
+      return {
+        threadId: parentThreadId,
+        messageId,
+        typedText,
+        workflowTriggers: (yield* settings.getSettings).workflowTriggers,
+        createdBy: "user",
+        creationSource: "web",
+        delegatedThread: false,
+        resumesEarlierTurn: false,
+      } as const;
+    });
+
+  /** The person asks for a workflow: their message is stored, then run start sees it. */
+  const askForWorkflow = Effect.gen(function* () {
+    yield* startParentWithSelection(modelSelection, requestText);
+    const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+    expect(yield* gate.observeTurn(yield* personTurn(requestText))).toBe("requested");
+  });
+
+  const refusal = (result: McpSchema.CallToolResult) => {
+    expect(result.isError).toBe(true);
+    return JSON.parse(errorText(result)) as { readonly code: string; readonly message: string };
+  };
+
+  const decide = (
+    reviewed: OrchestratorMcpGraphReviewResult,
+    overrides: Record<string, unknown> = {},
+  ) => ({
+    environmentId: invocation.environmentId,
+    threadId: parentThreadId,
+    reviewId: reviewed.reviewId,
+    digest: reviewed.digest!,
+    ...overrides,
+  });
+
+  const parentProjection = Effect.gen(function* () {
+    return yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(parentThreadId);
+  });
+
+  /** The messages the server sent the agent for the user's decisions. */
+  const cannedMessages = Effect.gen(function* () {
+    return (yield* parentProjection).messages.filter(
+      (message) => message.createdBy === "user" && message.creationSource === "server",
+    );
+  });
+
+  const startGraph = (
+    graph: unknown,
+    reviewed: OrchestratorMcpGraphReviewResult,
+    extra: Record<string, unknown> = {},
+  ) => invoke("graph_start", { graph, acceptedDigest: reviewed.digest, ...extra });
+
+  const workflowRows = Effect.gen(function* () {
+    return (yield* parentProjection).subagents.filter((task) => task.workflow !== undefined);
+  });
+
+  /** The same tool call as another provider session of the thread would make it. */
+  const otherSession: McpInvocationContext.McpInvocationScope = {
+    ...invocation,
+    requestNamespace: "provider-session:other",
+    thread: {
+      threadId: parentThreadId,
+      providerSessionId: "provider-session:other",
+      providerInstanceId: instanceId,
+    },
+  };
+  const invokeAs = (
+    scope: McpInvocationContext.McpInvocationScope,
+    name: string,
+    args: Record<string, unknown>,
+  ) =>
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      return yield* server
+        .callTool({ name, arguments: args })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    });
+
+  /**
+   * Makes the thread reads graph_review and graph_start do on the parent thread misbehave once,
+   * at the first matching read that `matches` accepts, after the real read. The read signals
+   * `reached`, then does `how`: it fails, never returns, or waits and then returns what it read.
+   * Restores itself when the test's scope ends.
+   */
+  const interceptParentRead = (
+    matches: (records: { readonly subagents: ReadonlyArray<OrchestrationV2Subagent> }) => boolean,
+    how: Effect.Effect<unknown, string>,
+    skip = 0,
+  ) =>
+    Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const real = threads.getThreadRecords;
+      const reached = yield* Deferred.make<void>();
+      let toSkip = skip;
+      let spent = false;
+      const spy = vi.spyOn(threads, "getThreadRecords").mockImplementation(((
+        threadId: ThreadId,
+        fields: ReadonlyArray<string>,
+        filter: never,
+      ) =>
+        real(threadId, fields as never, filter).pipe(
+          Effect.flatMap((records) => {
+            if (
+              spent ||
+              threadId !== parentThreadId ||
+              !fields.includes("contextTransfers") ||
+              !matches(records as never)
+            ) {
+              return Effect.succeed(records);
+            }
+            if (toSkip > 0) {
+              toSkip -= 1;
+              return Effect.succeed(records);
+            }
+            spent = true;
+            return Deferred.succeed(reached, undefined).pipe(
+              Effect.andThen(how),
+              Effect.as(records),
+            );
+          }),
+        )) as never);
+      yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+      return { reached, restore: Effect.sync(() => spy.mockRestore()) };
+    });
+
+  /** Makes the first approval or dismissal message the server sends fail to send. */
+  const failFirstCannedSend = (how: "not sent" | "sent, but reported as failed") =>
+    Effect.gen(function* () {
+      const threads = yield* ThreadManagementService.ThreadManagementService;
+      const real = threads.dispatch;
+      let pendingFailures = 1;
+      const spy = vi.spyOn(threads, "dispatch").mockImplementation(((command: {
+        readonly type: string;
+        readonly creationSource?: string;
+      }) => {
+        if (
+          pendingFailures > 0 &&
+          command.type === "message.dispatch" &&
+          command.creationSource === "server"
+        ) {
+          pendingFailures -= 1;
+          return how === "not sent"
+            ? Effect.fail("the send failed")
+            : real(command as never).pipe(Effect.andThen(Effect.fail("the reply was lost")));
+        }
+        return real(command as never);
+      }) as never);
+      yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+      return spy;
+    });
+  it.effect(
+    "refuses graph_start and workflow_start while the user's request waits, and starts no agent",
+    () =>
+      Effect.gen(function* () {
+        yield* askForWorkflow;
+        const reviewed = yield* reviewGraph(oneNode);
+        expect(reviewed).toMatchObject({ ready: true, approvalRequired: true });
+        expect(reviewed.reviewId).not.toBe("");
+        for (const graph of [oneNode, reviewed.expandedGraph]) {
+          expect(refusal(yield* startGraph(graph, reviewed))).toMatchObject({
+            code: "approval_required",
+          });
+        }
+        const script = refusal(yield* invoke("workflow_start", { script: "return 1" }));
+        expect(script).toMatchObject({ code: "approval_required" });
+        expect(script.message).toContain("graph_review");
+        // The agent's own digest, even one that matches its graph, is not an approval.
+        expect(reviewed.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        expect((yield* parentProjection).subagents).toEqual([]);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("starts the approved digest under the approval's key, and that start settles", () =>
+    Effect.gen(function* () {
+      yield* askForWorkflow;
+      const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+      const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+      const reviewed = yield* reviewGraph(oneNode);
+      const other = yield* reviewGraph(twoNodes);
+      // A double click, a retry and two clicks at once are one decision.
+      yield* approvals.approve(decide(reviewed));
+      yield* approvals.approve(decide(reviewed));
+      yield* Effect.all(
+        [approvals.approve(decide(reviewed)), approvals.approve(decide(reviewed))],
+        {
+          concurrency: 2,
+        },
+      );
+      const canned = yield* cannedMessages;
+      expect(canned).toHaveLength(1);
+      const [message] = canned;
+      expect(message).toMatchObject({ createdBy: "user", creationSource: "server" });
+      expect(message?.scheduledTaskId).toBeUndefined();
+      expect(message?.senderThreadId).toBeUndefined();
+      expect(message?.text).toContain(reviewed.digest);
+      expect(message?.text).toContain("graph_start");
+      // What was stored is what the next run start reads: it is not a typed request.
+      expect(
+        yield* gate.observeTurn({
+          ...(yield* personTurn(message!.text, message!.id)),
+          createdBy: message!.createdBy,
+          creationSource: message!.creationSource,
+          scheduledTaskId: message!.scheduledTaskId,
+          senderThreadId: message!.senderThreadId,
+        }),
+      ).toBe("ignored");
+      // Until the approved digest starts, only that digest may: not another graph, not a script.
+      expect(refusal(yield* startGraph(twoNodes, other))).toMatchObject({
+        code: "approval_required",
+      });
+      expect(refusal(yield* invoke("workflow_start", { script: "return 1" }))).toMatchObject({
+        code: "approval_required",
+      });
+      expect(yield* workflowRows).toEqual([]);
+
+      const started = yield* decodeWorkflow(
+        (yield* startGraph(oneNode, reviewed, { clientRequestId: "start-1" })).structuredContent,
+      );
+      const member = yield* awaitMember(started.workflowId, 1);
+      // The approval's key replaced the agent's, so the same start again, with another key or
+      // none, from this session or another, is a retry of it and starts nothing new.
+      for (const retry of [
+        yield* startGraph(oneNode, reviewed, { clientRequestId: "start-2" }),
+        yield* startGraph(oneNode, reviewed),
+        yield* invokeAs(otherSession, "graph_start", {
+          graph: oneNode,
+          acceptedDigest: reviewed.digest,
+        }),
+      ]) {
+        expect((yield* decodeWorkflow(retry.structuredContent)).workflowId).toBe(
+          started.workflowId,
+        );
+      }
+      expect(yield* workflowRows).toHaveLength(1);
+      // The approved start settled the request: later starts follow the ordinary rules.
+      yield* approvals.approve(decide(reviewed));
+      expect(yield* cannedMessages).toHaveLength(1);
+      const second = yield* decodeWorkflow(
+        (yield* startGraph(twoNodes, other, { clientRequestId: "other-graph" })).structuredContent,
+      );
+      expect(second.workflowId).not.toBe(started.workflowId);
+      const script = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", { script: "return 1" })).structuredContent,
+      );
+      expect(script.workflowId).not.toBe(started.workflowId);
+      expect(yield* workflowRows).toHaveLength(3);
+      yield* completeChild(member.childThreadId!, "done");
+      expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("binds a decision to this environment, thread, review and digest", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* askForWorkflow;
+        const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+        const reviewed = yield* reviewGraph(oneNode);
+        const blocked = yield* reviewGraph({
+          schemaVersion: 1,
+          nodes: {
+            a: {
+              subject: "worker",
+              description: "work",
+              dependsOn: [],
+              inputs: [{ id: "gone", kind: "workspace_snapshot", path: `${dir}/missing.txt` }],
+            },
+          },
+        });
+        expect(blocked.ready).toBe(false);
+        expect(blocked.digest).not.toBeNull();
+        const reason = (input: Record<string, unknown>, review = reviewed) =>
+          approvals.approve(decide(review, input)).pipe(
+            Effect.flip,
+            Effect.map((error) => error.reason),
+          );
+        expect(yield* reason({ environmentId: EnvironmentId.make("environment:elsewhere") })).toBe(
+          "environment-mismatch",
+        );
+        expect(yield* reason({ threadId: ThreadId.make("thread:somewhere-else") })).toBe(
+          "no-pending-request",
+        );
+        expect(yield* reason({ digest: `sha256:${"0".repeat(64)}` })).toBe("review-not-found");
+        expect(yield* reason({ reviewId: "review:never-made" })).toBe("review-not-found");
+        // A review with blockers can be dismissed, never approved.
+        expect(yield* reason({}, blocked)).toBe("review-blocked");
+        expect(yield* cannedMessages).toEqual([]);
+        expect(refusal(yield* startGraph(oneNode, reviewed))).toMatchObject({
+          code: "approval_required",
+        });
+        expect((yield* parentProjection).subagents).toEqual([]);
+      }).pipe(Effect.provide(layerTest)),
+    ),
+  );
+  it.effect("dismissing settles the request at once and tells the agent once", () =>
+    Effect.gen(function* () {
+      yield* askForWorkflow;
+      const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+      const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+      const reviewed = yield* reviewGraph(oneNode);
+      const other = yield* reviewGraph(twoNodes);
+      expect(refusal(yield* startGraph(oneNode, reviewed))).toMatchObject({
+        code: "approval_required",
+      });
+      // Dismissing any review of the request, as often as the person clicks, is one word.
+      yield* approvals.dismiss(decide(reviewed));
+      yield* approvals.dismiss(decide(reviewed));
+      yield* approvals.dismiss(decide(other));
+      const canned = yield* cannedMessages;
+      expect(canned).toHaveLength(1);
+      expect(canned[0]?.text).toContain("Do not start a workflow for this request.");
+      expect(canned[0]?.text).not.toContain("another graph");
+      // The card for it is expired, not a fifth state.
+      for (const review of [reviewed, other]) {
+        expect(
+          yield* approvals.approve(decide(review)).pipe(
+            Effect.flip,
+            Effect.map((error) => error.reason),
+          ),
+        ).toBe("no-pending-request");
+      }
+      expect(yield* cannedMessages).toHaveLength(1);
+      // The request is settled, so the gate no longer refuses: telling the agent is the instruction.
+      const afterwards = yield* decodeWorkflow(
+        (yield* startGraph(twoNodes, other)).structuredContent,
+      );
+      expect(afterwards.status).toBe("running");
+      expect(
+        (yield* decodeWorkflow(
+          (yield* invoke("workflow_start", { script: "return 1" })).structuredContent,
+        )).workflowId,
+      ).toBeDefined();
+      // The person's next message that asks for a workflow arms it again.
+      expect(
+        yield* gate.observeTurn(
+          yield* personTurn("Now run a different workflow", MessageId.make("message:again")),
+        ),
+      ).toBe("requested");
+      expect(refusal(yield* invoke("workflow_start", { script: "return 2" }))).toMatchObject({
+        code: "approval_required",
+      });
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("drops what a newer request makes stale, and wants a review of it", () =>
+    Effect.gen(function* () {
+      yield* askForWorkflow;
+      const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+      const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+      const first = yield* reviewGraph(oneNode);
+      yield* approvals.approve(decide(first));
+      expect(
+        yield* gate.observeTurn(
+          yield* personTurn("Now run a different workflow", MessageId.make("message:second")),
+        ),
+      ).toBe("requested");
+      expect(refusal(yield* startGraph(oneNode, first))).toMatchObject({
+        code: "approval_required",
+      });
+      expect(
+        yield* approvals.approve(decide(first)).pipe(
+          Effect.flip,
+          Effect.map((error) => error.reason),
+        ),
+      ).toBe("review-not-found");
+      const second = yield* reviewGraph(oneNode);
+      expect(second.digest).toBe(first.digest);
+      expect(second.reviewId).not.toBe(first.reviewId);
+      yield* approvals.approve(decide(second));
+      expect(
+        (yield* decodeWorkflow((yield* startGraph(oneNode, second)).structuredContent)).status,
+      ).toBe("running");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "keeps refusing a reviewed target that is gone after approval, without a fallback",
+    () => {
+      const providers: ServerProvider[] = [
+        {
+          ...provider,
+          models: [
+            {
+              slug: model,
+              name: model,
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "effort",
+                    label: "Effort",
+                    type: "select" as const,
+                    options: ["low", "high"].map((id) => ({ id, label: id })),
+                  },
+                ],
+              },
+            },
+          ],
+        },
+      ];
+      const highEntry = {
+        providerInstanceId: instanceId,
+        model,
+        options: [{ id: "effort", value: "high" }],
+      };
+      return Effect.gen(function* () {
+        yield* askForWorkflow;
+        const settings = yield* ServerSettings.ServerSettingsService;
+        yield* settings.updateSettings({
+          workflowPresets: {
+            presets: [
+              {
+                id: "worker",
+                name: "Worker",
+                target: highEntry,
+                fallbacks: [{ providerInstanceId: instanceId, model }],
+              },
+            ],
+            defaultPresetId: null,
+          },
+        });
+        const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+        const graph = {
+          schemaVersion: 1,
+          nodes: { a: { subject: "worker", description: "work", dependsOn: [], preset: "worker" } },
+        };
+        const reviewed = yield* reviewGraph(graph);
+        expect(reviewed.profiles?.[0]).toMatchObject({ chosenIndex: 0 });
+        yield* approvals.approve(decide(reviewed));
+        // The catalog stops offering the reviewed option; the plain entry after it is still servable.
+        providers[0] = {
+          ...provider,
+          models: [
+            {
+              slug: model,
+              name: model,
+              isCustom: false,
+              capabilities: {
+                optionDescriptors: [
+                  {
+                    id: "effort",
+                    label: "Effort",
+                    type: "select" as const,
+                    options: [{ id: "low", label: "low" }],
+                  },
+                ],
+              },
+            },
+          ],
+        };
+        const refused = yield* startGraph(graph, reviewed);
+        expect(refused.isError).toBe(true);
+        expect(errorText(refused)).toContain("no longer available");
+        expect(errorText(refused)).toContain("does not switch to another model");
+        expect((yield* parentProjection).subagents).toEqual([]);
+      }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+    },
+  );
+
+  it.effect("keeps an approval for a start that failed, so the same digest can start later", () => {
+    const providers: ServerProvider[] = [provider];
+    return Effect.gen(function* () {
+      yield* askForWorkflow;
+      const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+      const reviewed = yield* reviewGraph(oneNode);
+      yield* approvals.approve(decide(reviewed));
+      // The caller's own model leaves the catalog, so the rebuilt graph no longer matches.
+      providers[0] = { ...provider, models: [] };
+      expect((yield* startGraph(oneNode, reviewed)).isError).toBe(true);
+      expect((yield* parentProjection).subagents).toEqual([]);
+      providers[0] = provider;
+      const started = yield* decodeWorkflow(
+        (yield* startGraph(oneNode, reviewed)).structuredContent,
+      );
+      expect(started.status).toBe("running");
+    }).pipe(Effect.provide(makeLayerTest(undefined, providers)));
+  });
+
+  describe("one approval is one workflow", () => {
+    it.effect.each([
+      { name: "fails before it can launch", how: "fails", skip: 0 },
+      { name: "is interrupted before it can launch", how: "is interrupted", skip: 0 },
+      { name: "is interrupted after it launched", how: "is interrupted", skip: 1 },
+    ] as const)("when a start $name after its workflow was committed", ({ how, skip }) =>
+      Effect.gen(function* () {
+        yield* askForWorkflow;
+        const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+        const reviewed = yield* reviewGraph(oneNode);
+        yield* approvals.approve(decide(reviewed));
+        // The first start commits its workflow; then its next read of the thread (the one after
+        // the launch, when `skip` is 1) fails or never returns.
+        const read = yield* interceptParentRead(
+          (records) => records.subagents.some((task) => task.workflow !== undefined),
+          how === "fails" ? Effect.fail("the read failed") : Effect.never,
+          skip,
+        );
+        const first = yield* startGraph(oneNode, reviewed, { clientRequestId: "first" }).pipe(
+          Effect.forkChild,
+        );
+        yield* Deferred.await(read.reached);
+        if (how === "is interrupted") {
+          yield* Fiber.interrupt(first);
+        } else {
+          expect((yield* Fiber.join(first)).isError).toBe(true);
+        }
+        yield* read.restore;
+        const [committed] = yield* workflowRows;
+        expect(committed).toBeDefined();
+        // Retries with another key, and with none, find that workflow and start no second one.
+        const retried = yield* decodeWorkflow(
+          (yield* startGraph(oneNode, reviewed, { clientRequestId: "second" })).structuredContent,
+        );
+        const again = yield* decodeWorkflow(
+          (yield* startGraph(oneNode, reviewed)).structuredContent,
+        );
+        expect(retried.workflowId).toBe(committed!.id);
+        expect(again.workflowId).toBe(committed!.id);
+        const member = yield* awaitMember(committed!.id, 1);
+        const projection = yield* parentProjection;
+        expect(projection.subagents.filter((task) => task.workflow !== undefined)).toHaveLength(1);
+        expect(
+          projection.subagents.filter((task) => task.parentNodeId === committed!.id),
+        ).toHaveLength(1);
+        yield* completeChild(member.childThreadId!, "done");
+        expect((yield* awaitWorkflowEnd(committed!.id)).status).toBe("completed");
+      }).pipe(Effect.provide(layerTest)),
+    );
+  });
+
+  describe("a review that is still running", () => {
+    it.effect("is refused, and not recorded, when a newer request arrives meanwhile", () =>
+      Effect.gen(function* () {
+        yield* askForWorkflow;
+        const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+        const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+        // graph_review noted the request before it reads the thread: hold it at that read.
+        const proceed = yield* Deferred.make<void>();
+        const read = yield* interceptParentRead(() => true, Deferred.await(proceed));
+        const slow = yield* invoke("graph_review", { graph: oneNode }).pipe(Effect.forkChild);
+        yield* Deferred.await(read.reached);
+        expect(
+          yield* gate.observeTurn(
+            yield* personTurn(
+              "Plan something else as a workflow",
+              MessageId.make("message:second"),
+            ),
+          ),
+        ).toBe("requested");
+        yield* Deferred.succeed(proceed, undefined);
+        const stale = refusal(yield* Fiber.join(slow));
+        expect(stale.code).toBe("approval_required");
+        expect(stale.message).toContain("not recorded");
+        // The new request has no review of the old one, and its own review works.
+        const fresh = yield* reviewGraph(oneNode);
+        expect(fresh.approvalRequired).toBe(true);
+        yield* approvals.approve(decide(fresh));
+        expect(
+          (yield* decodeWorkflow((yield* startGraph(oneNode, fresh)).structuredContent)).status,
+        ).toBe("running");
+      }).pipe(Effect.provide(layerTest)),
+    );
+  });
+
+  describe("telling the agent", () => {
+    it.effect.each(["not sent", "sent, but reported as failed"] as const)(
+      "repeating a decision whose message was %s sends it once",
+      (how) =>
+        Effect.gen(function* () {
+          yield* askForWorkflow;
+          const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+          const reviewed = yield* reviewGraph(oneNode);
+          const send = yield* failFirstCannedSend(how);
+          const reason = (error: { readonly reason: string }) => error.reason;
+          // The gate recorded the approval before the send failed.
+          expect(reason(yield* approvals.approve(decide(reviewed)).pipe(Effect.flip))).toBe(
+            "unavailable",
+          );
+          expect(yield* cannedMessages).toHaveLength(how === "not sent" ? 0 : 1);
+          // The repeat is the same command: it sends what is missing, or reaches the receipt.
+          yield* approvals.approve(decide(reviewed));
+          yield* approvals.approve(decide(reviewed));
+          expect(yield* cannedMessages).toHaveLength(1);
+          send.mockRestore();
+          // A dismissal is delivered the same way.
+          const other = yield* reviewGraph(twoNodes);
+          yield* failFirstCannedSend(how);
+          expect(reason(yield* approvals.dismiss(decide(other)).pipe(Effect.flip))).toBe(
+            "unavailable",
+          );
+          yield* approvals.dismiss(decide(other));
+          yield* approvals.dismiss(decide(reviewed));
+          expect(yield* cannedMessages).toHaveLength(2);
+        }).pipe(Effect.provide(layerTest)),
+    );
+  });
+  it.effect("leaves a request nobody asked a workflow for as it was: starts need no approval", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+      expect(yield* gate.observeTurn(yield* personTurn("Fan out work."))).toBe("plain");
+      const reviewed = yield* reviewGraph(oneNode);
+      expect(reviewed.approvalRequired).toBe(false);
+      const started = yield* decodeWorkflow(
+        (yield* startGraph(oneNode, reviewed)).structuredContent,
+      );
+      expect(started.status).toBe("running");
+      const script = yield* decodeWorkflow(
+        (yield* invoke("workflow_start", { script: "return 1" })).structuredContent,
+      );
+      expect(script.workflowId).toBeDefined();
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  describe("after a server restart", () => {
+    /** A fresh gate and fresh services over the same stored threads, as a restart leaves them. */
+    const restarted = <A, E, R>(
+      use: (services: {
+        readonly mcp: OrchestratorMcpService.OrchestratorMcpService["Service"];
+        readonly approvals: WorkflowApprovalService.WorkflowApprovalService["Service"];
+      }) => Effect.Effect<A, E, R>,
+    ) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const layer = Layer.mergeAll(
+            OrchestratorMcpService.layer,
+            WorkflowApprovalService.layer,
+          ).pipe(
+            Layer.provideMerge(WorkflowApprovalGate.layer),
+            Layer.provide(
+              Layer.mock(ProjectionStore.ProjectionStoreV2)({
+                getThreadRecords: (threadId, fields, filter) =>
+                  orchestrator
+                    .getThreadRecords(threadId, fields, filter)
+                    .pipe(
+                      Effect.mapError(
+                        (cause) =>
+                          new ProjectionStore.ProjectionStoreReadError({ threadId, cause }),
+                      ),
+                    ),
+              }),
+            ),
+          );
+          const context = yield* Layer.build(Layer.fresh(layer));
+          return yield* use({
+            mcp: Context.get(context, OrchestratorMcpService.OrchestratorMcpService),
+            approvals: Context.get(context, WorkflowApprovalService.WorkflowApprovalService),
+          });
+        }),
+      );
+
+    it.effect(
+      "wants a fresh review and approval, and the same request and graph finds its workflow",
+      () =>
+        Effect.gen(function* () {
+          yield* askForWorkflow;
+          const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+          const before = yield* reviewGraph(oneNode);
+          // The coordinator ended its turn, so the canned message starts a run of its own.
+          yield* completeChild(parentThreadId, "Here is the plan.");
+          yield* approvals.approve(decide(before));
+          // The approved start commits its workflow, and the answer to the coordinator is lost.
+          const read = yield* interceptParentRead(
+            (records) => records.subagents.some((task) => task.workflow !== undefined),
+            Effect.fail("the read failed"),
+          );
+          const first = yield* startGraph(oneNode, before).pipe(Effect.forkChild);
+          yield* Deferred.await(read.reached);
+          expect((yield* Fiber.join(first)).isError).toBe(true);
+          yield* read.restore;
+          const [committed] = yield* workflowRows;
+          expect(committed).toBeDefined();
+          yield* restarted(({ mcp, approvals: afterRestart }) =>
+            Effect.gen(function* () {
+              const stale = yield* mcp
+                .graphStart(invocation, {
+                  graph: before.expandedGraph,
+                  acceptedDigest: before.digest!,
+                })
+                .pipe(Effect.flip);
+              expect(stale.code).toBe("approval_required");
+              expect((yield* afterRestart.approve(decide(before)).pipe(Effect.flip)).reason).toBe(
+                "review-not-found",
+              );
+              const fresh = yield* mcp.graphReview(invocation, { graph: oneNode });
+              expect(fresh.approvalRequired).toBe(true);
+              expect(fresh.digest).toBe(before.digest);
+              expect(fresh.reviewId).not.toBe(before.reviewId);
+              // The same request and digest as before the restart, a new decision: repeated and
+              // concurrent clicks are still one decision.
+              yield* afterRestart.approve(decide(fresh));
+              yield* Effect.all(
+                [afterRestart.approve(decide(fresh)), afterRestart.approve(decide(fresh))],
+                { concurrency: 2 },
+              );
+              // The decision is new, the launch is not: the request and the digest are the same, so
+              // the start finds the workflow the first approval began.
+              const started = yield* mcp.graphStart(invocation, {
+                graph: fresh.expandedGraph,
+                acceptedDigest: fresh.digest!,
+              });
+              expect(started.workflowId).toBe(committed!.id);
+            }),
+          );
+          // One message for the decision before the restart, one for the decision after it. The
+          // restarted gate read past the first to the request, and was not answered from its receipt.
+          const projection = yield* parentProjection;
+          const stored = projection.messages.filter(
+            (message) => message.createdBy === "user" && message.creationSource === "server",
+          );
+          expect(stored).toHaveLength(2);
+          expect(stored[0]?.id).not.toBe(stored[1]?.id);
+          expect(stored.map((message) => message.text)).toEqual([stored[0]?.text, stored[0]?.text]);
+          // One workflow and one member, however many times the request and digest were started.
+          yield* awaitMember(committed!.id, 1);
+          const settled = yield* parentProjection;
+          expect(settled.subagents.filter((task) => task.workflow !== undefined)).toHaveLength(1);
+          expect(
+            settled.subagents.filter((task) => task.parentNodeId === committed!.id),
+          ).toHaveLength(1);
+        }).pipe(Effect.provide(layerTest)),
+    );
+
+    it.effect("tells the agent again about a dismissal made after a restart", () =>
+      Effect.gen(function* () {
+        yield* askForWorkflow;
+        const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+        const before = yield* reviewGraph(oneNode);
+        yield* approvals.dismiss(decide(before));
+        expect(yield* cannedMessages).toHaveLength(1);
+        yield* restarted(({ mcp, approvals: afterRestart }) =>
+          Effect.gen(function* () {
+            // The request was dismissed, and a restart arms it again.
+            const fresh = yield* mcp.graphReview(invocation, { graph: oneNode });
+            expect(fresh.approvalRequired).toBe(true);
+            yield* afterRestart.dismiss(decide(fresh));
+            yield* afterRestart.dismiss(decide(fresh));
+          }),
+        );
+        expect(yield* cannedMessages).toHaveLength(2);
+      }).pipe(Effect.provide(layerTest)),
+    );
+    it.effect("stays open when the person's latest message asks for no workflow", () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const before = yield* reviewGraph(oneNode);
+        yield* restarted(({ mcp }) =>
+          Effect.gen(function* () {
+            const reviewed = yield* mcp.graphReview(invocation, { graph: oneNode });
+            expect(reviewed.approvalRequired).toBe(false);
+            const started = yield* mcp.graphStart(invocation, {
+              graph: before.expandedGraph,
+              acceptedDigest: before.digest!,
+            });
+            expect(started.status).toBe("running");
+          }),
+        );
+      }).pipe(Effect.provide(layerTest)),
+    );
+  });
+
+  it.effect("gives the agent no tool to approve or dismiss anything", () =>
+    Effect.sync(() => {
+      const names = [
+        OrchestratorToolkit,
+        ThreadToolkit,
+        WorktreeToolkit,
+        ProjectToolkit,
+        EnvironmentToolkit,
+        PreviewControlsToolkit,
+        HtmlToolkit,
+      ].flatMap((toolkit) => Object.values(toolkit.tools).map((tool) => tool.name));
+      expect(names).toContain("graph_review");
+      expect(names.filter((name) => /approv|dismiss/iu.test(name))).toEqual([]);
+    }),
   );
 });

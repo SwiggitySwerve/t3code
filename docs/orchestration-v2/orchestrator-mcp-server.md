@@ -525,6 +525,70 @@ workflow (the `workflowTriggers` setting) gets a plan-first `<t3-workflow>` note
 thread that is not a delegated task can ask; wakes, steers, restart continuations and
 server-made replies cannot. The detector reads the stored message, not the provider text.
 
+A request for a workflow arms an approval gate for that thread
+(`apps/server/src/orchestration-v2/WorkflowApprovalGate.ts`, which owns its state and asks
+the same detector). While it is armed the server refuses `workflow_start`, and refuses
+`graph_start` for any digest the user has not approved. The agent plans with `graph_review`
+and ends its turn; the user approves or dismisses that review in the client
+(`orchestration.approveWorkflowReview`, `orchestration.dismissWorkflowReview`, which need
+the operate grant and are not MCP tools).
+
+A request is armed until it is settled. Armed refuses; settled does not.
+
+- **Approve** records the digest and sends the agent a message, from the server on the
+  user's behalf, that carries it. The request stays armed: only that digest may start, and
+  any other graph or script is still refused.
+- **A successful start of the approved digest** settles the request. Later starts on the
+  thread, including scripts and other graphs, follow the ordinary rules for a thread nobody
+  asked a workflow on. A start that fails or is interrupted settles nothing.
+- **Dismiss** settles the request at once and tells the agent not to start a workflow for it.
+  Starts are not refused afterwards; the instruction is all that stops the agent. A repeated
+  Dismiss succeeds and sends nothing new. Approve after Dismiss is refused with
+  `no-pending-request`, which the client shows as an expired review.
+- **The user's next message** that asks for no workflow lifts the gate, and a new request
+  replaces it with a fresh one.
+
+One request and one graph are one run. Two identities are kept apart.
+
+- **Launch identity: thread, request and digest.** The gate derives a start key,
+  `approval:<thread>:<request message>:<digest>`, and uses it as the `clientRequestId` of the
+  `workflow.start` command, replacing whatever key the agent sent. If the start commits its
+  workflow and then fails or is interrupted, a retry of the same digest, with any key or none,
+  finds that workflow instead of starting a second one. The key does not depend on the
+  decision, so it is the same after a restart: a fresh review and approval of the same request
+  and digest returns the workflow the first approval began, whether it is still running or
+  has finished. It does not start another. To run the same graph again, the person sends a new
+  message that asks for a workflow, which is a new request with a new key. A different digest
+  is a separate review and a separate start. The command id is made in an `approval`
+  namespace rather than from the agent's provider session, so a retry from a new provider
+  session finds the same workflow. A stable key is not an approval: after a restart the
+  approval is gone, and no start runs until the person approves a fresh review. A start
+  refused before it reaches `workflow.start`, for example because the reviewed model is no
+  longer served, leaves the approval in place; the same digest can start once the target is
+  served again, and T3 never moves to another entry.
+- **Delivery identity: thread, request and decision.** The messages the gate sends are named
+  by the thread, the request and a decision id the gate makes in this process. Repeated and
+  concurrent clicks share the decision id, so they share one message. A review made and
+  approved after a restart gets a new decision id, so the agent is told again and its message
+  is not mistaken for the earlier one, which a command receipt would otherwise answer. Every
+  call returns the same ids, so a call that repeats after a failed send reaches the receipt or
+  sends the missing message.
+
+State is in memory only. After a restart (or an upgrade, which restarts) the gate is armed
+again from the thread's latest started person-typed message, whether its request was pending,
+dismissed or already started, so every review and approval must be made again, even when the
+agent sends back the expanded graph with the old digest. "Started" means the message began a
+run: a message still waiting in the queue, and steers, do not count. The trigger settings in
+force now decide whether the message asks for a workflow. Delegation (`delegate_task`,
+`delegate_tasks`) is not gated.
+
+Two limits of an approved start are accepted. The orchestrator stores a `workflow.start` that it
+rejected, under the start key. Retrying that approved digest repeats the rejection, even after
+a restart, until the person sends a new message that asks for a workflow (a new request, so a
+new key). And when a committed workflow's agents have changed an input file of the reviewed
+graph, a retry fails the input check instead of returning the workflow; that failure is
+closed, and no second run starts.
+
 #### In the app
 
 The calling thread's timeline shows a T3-run workflow where it started: its state
@@ -555,6 +619,10 @@ own threads. The row stores the script with a settings line for its args and bud
   The same sweep stops an attempt past its deadline; that counts as a failed
   attempt and retries with a note asking the agent to finish within the budget.
   It is separate from `stallTimeoutMs`, which measures inactivity.
+- **Approved starts.** A start rejected inside `workflow.start` is remembered under the
+  approval's start key and repeats its rejection on every retry, across restarts, until the
+  person sends a new message that asks for a workflow. A retry after the committed workflow
+  changed a reviewed input file fails closed rather than returning the workflow.
 - **Budget.** `budgetTokens` counts cumulative input plus output for finished
   attempts, including cached reads and writes, retries and judges. It is an estimate
   rather than a bill. Once it is spent, `agent()` throws for any agent that has not
@@ -624,13 +692,25 @@ when every node passed its checks.
   `workspace_snapshot` input and returns the run order as `layers`, `writeConflicts`
   between nodes with no path between them (the runner runs those one at a time), the
   inputs it found, `ready`, and a `digest` over the normalized graph and the input
-  hashes. It starts and records nothing; Claude's read-only tool list includes it.
+  hashes. It starts nothing; Claude's read-only tool list includes it. It also returns
+  a `reviewId` the server made for this review, and `approvalRequired`, true while a
+  user's request for a workflow waits for approval (above). The server keeps the review
+  in memory so the user's decision can be bound to it; the client decides by `reviewId`
+  and `digest`, never by what the agent echoed. The server notes which request is armed
+  before the review reads anything. If the request was replaced, lifted or settled while the
+  review ran, the call fails as stale and records nothing, so a slow review never becomes
+  approvable under a newer request.
 - **`graph_start({ graph, acceptedDigest, budgetTokens?, title?, clientRequestId? })`**
   reviews again and refuses blockers, a digest mismatch, or an input file that
   changed since the review (naming the files, for reviews this server process
   made). Reviews are kept in memory, so after a restart a mismatched digest is
   refused as "Review not found"; run `graph_review` again. A digest that still
-  matches starts without the record. It then runs the graph as a workflow, so `workflow_status`,
+  matches starts without the record, unless the user's request for a workflow waits: then
+  the approval gate refuses first, before the graph is rebuilt, and only a digest the
+  user approved starts. It starts under the key of the thread, request and digest, which replaces
+  the `clientRequestId` you send, so a repeat of that start, in this process or after a
+  restart, returns the same workflow. It then
+  runs the graph as a workflow, so `workflow_status`,
   `workflow_stop`, resume after a restart, the budget, the app's display and the one
   completion wake work as for a script.
 - **Running.** The stored script is one fixed driver with the graph as its args.

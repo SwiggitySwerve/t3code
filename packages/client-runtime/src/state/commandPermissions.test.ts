@@ -14,6 +14,7 @@ import {
   AuthSourceControlWriteScope,
   ThreadId,
   EnvironmentId,
+  ORCHESTRATION_V2_WS_METHODS,
   ScheduledTaskId,
   WS_METHODS,
   type AuthSessionState,
@@ -346,3 +347,65 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
     expect(writes).toBe(0);
   }),
 );
+
+describe("workflow review decisions", () => {
+  const methods = [
+    ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview,
+    ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview,
+  ] as const;
+
+  it.effect.each(methods)("%s needs the destination's operate grant", (method) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const registry = yield* setup;
+        const decide = createCommandPermissions(runtime, method);
+        // Reading a thread is not deciding what its agent may run.
+        registry.set(
+          sessions(env),
+          AsyncResult.success({
+            ...grant(false),
+            scopes: [AuthOrchestrationReadScope],
+            permissions: [AuthOrchestrationReadScope],
+          }),
+        );
+        expect(registry.get(decide.permissionAtom(env))).toBe(false);
+        expect(yield* decide.authorize(registry, env).pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthOrchestrationOperateScope,
+        });
+        registry.set(sessions(env), AsyncResult.success(grant(true)));
+        expect(registry.get(decide.permissionAtom(env))).toBe(true);
+        yield* decide.authorize(registry, env);
+        // The grant is the destination's: another environment's does not carry over.
+        registry.set(sessions(other), AsyncResult.success(grant(false)));
+        expect(registry.get(decide.permissionAtom(other))).toBe(false);
+      }),
+    ),
+  );
+
+  it.effect.each(methods)("%s cannot be sent outside a guarded command", (method) =>
+    Effect.gen(function* () {
+      let sent = 0;
+      const session = {
+        client: {
+          [method]: () =>
+            Effect.sync(() => {
+              sent++;
+            }),
+        },
+      } as unknown as RpcSession;
+      const supervisor = {
+        target: { environmentId: env, label: "target" },
+        session: yield* SubscriptionRef.make(Option.some(session)),
+      } as unknown as EnvironmentSupervisor["Service"];
+      const refused = yield* requestGuarded(method, {
+        environmentId: env,
+        threadId: ThreadId.make("thread"),
+        reviewId: "review",
+        digest: null,
+      } as never).pipe(Effect.provideService(EnvironmentSupervisor, supervisor), Effect.flip);
+      expect(refused._tag).toBe("EnvironmentAuthorizationError");
+      expect(sent).toBe(0);
+    }),
+  );
+});

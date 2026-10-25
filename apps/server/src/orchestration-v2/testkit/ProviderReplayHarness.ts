@@ -49,6 +49,7 @@ import * as ProviderTurnStartService from "../ProviderTurnStartService.ts";
 import * as ProviderTurnStartServiceTestkit from "../ProviderTurnStartService.testkit.ts";
 import * as McpAppModelContext from "../../mcpApps/McpAppModelContext.ts";
 import * as RunExecutionService from "../RunExecutionService.ts";
+import * as WorkflowApprovalGate from "../WorkflowApprovalGate.ts";
 import * as RunFinalizationService from "../RunFinalizationService.ts";
 import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationService.ts";
 import * as RuntimePolicy from "../RuntimePolicy.ts";
@@ -248,6 +249,7 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
+  | WorkflowApprovalGate.WorkflowApprovalGate
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | CommandOutputRecorder.CommandOutputRecorder
@@ -283,6 +285,7 @@ export function layerWithRegistry<Error>(
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
+  | WorkflowApprovalGate.WorkflowApprovalGate
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | ProviderSessionManager.ProviderSessionManagerV2
@@ -390,6 +393,9 @@ export function layerWithRegistry<Error>(
   const layerProviderSwitchServiceProvided = ProviderSwitchService.layer.pipe(
     Layer.provide(layerProvidedRegistry),
   );
+  const layerWorkflowApprovalGateProvided = WorkflowApprovalGate.layer.pipe(
+    Layer.provide(Layer.merge(layerStores, layerServerSettings)),
+  );
   const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
@@ -400,6 +406,7 @@ export function layerWithRegistry<Error>(
         layerProviderEventIngestorProvided,
         layerServerSettings,
         layerStores,
+        layerWorkflowApprovalGateProvided,
       ),
     ),
   );
@@ -523,6 +530,7 @@ export function layerWithRegistry<Error>(
   );
   const layerReplayRuntime = Layer.mergeAll(
     layerOrchestratorProvided,
+    layerWorkflowApprovalGateProvided,
     layerProviderSessionManagerProvided,
     layerEffectWorkerProvided,
     layerEventSinkProvided,

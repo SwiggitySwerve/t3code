@@ -52,6 +52,8 @@ import * as ThreadLaunchService from "./ThreadLaunchService.ts";
 import * as ThreadLifecycleService from "./ThreadLifecycleService.ts";
 import * as ThreadForkService from "./ThreadForkService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
+import * as WorkflowApprovalService from "./WorkflowApprovalService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 
@@ -148,6 +150,14 @@ const layerProviderAuthServiceProvided = ProviderAuthService.layer.pipe(
   Layer.provide(Layer.merge(ProjectionStore.layer, layerProviderSessionManagerProvided)),
 );
 
+// One gate for the process: turn start arms it, the workflow tools check it, the client decides.
+// Every consumer takes this same layer reference, so memoization builds it once. A consumer that
+// built its own gate (a fresh layer, a separate build) would never see what turn start armed;
+// the composition tests in runtimeLayer.test.ts fail then.
+const layerWorkflowApprovalGateProvided = WorkflowApprovalGate.layer.pipe(
+  Layer.provide(ProjectionStore.layer),
+);
+
 const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -157,6 +167,7 @@ const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
       IdAllocator.layer,
       layerProviderEventIngestorProvided,
       TurnItemPositionStore.layer,
+      layerWorkflowApprovalGateProvided,
     ),
   ),
 );
@@ -264,6 +275,9 @@ export const layerProjectSetupScriptRunner = ProjectSetupScriptRunner.layer.pipe
 const layerManagedProjectFoldersProvided = ManagedProjectFolders.layer.pipe(
   Layer.provide(layerProjectService),
 );
+export const layerWorkflowApprovalService = WorkflowApprovalService.layer.pipe(
+  Layer.provide(Layer.merge(layerWorkflowApprovalGateProvided, layerThreadManagementProvided)),
+);
 const layerThreadLaunchProvided = ThreadLaunchService.layer.pipe(
   Layer.provide(
     Layer.mergeAll(
@@ -349,6 +363,7 @@ const layerMcpAppRequestsProvided = McpAppRequests.layer.pipe(
 export const layer = Layer.mergeAll(
   layerCommandOutputHubProvided,
   layerOrchestratorProvided,
+  layerWorkflowApprovalGateProvided,
   layerMcpAppRequestsProvided,
   layerThreadManagementProvided,
   layerEffectWorkerProvided,
@@ -364,6 +379,7 @@ export const layerProduction = Layer.mergeAll(
   layerProjectService,
   layerManagedProjectFoldersProvided,
   layerThreadLaunchProvided,
+  layerWorkflowApprovalService,
   layerThreadLifecycleProvided,
   layerScheduledTaskProvided,
   layerSecretRequestsProvided,

@@ -119,6 +119,7 @@ import {
 import { delegatedRunOutcome, runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as WorkflowApprovalGate from "../orchestration-v2/WorkflowApprovalGate.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
@@ -868,6 +869,12 @@ export function resolveInteractionMode(
     : Effect.succeed(resolved);
 }
 
+/**
+ * The namespace of command ids for a workflow started on the user's approval. The approval's
+ * start key names the start, so the provider session that makes the call does not.
+ */
+const APPROVED_START_NAMESPACE = "workflow-approval";
+
 function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
@@ -1209,6 +1216,7 @@ const make = Effect.gen(function* () {
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const projects = yield* ProjectService.ProjectService;
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
+  const workflowApprovalGate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
   const loadWorkflowPresets = serverSettings.getSettings.pipe(
@@ -2478,6 +2486,19 @@ const make = Effect.gen(function* () {
     ),
   });
 
+  const isReviewReady = (review: Pick<GraphReview, "digest" | "blockers">) =>
+    review.digest !== null && review.blockers.length === 0;
+
+  /**
+   * The user's approval gate refused, or could not be checked. The agent reads the message, which
+   * says what to do next.
+   */
+  const approvalFailure = (error: WorkflowApprovalGate.WorkflowApprovalRequiredError) =>
+    failure(
+      error.reason === "unverified" ? "orchestration_error" : "approval_required",
+      error.message,
+    );
+
   type GraphReview = ReturnType<typeof reviewGraph> & {
     targets: OrchestratorMcpGraphReviewResult["targets"];
     profiles: ReadonlyArray<ProfileChoice>;
@@ -2670,9 +2691,13 @@ const make = Effect.gen(function* () {
       .toSorted();
   };
 
-  const graphReviewResult = (review: GraphReview): OrchestratorMcpGraphReviewResult => ({
+  const graphReviewResult = (
+    review: GraphReview,
+    decision: Pick<OrchestratorMcpGraphReviewResult, "reviewId" | "approvalRequired">,
+  ): OrchestratorMcpGraphReviewResult => ({
+    ...decision,
     digest: review.digest,
-    ready: review.digest !== null && review.blockers.length === 0,
+    ready: isReviewReady(review),
     targets: review.targets,
     ...(review.profiles.length === 0 ? {} : { profiles: review.profiles }),
     ...(review.availableProfiles.length === 0
@@ -2777,6 +2802,53 @@ const make = Effect.gen(function* () {
       yield* resumeWorkflow(started, workflowScope(scope, workflowId), afterSequence);
     }
     return yield* workflowResult(yield* loadProjection(scope.thread.threadId), started);
+  });
+
+  /**
+   * The start of a reviewed graph, past the approval gate: the graph the caller sends is reviewed
+   * again and must still match the digest the caller accepted.
+   */
+  const startReviewedGraph = Effect.fn("OrchestratorMcpService.startReviewedGraph")(function* (
+    scope: McpThreadInvocationScope,
+    input: OrchestratorMcpGraphStartInput,
+  ) {
+    const parent = yield* loadProjection(scope.thread.threadId);
+    const { review, compiled } = yield* reviewCallerGraph(
+      parent,
+      input.graph,
+      input.workerTarget,
+      reviewedGraphs.get(input.acceptedDigest)?.profileEntries,
+    );
+    if (review.blockers.length > 0 || compiled === undefined) {
+      return yield* failure(
+        "invalid_request",
+        `The graph has blockers: ${review.blockers.join("; ")}`,
+      );
+    }
+    if (review.digest !== input.acceptedDigest) {
+      const changed = changedGraphInputs(input.acceptedDigest, review.inputs);
+      return yield* failure(
+        "invalid_request",
+        changed === undefined
+          ? // Reviews live in memory, so a restart forgets them; the digest alone cannot say what changed.
+            "Review not found: no review with that digest is on record (reviews do not survive a server restart), and the graph or its input files no longer match it. Run graph_review again."
+          : changed.length > 0
+            ? `Input files changed since review: ${changed.join(", ")}. Review the graph again.`
+            : "The graph changed since review (digest mismatch); review it again.",
+      );
+    }
+    return yield* startWorkflow(
+      scope,
+      parent,
+      {
+        script: compiled.source,
+        args: compiled.args,
+        title: input.title ?? compiled.title,
+        ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+        ...(input.clientRequestId === undefined ? {} : { clientRequestId: input.clientRequestId }),
+      },
+      compiled.plan,
+    );
   });
 
   const findWorkflow = (
@@ -3640,60 +3712,67 @@ const make = Effect.gen(function* () {
     ),
     workflowStart: Effect.fn("OrchestratorMcpService.workflowStart")(
       function* (callerScope, input) {
-        const { scope, parent } = yield* loadThreadCaller(callerScope, "workflow_start");
+        yield* requireCapability(callerScope);
+        const scope = yield* requireThreadScope(callerScope, "workflow_start");
+        // While the user's request for a workflow waits for approval, a script has no review to
+        // approve, so it does not start.
+        yield* workflowApprovalGate
+          .requireNoRequest(scope.thread.threadId)
+          .pipe(Effect.mapError(approvalFailure));
+        const parent = yield* loadProjection(scope.thread.threadId);
         return yield* startWorkflow(scope, parent, input);
       },
     ),
     graphReview: Effect.fn("OrchestratorMcpService.graphReview")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "graph_review");
       yield* requireCapability(scope);
+      // The request this review belongs to is taken before any of its work: a review that
+      // finishes under a newer request is stale and is not recorded.
+      const ticket = yield* workflowApprovalGate
+        .beginReview(scope.thread.threadId)
+        .pipe(Effect.mapError(approvalFailure));
       const { review } = yield* reviewCallerGraph(
         yield* loadProjection(scope.thread.threadId),
         input.graph,
         input.workerTarget,
       );
-      return graphReviewResult(review);
+      // The review gets its id here, where it is produced. The client decides about it by this
+      // id and the digest; nothing the provider echoes back is read.
+      const reviewId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+      const { approvalRequired } = yield* workflowApprovalGate
+        .completeReview(ticket, {
+          environmentId: scope.environmentId,
+          reviewId,
+          digest: review.digest,
+          ready: isReviewReady(review),
+        })
+        .pipe(Effect.mapError(approvalFailure));
+      return graphReviewResult(review, { reviewId, approvalRequired });
     }),
     graphStart: Effect.fn("OrchestratorMcpService.graphStart")(function* (callerScope, input) {
-      const { scope, parent } = yield* loadThreadCaller(callerScope, "graph_start");
-      const { review, compiled } = yield* reviewCallerGraph(
-        parent,
-        input.graph,
-        input.workerTarget,
-        reviewedGraphs.get(input.acceptedDigest)?.profileEntries,
-      );
-      if (review.blockers.length > 0 || compiled === undefined) {
-        return yield* failure(
-          "invalid_request",
-          `The graph has blockers: ${review.blockers.join("; ")}`,
+      yield* requireCapability(callerScope);
+      const scope = yield* requireThreadScope(callerScope, "graph_start");
+      // The gate comes first and wraps the whole start: the graph the agent sends back is rebuilt
+      // only for a digest the user approved, so a rebuilt graph can never stand in for approval.
+      // An approved start runs under the approval's own key, whatever key the agent sent, and in
+      // a namespace of its own, so a retry finds the workflow the first attempt committed even
+      // from another provider session.
+      return yield* workflowApprovalGate
+        .guardGraphStart(
+          { threadId: scope.thread.threadId, digest: input.acceptedDigest },
+          (startKey) =>
+            startKey === undefined
+              ? startReviewedGraph(scope, input)
+              : startReviewedGraph(
+                  { ...scope, requestNamespace: APPROVED_START_NAMESPACE },
+                  { ...input, clientRequestId: startKey },
+                ),
+        )
+        .pipe(
+          Effect.catchTags({
+            WorkflowApprovalRequiredError: (error) => Effect.fail(approvalFailure(error)),
+          }),
         );
-      }
-      if (review.digest !== input.acceptedDigest) {
-        const changed = changedGraphInputs(input.acceptedDigest, review.inputs);
-        return yield* failure(
-          "invalid_request",
-          changed === undefined
-            ? // Reviews live in memory, so a restart forgets them; the digest alone cannot say what changed.
-              "Review not found: no review with that digest is on record (reviews do not survive a server restart), and the graph or its input files no longer match it. Run graph_review again."
-            : changed.length > 0
-              ? `Input files changed since review: ${changed.join(", ")}. Review the graph again.`
-              : "The graph changed since review (digest mismatch); review it again.",
-        );
-      }
-      return yield* startWorkflow(
-        scope,
-        parent,
-        {
-          script: compiled.source,
-          args: compiled.args,
-          title: input.title ?? compiled.title,
-          ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
-          ...(input.clientRequestId === undefined
-            ? {}
-            : { clientRequestId: input.clientRequestId }),
-        },
-        compiled.plan,
-      );
     }),
     workflowStatus: Effect.fn("OrchestratorMcpService.workflowStatus")(
       function* (callerScope, input) {
@@ -4463,6 +4542,7 @@ export const layer: Layer.Layer<
   | Crypto.Crypto
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
+  | WorkflowApprovalGate.WorkflowApprovalGate
   | GitVcsDriver.GitVcsDriver
   | ProviderRegistry.ProviderRegistry
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2

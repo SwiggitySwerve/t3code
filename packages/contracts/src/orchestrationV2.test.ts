@@ -2,7 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
-import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
+import { EnvironmentId, NodeId, RunAttemptId, ThreadId, TrimmedNonEmptyString } from "./index.ts";
 import {
   latestProviderTurnForAttempt,
   OrchestrationV2ProviderCapabilities,
@@ -15,6 +15,7 @@ import {
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
   OrchestrationV2WorkflowAgent,
+  OrchestrationV2WorkflowApprovalError,
   OrchestrationV2WorkflowUpdateCommand,
 } from "./orchestrationV2.ts";
 
@@ -705,5 +706,60 @@ describe("latestProviderTurnForAttempt", () => {
     ];
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
+  });
+});
+
+const decodeApprove = Schema.decodeUnknownSync(
+  OrchestrationV2RpcSchemas.approveWorkflowReview.input,
+);
+const decodeDismiss = Schema.decodeUnknownSync(
+  OrchestrationV2RpcSchemas.dismissWorkflowReview.input,
+);
+const workflowApprovalErrorCodec = Schema.toCodecJson(OrchestrationV2WorkflowApprovalError);
+const decodeWorkflowApprovalError = Schema.decodeUnknownSync(workflowApprovalErrorCodec);
+const encodeWorkflowApprovalError = Schema.encodeSync(workflowApprovalErrorCodec);
+
+describe("workflow review decisions", () => {
+  const digest = `sha256:${"a".repeat(64)}`;
+  const review = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-1"),
+    reviewId: "review-1",
+  };
+  it("names the environment, thread, review and digest, and nothing about who decides", () => {
+    expect(decodeApprove({ ...review, digest })).toEqual({ ...review, digest });
+    // A review with blockers has no digest, and can only be dismissed.
+    expect(decodeDismiss({ ...review, digest: null })).toEqual({ ...review, digest: null });
+    expect(() => decodeApprove({ ...review, digest: null })).toThrow();
+    expect(() => decodeApprove({ ...review, digest: "sha256:abc" })).toThrow();
+    for (const missing of ["environmentId", "threadId", "reviewId"] as const) {
+      const { [missing]: _removed, ...rest } = review;
+      expect(() => decodeApprove({ ...rest, digest })).toThrow();
+    }
+    // The connection's grant says who is deciding; a claimed actor is not part of the input.
+    expect(
+      decodeApprove({ ...review, digest, createdBy: "agent", creationSource: "mcp" }),
+    ).not.toHaveProperty("createdBy");
+  });
+
+  it("keeps its reason across the wire and says each one plainly", () => {
+    const reasons = [
+      "environment-mismatch",
+      "no-pending-request",
+      "review-not-found",
+      "review-blocked",
+      "unavailable",
+    ] as const;
+    const messages = reasons.map((reason) => {
+      const error = new OrchestrationV2WorkflowApprovalError({
+        threadId: review.threadId,
+        reviewId: review.reviewId,
+        reason,
+      });
+      const decoded = decodeWorkflowApprovalError(encodeWorkflowApprovalError(error));
+      expect(decoded.reason).toBe(reason);
+      return decoded.message;
+    });
+    expect(new Set(messages).size).toBe(reasons.length);
   });
 });

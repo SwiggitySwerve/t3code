@@ -211,6 +211,7 @@ import {
   ORCHESTRATION_V2_WS_METHODS,
   OrchestrationGetWorkflowScriptError,
   OrchestrationV2StopWorkflowError,
+  OrchestrationV2WorkflowApprovalError,
   OrchestrationV2DispatchCommandError,
   OrchestrationV2GetShellSnapshotError,
   OrchestrationV2CommandOutputError,
@@ -1687,6 +1688,24 @@ const WsOrchestrationV2StopWorkflowRpc = Rpc.make(ORCHESTRATION_V2_WS_METHODS.st
   error: Schema.Union([OrchestrationV2StopWorkflowError, EnvironmentAuthorizationError]),
 });
 
+const WsOrchestrationV2ApproveWorkflowReviewRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview,
+  {
+    payload: OrchestrationV2RpcSchemas.approveWorkflowReview.input,
+    success: OrchestrationV2RpcSchemas.approveWorkflowReview.output,
+    error: Schema.Union([OrchestrationV2WorkflowApprovalError, EnvironmentAuthorizationError]),
+  },
+);
+
+const WsOrchestrationV2DismissWorkflowReviewRpc = Rpc.make(
+  ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview,
+  {
+    payload: OrchestrationV2RpcSchemas.dismissWorkflowReview.input,
+    success: OrchestrationV2RpcSchemas.dismissWorkflowReview.output,
+    error: Schema.Union([OrchestrationV2WorkflowApprovalError, EnvironmentAuthorizationError]),
+  },
+);
+
 const WsOrchestrationV2GetWorkflowScriptRpc = Rpc.make(
   ORCHESTRATION_V2_WS_METHODS.getWorkflowScript,
   {
@@ -2065,6 +2084,8 @@ export const WsRpcGroup = RpcGroup.make(
   WsOrchestrationV2DispatchCommandRpc,
   WsOrchestrationV2GetWorkflowScriptRpc,
   WsOrchestrationV2StopWorkflowRpc,
+  WsOrchestrationV2ApproveWorkflowReviewRpc,
+  WsOrchestrationV2DismissWorkflowReviewRpc,
   WsOrchestrationV2GetTurnItemRpc,
   WsOrchestrationV2GetTurnDiffRpc,
   WsOrchestrationV2GetFullThreadDiffRpc,

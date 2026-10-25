@@ -53,6 +53,7 @@ import {
 } from "@t3tools/provider-core/server/failure";
 import * as RunFinalizationService from "./RunFinalizationService.ts";
 import * as TurnItemPositionStore from "./TurnItemPositionStore.ts";
+import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
 
 export interface ProviderEventRoutingState {
   readonly ownedThreadIds: ReadonlySet<ThreadId>;
@@ -605,6 +606,7 @@ export const layer: Layer.Layer<
   | ServerSettings.ServerSettingsService
   | McpAppModelContext.McpAppModelContext
   | TurnItemPositionStore.TurnItemPositionStoreV2
+  | WorkflowApprovalGate.WorkflowApprovalGate
 > = Layer.effect(
   RunExecutionServiceV2,
   Effect.gen(function* () {
@@ -616,6 +618,7 @@ export const layer: Layer.Layer<
     const serverSettings = yield* ServerSettings.ServerSettingsService;
     const mcpAppModelContext = yield* McpAppModelContext.McpAppModelContext;
     const turnItemPositions = yield* TurnItemPositionStore.TurnItemPositionStoreV2;
+    const workflowApprovalGate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
     const finalizationObserver = yield* RunFinalizationService.RunFinalizationObserver;
 
     const writeFinalRunEvents = Effect.fn("RunExecutionService.writeFinalRunEvents")(
@@ -1614,6 +1617,24 @@ export const layer: Layer.Layer<
           key: `mcp_app_${entry.itemId.replace(/[^\w.-]/g, "_")}`,
           text: entry.text,
         }));
+        // The gate and the note answer one question about this message, asked once.
+        const workflowRequest = {
+          workflowTriggers: runSettings.workflowTriggers,
+          typedText: input.typedText,
+          createdBy: input.message.createdBy,
+          creationSource: input.message.creationSource,
+          scheduledTaskId: input.message.scheduledTaskId,
+          senderThreadId: input.message.senderThreadId,
+          delegatedThread: input.appThread.lineage?.relationshipToParent === "subagent",
+          resumesEarlierTurn:
+            input.attempt.reason === "steering_restart" ||
+            input.run.restartContinuationOfRunId !== undefined,
+        };
+        const requested = yield* workflowApprovalGate.observeTurn({
+          ...workflowRequest,
+          threadId: input.run.threadId,
+          messageId: input.message.messageId,
+        });
         const turnInput = {
           appThread: input.appThread,
           threadId: input.run.threadId,
@@ -1633,22 +1654,16 @@ export const layer: Layer.Layer<
           providerThread: input.providerThread,
           message: {
             ...input.message,
-            text: applyTurnTriggers({
-              ultracode: runSettings.ultracode,
-              workflowTriggers: runSettings.workflowTriggers,
-              workflowPresets: runSettings.workflowPresets,
-              driver: input.providerThread.driver,
-              text: input.message.text,
-              typedText: input.typedText,
-              createdBy: input.message.createdBy,
-              creationSource: input.message.creationSource,
-              scheduledTaskId: input.message.scheduledTaskId,
-              senderThreadId: input.message.senderThreadId,
-              delegatedThread: input.appThread.lineage?.relationshipToParent === "subagent",
-              resumesEarlierTurn:
-                input.attempt.reason === "steering_restart" ||
-                input.run.restartContinuationOfRunId !== undefined,
-            }),
+            text: applyTurnTriggers(
+              {
+                ...workflowRequest,
+                ultracode: runSettings.ultracode,
+                workflowPresets: runSettings.workflowPresets,
+                driver: input.providerThread.driver,
+                text: input.message.text,
+              },
+              requested,
+            ),
           },
           modelSelection: input.modelSelection,
           runtimePolicy: input.runtimePolicy,

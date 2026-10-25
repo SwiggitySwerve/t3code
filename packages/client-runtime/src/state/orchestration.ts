@@ -96,6 +96,15 @@ export function createOrchestrationEnvironmentAtoms<R, E>(
       label: "environment-data:orchestration:stop-workflow",
       tag: ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
     }),
+    // The user's decision on a reviewed workflow graph; the agent cannot reach either one.
+    approveWorkflowReview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:approve-workflow-review",
+      tag: ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview,
+    }),
+    dismissWorkflowReview: createEnvironmentRpcCommand(runtime, {
+      label: "environment-data:orchestration:dismiss-workflow-review",
+      tag: ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview,
+    }),
     turnItem: createEnvironmentRpcQueryAtomFamily(runtime, {
       label: "environment-data:orchestration:turn-item",
       tag: ORCHESTRATION_V2_WS_METHODS.getTurnItem,
