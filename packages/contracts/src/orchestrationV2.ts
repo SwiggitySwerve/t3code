@@ -937,6 +937,25 @@ export function isOrchestrationV2WorkActive(
   return status === "pending" || status === "running" || status === "waiting";
 }
 
+/**
+ * A task a T3-run workflow started that is still active: app-owned, parented to the workflow row,
+ * with a thread of its own. Stopping the workflow repeats while any member is active, whatever the
+ * row's own status.
+ */
+export function isOrchestrationV2ActiveWorkflowMember<
+  Member extends Pick<
+    OrchestrationV2Subagent,
+    "origin" | "parentNodeId" | "childThreadId" | "status"
+  >,
+>(member: Member, workflowId: NodeId): member is Member & { readonly childThreadId: ThreadId } {
+  return (
+    member.origin === "app_owned" &&
+    member.parentNodeId === workflowId &&
+    member.childThreadId !== null &&
+    isOrchestrationV2WorkActive(member.status)
+  );
+}
+
 export const OrchestrationV2CheckpointScope = Schema.Struct({
   id: CheckpointScopeId,
   threadId: ThreadId,

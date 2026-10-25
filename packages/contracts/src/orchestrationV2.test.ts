@@ -4,6 +4,8 @@ import * as Schema from "effect/Schema";
 
 import { EnvironmentId, NodeId, RunAttemptId, ThreadId, TrimmedNonEmptyString } from "./index.ts";
 import {
+  isOrchestrationV2ActiveWorkflowMember,
+  isOrchestrationV2WorkActive,
   latestProviderTurnForAttempt,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
@@ -820,5 +822,61 @@ describe("workflow review decisions", () => {
       return decoded.message;
     });
     expect(new Set(messages).size).toBe(reasons.length);
+  });
+});
+
+describe("isOrchestrationV2ActiveWorkflowMember", () => {
+  const workflowId = NodeId.make("node:workflow");
+  const memberThread = ThreadId.make("thread:member");
+  const member = (
+    overrides: Partial<{
+      origin: "app_owned" | "provider_native";
+      parentNodeId: NodeId;
+      childThreadId: ThreadId | null;
+      status: OrchestrationV2Subagent["status"];
+    }> = {},
+  ) => ({
+    origin: "app_owned" as const,
+    parentNodeId: workflowId,
+    childThreadId: memberThread as ThreadId | null,
+    status: "running" as OrchestrationV2Subagent["status"],
+    ...overrides,
+  });
+
+  it.each([
+    ["idle", false],
+    ["pending", true],
+    ["running", true],
+    ["waiting", true],
+    ["completed", false],
+    ["failed", false],
+    ["cancelled", false],
+    ["interrupted", false],
+  ] as const)("treats a %s app-owned member of the workflow as active: %s", (status, active) => {
+    expect(isOrchestrationV2ActiveWorkflowMember(member({ status }), workflowId)).toBe(active);
+    // One rule: membership adds to the shared work-active status, never redefines it.
+    expect(isOrchestrationV2WorkActive(status)).toBe(active);
+  });
+
+  it("is not a member of the workflow unless it is app-owned, parented to it, and has a thread", () => {
+    expect(
+      isOrchestrationV2ActiveWorkflowMember(member({ origin: "provider_native" }), workflowId),
+    ).toBe(false);
+    expect(
+      isOrchestrationV2ActiveWorkflowMember(
+        member({ parentNodeId: NodeId.make("node:other-workflow") }),
+        workflowId,
+      ),
+    ).toBe(false);
+    expect(isOrchestrationV2ActiveWorkflowMember(member({ childThreadId: null }), workflowId)).toBe(
+      false,
+    );
+  });
+
+  it("narrows an active member to the thread the stop must reach", () => {
+    const threads = [member(), member({ childThreadId: null }), member({ status: "completed" })]
+      .filter((candidate) => isOrchestrationV2ActiveWorkflowMember(candidate, workflowId))
+      .map((active) => active.childThreadId);
+    expect(threads).toEqual([memberThread]);
   });
 });

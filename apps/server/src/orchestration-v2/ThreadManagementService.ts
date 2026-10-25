@@ -11,7 +11,7 @@ import type {
 import {
   type ChatAttachment,
   CommandId,
-  isOrchestrationV2WorkActive,
+  isOrchestrationV2ActiveWorkflowMember,
   MessageId,
   type NodeId,
   OrchestrationV2StopWorkflowError,
@@ -1041,12 +1041,7 @@ const make = Effect.gen(function* () {
     workflowId: NodeId,
   ) =>
     subagents.flatMap((member) =>
-      member.origin === "app_owned" &&
-      member.parentNodeId === workflowId &&
-      member.childThreadId !== null &&
-      isOrchestrationV2WorkActive(member.status)
-        ? [member.childThreadId]
-        : [],
+      isOrchestrationV2ActiveWorkflowMember(member, workflowId) ? [member.childThreadId] : [],
     );
 
   const stopAppOwnedWorkflow = Effect.fn("ThreadManagementService.stopAppOwnedWorkflow")(function* (

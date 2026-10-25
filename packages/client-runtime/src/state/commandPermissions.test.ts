@@ -348,10 +348,11 @@ it.effect("rejects protected unary and streamed RPCs outside a guarded command",
   }),
 );
 
-describe("workflow review decisions", () => {
+describe("workflow commands that run or end a thread's agents", () => {
   const methods = [
     ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview,
     ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview,
+    ORCHESTRATION_V2_WS_METHODS.stopWorkflow,
   ] as const;
 
   it.effect.each(methods)("%s needs the destination's operate grant", (method) =>

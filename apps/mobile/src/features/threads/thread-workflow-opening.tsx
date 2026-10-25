@@ -2,10 +2,13 @@ import { useAtomValue } from "@effect/atom-react";
 import { StackActions, useNavigation } from "@react-navigation/native";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
+  appWorkflowHeading,
+  canStopWorkflow,
   resolveWorkflowOpening,
   workflowOpeningHeadline,
   workflowOpeningParentThreadId,
   type RuntimeSubagent,
+  type WorkflowOpening,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import { useState } from "react";
@@ -16,11 +19,18 @@ import { environmentThreadDetails } from "../../state/threads";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 import { useMarkdownCodeHighlight } from "./markdownCodeHighlightState";
 import { SubagentRow } from "./SubagentRow";
+import { WorkflowStopControl } from "./workflow-stop-control";
 import { WorkLogBlock } from "./work-log-layout";
 
 const FOLDED_SCRIPT_LINES = 10;
 
-export function useWorkflowOpening(environmentId: EnvironmentId, threadId: ThreadId) {
+/** An opening plus the parent thread that owns the coordinator's workflow row. */
+export type WorkflowOpeningView = WorkflowOpening & { readonly parentThreadId: ThreadId };
+
+export function useWorkflowOpening(
+  environmentId: EnvironmentId,
+  threadId: ThreadId,
+): WorkflowOpeningView | null {
   const threadAtom = environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, threadId));
   // Selected as a primitive so an ordinary thread's updates never change the result.
   const parentId = useAtomValue(threadAtom, (thread) =>
@@ -38,13 +48,13 @@ export function useWorkflowOpening(environmentId: EnvironmentId, threadId: Threa
     environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, parentId ?? threadId)),
     (parent) => (parentId === null ? null : (parent?.projection.subagents ?? null)),
   );
-  return projection === null
-    ? null
-    : resolveWorkflowOpening({
-        thread: projection.thread,
-        messages: projection.messages,
-        parentSubagents,
-      });
+  if (projection === null || parentId === null) return null;
+  const opening = resolveWorkflowOpening({
+    thread: projection.thread,
+    messages: projection.messages,
+    parentSubagents,
+  });
+  return opening === null ? null : { ...opening, parentThreadId: parentId };
 }
 
 function memberRowSubagent(
@@ -67,7 +77,7 @@ function memberRowSubagent(
   };
 }
 
-type WorkflowOpeningValue = NonNullable<ReturnType<typeof useWorkflowOpening>>;
+type WorkflowOpeningValue = WorkflowOpeningView;
 
 export function ThreadWorkflowOpening(props: {
   readonly environmentId: EnvironmentId;
@@ -77,6 +87,11 @@ export function ThreadWorkflowOpening(props: {
   const navigation = useNavigation();
   const { opening } = props;
   const headline = workflowOpeningHeadline(opening);
+  const workflow = opening.group?.workflow ?? null;
+  // A coordinator thread is a provider-native workflow; its row lives on the parent thread.
+  const canStop =
+    workflow !== null &&
+    canStopWorkflow({ status: workflow.status, origin: "provider_native", driver: opening.driver });
   const canListMembers = opening.driver !== null && opening.providerInstanceId !== null;
   const phases = (opening.group?.phases ?? []).filter((phase) => phase.members.length > 0);
   const unphased = opening.group?.unphasedMembers ?? [];
@@ -112,7 +127,9 @@ export function ThreadWorkflowOpening(props: {
       <View className="mb-5 gap-3">
         <View className="flex-row items-start gap-2">
           <View className="min-w-0 flex-1 gap-0.5">
-            <Text className="font-t3-medium text-2xs text-foreground-muted">Workflow started</Text>
+            <Text className="font-t3-medium text-2xs text-foreground-muted">
+              {workflow === null ? "Workflow started" : appWorkflowHeading(workflow.status)}
+            </Text>
             <Text numberOfLines={1} className="font-t3-medium text-sm text-foreground">
               {headline.title}
             </Text>
@@ -126,6 +143,14 @@ export function ThreadWorkflowOpening(props: {
             </Text>
           ) : null}
         </View>
+        {workflow !== null && canStop ? (
+          <WorkflowStopControl
+            environmentId={props.environmentId}
+            threadId={opening.parentThreadId}
+            workflowId={workflow.id}
+            title={headline.title}
+          />
+        ) : null}
         {canListMembers
           ? phases.map((phase) => (
               <View key={phase.index} className="gap-px">

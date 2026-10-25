@@ -604,6 +604,23 @@ export function appWorkflowHeading(status: OrchestrationV2Subagent["status"]): s
 }
 
 /**
+ * Whether Stop applies to a workflow: it is running, and it is one T3 runs or a Claude workflow T3
+ * can ask the provider to stop. The row must already be known to be a workflow; the server stays
+ * the authority and refuses the rest.
+ */
+export function canStopWorkflow(workflow: {
+  readonly status: OrchestrationV2Subagent["status"];
+  readonly origin: OrchestrationV2Subagent["origin"];
+  readonly driver: OrchestrationV2Subagent["driver"] | null;
+}): boolean {
+  return (
+    workflow.status === "running" &&
+    (workflow.origin === "app_owned" ||
+      (workflow.origin === "provider_native" && workflow.driver === "claudeAgent"))
+  );
+}
+
+/**
  * A T3-run workflow described as a workflow opening: its plan and agents.
  * The opening also carries the workflow script as data; this view does not
  * decide whether or where a client displays it.

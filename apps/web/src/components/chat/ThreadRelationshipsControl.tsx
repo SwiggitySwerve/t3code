@@ -8,6 +8,7 @@ import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   appWorkflowMemberThreads,
+  canStopWorkflow,
   isAppWorkflow,
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
@@ -504,13 +505,17 @@ export function ThreadRelationshipsPanel(props: {
                   (agent?.providerInstanceId ?? node?.thread?.providerInstanceId),
               );
               const providerDriver = agent?.driver ?? provider?.driver;
-              const canStopWorkflow =
+              const showWorkflowStop =
                 canOperateWorkflow &&
-                workflowGroup?.workflow.status === "running" &&
-                (agent?.origin === "app_owned" ||
-                  (agent?.origin === "provider_native" && providerDriver === "claudeAgent"));
+                workflowGroup !== undefined &&
+                agent !== undefined &&
+                canStopWorkflow({
+                  status: workflowGroup.workflow.status,
+                  origin: agent.origin,
+                  driver: providerDriver ?? null,
+                });
               const isAppWorkflowRow = workflowGroup !== undefined && agent?.origin === "app_owned";
-              const trailingVisibilityClass = (workflowGroup ? canStopWorkflow : canStop)
+              const trailingVisibilityClass = (workflowGroup ? showWorkflowStop : canStop)
                 ? "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0"
                 : "";
               const project = projects.find((project) => project.id === node?.thread?.projectId);
@@ -558,9 +563,9 @@ export function ThreadRelationshipsPanel(props: {
                   )}
                   {agent &&
                   !failed &&
-                  (deriveSubagentElapsedMs(agent, 0) !== null || canStopWorkflow) ? (
+                  (deriveSubagentElapsedMs(agent, 0) !== null || showWorkflowStop) ? (
                     <span
-                      className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${canStopWorkflow ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
+                      className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${showWorkflowStop ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
                     >
                       <AgentElapsed agent={agent} compact />
                     </span>
@@ -612,7 +617,7 @@ export function ThreadRelationshipsPanel(props: {
                     isThreadAvailable={(memberThreadId) =>
                       graph.nodes.get(memberThreadId as ThreadId)?.missing === false
                     }
-                    onStop={canStopWorkflow ? () => void stopWorkflow(agent.id) : undefined}
+                    onStop={showWorkflowStop ? () => void stopWorkflow(agent.id) : undefined}
                     stopping={stoppingId === agent.id}
                     stopDisabled={stoppingId !== null}
                     header={relationshipLink}

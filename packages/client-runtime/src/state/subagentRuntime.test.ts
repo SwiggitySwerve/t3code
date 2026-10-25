@@ -11,6 +11,7 @@ import * as DateTime from "effect/DateTime";
 import {
   appWorkflowHeading,
   appWorkflowMemberThreads,
+  canStopWorkflow,
   workflowGraphHeadline,
   workflowGraphNodeDetail,
   deriveWorkflowGroups,
@@ -653,5 +654,45 @@ describe("appWorkflowHeading", () => {
       "Workflow stopped",
       "Workflow",
     ]);
+  });
+});
+
+describe("canStopWorkflow", () => {
+  const driver = (value: string) => ProviderDriverKind.make(value);
+
+  it("offers Stop only while a workflow T3 can stop is running", () => {
+    const statuses = [
+      "pending",
+      "running",
+      "waiting",
+      "idle",
+      "completed",
+      "failed",
+      "cancelled",
+      "interrupted",
+    ] as const;
+    expect(
+      statuses.filter((status) =>
+        canStopWorkflow({ status, origin: "app_owned", driver: driver("codex") }),
+      ),
+    ).toEqual(["running"]);
+    expect(
+      statuses.filter((status) =>
+        canStopWorkflow({ status, origin: "provider_native", driver: driver("claudeAgent") }),
+      ),
+    ).toEqual(["running"]);
+  });
+
+  it("leaves a provider-native workflow only Claude can stop to the provider", () => {
+    expect(
+      canStopWorkflow({
+        status: "running",
+        origin: "provider_native",
+        driver: driver("codex"),
+      }),
+    ).toBe(false);
+    expect(canStopWorkflow({ status: "running", origin: "provider_native", driver: null })).toBe(
+      false,
+    );
   });
 });
