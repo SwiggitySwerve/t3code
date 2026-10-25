@@ -685,11 +685,15 @@ when every node passed its checks.
 - **Inputs.** A `workspace_snapshot` names a file in the caller's checkout. A
   `task_output` names an output another node declares; that node must be in
   `dependsOn`.
-- **`graph_review({ graph })`** validates the graph and reports every problem as a
-  blocker: bad or duplicate ids, unknown or cyclic dependencies, unsafe paths, a
+- **`graph_review({ graph })`** validates the graph and reports its problems as
+  blockers: bad or duplicate ids, unknown or cyclic dependencies, unsafe paths, a
   `task_output` naming an undeclared output or a node outside `dependsOn`, two
   nodes declaring one output path, `long` without approval, a structured `outputId`
-  the node does not declare, and a missing or oversized input. It hashes every
+  the node does not declare, a missing or oversized input, and a graph over capacity.
+  Review first refuses a graph with more than 1,000 nodes, or one whose worst case
+  exceeds the 1,000-agent workflow cap (see **Caps**): one agent per node, plus up to
+  three judges for each node with a `judgment` check. A capacity refusal can omit the
+  remaining per-node problems; reduce the graph and review again. It hashes every
   `workspace_snapshot` input and returns the run order as `layers`, `writeConflicts`
   between nodes with no path between them (the runner runs those one at a time), the
   inputs it found, `ready`, and a `digest` over the normalized graph and the input
@@ -702,10 +706,10 @@ when every node passed its checks.
   review ran, the call fails as stale and records nothing, so a slow review never becomes
   approvable under a newer request.
 - **`graph_start({ graph, acceptedDigest, budgetTokens?, title?, clientRequestId? })`**
-  reviews again and refuses blockers, a digest mismatch, or an input file that
-  changed since the review (naming the files, for reviews this server process
-  made). Reviews are kept in memory, so after a restart a mismatched digest is
-  refused as "Review not found"; run `graph_review` again. A digest that still
+  reviews again, which revalidates the capacity bound, and refuses blockers, a
+  digest mismatch, or an input file that changed since the review (naming the files,
+  for reviews this server process made). Reviews are kept in memory, so after a
+  restart a mismatched digest is refused as "Review not found"; run `graph_review` again. A digest that still
   matches starts without the record, unless the user's request for a workflow waits: then
   the approval gate refuses first, before the graph is rebuilt, and only a digest the
   user approved starts. It starts under the key of the thread, request and digest, which replaces

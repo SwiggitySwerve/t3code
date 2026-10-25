@@ -887,6 +887,30 @@ return errors`,
     );
 
     it.effect(
+      "gives a node that is never judged good one worker row and a judge row per attempt",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, workflowUpdates, spawned } = yield* makeHarness({
+            judgment: () => false,
+          });
+          yield* launch(
+            runner,
+            'return await agent("x", { node: "a", verify: { type: "judgment", rubric: ["Correct"] } })',
+            twoNodePlan,
+          );
+          yield* Deferred.await(completed);
+          // Graph review budgets this worst case against the workflow's agent capacity.
+          const agents = workflowUpdates.at(-1)!.agents;
+          expect(agents.map((agent) => agent.judgmentFor?.attempt ?? "worker")).toEqual([
+            "worker",
+            0,
+            1,
+            2,
+          ]);
+          expect(spawned()).toBe(6);
+        }),
+    );
+    it.effect(
       "keeps checker associations through a judgment retry and duplicate worker labels",
       () =>
         Effect.gen(function* () {

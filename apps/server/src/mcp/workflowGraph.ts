@@ -15,6 +15,7 @@ import {
   scopesOverlap,
   type WorkflowCheck,
 } from "./workflowChecks.ts";
+import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW, maxAgentsPerCall } from "./workflowLimits.ts";
 
 type AttemptBudget = "short" | "standard" | "long";
 const ATTEMPT_BUDGETS = { short: 30 * 60_000, standard: 2 * 60 * 60_000, long: 6 * 60 * 60_000 };
@@ -201,13 +202,23 @@ export function parseGraph(value: unknown): ParseResult {
   const problems: string[] = [];
   if (source.schemaVersion !== 1) problems.push("schemaVersion must be 1.");
   const rawNodes = record(source.nodes);
-  if (rawNodes === undefined || Object.keys(rawNodes).length === 0)
+  const nodeKeys = rawNodes === undefined ? [] : Object.keys(rawNodes);
+  if (rawNodes === undefined || nodeKeys.length === 0)
     return {
       ok: false,
       problems: [...problems, "nodes must be a non-empty map of node ids to nodes."],
     };
+  // Every node starts an agent, so this much is known before any node is read.
+  if (nodeKeys.length > MAX_AGENTS_PER_WORKFLOW)
+    return {
+      ok: false,
+      problems: [
+        ...problems,
+        `graph has ${nodeKeys.length} nodes, but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW} agents.`,
+      ],
+    };
   const nodes: Record<string, GraphNode> = Object.create(null);
-  for (const key of Object.keys(rawNodes).sort()) {
+  for (const key of nodeKeys.sort()) {
     try {
       id(key, "node");
       nodes[key] = parseNode(rawNodes[key]);
@@ -223,6 +234,19 @@ export function parseGraph(value: unknown): ParseResult {
       problems.push(error instanceof Error ? error.message : String(error));
     }
   }
+  // Judgment checks add judge agents, so the nodes' worst case is known once they are read.
+  const agentsNeeded = Object.values(nodes).reduce(
+    (sum, node) => sum + maxAgentsPerCall(node.verify?.type),
+    0,
+  );
+  if (agentsNeeded > MAX_AGENTS_PER_WORKFLOW)
+    return {
+      ok: false,
+      problems: [
+        ...problems,
+        `graph can start up to ${agentsNeeded} agents (each node, plus up to ${MAX_AGENT_ATTEMPTS} judges for each judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
+      ],
+    };
   const paths = new Map<string, string>();
   for (const [key, node] of Object.entries(nodes)) {
     for (const dep of node.dependsOn)
@@ -319,22 +343,23 @@ export function reviewGraph(value: unknown, inputHashes: Readonly<Record<string,
       ancestors.set(key, found);
       return found;
     };
-    const ordered = layers.flat();
-    ordered.forEach((left, index) => {
-      for (const right of ordered.slice(index + 1)) {
-        if (ancestorsOf(left).has(right) || ancestorsOf(right).has(left)) continue;
-        const a = parsed.graph.nodes[left];
-        const b = parsed.graph.nodes[right];
-        if (a === undefined || b === undefined) continue;
-        const aPaths = writePaths(a);
-        const bPaths = writePaths(b);
-        if (!scopesOverlap(aPaths, bPaths)) continue;
+    // Only nodes that write can conflict, and each one's write paths are worked out once.
+    const writers = layers.flat().flatMap((key) => {
+      const node = parsed.graph.nodes[key];
+      const paths = node === undefined ? [] : writePaths(node);
+      return paths.length === 0 ? [] : [{ key, paths }];
+    });
+    writers.forEach((left, index) => {
+      for (let next = index + 1; next < writers.length; next += 1) {
+        const right = writers[next]!;
+        if (!scopesOverlap(left.paths, right.paths)) continue;
+        if (ancestorsOf(left.key).has(right.key) || ancestorsOf(right.key).has(left.key)) continue;
         writeConflicts.push({
-          nodes: [left, right],
+          nodes: [left.key, right.key],
           paths: [
             ...new Set([
-              ...aPaths.filter((path) => scopesOverlap([path], bPaths)),
-              ...bPaths.filter((path) => scopesOverlap(aPaths, [path])),
+              ...left.paths.filter((path) => scopesOverlap([path], right.paths)),
+              ...right.paths.filter((path) => scopesOverlap(left.paths, [path])),
             ]),
           ].sort(),
         });

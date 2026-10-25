@@ -61,13 +61,10 @@ import {
   scopesOverlap,
   type WorkflowCheck,
 } from "./workflowChecks.ts";
+import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
 
-/** Claude Code's documented per-run ceiling. */
-const MAX_AGENTS_PER_WORKFLOW = 1000;
-/** A failed agent, or one a server restart cancelled, runs again up to this many times in all. */
-const MAX_AGENT_ATTEMPTS = 3;
 /**
  * An agent whose thread records nothing for this long is stopped and started again.
  * Generous, because a long tool call can be silent; `stallTimeoutMs` overrides it.

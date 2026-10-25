@@ -363,6 +363,100 @@ describe("graph review", () => {
   });
 });
 
+describe("graph review write conflicts", () => {
+  it("compares only nodes that can run together and write overlapping paths", () => {
+    const value = graph({
+      root: node({ scopes: { write: ["lib"] } }),
+      mid: node({ dependsOn: ["root"], scopes: { write: ["lib/core"] } }),
+      leaf: node({ dependsOn: ["mid"], scopes: { write: ["lib"] } }),
+      side: node({ scopes: { write: ["lib/core/x.ts", "docs"] } }),
+      docs: node({
+        outputs: [{ id: "out", path: "docs/out.json" }],
+        scopes: { read: ["lib"], write: [] },
+      }),
+      reader: node({ scopes: { read: ["lib"], write: [] } }),
+      bare: node(),
+    });
+    // root, mid and leaf form one chain, so they never conflict with each other.
+    expect(reviewGraph(value, {}).writeConflicts).toEqual([
+      { nodes: ["docs", "side"], paths: ["docs", "docs/out.json"] },
+      { nodes: ["root", "side"], paths: ["lib", "lib/core/x.ts"] },
+      { nodes: ["side", "mid"], paths: ["lib/core", "lib/core/x.ts"] },
+      { nodes: ["side", "leaf"], paths: ["lib", "lib/core/x.ts"] },
+    ]);
+  });
+});
+
+describe("graph capacity", () => {
+  // A workflow starts at most this many agents (workflowRunner.test.ts pins the runner's side).
+  const CAPACITY = 1000;
+  // A judgment check adds a judge agent for each of the three attempts at its node.
+  const JUDGES_PER_NODE = 3;
+  const many = (count: number, make: (index: number) => unknown = () => node()) =>
+    Object.fromEntries(Array.from({ length: count }, (_, index) => [`n${index}`, make(index)]));
+  const judged = () => node({ verify: { type: "judgment", rubric: ["Correct"] } });
+
+  it("reviews a graph that exactly fills the workflow's agent capacity", () => {
+    const reviewed = reviewGraph(graph(many(CAPACITY)), {});
+    expect(reviewed.blockers).toEqual([]);
+    expect(reviewed.digest).not.toBeNull();
+    expect(reviewed.layers).toHaveLength(1);
+    const perNode = 1 + JUDGES_PER_NODE;
+    const full = reviewGraph(graph(many(CAPACITY / perNode, judged)), {});
+    expect(full.blockers).toEqual([]);
+    expect(full.digest).not.toBeNull();
+  });
+
+  it("blocks more nodes than the workflow can start, before looking inside any node", () => {
+    const value = graph(many(CAPACITY + 1, () => ({})));
+    const parsed = parseGraph(value);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok ? [] : parsed.problems).toEqual([
+      expect.stringContaining(String(CAPACITY + 1)),
+    ]);
+    const reviewed = reviewGraph(value, {});
+    expect(reviewed.blockers).toHaveLength(1);
+    expect(reviewed.blockers[0]).toContain(String(CAPACITY));
+    expect(reviewed.digest).toBeNull();
+    expect(reviewed.layers).toEqual([]);
+    expect(reviewed.writeConflicts).toEqual([]);
+  });
+
+  it("counts the judge agents a judgment check can add at every attempt", () => {
+    const perNode = 1 + JUDGES_PER_NODE;
+    const fits = CAPACITY / perNode;
+    const over = graph(many(fits + 1, judged));
+    const reviewed = reviewGraph(over, {});
+    expect(reviewed.blockers).toHaveLength(1);
+    expect(reviewed.blockers[0]).toContain(String((fits + 1) * perNode));
+    expect(reviewed.digest).toBeNull();
+    expect(reviewed.layers).toEqual([]);
+    // The same count of nodes without judges is well within capacity.
+    expect(reviewGraph(graph(many(fits + 1)), {}).blockers).toEqual([]);
+  });
+
+  it("does not count process or structured checks as extra agents", () => {
+    const checked = (index: number) =>
+      node(
+        index % 2 === 0
+          ? { verify: { type: "process", argv: ["true"] } }
+          : {
+              schema: { type: "object" },
+              verify: { type: "structured", requiredPointers: ["/ok"] },
+            },
+      );
+    expect(reviewGraph(graph(many(CAPACITY, checked)), {}).blockers).toEqual([]);
+  });
+
+  it("never reports an over-capacity graph ready to start", () => {
+    const value = graph(
+      many(CAPACITY + 1, (index) => node({ dependsOn: index === 0 ? [] : ["n0"] })),
+    );
+    const reviewed = reviewGraph(value, {});
+    expect(reviewed.blockers).not.toEqual([]);
+    expect(reviewed.digest).toBeNull();
+  });
+});
 it("uses omx attempt deadlines", () => {
   expect(attemptBudgetMs("short")).toBe(30 * 60_000);
   expect(attemptBudgetMs("standard")).toBe(2 * 60 * 60_000);
