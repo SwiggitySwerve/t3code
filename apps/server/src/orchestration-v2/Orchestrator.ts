@@ -1130,10 +1130,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         return withId;
       });
 
-  const delegatedAdmissionFull = Effect.fnUntraced(function* () {
+  /**
+   * Whether a delegated run has to wait for a slot: earlier waiting runs go first, then the
+   * running limit. A run that already holds a slot (admitted while its workspace was prepared)
+   * is not counted against itself.
+   */
+  const delegatedAdmissionFull = Effect.fnUntraced(function* (input?: {
+    readonly holdsSlot: boolean;
+  }) {
     const settings = yield* serverSettings.getSettings.pipe(Effect.orDie);
     const admission = yield* projectionStore.getDelegatedRunAdmission();
-    return admission.waiting.length > 0 || admission.admitted >= settings.maxRunningDelegatedTasks;
+    const others = admission.admitted - (input?.holdsSlot === true ? 1 : 0);
+    return admission.waiting.length > 0 || others >= settings.maxRunningDelegatedTasks;
   });
 
   // Runs in every command transaction; avoid reading thousands of finished leaf nodes.
@@ -9259,6 +9267,34 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         });
       }
       const now = yield* DateTime.now;
+      // A workspace child is admitted while its checkout is prepared, whatever the running limit
+      // says. Once the checkout is ready it takes a slot like any other: it waits, ready, until
+      // a running delegated task finishes and admission releases it.
+      if (
+        state.run.admission === "admitted" &&
+        (yield* delegatedAdmissionFull({ holdsSlot: true }).pipe(mapDispatchError(command)))
+      ) {
+        const emitWait = emit(events, command);
+        yield* emitWait({
+          type: "turn-item.updated",
+          threadId: command.threadId,
+          runId: state.run.id,
+          nodeId: state.rootNode.id,
+          providerInstanceId: state.run.providerInstanceId,
+          occurredAt: now,
+          payload: { ...state.preparationItem, title: ADMISSION_WAIT_TITLE, updatedAt: now },
+        });
+        yield* emitWait({
+          type: "run.updated",
+          threadId: command.threadId,
+          runId: state.run.id,
+          nodeId: state.rootNode.id,
+          providerInstanceId: state.run.providerInstanceId,
+          occurredAt: now,
+          payload: { ...state.run, admission: "waiting" },
+        });
+        return;
+      }
       const resolvedRuntimePolicy = yield* runtimePolicy
         .resolve({ thread: projection.thread, modelSelection: state.run.modelSelection })
         .pipe(mapDispatchError(command));
@@ -12899,7 +12935,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           finalizeAppOwnedSubagent(threadId, { syncRunId: run.id }),
         );
       }
-      if (run.admission !== undefined && delegatedTaskTerminalStatus(run.status) !== null) {
+      // A finished run frees a slot. A workspace child that just became ready and waits may
+      // find one free already: a run that ended before it was listed as waiting woke no pass.
+      if (
+        run.admission !== undefined &&
+        (delegatedTaskTerminalStatus(run.status) !== null ||
+          (run.admission === "waiting" && run.workspacePreparation !== undefined))
+      ) {
         yield* admitWaitingDelegatedRuns;
       }
     },
