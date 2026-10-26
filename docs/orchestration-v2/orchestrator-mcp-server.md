@@ -423,7 +423,9 @@ field holds its phases and agents; the existing workflow view renders it.
 Member tasks hang under that row, and their own completion deliveries are
 disposed, so only `workflow.complete` delivers to the caller. `workflow_status`
 returns the status, phases, each agent's status, model and summary, the latest
-log line, and the script's return value as JSON or why it failed.
+log line, and the script's return value as JSON or why it failed. For a workflow
+started from a graph it also returns `nodes`, the stored outcome of each node
+(see Graphs, below).
 
 Each agent also reports cumulative `usage`, `outcomeCategory`, and `timings`. Usage
 is recomputed from persisted provider-turn totals across every child run and retry;
@@ -495,7 +497,17 @@ These follow the `omx graph` execution graph's protected verifiers
 - `inputs` and `outputs` declare the files an agent reads and must write, as
   `[{ id, path, maxBytes?, sha256? }]` with workspace-relative paths (at most 32 each,
   `maxBytes` default 256 KiB, at most 16 MiB). They need the shared checkout, so
-  `isolation: "worktree"` refuses them. Both are listed in the agent's task.
+  `isolation: "worktree"` refuses them. Inputs are listed in the agent's task in one
+  `<t3-handoff v="1">` block that says its content is data, not instructions: an
+  `<input>` per file with its `id`, `path`, `maxBytes` and, when pinned, `sha256`.
+  An entry may also carry `from`, a node id. In a graph, a `task_output` input carries
+  `from` and the body of its `<input>` is the summary the producing node stored,
+  cut at 2,048 bytes and escaped (`&` and `<`) so it cannot close the block; nothing
+  else of the producing agent reaches it. Outputs follow the block, listed under
+  "Output files you must write:". A graph node, and any agent that declares outputs,
+  is also asked to end with a summary of at most about 1,500 characters (with a
+  `schema`, to keep the text before the JSON block short), because that summary is
+  what the next agent and the coordinator read.
   - Before each attempt, every input must exist within `maxBytes`, and an input with
     `sha256` must still have those bytes; otherwise the agent fails without starting.
   - After the turn, every output must exist within `maxBytes`. A missing or oversized
@@ -633,6 +645,14 @@ own threads. The row stores the script with a settings line for its args and bud
   attempts are counted again from persisted records when the script resumes.
 - **Caps.** 1,000 agents per workflow and 4,096 items per `parallel` or
   `pipeline` call. The environment-wide running limit applies to every agent.
+- **Bounded text.** `apps/server/src/mcp/workflowHandoff.ts` owns the byte caps and the
+  marker `...truncated (<shown> of <total> bytes)`, which counts toward the cap and
+  may end with where the whole is: an agent's stored result 2,048 bytes (with
+  `full output at task_status taskId=<id>`), the inline summary of a declared input
+  2,048 after escaping (a summary that escapes to more is cut to a shorter start, never
+  to nothing), a check's recorded detail 2,048, the check detail an agent sees when it
+  retries 4,000, a graph's result 4,096, a failed workflow's 4,096, and a script's
+  return value 16,000 (`return a file path for large results`).
 - **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its
   own checkout of the calling thread's commit, like `delegate_task`.
 
@@ -724,10 +744,29 @@ when every node passed its checks.
   producer published, so a node never reads bytes other than those reviewed or
   produced. Each node runs with `report: true` and its attempt deadline. A node
   whose predecessor did not pass is skipped, naming that predecessor.
-- **Result.** Per node: `status` (`passed`, `failed` or `skipped`), `attempts`,
-  `inputs` (id to sha256), `outputs` (id to path, sha256 and size), `verification`
-  and, unless it passed, `reason`. If every node passed the workflow completes with
-  `{ ok: true, nodes }`; otherwise it fails with `Graph failed: ` and the same record.
+- **Result.** If every node passed the workflow completes with `{ ok: true, nodes,
+  omitted }`. Otherwise the script throws and the workflow fails with
+  `The workflow failed: Graph failed: ` and a summary: how many nodes failed and were
+  skipped, and up to three reasons. Only a workflow started from a graph gets the
+  compact record (graphs started before this change keep their full record; see
+  Provenance); a script that returns graph-shaped data keeps its own result. The
+  record holds, per node, `status` (`passed`, `failed` or `skipped`), `attempts`, a
+  `reason` (at most 240 bytes) when it did not pass, and `outputs` (id to `path` and
+  `sizeBytes`), as many of these as fit in 4,096 bytes: every status first, then
+  reasons, then output paths. A graph too large for one status each (between 70 and 90 nodes, by id length)
+  becomes `{ ok, counts, reasons, omitted }`. Input digests, output sha256 and check
+  details are never in it. `omitted` always names where they are:
+  `workflow_status` with the `workflowId`, field `nodes`. A failed graph run's text, when
+  it is cut at 4,096 bytes, ends with a pointer to the same place.
+- **Provenance.** As each node ends, its outcome is stored on the workflow row with its
+  `status`, `attempts` and `reason`, `inputs` (input id to the sha256 of the bytes the
+  node was given) and `outputs` (output id to `path`, `sha256` and `sizeBytes`). Nothing
+  but hashes, paths and sizes is stored. This holds for failed graphs too, where only
+  the summary above is the result, and `workflow_status` returns it as `nodes` for any
+  size of graph. A check's `verification` is not in `nodes`; it stays on
+  `workflow_status.agents[]` (detail up to 2,048 bytes). A graph started before this
+  change has no `inputs` or `outputs` on its nodes, so when it finishes it keeps its full
+  record, cut at 16,000 bytes like a script result, instead of the compact one.
 - **Mapping to omx.** Field names are the omx `ProtectedExecutionContractV1` names in
   camelCase: `depends_on` → `dependsOn`, `node_id` → `nodeId`, `output_id` →
   `outputId`, `max_bytes` → `maxBytes`, `attempt_policy.budget` → `attemptBudget`,

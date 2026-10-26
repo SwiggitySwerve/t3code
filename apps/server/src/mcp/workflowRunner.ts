@@ -62,7 +62,17 @@ import {
   scopeInstructions,
   scopesOverlap,
   type WorkflowCheck,
+  withoutProducer,
 } from "./workflowChecks.ts";
+import {
+  boundText,
+  completionResult,
+  fullOutputAt,
+  HANDOFF_SUMMARY_BYTES,
+  resultContract,
+  type HandoffInput,
+} from "./workflowHandoff.ts";
+import { GRAPH_DRIVER_SCRIPT } from "./workflowGraph.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
@@ -77,8 +87,6 @@ const MIN_STALL_MS = 60_000;
 const MIN_ATTEMPT_TIMEOUT_MS = 60_000;
 const MAX_ATTEMPT_TIMEOUT_MS = 6 * 60 * 60_000;
 const STALL_SWEEP_INTERVAL = "30 seconds";
-const RESULT_TEXT_LIMIT = 2_000;
-const WORKFLOW_RESULT_LIMIT = 16_000;
 const PREVIEW_LIMIT = 500;
 /** A failed workflow.complete is sent again after a pause that doubles from 1 s up to 30 s. */
 const COMPLETION_RETRY_MIN_MS = 1_000;
@@ -426,9 +434,12 @@ class WorkflowSession {
       threadId: this.workflow.threadId,
       workflowId: this.workflow.workflowId,
       status: outcome.ok ? "completed" : "failed",
-      result: outcome.ok
-        ? truncate(JSON.stringify(outcome.value ?? null, null, 2), WORKFLOW_RESULT_LIMIT)
-        : truncate(`The workflow failed: ${outcome.message}`, WORKFLOW_RESULT_LIMIT),
+      result: completionResult(outcome, {
+        workflowId: this.workflow.workflowId,
+        // Only the current graph driver stores per-node provenance, so only its record is
+        // compacted. A graph started under an older driver keeps its full record on resume.
+        graph: this.workflow.plan !== undefined && this.workflow.source === GRAPH_DRIVER_SCRIPT,
+      }),
     };
   }
 
@@ -614,7 +625,7 @@ class WorkflowSession {
           // Only present when used, so scripts without them keep their keys.
           ...(check === undefined ? [] : [{ verify: check }]),
           ...(scopes === undefined ? [] : [{ scopes }]),
-          ...(inputs.length === 0 ? [] : [{ inputs }]),
+          ...(inputs.length === 0 ? [] : [{ inputs: inputs.map(withoutProducer) }]),
           ...(outputs.length === 0 ? [] : [{ outputs }]),
           ...(attemptTimeoutMs === undefined ? [] : [{ attemptTimeoutMs }]),
         ]),
@@ -644,14 +655,28 @@ class WorkflowSession {
       });
       if (category !== null) entry.outcomeCategory ??= category;
       if (result !== null && result.trim().length > 0) {
-        entry.result = truncate(result, RESULT_TEXT_LIMIT);
+        entry.result = boundText(
+          result,
+          HANDOFF_SUMMARY_BYTES,
+          entry.agentId === undefined
+            ? undefined
+            : fullOutputAt(`task_status taskId=${entry.agentId}`),
+        );
       }
       this.scheduleUpdate();
     };
 
+    // A graph node's final message becomes the summary the next agent and the coordinator read.
+    const contract =
+      graphNodeKey !== undefined || outputs.length > 0
+        ? resultContract({
+            hasSchema: options.schema !== undefined,
+            hasOutputs: outputs.length > 0,
+          })
+        : "";
     const itemFor = (feedback: string) =>
       decodeItem({
-        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(inputs, outputs)}${feedback}`,
+        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${feedback}`,
         title: truncate(label, 500),
         ...(target === undefined ? {} : { target }),
         ...(options.isolation === undefined ? {} : { isolation: options.isolation }),
@@ -711,6 +736,19 @@ class WorkflowSession {
     } finally {
       if (holdsWrites) this.releaseWrites(entry.index);
     }
+  }
+
+  /** Each input from a graph node with the stored result of the agent that ran it. */
+  private withSummaries(inputs: ReadonlyArray<FileRef>): ReadonlyArray<HandoffInput> {
+    return inputs.map((ref) => ({
+      ...ref,
+      summary:
+        ref.from === undefined
+          ? undefined
+          : this.agents.find(
+              (agent) => agent.graphNodeKey === ref.from && agent.judgmentFor === undefined,
+            )?.result,
+    }));
   }
 
   private async acquireWrites(index: number, paths: ReadonlyArray<string>, label: string) {
@@ -952,7 +990,7 @@ class WorkflowSession {
         attempts: attempt + 1,
         ...(checked.detail.trim().length === 0
           ? {}
-          : { detail: truncate(checked.detail, RESULT_TEXT_LIMIT) }),
+          : { detail: boundText(checked.detail, HANDOFF_SUMMARY_BYTES) }),
       };
       if (checked.outcome === "passed") {
         settle("completed", summary);

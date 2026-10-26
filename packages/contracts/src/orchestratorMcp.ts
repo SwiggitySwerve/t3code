@@ -37,6 +37,7 @@ import {
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2WorkflowNodeOutcome,
   OrchestrationV2WorkflowReviewDigest,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
@@ -553,6 +554,12 @@ export const OrchestratorMcpWorkflowResult = Schema.Struct({
   result: Schema.NullOr(Schema.String).annotate({
     description: "The script's return value as JSON, or why it failed or stopped.",
   }),
+  nodes: Schema.optional(
+    Schema.Record(Schema.String, OrchestrationV2WorkflowNodeOutcome).annotate({
+      description:
+        "A workflow started from a graph: each node's status, attempts and reason, the sha256 of each input it was given, and the path, size and sha256 of each file it wrote. The result may leave these out when it is large; this is where they are kept, for failed graphs too.",
+    }),
+  ),
 });
 export type OrchestratorMcpWorkflowResult = typeof OrchestratorMcpWorkflowResult.Type;
 

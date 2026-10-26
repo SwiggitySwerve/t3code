@@ -724,10 +724,52 @@ describe("graph driver in QuickJS", () => {
     expect(run.calls[0]?.options.inputs).toEqual([
       { id: "source", path: "src/file", maxBytes: 262144, sha256: HASH },
     ]);
+    // What each node was given and produced is recorded with its outcome, digests included.
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      producer: { status: "passed", attempts: 2, inputs: { source: HASH }, outputs },
+      consumer: { status: "passed", attempts: 1, inputs: { upstream: NEXT_HASH } },
+    });
     expect(run.calls[0]?.options.verify).toMatchObject({ type: "structured", outputId: "report" });
     expect(run.calls[1]?.options.inputs).toEqual([
-      { id: "upstream", path: "returned/report.json", maxBytes: 500000, sha256: NEXT_HASH },
+      {
+        id: "upstream",
+        path: "returned/report.json",
+        maxBytes: 500000,
+        sha256: NEXT_HASH,
+        from: "producer",
+      },
     ]);
+  });
+
+  it("records the digests of the inputs a node that did not pass was given, and no content", async () => {
+    const run = driver(
+      graph({
+        reader: node({
+          description: "read",
+          inputs: [{ id: "source", kind: "workspace_snapshot", path: "src/file" }],
+        }),
+      }),
+      {
+        read: {
+          ok: false,
+          result: "a long answer that is not a record",
+          attempts: 2,
+          outputs: {},
+          verification: { type: "process", outcome: "failed", attempts: 2, detail: "bad exit" },
+          reason: "check failed",
+        },
+      },
+      { "src/file": { sha256: HASH, sizeBytes: 10 } },
+    );
+    await failedRecord(run.result);
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      reader: {
+        status: "failed",
+        attempts: 2,
+        reason: "check failed",
+        inputs: { source: HASH },
+      },
+    });
   });
 
   it("refuses an unreviewed workspace snapshot", async () => {

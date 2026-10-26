@@ -2904,6 +2904,7 @@ const make = Effect.gen(function* () {
       { concurrency: 8 },
     );
     const usage = aggregateWorkflowUsage(records.flatMap((record) => record.usage));
+    const nodes = workflow.workflow?.nodeOutcomes;
     const epoch = (value: DateTime.Utc | null | undefined) =>
       value == null ? null : DateTime.toEpochMillis(value);
     const edge = (values: ReadonlyArray<number | null>, latest = false) => {
@@ -2989,6 +2990,8 @@ const make = Effect.gen(function* () {
       tokensUsed: usage.totalTokens,
       budgetTokens: storedBudget(workflow.prompt) ?? null,
       result: workflow.result,
+      // A graph's stored provenance: what its result may leave out when it is large.
+      ...(nodes === undefined || Object.keys(nodes).length === 0 ? {} : { nodes }),
     } satisfies OrchestratorMcpWorkflowResult;
   });
 

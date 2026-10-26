@@ -45,6 +45,8 @@ interface HarnessOptions {
   readonly finish?: (spawned: number) => "completed" | "failed" | "hang";
   /** Workspace files by path, for declared outputs. */
   readonly files?: Readonly<Record<string, string>>;
+  /** What the nth agent (1-based) says last; "ok" otherwise. */
+  readonly summary?: (spawned: number) => string;
   /** Why every agent's result misses its schema, when it should. */
   readonly structuredResultError?: string;
   /** Process checks, for callers allowed to run commands. */
@@ -252,7 +254,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
           taskUpdates.set(taskId, queue);
           const read = (): WorkflowAgentOutcome => ({
             status: statuses.get(taskId) ?? "running",
-            summary: "ok",
+            summary: options.summary?.(Number(taskId.split("-").at(-1))) ?? "ok",
             cancelledByServerRestart: false,
             outcomeCategory: statuses.get(taskId) === "completed" ? "completed" : "cancelled",
             usage: options.usage?.(Number(taskId.split("-").at(-1))) ?? aggregateWorkflowUsage([]),
@@ -1155,6 +1157,44 @@ describe("workflow runner", () => {
       }),
     );
 
+    it.effect(
+      "keeps the digests of a node's inputs and the path, size and sha256 of its outputs",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, workflowUpdates } = yield* makeHarness();
+          const inputs = { source: "a".repeat(64) };
+          const outputs = { out: { path: "out/a.md", sha256: "b".repeat(64), sizeBytes: 42 } };
+          yield* launch(
+            runner,
+            `node("a", { status: "passed", attempts: 1, inputs: ${JSON.stringify(inputs)}, outputs: ${JSON.stringify(outputs)} }); return 1`,
+            twoNodePlan,
+          );
+          yield* Deferred.await(completed);
+          expect(workflowUpdates.at(-1)!.nodeOutcomes).toEqual({
+            a: { status: "passed", attempts: 1, inputs, outputs },
+          });
+        }),
+    );
+
+    it.effect("refuses an output without a sha256 or with a negative size", () =>
+      Effect.gen(function* () {
+        const { runner, completed } = yield* makeHarness();
+        yield* launch(
+          runner,
+          `const errors = [];
+for (const outputs of [{ out: { path: "p", sizeBytes: 1 } }, { out: { path: "p", sha256: "x", sizeBytes: -1 } }]) {
+  try { node("a", { status: "passed", outputs }); errors.push(null) } catch (error) { errors.push(error.message) }
+}
+return errors`,
+          twoNodePlan,
+        );
+        expect(JSON.parse(yield* Deferred.await(completed))).toEqual([
+          "node() needs an outcome with status passed, failed or skipped.",
+          "node() needs an outcome with status passed, failed or skipped.",
+        ]);
+      }),
+    );
+
     it.effect("refuses a node outside the plan and an invalid outcome", () =>
       Effect.gen(function* () {
         const { runner, completed, spawned } = yield* makeHarness();
@@ -1315,6 +1355,226 @@ return errors`,
         }
         expect(harness.workflowUpdates.at(-1)?.agents).toHaveLength(150);
         expect(Math.max(...sizes)).toBeLessThanOrEqual(65536);
+      }),
+    );
+  });
+
+  describe("bounded handoff", () => {
+    const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
+
+    const graphLookalike = `const nodes = {};
+           for (let index = 0; index < 40; index += 1) {
+             const key = "node-" + String(index).padStart(2, "0");
+             nodes[key] = {
+               status: "passed", attempts: 1, inputs: { in: "a".repeat(64) },
+               outputs: { out: { path: "out/" + key + ".md", sha256: "b".repeat(64), sizeBytes: 10 } },
+               verification: { type: "judgment", outcome: "passed", attempts: 1, detail: "d".repeat(2000) },
+             };
+           }
+           return { ok: true, nodes };`;
+
+    it.effect(
+      "keeps the full record of a graph resumed under an older driver, which stores no per-node provenance",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed } = yield* makeHarness();
+          // A plan with a driver other than the current one: a graph started before this change.
+          yield* launch(runner, graphLookalike, twoNodePlan);
+          const text = yield* Deferred.await(completed);
+          expect(byteLength(text)).toBeLessThanOrEqual(16_000);
+          expect(text).toContain("sha256");
+          expect(text).not.toContain(`workflow_status workflowId=${workflowId}`);
+        }),
+    );
+    it.effect("keeps every field of a plain script's result that looks like a graph record", () =>
+      Effect.gen(function* () {
+        const { runner, completed } = yield* makeHarness();
+        yield* launch(
+          runner,
+          'return { ok: true, nodes: { a: { status: "passed", attempts: 1, data: { keep: "me" } } }, notes: "mine" }',
+        );
+        // No plan: this is a script, so the result is its own JSON, whatever its shape.
+        expect(JSON.parse(yield* Deferred.await(completed))).toEqual({
+          ok: true,
+          nodes: { a: { status: "passed", attempts: 1, data: { keep: "me" } } },
+          notes: "mine",
+        });
+      }),
+    );
+    it.effect(
+      "keeps a large graph-looking script result as a script result, cut at 16,000 bytes",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed } = yield* makeHarness();
+          yield* launch(runner, graphLookalike);
+          const text = yield* Deferred.await(completed);
+          expect(byteLength(text)).toBeLessThanOrEqual(16_000);
+          expect(text).toContain("sha256");
+          expect(text).toContain("return a file path for large results");
+        }),
+    );
+    it.effect("cuts a 20 KB script failure to 4,096 bytes, marker included", () =>
+      Effect.gen(function* () {
+        const { runner, completed, completions } = yield* makeHarness();
+        yield* launch(runner, 'throw new Error("e".repeat(20000))');
+        const text = yield* Deferred.await(completed);
+        expect(completions[0]?.result).toBe(text);
+        expect(byteLength(text)).toBeLessThanOrEqual(4_096);
+        expect(text.startsWith("The workflow failed: eee")).toBe(true);
+        expect(text).toMatch(/\.\.\.truncated \(\d+ of \d+ bytes\)$/);
+      }),
+    );
+    it.effect("tells a script to return a file path when its result is cut at 16,000 bytes", () =>
+      Effect.gen(function* () {
+        const { runner, completed } = yield* makeHarness();
+        yield* launch(runner, 'return "x".repeat(40000)');
+        const text = yield* Deferred.await(completed);
+        expect(byteLength(text)).toBeLessThanOrEqual(16_000);
+        expect(text).toContain("return a file path for large results");
+      }),
+    );
+    it.effect.each([
+      { name: "ASCII", summary: "s".repeat(10_000) },
+      { name: "four-byte code points", summary: "😀".repeat(3_000) },
+    ])("stores an agent's result in at most 2,048 bytes with a marker, for $name", ({ summary }) =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness({
+          summary: () => summary,
+          taskId: () => "node:agent-1",
+        });
+        yield* launch(runner, 'return (await agent("work")).length');
+        // The script still receives the agent's whole answer.
+        expect(JSON.parse(yield* Deferred.await(completed))).toBe(summary.length);
+        const stored = workflowUpdates.at(-1)?.agents[0]?.result ?? "";
+        expect(byteLength(stored)).toBeLessThanOrEqual(2_048);
+        expect(stored).not.toContain("\uFFFD");
+        expect(stored).toMatch(
+          /\.\.\.truncated \(\d+ of \d+ bytes\), full output at task_status taskId=node:agent-1$/,
+        );
+      }),
+    );
+    it.effect("keeps a short agent result as it is", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates } = yield* makeHarness({
+          summary: () => "Wrote out/a.md; nothing blocked.",
+        });
+        yield* launch(runner, 'return await agent("work")');
+        yield* Deferred.await(completed);
+        expect(workflowUpdates.at(-1)?.agents[0]?.result).toBe("Wrote out/a.md; nothing blocked.");
+      }),
+    );
+    it.effect("bounds a failed check's recorded detail by bytes and says it was cut", () =>
+      Effect.gen(function* () {
+        const { runner, completed } = yield* makeHarness({
+          structuredResultError: "é".repeat(5_000),
+        });
+        yield* launch(
+          runner,
+          'return await agent("x", { schema: { type: "object" }, report: true })',
+        );
+        const report = JSON.parse(yield* Deferred.await(completed));
+        expect(byteLength(report.verification.detail)).toBeLessThanOrEqual(2_048);
+        expect(report.verification.detail).toMatch(/\.\.\.truncated \(\d+ of 10000 bytes\)$/);
+      }),
+    );
+  });
+
+  describe("declared-input handoff", () => {
+    const byteLength = (text: string) => Buffer.byteLength(text, "utf8");
+    const threeNodePlan: OrchestrationV2WorkflowPlan = {
+      nodes: [
+        { key: "a", label: "Node A", wave: 0, dependsOn: [] },
+        { key: "b", label: "Node B", wave: 1, dependsOn: ["a"] },
+        { key: "c", label: "Node C", wave: 1, dependsOn: ["a"] },
+      ],
+    };
+    const source = (inputExtras: string) => `
+      await agent("write notes", { node: "a", outputs: [{ id: "notes", path: "out/a.md" }] });
+      await agent("read notes", { node: "b", inputs: [{ id: "notes", path: "out/a.md"${inputExtras} }] });
+      await agent("unrelated", { node: "c" });
+      return null;`;
+    const run = (script: string) =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({
+          files: { "out/a.md": "notes" },
+          summary: (spawned) => (spawned === 1 ? `A-SUMMARY-${"s".repeat(10_000)}` : "ok"),
+        });
+        yield* launch(harness.runner, script, threeNodePlan);
+        yield* Deferred.await(harness.completed);
+        const tasks = [...harness.keys.entries()];
+        const find = (prompt: string) => tasks.find(([task]) => task.startsWith(prompt));
+        return {
+          tasks,
+          task: (prompt: string) => find(prompt)?.[0] ?? "",
+          key: (prompt: string) => find(prompt)?.[1],
+        };
+      });
+
+    it.effect(
+      "gives an agent its declared input as one block with the producer's capped summary",
+      () =>
+        Effect.gen(function* () {
+          const { task } = yield* run(source(', from: "a"'));
+          const text = task("read notes");
+          expect(text.match(/<t3-handoff v="1">/g)).toHaveLength(1);
+          expect(text.match(/<\/t3-handoff>/g)).toHaveLength(1);
+          const opening = '<input id="notes" from="a" path="out/a.md" maxBytes="262144">\n';
+          const body = text.slice(
+            text.indexOf(opening) + opening.length,
+            text.indexOf("\n</input>"),
+          );
+          expect(text).toContain(opening);
+          expect(body.startsWith("A-SUMMARY-ssss")).toBe(true);
+          expect(byteLength(body)).toBeLessThanOrEqual(2_048);
+          expect(body).toMatch(
+            /\.\.\.truncated \(\d+ of \d+ bytes\), full output at task_status taskId=node:agent-1$/,
+          );
+        }),
+    );
+    it.effect("gives an agent nothing from a predecessor it did not declare", () =>
+      Effect.gen(function* () {
+        const { task } = yield* run(source(', from: "a"'));
+        expect(task("unrelated")).not.toContain("<t3-handoff");
+        expect(task("unrelated")).not.toContain("A-SUMMARY");
+      }),
+    );
+    it.effect("names the file without a summary when the input has no producing node", () =>
+      Effect.gen(function* () {
+        const { task } = yield* run(source(""));
+        const text = task("read notes");
+        expect(text).toContain('<input id="notes" path="out/a.md" maxBytes="262144" />');
+        expect(text).not.toContain("A-SUMMARY");
+      }),
+    );
+    it.effect("keeps an agent's retry key the same with or without its producing node", () =>
+      Effect.gen(function* () {
+        const withProducer = yield* run(source(', from: "a"'));
+        const without = yield* run(source(""));
+        expect(withProducer.key("read notes")).toBeDefined();
+        expect(withProducer.key("read notes")).toBe(without.key("read notes"));
+      }),
+    );
+    it.effect("asks graph nodes for a short summary and leaves plain script agents alone", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ files: { "out/a.md": "notes" } });
+        yield* launch(
+          harness.runner,
+          `await agent("write notes", { node: "a", outputs: [{ id: "notes", path: "out/a.md" }] });
+           await agent("read notes", { node: "b" });
+           await agent("count", { node: "c", schema: { type: "object" } });
+           await agent("plain");
+           return null;`,
+          threeNodePlan,
+        );
+        yield* Deferred.await(harness.completed);
+        const tasks = [...harness.keys.keys()];
+        const task = (prompt: string) => tasks.find((text) => text.startsWith(prompt)) ?? "";
+        expect(task("write notes")).toContain("at most about 1,500 characters");
+        expect(task("write notes")).toContain("Put longer material in your output files.");
+        expect(task("read notes")).toContain("at most about 1,500 characters");
+        expect(task("read notes")).not.toContain("output files");
+        expect(task("count")).toContain("Keep the text before the JSON block short.");
+        expect(task("plain")).toBe("plain");
       }),
     );
   });

@@ -739,11 +739,26 @@ export const OrchestrationV2WorkflowPlan = Schema.Struct({
 });
 export type OrchestrationV2WorkflowPlan = typeof OrchestrationV2WorkflowPlan.Type;
 
-/** How a graph node ended, as its workflow recorded it. */
+/** A file a graph node wrote, by path, size and content hash; never its content. */
+const WorkflowNodeOutput = Schema.Struct({
+  path: Schema.NonEmptyString,
+  sha256: Schema.NonEmptyString,
+  sizeBytes: NonNegativeInt,
+});
+
+/**
+ * How a graph node ended, as its workflow recorded it. The stored provenance of a finished
+ * graph: the content hash of each input the node was given and each file it wrote. The
+ * workflow's own result may drop these when it is large.
+ */
 export const OrchestrationV2WorkflowNodeOutcome = Schema.Struct({
   status: Schema.Literals(["passed", "failed", "skipped"]),
   reason: Schema.optional(Schema.NonEmptyString),
   attempts: Schema.optional(NonNegativeInt),
+  /** Declared input id to the sha256 of the bytes the node was given. */
+  inputs: Schema.optional(Schema.Record(TrimmedNonEmptyString, Schema.NonEmptyString)),
+  /** Declared output id to the file the node wrote. */
+  outputs: Schema.optional(Schema.Record(TrimmedNonEmptyString, WorkflowNodeOutput)),
 });
 export type OrchestrationV2WorkflowNodeOutcome = typeof OrchestrationV2WorkflowNodeOutcome.Type;
 

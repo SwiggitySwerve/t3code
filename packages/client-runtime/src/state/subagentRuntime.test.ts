@@ -638,6 +638,60 @@ describe("workflow progress text", () => {
       "Working",
     );
   });
+
+  it("reads the server's compact record, its counts form, and nodes that carry provenance", () => {
+    const sha = "a".repeat(64);
+    const omitted =
+      "input and output sha256 and any cut detail: workflow_status workflowId=workflow:w1, field nodes";
+    const nodeOutcomes = {
+      build: {
+        status: "passed" as const,
+        attempts: 1,
+        inputs: { source: sha },
+        outputs: { out: { path: "out/build.md", sha256: sha, sizeBytes: 3 } },
+      },
+      test: { status: "passed" as const, attempts: 1 },
+    };
+    const compact = JSON.stringify({
+      ok: true,
+      nodes: {
+        build: {
+          status: "passed",
+          attempts: 1,
+          outputs: { out: { path: "out/build.md", sizeBytes: 3 } },
+        },
+        test: { status: "passed", attempts: 1 },
+      },
+      omitted,
+    });
+    const workflow = { ...row.workflow, nodeOutcomes };
+    expect(
+      workflowProgressText({ ...row, status: "completed", result: compact, workflow }),
+    ).toBeNull();
+    // A graph too large for one status each has no nodes: the text is shown as it is.
+    const counts = JSON.stringify({
+      ok: false,
+      counts: { passed: 1, failed: 1, skipped: 0 },
+      reasons: [{ node: "build", reason: "Provider unavailable" }],
+      omitted,
+    });
+    expect(workflowProgressText({ ...row, result: counts, workflow })).toBe(counts);
+    // A failed graph's text cut at 4,096 bytes still reads from the stored outcomes.
+    const cut = `The workflow failed: Graph failed: 1 node failed, 1 skipped. Build API: Provid...truncated (60 of 9000 bytes), per-node detail at workflow_status workflowId=workflow:w1, field nodes`;
+    expect(
+      workflowProgressText({
+        ...row,
+        result: cut,
+        workflow: {
+          ...row.workflow,
+          nodeOutcomes: {
+            build: { status: "failed", reason: "Provider unavailable", inputs: { source: sha } },
+            test: { status: "skipped" },
+          },
+        },
+      }),
+    ).toBe("Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable");
+  });
 });
 
 describe("appWorkflowHeading", () => {

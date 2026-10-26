@@ -488,7 +488,13 @@ describe("orchestration V2 contracts", () => {
         ],
       },
       nodeOutcomes: {
-        build: { status: "failed" as const, reason: "exit code 2", attempts: 3 },
+        build: {
+          status: "failed" as const,
+          reason: "exit code 2",
+          attempts: 3,
+          inputs: { source: "a".repeat(64) },
+          outputs: { log: { path: "out/build.log", sha256: "b".repeat(64), sizeBytes: 12 } },
+        },
         test: { status: "skipped" as const, reason: "build did not pass" },
       },
     };
@@ -517,6 +523,25 @@ describe("orchestration V2 contracts", () => {
 
     it.each([
       ["an unknown outcome", { nodeOutcomes: { build: { status: "done" } } }],
+      [
+        "an output without a sha256",
+        {
+          nodeOutcomes: {
+            build: { status: "passed", outputs: { log: { path: "p", sizeBytes: 1 } } },
+          },
+        },
+      ],
+      [
+        "an output with a negative size",
+        {
+          nodeOutcomes: {
+            build: {
+              status: "passed",
+              outputs: { log: { path: "p", sha256: "b".repeat(64), sizeBytes: -1 } },
+            },
+          },
+        },
+      ],
       ["a negative wave", { plan: { nodes: [{ key: "a", label: "A", wave: -1, dependsOn: [] }] } }],
     ])("refuses %s", (_name, patch) => {
       const subagent = {

@@ -427,7 +427,10 @@ const runNode = async (key) => {
           return failedNode("Predecessor " + input.nodeId + " did not return output " + input.outputId + ".", inputDigests);
         }
         const declared = graph.nodes[input.nodeId].outputs.find((ref) => ref.id === input.outputId);
-        pinned = { id: input.id, path: output.path, maxBytes: declared.maxBytes, sha256: output.sha256 };
+        pinned = {
+          id: input.id, path: output.path, maxBytes: declared.maxBytes, sha256: output.sha256,
+          from: input.nodeId,
+        };
       }
       inputs.push(pinned);
       inputDigests[input.id] = pinned.sha256;
@@ -464,15 +467,26 @@ const run = (key) =>
     }
     // Once per node, including those that never reached agent(), so the app can show every node.
     if (recordsNodes) {
-      const { status, attempts, reason } = results[key];
-      node(key, reason ? { status, attempts, reason } : { status, attempts });
+      const { status, attempts, reason, inputs, outputs } = results[key];
+      const recorded = { status, attempts };
+      if (reason) recorded.reason = reason;
+      // Hashes and paths only, never content: the stored provenance a large result may leave out.
+      if (Object.keys(inputs).length > 0) recorded.inputs = inputs;
+      const files = Object.entries(outputs ?? {});
+      if (files.length > 0) {
+        recorded.outputs = Object.fromEntries(files.map(([id, file]) => [
+          id, { path: file.path, sha256: file.sha256, sizeBytes: file.sizeBytes },
+        ]));
+      }
+      node(key, recorded);
     }
     settled += 1;
     log(settled + "/" + total + " nodes finished; " + key + " " + results[key].status + ".");
   }));
 await Promise.all(Object.keys(graph.nodes).sort().map(run));
 const record = { ok: Object.values(results).every((node) => node.status === "passed"), nodes: results };
-// A graph completes only when every node passed; the failed workflow keeps the record.
+// A graph completes only when every node passed. A failed one throws the summary; each node's
+// inputs and outputs are in the outcomes recorded above, for failed graphs too.
 if (!record.ok) throw new Error((${workflowGraphFailureSummary.toString()})(
   Object.entries(results).map(([key, outcome]) => ({ ...outcome, label: graph.nodes[key].subject }))
 ));

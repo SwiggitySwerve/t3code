@@ -1502,14 +1502,15 @@ return counted.lines + 1`,
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("caps a failed workflow's result like a successful one", () =>
+  it.effect("caps a failed workflow's result at 4,096 bytes and marks the cut", () =>
     Effect.gen(function* () {
       yield* startParent;
       const started = yield* startWorkflow('throw new Error("x".repeat(100000))');
       const ended = yield* awaitWorkflowEnd(started.workflowId);
       expect(ended.status).toBe("failed");
       expect(ended.result!.startsWith("The workflow failed: xxx")).toBe(true);
-      expect(ended.result!.length).toBe(16_000);
+      expect(Buffer.byteLength(ended.result!, "utf8")).toBeLessThanOrEqual(4_096);
+      expect(ended.result!).toMatch(/\.\.\.truncated \(\d+ of \d+ bytes\)$/);
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -3019,7 +3020,9 @@ describe("workflow checks", () => {
             attempts: 2,
           });
           const first = yield* awaitMember(started.workflowId, 1);
-          expect(first.prompt).toContain(`- source: ${dir}/in.txt (sha256 ${inputSha})`);
+          expect(first.prompt).toContain(
+            `<input id="source" path="${dir}/in.txt" sha256="${inputSha}" maxBytes="262144" />`,
+          );
           expect(first.prompt).toContain(`- report: ${dir}/out.txt (at most 100 bytes)`);
           const retry = yield* awaitMember(started.workflowId, 2);
           expect(retry.prompt).toContain("did not pass its outputs check");
@@ -3812,7 +3815,7 @@ describe("graphs", () => {
   );
 
   it.effect(
-    "runs a reviewed graph as one workflow and returns each node's provenance, waking once",
+    "runs a reviewed graph as one workflow and returns a compact record of each node, waking once",
     () =>
       withScratchDir((dir) =>
         Effect.gen(function* () {
@@ -3831,32 +3834,36 @@ describe("graphs", () => {
           expect(ended.status).toBe("completed");
           expect(ended.name).toBe("Serial");
           const totalSha = sha256('{"total":6}');
+          // The wake carries statuses and paths; digests are not in it, and it says where they are.
           expect(JSON.parse(ended.result!)).toEqual({
             ok: true,
             nodes: {
               produce: {
                 status: "passed",
                 attempts: 1,
-                inputs: { source: sha256("source") },
-                outputs: { total: { path: `${dir}/total.json`, sha256: totalSha, sizeBytes: 11 } },
-                verification: {
-                  type: "structured",
-                  outcome: "passed",
-                  attempts: 1,
-                  detail: "Every required value is present and equal.",
-                },
+                outputs: { total: { path: `${dir}/total.json`, sizeBytes: 11 } },
               },
-              consume: {
-                status: "passed",
-                attempts: 1,
-                inputs: { upstream: totalSha },
-                outputs: {},
-                verification: null,
-              },
+              consume: { status: "passed", attempts: 1 },
             },
+            omitted: `input and output sha256 and any cut detail: workflow_status workflowId=${started.workflowId}, field nodes`,
+          });
+          // That is the place: workflow_status returns every node's input digests and output
+          // path, size and sha256, so they can still be checked after the run.
+          expect(ended.nodes).toEqual({
+            produce: {
+              status: "passed",
+              attempts: 1,
+              inputs: { source: sha256("source") },
+              outputs: { total: { path: `${dir}/total.json`, sha256: totalSha, sizeBytes: 11 } },
+            },
+            consume: { status: "passed", attempts: 1, inputs: { upstream: totalSha } },
           });
           const consumer = yield* awaitMember(started.workflowId, 2);
-          expect(consumer.prompt).toContain(`- upstream: ${dir}/total.json (sha256 ${totalSha})`);
+          // The consumer gets the producer's summary and the file path, not a replay of its thread.
+          expect(consumer.prompt).toContain(
+            `<input id="upstream" from="produce" path="${dir}/total.json" sha256="${totalSha}" maxBytes="100">\nmade it\n</input>`,
+          );
+          expect(consumer.prompt.match(/<t3-handoff v="1">/g)).toHaveLength(1);
           const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
             parentThreadId,
           );
@@ -3902,10 +3909,18 @@ describe("graphs", () => {
             (attempt) => attempt.state === "completed" && attempt.childThreadId.length > 0,
           ),
         ).toBe(true);
-        expect(row?.workflow?.nodeOutcomes).toEqual({
-          produce: { status: "failed", attempts: 3, reason },
+        const recorded = {
+          produce: {
+            status: "failed",
+            attempts: 3,
+            reason,
+            inputs: { source: sha256("source") },
+          },
           consume: { status: "skipped", attempts: 0, reason: "Predecessor produce did not pass." },
-        });
+        };
+        expect(row?.workflow?.nodeOutcomes).toEqual(recorded);
+        // A failed graph keeps its provenance too, and workflow_status returns it.
+        expect(ended.nodes).toEqual(recorded);
       }).pipe(Effect.provide(layerTest)),
     ),
   );
@@ -4061,10 +4076,24 @@ describe("graphs", () => {
         const row = (yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
           parentThreadId,
         )).subagents.find((task) => task.id === started.workflowId);
+        // The producer's provenance survives the failed graph, and the consumer's pinned input.
+        const totalSha = sha256('{"total":6}');
         expect(row?.workflow?.nodeOutcomes).toEqual({
-          produce: { status: "passed", attempts: 1 },
-          consume: { status: "failed", attempts: 0, reason },
+          produce: {
+            status: "passed",
+            attempts: 1,
+            inputs: { source: sha256("source") },
+            outputs: {
+              total: {
+                path: expect.stringMatching(/total\.json$/),
+                sha256: totalSha,
+                sizeBytes: 11,
+              },
+            },
+          },
+          consume: { status: "failed", attempts: 0, reason, inputs: { upstream: totalSha } },
         });
+        expect(ended.nodes).toEqual(row?.workflow?.nodeOutcomes);
         expect(row?.workflow?.budget).toEqual({ limit: 1000, exhausted: true });
       }).pipe(Effect.provide(layerTest)),
     ),

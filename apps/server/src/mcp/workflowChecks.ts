@@ -6,6 +6,13 @@
  */
 import * as NodeUtil from "node:util";
 
+import {
+  boundText,
+  CHECK_FEEDBACK_BYTES,
+  renderHandoff,
+  type HandoffInput,
+} from "./workflowHandoff.ts";
+
 const MAX_CHECK_ARGV_COUNT = 256;
 const MAX_CHECK_ARGV_BYTES = 64 * 1024;
 const MAX_CHECK_TIMEOUT_MS = 15 * 60_000;
@@ -14,7 +21,6 @@ const DEFAULT_CHECK_TIMEOUT_MS = 2 * 60_000;
 const DEFAULT_CHECK_OUTPUT_BYTES = 64 * 1024;
 const MAX_RUBRIC_CRITERIA = 20;
 const MAX_SCOPE_PATHS = 64;
-const FEEDBACK_LIMIT = 4_000;
 
 export interface ProcessCheck {
   readonly type: "process";
@@ -54,6 +60,8 @@ export interface FileRef {
   readonly path: string;
   readonly maxBytes: number;
   readonly sha256?: string;
+  /** For an input of a graph node, the node whose output it is. */
+  readonly from?: string;
 }
 
 export interface FileScopes {
@@ -201,6 +209,10 @@ export function parseFileRefs(value: unknown, what: "inputs" | "outputs"): Reado
     if (sha256 !== undefined && (typeof sha256 !== "string" || !/^[a-f0-9]{64}$/.test(sha256))) {
       throw new Error(`${what}.${record.id}.sha256 must be 64 lowercase hex digits.`);
     }
+    const from = what === "inputs" ? record.from : undefined;
+    if (from !== undefined && (typeof from !== "string" || !FILE_ID.test(from))) {
+      throw new Error(`${what}.${record.id}.from must be a node id.`);
+    }
     return {
       id: record.id,
       path: normalizeWorkspacePath(record.path, `${what}.${record.id}.path`),
@@ -211,6 +223,7 @@ export function parseFileRefs(value: unknown, what: "inputs" | "outputs"): Reado
         MAX_FILE_BYTES,
       ),
       ...(sha256 === undefined ? {} : { sha256 }),
+      ...(from === undefined ? {} : { from }),
     } satisfies FileRef;
   });
   const ids = refs.map((ref) => ref.id);
@@ -218,19 +231,20 @@ export function parseFileRefs(value: unknown, what: "inputs" | "outputs"): Reado
   return refs;
 }
 
+/** The input as the request that keys an agent's retries sees it, without its producing node. */
+export function withoutProducer(ref: FileRef): FileRef {
+  const { from: _from, ...declared } = ref;
+  return declared;
+}
+
 /** The task text that names an agent's input and output files. */
 export function fileInstructions(
-  inputs: ReadonlyArray<FileRef>,
+  inputs: ReadonlyArray<HandoffInput>,
   outputs: ReadonlyArray<FileRef>,
 ): string {
   if (inputs.length === 0 && outputs.length === 0) return "";
   const lines = [""];
-  if (inputs.length > 0) {
-    lines.push("", "Input files (read them; do not change them):");
-    for (const input of inputs) {
-      lines.push(`- ${input.id}: ${input.path}${input.sha256 ? ` (sha256 ${input.sha256})` : ""}`);
-    }
-  }
+  if (inputs.length > 0) lines.push("", renderHandoff(inputs));
   if (outputs.length > 0) {
     lines.push("", "Output files you must write:");
     for (const output of outputs) {
@@ -467,15 +481,11 @@ export function checkFeedback(
   checkType: WorkflowCheck["type"] | "outputs",
   outcome: CheckOutcome,
 ): string {
-  const detail =
-    outcome.detail.length > FEEDBACK_LIMIT
-      ? `${outcome.detail.slice(0, FEEDBACK_LIMIT - 1)}…`
-      : outcome.detail;
   return [
     "",
     "",
     `Your previous attempt did not pass its ${checkType} check (${outcome.outcome}):`,
-    detail,
+    boundText(outcome.detail, CHECK_FEEDBACK_BYTES),
     "Fix this and complete the task again.",
   ].join("\n");
 }
