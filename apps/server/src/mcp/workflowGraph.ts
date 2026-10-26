@@ -5,7 +5,7 @@ import type { OrchestrationV2WorkflowPlan } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
-import { graphAdvisory } from "./workflowAdvisory.ts";
+import { type AdvisoryDrivers, graphAdvisory } from "./workflowAdvisory.ts";
 import {
   FILE_ID,
   type FileRef,
@@ -302,7 +302,11 @@ function writePaths(node: GraphNode): string[] {
   ].sort();
 }
 
-export function reviewGraph(value: unknown, inputHashes: Readonly<Record<string, InputHash>>) {
+export function reviewGraph(
+  value: unknown,
+  inputHashes: Readonly<Record<string, InputHash>>,
+  drivers?: AdvisoryDrivers,
+) {
   const parsed = parseGraph(value);
   const inputs: Record<string, InputHash> = Object.create(null);
   const blockers = parsed.ok ? [] : [...parsed.problems];
@@ -373,7 +377,7 @@ export function reviewGraph(value: unknown, inputHashes: Readonly<Record<string,
     blockers,
     inputs,
     // Advice only: the digest below never reads it.
-    advisory: parsed.ok ? graphAdvisory(parsed.graph, layers) : undefined,
+    advisory: parsed.ok ? graphAdvisory(parsed.graph, layers, drivers) : undefined,
     digest: parsed.ok
       ? "sha256:" +
         NodeCrypto.createHash("sha256")

@@ -3523,6 +3523,8 @@ describe("graphs", () => {
           c: task(),
           combine: task(["a", "b", "c"]),
         });
+        // A Codex coordinator with Claude members: the coordinator is priced from the Codex
+        // measurement, the members from the earlier 37k-96k estimate.
         expect(fan).toMatchObject({
           ready: true,
           blockers: [],
@@ -3530,7 +3532,7 @@ describe("graphs", () => {
             fanOut: "ok",
             widestWave: 3,
             estimatedModelCalls: { low: 11, high: 16 },
-            estimatedTokens: { coordinator: { low: 111_000, high: 384_000 } },
+            estimatedTokens: { coordinator: { low: 288_000, high: 424_000 } },
           },
         });
         expect(fan.advisory?.suggestedBudgetTokens).toBe(1_612_800);
@@ -3549,6 +3551,57 @@ describe("graphs", () => {
         );
         expect(broken.advisory).toBeUndefined();
         expect(broken.ready).toBe(false);
+        // The same graph on Codex members is priced from the Codex measurement.
+        const codexFan = yield* decodeReview(
+          (yield* invoke("graph_review", {
+            graph: {
+              schemaVersion: 1,
+              nodes: {
+                a: task(),
+                b: task(),
+                c: task(),
+                combine: task(["a", "b", "c"]),
+              },
+            },
+            workerTarget: { providerInstanceId: instanceId, model },
+          })).structuredContent,
+        );
+        expect(codexFan.advisory?.suggestedBudgetTokens).toBe(436_800);
+        expect(codexFan.advisory?.overshootBoundTokens).toBe(234_000);
+        expect(codexFan.digest).not.toBe(fan.digest);
+      }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect(
+    "graph_review prices a Claude coordinator and Claude members from the earlier estimate",
+    () =>
+      Effect.gen(function* () {
+        yield* startParentWithSelection({ instanceId: claudeInstanceId, model: claudeModel });
+        const task = (dependsOn: ReadonlyArray<string> = []) => ({
+          subject: "worker",
+          description: "work",
+          dependsOn,
+        });
+        const result = yield* invoke("graph_review", {
+          graph: {
+            schemaVersion: 1,
+            nodes: { a: task(), b: task(), c: task(), combine: task(["a", "b", "c"]) },
+          },
+        });
+        const review = yield* decodeReview(result.structuredContent);
+        expect(review).toMatchObject({
+          ready: true,
+          advisory: {
+            estimatedModelCalls: { low: 11, high: 16 },
+            estimatedTokens: {
+              low: 407_000,
+              high: 1_536_000,
+              coordinator: { low: 111_000, high: 384_000 },
+            },
+            overshootBoundTokens: 864_000,
+          },
+        });
+        expect(review.advisory?.suggestedBudgetTokens).toBe(1_612_800);
+        expect(review.advisory?.estimatedTokens.basis).toContain("Other drivers are not measured");
       }).pipe(Effect.provide(layerTest)),
   );
   it.effect("C3 expands defaults before hashing and reports target provenance", () =>

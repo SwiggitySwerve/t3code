@@ -2641,7 +2641,25 @@ const make = Effect.gen(function* () {
             : file.status;
       }
     }
-    const reviewed = reviewGraph(concreteGraph ?? graph, hashes);
+    // The advisory's token figures depend on the driver that runs each agent, so it is told which.
+    const driverByInstance = new Map(
+      (yield* loadProviders).map((provider) => [provider.instanceId, provider.driver]),
+    );
+    const driverOfTarget = (target: OrchestratorMcpTarget) =>
+      target.providerInstanceId === undefined
+        ? undefined
+        : driverByInstance.get(target.providerInstanceId);
+    const reviewed = reviewGraph(concreteGraph ?? graph, hashes, {
+      coordinator: driverByInstance.get(parent.thread.modelSelection.instanceId),
+      nodes: new Map(targets.map((entry) => [entry.nodeId, driverOfTarget(entry.target)])),
+      judges: new Map(
+        targets.flatMap((entry) =>
+          entry.judgmentTarget === undefined
+            ? []
+            : [[entry.nodeId, driverOfTarget(entry.judgmentTarget)] as const],
+        ),
+      ),
+    });
     const review: GraphReview = {
       ...reviewed,
       targets,

@@ -655,7 +655,8 @@ own threads. The row stores the script with a settings line for its args and bud
   changed a reviewed input file fails closed rather than returning the workflow.
 - **Budget.** `budgetTokens` counts cumulative input plus output for finished
   attempts, including cached reads and writes, retries and judges. It does not count the
-  coordinator's own tokens, which were 20-26% of the total in the C1 baseline. `graph_review`
+  coordinator's own tokens, which were 20-26% of the total in the C1 baseline and 58-63% after
+  the C3 member trim (C4, Codex members). `graph_review`
   suggests a value (`advisory.suggestedBudgetTokens`). It is an estimate
   rather than a bill. Once it is spent, `agent()` throws for any agent that has not
   already started; agents already running finish. `workflow_status` reports
@@ -741,9 +742,17 @@ when every node passed its checks.
   with no check), up to three short `reasons`, the node count, widest wave, depth and verifier
   count, `estimatedModelCalls` and `estimatedTokens` (low and high, with the coordinator's part
   and a `basis`), `suggestedBudgetTokens` (1.4 times the agents' high estimate, without the
-  coordinator) and `overshootBoundTokens` (the widest wave times three calls at the high
-  per-call figure). Call counts and the 96k high figure come from the C1 baseline of 2026-10-26,
-  the 37k low figure from M7's Claude prefix; all are opinion until C4 recalibrates them. The advisory counts one judge agent per judgment check. It is not in the
+  coordinator) and `overshootBoundTokens` (the widest wave times three calls at each node's
+  high figure). Calls are 2-3 per agent and 3-4 for the coordinator. The token figures per call
+  depend on the provider driver that runs the agent, which `graph_review` resolves for each
+  node, each judge and the coordinator. Codex-driver agents use the C4 re-bench of 2026-10-26
+  (Sonnet 5.5 through cliproxy): 17k-26k tokens per member call and 96k-106k per coordinator
+  call. Every other driver, Claude included, was not measured and keeps the earlier estimate of
+  37k-96k per call until it is; a Claude coordinator is therefore also unmeasured. An agent whose
+  driver is unknown is priced as unmeasured, so a graph with Codex and Claude members is priced
+  agent by agent. The `basis` says which figures were used. Tasks that read more than the
+  benchmark's one or two small files will exceed the member high figure; the headroom and the
+  thresholds are opinion. The advisory counts one judge agent per judgment check. It is not in the
   digest and never changes `ready`, `blockers` or `approvalRequired`, and it never blocks a start,
   including when the user asked for a workflow. It also returns
   a `reviewId` the server made for this review, and `approvalRequired`, true while a
