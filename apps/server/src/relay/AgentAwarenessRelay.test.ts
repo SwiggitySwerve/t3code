@@ -188,6 +188,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
         return { schemaVersion: 2, snapshotSequence: 1, threads: [], archivedThreads: [] };
       }),
     listActiveSubagentThreadIds: unused,
+    listOlderSettledThreads: unused,
     readShellSnapshot: unused,
     ensureLegacyTranscript: unused,
     dispatch: unused,
@@ -270,18 +271,16 @@ const makeTestRelay = Effect.fnUntraced(function* (
       getShell: unused,
       listShells: unused,
       getById: () =>
-        Effect.succeed(
-          Option.some({
-            id: PROJECT_ID,
-            title: "Project",
-            workspaceRoot: "/workspace",
-            defaultModelSelection: null,
-            scripts: [],
-            createdAt: NOW,
-            updatedAt: NOW,
-            deletedAt: null,
-          }),
-        ),
+        Effect.succeedSome({
+          id: PROJECT_ID,
+          title: "Project",
+          workspaceRoot: "/workspace",
+          defaultModelSelection: null,
+          scripts: [],
+          createdAt: NOW,
+          updatedAt: NOW,
+          deletedAt: null,
+        }),
     }),
     Effect.provideService(FetchHttpClient.Fetch, fetch),
     Effect.provide(NodeCrypto.layer),

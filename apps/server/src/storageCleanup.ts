@@ -491,7 +491,7 @@ const make = Effect.gen(function* () {
         const remaining = measurementDeadline - (yield* Clock.currentTimeMillis);
         if (!orphanSizes.has(key) && (firstMeasurement || remaining > 0)) {
           const measured = yield* measureWorktree(worktreePath).pipe(
-            firstMeasurement ? Effect.map(Option.some) : Effect.timeoutOption(remaining),
+            firstMeasurement ? Effect.asSome : Effect.timeoutOption(remaining),
           );
           firstMeasurement = false;
           if (Option.isSome(measured)) orphanSizes.set(key, measured.value);
@@ -753,14 +753,12 @@ const make = Effect.gen(function* () {
       timeoutMs: 300_000,
     });
     if (result.exitCode !== 0)
-      return yield* Effect.fail(
-        new GitCommandError({
-          operation: "StorageCleanup.cleanupGit",
-          command,
-          cwd,
-          detail: result.stderr.trim().split(/\r?\n/)[0]?.slice(0, 1000) || "command failed",
-        }),
-      );
+      return yield* new GitCommandError({
+        operation: "StorageCleanup.cleanupGit",
+        command,
+        cwd,
+        detail: result.stderr.trim().split(/\r?\n/)[0]?.slice(0, 1000) || "command failed",
+      });
   });
 
   const managedRoots = Effect.fn("StorageCleanup.managedRoots")(function* (
