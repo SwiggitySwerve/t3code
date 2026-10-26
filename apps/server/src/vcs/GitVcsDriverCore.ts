@@ -64,6 +64,13 @@ const gitProcesses = Semaphore.makeUnsafe(8);
 const WORKTREE_ADD_TIMEOUT_MS = 300_000;
 const WORKTREE_REMOVE_TIMEOUT_MS = Duration.toMillis(Duration.minutes(5));
 const DEFAULT_MAX_OUTPUT_BYTES = 1_000_000;
+/**
+ * The most changed paths one local status lists. Totals still cover every change; the number of
+ * paths left out is reported as `workingTree.omittedFileCount`.
+ */
+export const WORKING_TREE_STATUS_MAX_FILES = 1_000;
+// A single NUL record is one path (or one status line); anything longer is not git output we understand.
+const MAX_PENDING_RECORD_CHARS = 1024 * 1024;
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
 const PREPARED_COMMIT_PATCH_MAX_OUTPUT_BYTES = 49_000;
 const RANGE_COMMIT_SUMMARY_MAX_OUTPUT_BYTES = 19_000;
@@ -184,6 +191,7 @@ interface ExecuteGitOptions {
   env?: NodeJS.ProcessEnv | undefined;
   maxOutputBytes?: number | undefined;
   appendTruncationMarker?: boolean | undefined;
+  onStdoutRecord?: GitVcsDriver.ExecuteGitInput["onStdoutRecord"];
   progress?: GitVcsDriver.ExecuteGitProgress | undefined;
 }
 
@@ -196,23 +204,54 @@ function parseBranchAb(value: string): { ahead: number; behind: number } {
   };
 }
 
+/**
+ * Folds the NUL-separated records of `--numstat -z` into file stats, one record at a time. A
+ * rename's header has an empty path and is followed by its previous and current paths.
+ */
+function makeNumstatRecordParser(emit: (entry: ReviewDiffFileStat) => void) {
+  let rename: { additions: number; deletions: number; previousPath: string | null } | null = null;
+  return (record: string): void => {
+    if (rename) {
+      if (rename.previousPath === null) {
+        rename.previousPath = record;
+        return;
+      }
+      emit({
+        path: record,
+        previousPath: rename.previousPath,
+        additions: rename.additions,
+        deletions: rename.deletions,
+      });
+      rename = null;
+      return;
+    }
+    const match = /^(\d+|-)\t(\d+|-)\t([\s\S]*)$/.exec(record);
+    if (!match) return;
+    const additions = match[1] === "-" ? 0 : Number(match[1]);
+    const deletions = match[2] === "-" ? 0 : Number(match[2]);
+    if (match[3] === "") {
+      rename = { additions, deletions, previousPath: null };
+      return;
+    }
+    emit({ path: match[3]!, previousPath: null, additions, deletions });
+  };
+}
+
 function parseReviewNumstat(stdout: string): ReviewDiffFileStat[] {
-  const fields = stdout.split("\0");
   const files: ReviewDiffFileStat[] = [];
-  for (let index = 0; index < fields.length; index++) {
-    const field = fields[index]!;
-    const match = /^(\d+|-)\t(\d+|-)\t([\s\S]*)$/.exec(field);
-    if (!match) continue;
-    const previousPath = match[3] === "" ? fields[++index]! : null;
-    const path = previousPath !== null ? fields[++index]! : match[3]!;
-    files.push({
-      path,
-      previousPath,
-      additions: match[1] === "-" ? 0 : Number(match[1]),
-      deletions: match[2] === "-" ? 0 : Number(match[2]),
-    });
-  }
+  const accept = makeNumstatRecordParser((entry) => files.push(entry));
+  for (const record of stdout.split("\0")) accept(record);
   return files;
+}
+
+type WorkingTreeFileStats = Map<string, { insertions: number; deletions: number }>;
+
+/** Adds one numstat entry to the per-path totals; a path listed twice (staged and unstaged) sums. */
+function addWorkingTreeFileStat(stats: WorkingTreeFileStats, entry: ReviewDiffFileStat): void {
+  const stat = stats.get(entry.path) ?? { insertions: 0, deletions: 0 };
+  stat.insertions += entry.additions;
+  stat.deletions += entry.deletions;
+  stats.set(entry.path, stat);
 }
 
 // Space-separated fields precede the path in each porcelain v2 record type. The path itself
@@ -230,6 +269,54 @@ function parsePorcelainPath(record: string): string | null {
   if (fieldsBeforePath === undefined) return null;
   const filePath = record.split(" ").slice(fieldsBeforePath).join(" ");
   return filePath.length > 0 ? filePath : null;
+}
+
+/**
+ * Folds the NUL-separated records of `status --porcelain=2 --branch -z` into a summary, one
+ * record at a time, so the output can be any size.
+ */
+function makePorcelainStatusRecordParser(includeDivergence: boolean) {
+  const summary = {
+    refName: null as string | null,
+    upstreamRef: null as string | null,
+    aheadCount: 0,
+    behindCount: 0,
+    hasWorkingTreeChanges: false,
+    changedPaths: new Set<string>(),
+  };
+  let expectOriginalPath = false;
+  const accept = (record: string): void => {
+    // A rename record is followed by its original path as a separate record. Listing it
+    // keeps the deletion selectable when committing only some files.
+    if (expectOriginalPath) {
+      expectOriginalPath = false;
+      if (record) summary.changedPaths.add(record);
+      return;
+    }
+    if (record.startsWith("# branch.head ")) {
+      const value = record.slice("# branch.head ".length).trim();
+      summary.refName = value.startsWith("(") ? null : value;
+      return;
+    }
+    if (record.startsWith("# branch.upstream ")) {
+      const value = record.slice("# branch.upstream ".length).trim();
+      summary.upstreamRef = value.length > 0 ? value : null;
+      return;
+    }
+    if (includeDivergence && record.startsWith("# branch.ab ")) {
+      const parsed = parseBranchAb(record.slice("# branch.ab ".length).trim());
+      summary.aheadCount = parsed.ahead;
+      summary.behindCount = parsed.behind;
+      return;
+    }
+    if (record.length > 0 && !record.startsWith("#")) {
+      summary.hasWorkingTreeChanges = true;
+      const pathValue = parsePorcelainPath(record);
+      if (pathValue) summary.changedPaths.add(pathValue);
+      if (record.startsWith("2 ")) expectOriginalPath = true;
+    }
+  };
+  return { summary, accept };
 }
 
 function filterBranchesForListQuery(
@@ -825,8 +912,37 @@ const collectOutput = Effect.fnUntraced(function* (
   appendTruncationMarker: boolean,
   onLine: ((line: string) => Effect.Effect<void, never>) | undefined,
   keepLineCallbacksAfterTruncation = false,
+  onRecord: ((record: string) => Effect.Effect<void>) | undefined = undefined,
 ): Effect.fn.Return<{ readonly text: string; readonly truncated: boolean }, GitCommandError> {
   const decoder = new TextDecoder();
+  let pendingRecord = "";
+
+  // Record mode folds output as it arrives: nothing is retained, so there is nothing to cap.
+  const emitCompleteRecords = Effect.fnUntraced(function* (flush: boolean) {
+    let start = 0;
+    for (
+      let end = pendingRecord.indexOf("\0");
+      end >= 0;
+      end = pendingRecord.indexOf("\0", start)
+    ) {
+      yield* onRecord!(pendingRecord.slice(start, end));
+      start = end + 1;
+    }
+    pendingRecord = pendingRecord.slice(start);
+    if (flush && pendingRecord.length > 0) {
+      const last = pendingRecord;
+      pendingRecord = "";
+      yield* onRecord!(last);
+    }
+    if (pendingRecord.length > MAX_PENDING_RECORD_CHARS) {
+      return yield* new GitCommandError({
+        ...gitCommandContext(input),
+        detail: "Git output contained a record too long to be a path or status line.",
+        outputLength: pendingRecord.length,
+      });
+    }
+  });
+
   const lineDecoder = keepLineCallbacksAfterTruncation && onLine ? new TextDecoder() : null;
   let bytes = 0;
   let text = "";
@@ -857,6 +973,10 @@ const collectOutput = Effect.fnUntraced(function* (
   });
 
   const processChunk = Effect.fnUntraced(function* (chunk: Uint8Array) {
+    if (onRecord) {
+      pendingRecord += decoder.decode(chunk, { stream: true });
+      return yield* emitCompleteRecords(false);
+    }
     if (appendTruncationMarker && truncated) {
       if (lineDecoder) {
         lineBuffer += lineDecoder.decode(chunk, { stream: true });
@@ -899,6 +1019,12 @@ const collectOutput = Effect.fnUntraced(function* (
         }),
     }),
   );
+
+  if (onRecord) {
+    pendingRecord += decoder.decode();
+    yield* emitCompleteRecords(true);
+    return { text: "", truncated: false };
+  }
 
   const remainder = truncated ? "" : decoder.decode();
   text += remainder;
@@ -994,6 +1120,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
               appendTruncationMarker,
               input.progress?.onStdoutLine,
               input.keepLineCallbacksAfterTruncation,
+              input.onStdoutRecord,
             ),
             collectOutput(
               commandInput,
@@ -1116,6 +1243,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ...(options.appendTruncationMarker !== undefined
         ? { appendTruncationMarker: options.appendTruncationMarker }
         : {}),
+      ...(options.onStdoutRecord ? { onStdoutRecord: options.onStdoutRecord } : {}),
       ...(options.progress ? { progress: options.progress } : {}),
     }).pipe(
       Effect.flatMap((result) => {
@@ -2000,11 +2128,29 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     };
   });
 
+  // Numstat output grows with the number of changed files, so it is folded into per-path totals
+  // as it streams rather than buffered under the output cap.
+  const collectNumstatStats = Effect.fnUntraced(function* (
+    cwd: string,
+    operation: string,
+    args: readonly string[],
+    allowNonZeroExit: boolean,
+  ) {
+    const stats: WorkingTreeFileStats = new Map();
+    const accept = makeNumstatRecordParser((entry) => addWorkingTreeFileStat(stats, entry));
+    const result = yield* executeGitWithStableDiagnostics(operation, cwd, args, {
+      allowNonZeroExit,
+      onStdoutRecord: (record) => Effect.sync(() => accept(record)),
+    });
+    return { result, stats };
+  });
+
   const readStatusDetailsLocal = Effect.fn("readStatusDetailsLocal")(function* (
     cwd: string,
     options?: GitVcsDriver.GitLocalStatusOptions,
   ) {
     const includeDivergence = options?.includeDivergence !== false;
+    const statusParser = makePorcelainStatusRecordParser(includeDivergence);
     const statusArgs = [
       "status",
       "--porcelain=2",
@@ -2054,6 +2200,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       statusArgs,
       {
         allowNonZeroExit: true,
+        // Status lists every changed path, which can exceed the output cap in a large worktree.
+        onStdoutRecord: (record) => Effect.sync(() => statusParser.accept(record)),
       },
     ).pipe(
       Effect.catchTags({
@@ -2078,7 +2226,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         }),
         detail: "Git status failed.",
         exitCode: statusResult.exitCode,
-        stdoutLength: statusResult.stdout.length,
         stderrLength: statusResult.stderr.length,
       });
     }
@@ -2087,36 +2234,44 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       Effect.catchTags({ GitCommandError: () => Effect.succeed(null) }),
     );
     const statusCacheKey = repositoryPaths?.gitCommonDir;
-    const [numstatEntries, defaultBranch, hasPrimaryRemote] = yield* Effect.all(
+    const [numstatStats, defaultBranch, hasPrimaryRemote] = yield* Effect.all(
       [
         // Porcelain diff rewrites indexes despite GIT_OPTIONAL_LOCKS=0; plumbing with -M preserves rename detection.
-        executeGitWithStableDiagnostics(
-          "GitVcsDriver.statusDetails.numstat",
+        collectNumstatStats(
           cwd,
+          "GitVcsDriver.statusDetails.numstat",
           ["diff-index", "-M", "--numstat", "-z", "HEAD", "--"],
-          { allowNonZeroExit: true },
+          true,
         ).pipe(
-          Effect.flatMap((result) => {
-            if (result.exitCode === 0) return Effect.succeed(parseReviewNumstat(result.stdout));
+          Effect.flatMap(({ result, stats }) => {
+            if (result.exitCode === 0) return Effect.succeed(stats);
             if (isUnbornHeadStderr(result.stderr)) {
               return Effect.map(
                 Effect.all([
-                  runGitStdout("GitVcsDriver.statusDetails.numstat.unborn", cwd, [
-                    "diff-files",
-                    "--numstat",
-                    "-z",
-                  ]),
-                  runGitStdout("GitVcsDriver.statusDetails.numstat.unborn.staged", cwd, [
-                    "diff",
-                    "--cached",
-                    "--numstat",
-                    "-z",
-                  ]),
+                  collectNumstatStats(
+                    cwd,
+                    "GitVcsDriver.statusDetails.numstat.unborn",
+                    ["diff-files", "--numstat", "-z"],
+                    false,
+                  ),
+                  collectNumstatStats(
+                    cwd,
+                    "GitVcsDriver.statusDetails.numstat.unborn.staged",
+                    ["diff", "--cached", "--numstat", "-z"],
+                    false,
+                  ),
                 ]),
-                ([unstagedStdout, stagedStdout]) => [
-                  ...parseReviewNumstat(stagedStdout),
-                  ...parseReviewNumstat(unstagedStdout),
-                ],
+                ([unstaged, staged]) => {
+                  for (const [filePath, stat] of unstaged.stats) {
+                    addWorkingTreeFileStat(staged.stats, {
+                      path: filePath,
+                      previousPath: null,
+                      additions: stat.insertions,
+                      deletions: stat.deletions,
+                    });
+                  }
+                  return staged.stats;
+                },
               );
             }
             return Effect.fail(
@@ -2128,7 +2283,6 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                 }),
                 detail: "git diff-index HEAD --numstat failed.",
                 exitCode: result.exitCode,
-                stdoutLength: result.stdout.length,
                 stderrLength: result.stderr.length,
               }),
             );
@@ -2143,48 +2297,15 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       ],
       { concurrency: "unbounded" },
     );
-    const statusStdout = statusResult.stdout;
-
-    let refName: string | null = null;
-    let upstreamRef: string | null = null;
-    let aheadCount = 0;
-    let behindCount = 0;
+    const {
+      refName,
+      upstreamRef,
+      hasWorkingTreeChanges,
+      changedPaths: changedFilesWithoutNumstat,
+    } = statusParser.summary;
+    let aheadCount = statusParser.summary.aheadCount;
+    let behindCount = statusParser.summary.behindCount;
     let aheadOfDefaultCount = 0;
-    let hasWorkingTreeChanges = false;
-    const changedFilesWithoutNumstat = new Set<string>();
-
-    const statusRecords = statusStdout.split("\0");
-    for (let index = 0; index < statusRecords.length; index++) {
-      const line = statusRecords[index]!;
-      if (line.startsWith("# branch.head ")) {
-        const value = line.slice("# branch.head ".length).trim();
-        refName = value.startsWith("(") ? null : value;
-        continue;
-      }
-      if (line.startsWith("# branch.upstream ")) {
-        const value = line.slice("# branch.upstream ".length).trim();
-        upstreamRef = value.length > 0 ? value : null;
-        continue;
-      }
-      if (includeDivergence && line.startsWith("# branch.ab ")) {
-        const value = line.slice("# branch.ab ".length).trim();
-        const parsed = parseBranchAb(value);
-        aheadCount = parsed.ahead;
-        behindCount = parsed.behind;
-        continue;
-      }
-      if (line.length > 0 && !line.startsWith("#")) {
-        hasWorkingTreeChanges = true;
-        const pathValue = parsePorcelainPath(line);
-        if (pathValue) changedFilesWithoutNumstat.add(pathValue);
-        // A rename record is followed by its original path as a separate record. Listing it
-        // keeps the deletion selectable when committing only some files.
-        if (line.startsWith("2 ")) {
-          const originalPath = statusRecords[++index];
-          if (originalPath) changedFilesWithoutNumstat.add(originalPath);
-        }
-      }
-    }
 
     const fallbackAheadCount =
       includeDivergence && !upstreamRef && refName
@@ -2207,29 +2328,25 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           : yield* computeAheadCountAgainstBase(cwd, refName).pipe(Effect.orElseSucceed(() => 0));
     }
 
-    const fileStatMap = new Map<string, { insertions: number; deletions: number }>();
-    for (const entry of numstatEntries) {
-      const stat = fileStatMap.get(entry.path) ?? { insertions: 0, deletions: 0 };
-      stat.insertions += entry.additions;
-      stat.deletions += entry.deletions;
-      fileStatMap.set(entry.path, stat);
-    }
-
     let insertions = 0;
     let deletions = 0;
-    const files = Array.from(fileStatMap.entries())
-      .map(([filePath, stat]) => {
-        insertions += stat.insertions;
-        deletions += stat.deletions;
-        return { path: filePath, insertions: stat.insertions, deletions: stat.deletions };
-      })
-      .toSorted((a, b) => a.path.localeCompare(b.path));
-
-    for (const filePath of changedFilesWithoutNumstat) {
-      if (fileStatMap.has(filePath)) continue;
-      files.push({ path: filePath, insertions: 0, deletions: 0 });
+    for (const stat of numstatStats.values()) {
+      insertions += stat.insertions;
+      deletions += stat.deletions;
     }
-    files.sort((a, b) => a.path.localeCompare(b.path));
+    const allFiles = Array.from(numstatStats, ([filePath, stat]) => ({
+      path: filePath,
+      insertions: stat.insertions,
+      deletions: stat.deletions,
+    }));
+    for (const filePath of changedFilesWithoutNumstat) {
+      if (numstatStats.has(filePath)) continue;
+      allFiles.push({ path: filePath, insertions: 0, deletions: 0 });
+    }
+    allFiles.sort((a, b) => a.path.localeCompare(b.path));
+    // Totals above cover every change; only the listed paths are capped.
+    const files = allFiles.slice(0, WORKING_TREE_STATUS_MAX_FILES);
+    const omittedFileCount = allFiles.length - files.length;
 
     const branchChanges = options?.includeBranchChanges
       ? yield* readBranchChangeTotals(repositoryPaths?.worktreeRoot ?? cwd, refName).pipe(
@@ -2247,6 +2364,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       workingTree: {
         ...(repositoryPaths?.worktreeRoot ? { rootPath: repositoryPaths.worktreeRoot } : {}),
         files,
+        ...(omittedFileCount > 0 ? { omittedFileCount } : {}),
         insertions,
         deletions,
       },

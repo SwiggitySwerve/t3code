@@ -299,6 +299,76 @@ const EMPTY_GIT_STATUS_REMOTE: VcsStatusRemoteResult = {
   pr: null,
 };
 
+type WorkingTree = VcsStatusLocalResult["workingTree"];
+
+const EMPTY_WORKING_TREE: WorkingTree = { files: [], insertions: 0, deletions: 0 };
+
+/**
+ * Every changed path in the working tree: the listed files plus the ones the server left out of
+ * `files` (`omittedFileCount`) to keep the status payload small.
+ */
+export function workingTreeChangedFileCount(workingTree: {
+  readonly files: readonly unknown[];
+  readonly omittedFileCount?: number | undefined;
+}): number {
+  return workingTree.files.length + (workingTree.omittedFileCount ?? 0);
+}
+
+/**
+ * The notes to show under a file list the server cut short, or `null` when every changed file is
+ * listed. Web and mobile show the same text.
+ */
+export function describeOmittedWorkingTreeFiles(
+  workingTree: WorkingTree,
+): { readonly listNote: string; readonly selectionNote: string } | null {
+  const omitted = workingTree.omittedFileCount ?? 0;
+  if (omitted === 0) return null;
+  return {
+    listNote: `and ${omitted.toLocaleString()} more ${omitted === 1 ? "file" : "files"} not listed`,
+    selectionNote:
+      "Choosing individual files is unavailable for very large change sets. The commit includes all changes.",
+  };
+}
+
+/**
+ * Which changed files a commit covers, given the unchecked paths. Once the server has omitted
+ * files, picking is unavailable and the commit covers every change (`filePaths` is undefined), so
+ * `isExcluded` is false for every path, even one unchecked before the server omitted files.
+ */
+export function selectWorkingTreeFiles(
+  workingTree: WorkingTree | undefined,
+  excludedPaths: ReadonlySet<string>,
+): {
+  readonly canSelectFiles: boolean;
+  readonly isExcluded: (path: string) => boolean;
+  readonly selectedFiles: WorkingTree["files"];
+  readonly allSelected: boolean;
+  readonly noneSelected: boolean;
+  readonly insertions: number;
+  readonly deletions: number;
+  readonly filePaths: string[] | undefined;
+} {
+  const tree = workingTree ?? EMPTY_WORKING_TREE;
+  const canSelectFiles = (tree.omittedFileCount ?? 0) === 0;
+  const isExcluded = (path: string) => canSelectFiles && excludedPaths.has(path);
+  const selectedFiles = tree.files.filter((file) => !isExcluded(file.path));
+  const allSelected = !canSelectFiles || excludedPaths.size === 0;
+  return {
+    canSelectFiles,
+    isExcluded,
+    selectedFiles,
+    allSelected,
+    noneSelected: selectedFiles.length === 0,
+    insertions: allSelected
+      ? tree.insertions
+      : selectedFiles.reduce((sum, file) => sum + file.insertions, 0),
+    deletions: allSelected
+      ? tree.deletions
+      : selectedFiles.reduce((sum, file) => sum + file.deletions, 0),
+    filePaths: allSelected ? undefined : selectedFiles.map((file) => file.path),
+  };
+}
+
 export function mergeGitStatusParts(
   local: VcsStatusLocalResult,
   remote: VcsStatusRemoteResult | null,

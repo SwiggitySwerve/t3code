@@ -11,7 +11,10 @@ import {
   normalizeGitRemoteUrl,
   parseOriginUrlFromGitConfig,
   resolveAutoFeatureBranchName,
+  describeOmittedWorkingTreeFiles,
   sanitizeFeatureBranchName,
+  selectWorkingTreeFiles,
+  workingTreeChangedFileCount,
   WORKTREE_BRANCH_PREFIX,
 } from "./git.ts";
 
@@ -272,6 +275,95 @@ describe("resolveAutoFeatureBranchName", () => {
     ["fix/name", ["fixes", "fix/name-extra/child"], "fix/name"],
   ])("resolves %s against namespace blockers %j", (preferredBranch, existingNames, expected) => {
     expect(resolveAutoFeatureBranchName(existingNames, preferredBranch)).toBe(expected);
+  });
+});
+
+describe("working tree file selection", () => {
+  const file = (path: string) => ({ path, insertions: 1, deletions: 0 });
+  const small = { files: [file("a.ts"), file("b.ts")], insertions: 2, deletions: 0 };
+  const large = { ...small, omittedFileCount: 8_000, insertions: 9_000, deletions: 12 };
+
+  it("counts listed files and omitted files together", () => {
+    expect(workingTreeChangedFileCount(small)).toBe(2);
+    expect(workingTreeChangedFileCount({ ...small, omittedFileCount: 0 })).toBe(2);
+    expect(workingTreeChangedFileCount(large)).toBe(8_002);
+    expect(workingTreeChangedFileCount({ files: [] })).toBe(0);
+  });
+
+  it("describes the omitted files with their exact count", () => {
+    expect(describeOmittedWorkingTreeFiles(small)).toBeNull();
+    expect(describeOmittedWorkingTreeFiles({ ...small, omittedFileCount: 0 })).toBeNull();
+    expect(describeOmittedWorkingTreeFiles(large)).toEqual({
+      listNote: "and 8,000 more files not listed",
+      selectionNote:
+        "Choosing individual files is unavailable for very large change sets. The commit includes all changes.",
+    });
+    expect(describeOmittedWorkingTreeFiles({ ...small, omittedFileCount: 1 })?.listNote).toBe(
+      "and 1 more file not listed",
+    );
+  });
+
+  it("selects nothing, some or all listed files and sums what is selected", () => {
+    expect(selectWorkingTreeFiles(small, new Set())).toEqual({
+      canSelectFiles: true,
+      isExcluded: expect.any(Function),
+      selectedFiles: small.files,
+      allSelected: true,
+      noneSelected: false,
+      insertions: 2,
+      deletions: 0,
+      filePaths: undefined,
+    });
+    expect(selectWorkingTreeFiles(small, new Set(["a.ts"]))).toEqual({
+      canSelectFiles: true,
+      isExcluded: expect.any(Function),
+      selectedFiles: [file("b.ts")],
+      allSelected: false,
+      noneSelected: false,
+      insertions: 1,
+      deletions: 0,
+      filePaths: ["b.ts"],
+    });
+    expect(selectWorkingTreeFiles(small, new Set(["a.ts", "b.ts"]))).toMatchObject({
+      noneSelected: true,
+      filePaths: [],
+    });
+    expect(selectWorkingTreeFiles(undefined, new Set())).toMatchObject({
+      allSelected: true,
+      noneSelected: true,
+      insertions: 0,
+      filePaths: undefined,
+    });
+  });
+
+  // regression: a partial list would silently leave the omitted files out of the commit.
+  it("covers every change when files are omitted, even if listed paths are excluded", () => {
+    for (const excluded of [[], ["a.ts"], ["a.ts", "b.ts"]]) {
+      expect(selectWorkingTreeFiles(large, new Set(excluded))).toEqual({
+        canSelectFiles: false,
+        isExcluded: expect.any(Function),
+        selectedFiles: large.files,
+        allSelected: true,
+        noneSelected: false,
+        insertions: 9_000,
+        deletions: 12,
+        filePaths: undefined,
+      });
+    }
+  });
+
+  it("reports which listed paths are excluded", () => {
+    const { isExcluded } = selectWorkingTreeFiles(small, new Set(["a.ts"]));
+    expect(isExcluded("a.ts")).toBe(true);
+    expect(isExcluded("b.ts")).toBe(false);
+  });
+
+  // regression: a path unchecked while every file was listed is still included in the commit once
+  // the server omits files, so it must not be reported as excluded.
+  it("reports no path as excluded when files are omitted", () => {
+    const { isExcluded } = selectWorkingTreeFiles(large, new Set(["a.ts"]));
+    expect(isExcluded("a.ts")).toBe(false);
+    expect(isExcluded("b.ts")).toBe(false);
   });
 });
 

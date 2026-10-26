@@ -231,6 +231,9 @@ const VcsStatusLocalShape = {
         deletions: NonNegativeInt,
       }),
     ),
+    // Changed paths the server left out of `files` to bound the payload. Absent when `files` is
+    // complete. `insertions` and `deletions` still cover every change.
+    omittedFileCount: Schema.optional(NonNegativeInt),
     insertions: NonNegativeInt,
     deletions: NonNegativeInt,
   }),

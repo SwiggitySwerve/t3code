@@ -45,6 +45,7 @@ import { useSelectedThreadWorktree } from "../../../state/use-selected-thread-wo
 import { vcsEnvironment } from "../../../state/vcs";
 import { resolveGitOverviewReviewNavigationAction } from "./git-overview-navigation";
 import { menuItemIconName, statusSummary } from "./gitSheetComponents";
+import { changedFilesLabel } from "./workingTreePresentation";
 import {
   LinkedPullRequestRow,
   linkedPullRequestKey,
@@ -210,8 +211,7 @@ function GitOverviewSheetContent(props: GitOverviewSheetProps) {
       return undefined;
     }
     if (item.dialogAction === "commit" && status.hasWorkingTreeChanges) {
-      const fileCount = status.workingTree?.files.length ?? 0;
-      return `${fileCount} file${fileCount === 1 ? "" : "s"} changed`;
+      return changedFilesLabel(status.workingTree);
     }
     if (item.dialogAction === "push" && (status.aheadCount ?? 0) > 0) {
       const ahead = status.aheadCount ?? 0;

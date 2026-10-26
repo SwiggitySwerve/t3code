@@ -56,6 +56,13 @@ export interface ExecuteGitInput {
   readonly appendTruncationMarker?: boolean;
   /** With appendTruncationMarker, line callbacks continue beyond the buffer cap for progress-only consumers. */
   readonly keepLineCallbacksAfterTruncation?: boolean;
+  /**
+   * Streams stdout as NUL-terminated records, folded as they arrive. Stdout is not retained (the
+   * result's `stdout` is empty); `maxOutputBytes`, `appendTruncationMarker` and
+   * `progress.onStdoutLine` do not apply to it. A record over 1,048,576 characters fails. Stderr
+   * keeps its cap.
+   */
+  readonly onStdoutRecord?: (record: string) => Effect.Effect<void>;
   readonly progress?: ExecuteGitProgress;
 }
 

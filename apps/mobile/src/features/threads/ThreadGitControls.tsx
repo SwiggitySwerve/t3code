@@ -28,6 +28,7 @@ import {
   type TerminalMenuSession,
 } from "../terminal/terminalMenu";
 import { projectScriptMenuLabel } from "@t3tools/shared/projectScripts";
+import { compactChangedLabel } from "./git/workingTreePresentation";
 
 function truncateMiddle(value: string, maxLength: number): string {
   if (value.length <= maxLength) {
@@ -53,7 +54,7 @@ function compactMenuStatus(gitStatus: VcsStatusResult | null): string {
 
   const parts: string[] = [];
   if (gitStatus.hasWorkingTreeChanges) {
-    parts.push(`${gitStatus.workingTree.files.length} changed`);
+    parts.push(compactChangedLabel(gitStatus.workingTree));
   } else if (gitStatus.aheadCount === 0 && gitStatus.behindCount === 0) {
     parts.push("Clean");
   }

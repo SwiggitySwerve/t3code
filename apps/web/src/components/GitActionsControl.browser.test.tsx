@@ -14,7 +14,12 @@ import "~/index.css";
 import { act, render } from "../../test/render";
 
 type Branched = { readonly branch: string };
-type GitActionInput = { featureBranch?: boolean; threadId?: string; action: string };
+type GitActionInput = {
+  featureBranch?: boolean;
+  threadId?: string;
+  action: string;
+  filePaths?: string[];
+};
 type Toast = { actionProps?: { onClick: () => void } };
 
 const state = vi.hoisted(() => ({
@@ -31,6 +36,8 @@ const state = vi.hoisted(() => ({
   afterGitAction: undefined as (() => void) | undefined,
   workingTreeRoot: undefined as string | undefined,
   files: [{ path: "file.ts", insertions: 1, deletions: 0 }],
+  omittedFileCount: undefined as number | undefined,
+  totals: { insertions: 1, deletions: 0 },
   editorOpens: [] as { environmentId: string; input: { cwd: string; editor: string } }[],
 }));
 
@@ -65,8 +72,10 @@ vi.mock(import("~/state/query"), async (original) => ({
       workingTree: {
         ...(state.workingTreeRoot === undefined ? {} : { rootPath: state.workingTreeRoot }),
         files: state.files,
-        insertions: 1,
-        deletions: 0,
+        ...(state.omittedFileCount === undefined
+          ? {}
+          : { omittedFileCount: state.omittedFileCount }),
+        ...state.totals,
       },
       hasUpstream: true,
       aheadCount: 0,
@@ -196,6 +205,8 @@ function setup() {
   state.afterGitAction = undefined;
   state.workingTreeRoot = undefined;
   state.files = [{ path: "file.ts", insertions: 1, deletions: 0 }];
+  state.omittedFileCount = undefined;
+  state.totals = { insertions: 1, deletions: 0 };
   state.editorOpens = [];
   useComposerDraftStore.setState({
     getDraftSession: () => state.draft as never,
@@ -223,5 +234,98 @@ describe("Git action targets across thread navigation", () => {
       scope: { cwd: "/first" },
       input: { threadId: "first", action: "commit_push_pr" },
     });
+  });
+});
+
+describe("Commit dialog file selection", () => {
+  async function openCommitDialog() {
+    await userEvent.click(button("Git action options"));
+    await userEvent.click(page.getByRole("menuitem", { name: "Commit", exact: true }));
+    return page.getByRole("dialog");
+  }
+
+  it("commits only the checked files when every changed file is listed", async () => {
+    setup();
+    state.files = [
+      { path: "kept.ts", insertions: 1, deletions: 0 },
+      { path: "dropped.ts", insertions: 2, deletions: 0 },
+    ];
+    state.totals = { insertions: 3, deletions: 0 };
+    await using _screen = await render(control());
+    const dialog = await openCommitDialog();
+
+    await expect.element(dialog.getByText("more files not listed")).not.toBeInTheDocument();
+    await userEvent.click(dialog.getByRole("button", { name: "Edit", exact: true }));
+    await userEvent.click(dialog.getByRole("checkbox").nth(2));
+    await userEvent.click(dialog.getByRole("button", { name: "Commit", exact: true }));
+
+    await vi.waitFor(() =>
+      expect(state.actions.at(-1)?.input).toMatchObject({
+        action: "commit",
+        filePaths: ["kept.ts"],
+      }),
+    );
+  });
+
+  // regression: a partial `filePaths` list would silently drop the files the server omitted.
+  it("says how many files are not listed and commits everything for a very large change set", async () => {
+    setup();
+    state.files = [
+      { path: "a.ts", insertions: 1, deletions: 0 },
+      { path: "b.ts", insertions: 1, deletions: 0 },
+    ];
+    state.omittedFileCount = 8_000;
+    state.totals = { insertions: 9_000, deletions: 12 };
+    await using _screen = await render(control());
+    const dialog = await openCommitDialog();
+
+    await expect.element(dialog.getByText("and 8,000 more files not listed")).toBeVisible();
+    await expect
+      .element(dialog.getByText(/choosing individual files is unavailable/i))
+      .toBeVisible();
+    // The file count covers the two listed files and the 8,000 omitted ones.
+    await expect.element(dialog.getByText("(8,002)")).toBeVisible();
+    // Exact totals for every change, not the sum of the two listed files.
+    await expect.element(dialog.getByText("+9,000")).toBeVisible();
+    await expect.element(dialog.getByText("-12")).toBeVisible();
+    await expect
+      .element(dialog.getByRole("button", { name: "Edit", exact: true }))
+      .not.toBeInTheDocument();
+    expect(dialog.getByRole("checkbox").elements()).toHaveLength(0);
+
+    await userEvent.click(dialog.getByRole("button", { name: "Commit", exact: true }));
+
+    await vi.waitFor(() => expect(state.actions.at(-1)?.input.action).toBe("commit"));
+    expect(state.actions.at(-1)?.input).not.toHaveProperty("filePaths");
+  });
+
+  // regression: a file unchecked while every file was listed is committed once a live status
+  // update reports omitted files, so the row must not still say "Excluded".
+  it("shows no file as excluded after a status update omits files", async () => {
+    setup();
+    state.files = [
+      { path: "kept.ts", insertions: 1, deletions: 0 },
+      { path: "dropped.ts", insertions: 2, deletions: 0 },
+    ];
+    state.totals = { insertions: 3, deletions: 0 };
+    await using screen = await render(control());
+    const dialog = await openCommitDialog();
+
+    await userEvent.click(dialog.getByRole("button", { name: "Edit", exact: true }));
+    await userEvent.click(dialog.getByRole("checkbox").nth(2));
+    await userEvent.click(dialog.getByRole("button", { name: "Done", exact: true }));
+    await expect.element(dialog.getByText("Excluded")).toBeVisible();
+
+    state.omittedFileCount = 5;
+    state.totals = { insertions: 8, deletions: 0 };
+    await screen.rerender(control());
+
+    await expect.element(dialog.getByText("and 5 more files not listed")).toBeVisible();
+    await expect.element(dialog.getByText("Excluded")).not.toBeInTheDocument();
+    await expect.element(dialog.getByText("+2")).toBeVisible();
+    await userEvent.click(dialog.getByRole("button", { name: "Commit", exact: true }));
+
+    await vi.waitFor(() => expect(state.actions.at(-1)?.input.action).toBe("commit"));
+    expect(state.actions.at(-1)?.input).not.toHaveProperty("filePaths");
   });
 });

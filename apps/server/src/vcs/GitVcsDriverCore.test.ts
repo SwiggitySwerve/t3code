@@ -33,6 +33,7 @@ import {
   makeGitVcsDriverCore,
   parseGitCheckoutProgressLine,
   splitNullSeparatedGitStdoutPaths,
+  WORKING_TREE_STATUS_MAX_FILES,
   windowsLongPathConfigEnv,
 } from "./GitVcsDriverCore.ts";
 import * as GitVcsDriver from "./GitVcsDriver.ts";
@@ -92,7 +93,10 @@ describe("Git output collection", () => {
   // multibyte character across reads.
   const byteChunks = (text: string) =>
     Stream.fromIterable(Array.from(new TextEncoder().encode(text), (byte) => Uint8Array.of(byte)));
-  const makeDriver = (output: { stdout?: string; stderr?: string }) =>
+  const makeDriverWithStreams = (output: {
+    stdout: Stream.Stream<Uint8Array>;
+    stderr?: Stream.Stream<Uint8Array>;
+  }) =>
     makeGitVcsDriverCore().pipe(
       Effect.provideService(
         ChildProcessSpawner.ChildProcessSpawner,
@@ -100,13 +104,18 @@ describe("Git output collection", () => {
           Effect.succeed(
             ChildProcessSpawner.makeHandle({
               ...makeSuccessfulHandle(""),
-              stdout: byteChunks(output.stdout ?? ""),
-              stderr: byteChunks(output.stderr ?? ""),
+              stdout: output.stdout,
+              stderr: output.stderr ?? Stream.empty,
             }),
           ),
         ),
       ),
     );
+  const makeDriver = (output: { stdout?: string; stderr?: string }) =>
+    makeDriverWithStreams({
+      stdout: byteChunks(output.stdout ?? ""),
+      stderr: byteChunks(output.stderr ?? ""),
+    });
 
   it.effect("returns the same split UTF-8 and NUL output with and without line callbacks", () =>
     Effect.gen(function* () {
@@ -136,6 +145,50 @@ describe("Git output collection", () => {
       assert.deepEqual(withCallbacks, expected);
       assert.deepEqual(stdoutLines, ["a\\b\0雪", "last "]);
       assert.deepEqual(stderrLines, ["Receiving é", "Updating 雪", "done"]);
+    }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+
+  it.effect("streams NUL records past the output cap without retaining stdout", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriver({ stdout: "alpha\0\u00e9\u96ea\0\0last" });
+      const records: string[] = [];
+
+      const result = yield* driver.execute({
+        operation: "test.streamedGitRecords",
+        cwd: "/repo",
+        args: ["status"],
+        maxOutputBytes: 3,
+        onStdoutRecord: (record) => Effect.sync(() => void records.push(record)),
+      });
+
+      // Split multibyte characters, empty records and an unterminated last record all arrive intact.
+      assert.deepEqual(records, ["alpha", "\u00e9\u96ea", "", "last"]);
+      assert.deepEqual(result, {
+        exitCode: 0,
+        stdout: "",
+        stderr: "",
+        stdoutTruncated: false,
+        stderrTruncated: false,
+      });
+    }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
+  );
+
+  it.effect("fails a streamed record that never ends instead of buffering it", () =>
+    Effect.gen(function* () {
+      const driver = yield* makeDriverWithStreams({
+        stdout: Stream.make(new Uint8Array(1024 * 1024 + 1).fill(0x78)),
+      });
+
+      const error = yield* driver
+        .execute({
+          operation: "test.unboundedGitRecord",
+          cwd: "/repo",
+          args: ["status"],
+          onStdoutRecord: () => Effect.void,
+        })
+        .pipe(Effect.flip);
+
+      assert.include(error.detail, "record too long");
     }).pipe(Effect.provide(layerServerConfig.pipe(Layer.provideMerge(NodeServices.layer)))),
   );
 
@@ -229,6 +282,36 @@ const initRepoWithCommit = (
     yield* git(cwd, ["commit", "-m", "initial commit"]);
     const initialBranch = yield* git(cwd, ["branch", "--show-current"]);
     return { initialBranch };
+  });
+
+// Index entries that skip the worktree stand in for staged files without writing thousands of them.
+const stageIndexOnlyFiles = (
+  cwd: string,
+  paths: ReadonlyArray<string>,
+): Effect.Effect<void, GitCommandError, GitVcsDriver.GitVcsDriver> =>
+  Effect.gen(function* () {
+    const driver = yield* GitVcsDriver.GitVcsDriver;
+    const blob = (yield* driver.execute({
+      operation: "GitVcsDriver.test.hashObject",
+      cwd,
+      args: ["hash-object", "-w", "--stdin"],
+      stdin: "one\n",
+      timeoutMs: 10_000,
+    })).stdout.trim();
+    yield* driver.execute({
+      operation: "GitVcsDriver.test.indexInfo",
+      cwd,
+      args: ["update-index", "--add", "--index-info"],
+      stdin: paths.map((file) => `100644 ${blob}\t${file}\n`).join(""),
+      timeoutMs: 10_000,
+    });
+    yield* driver.execute({
+      operation: "GitVcsDriver.test.skipWorktree",
+      cwd,
+      args: ["update-index", "--skip-worktree", "--stdin"],
+      stdin: paths.map((file) => `${file}\n`).join(""),
+      timeoutMs: 10_000,
+    });
   });
 
 it.effect.each(["root", "nested", "worktree"] as const)(
@@ -2445,7 +2528,68 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
             status.workingTree.files.map((file) => file.path),
             ["bulk/"],
           );
+          // A status that fits the list never reports an omitted count.
+          assert.isFalse("omittedFileCount" in status.workingTree);
         }),
+    );
+
+    it.effect(
+      "lists the first paths and counts the rest when a status exceeds git's output cap",
+      () =>
+        Effect.gen(function* () {
+          const cwd = yield* makeTmpDir();
+          yield* initRepoWithCommit(cwd);
+          const driver = yield* GitVcsDriver.GitVcsDriver;
+          // Long names push both `status` and `diff-index --numstat` well past the 1 MB cap.
+          const fileCount = 9_000;
+          const fileName = (index: number) =>
+            `staged/${"x".repeat(140)}${String(index).padStart(5, "0")}.txt`;
+          const paths = Array.from({ length: fileCount }, (_, index) => fileName(index));
+          yield* stageIndexOnlyFiles(cwd, paths);
+
+          const status = yield* driver.statusDetailsLocal(cwd);
+
+          assert.isTrue(status.hasWorkingTreeChanges);
+          assert.equal(status.workingTree.files.length, WORKING_TREE_STATUS_MAX_FILES);
+          assert.deepStrictEqual(
+            status.workingTree.files.map((file) => file.path),
+            paths.slice(0, WORKING_TREE_STATUS_MAX_FILES),
+          );
+          assert.equal(
+            status.workingTree.omittedFileCount,
+            fileCount - WORKING_TREE_STATUS_MAX_FILES,
+          );
+          // Totals cover every change, including paths left out of the list.
+          assert.equal(status.workingTree.insertions, fileCount);
+          assert.equal(status.workingTree.deletions, 0);
+        }),
+    );
+
+    // The list holds at most WORKING_TREE_STATUS_MAX_FILES paths: exactly that many are all listed.
+    it.effect.each([
+      { fileCount: WORKING_TREE_STATUS_MAX_FILES, omitted: undefined },
+      { fileCount: WORKING_TREE_STATUS_MAX_FILES + 1, omitted: 1 },
+    ])("lists $fileCount changed files with omittedFileCount $omitted", ({ fileCount, omitted }) =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        yield* initRepoWithCommit(cwd);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const paths = Array.from(
+          { length: fileCount },
+          (_, index) => `staged/${String(index).padStart(5, "0")}.txt`,
+        );
+        yield* stageIndexOnlyFiles(cwd, paths);
+
+        const status = yield* driver.statusDetailsLocal(cwd);
+
+        assert.deepStrictEqual(
+          status.workingTree.files.map((file) => file.path),
+          paths.slice(0, WORKING_TREE_STATUS_MAX_FILES),
+        );
+        assert.strictEqual(status.workingTree.omittedFileCount, omitted);
+        if (omitted === undefined) assert.isFalse("omittedFileCount" in status.workingTree);
+        assert.equal(status.workingTree.insertions, fileCount);
+      }),
     );
 
     it.effect("reports changes to a file named HEAD", () =>
@@ -2792,6 +2936,30 @@ it.layer(layerTest)("GitVcsDriver core integration", (it) => {
         assert.ok(file);
         assert.equal(file.insertions, 2);
         assert.equal(file.deletions, 0);
+      }),
+    );
+
+    it.effect("sums staged and unstaged edits to one path on unborn HEAD", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        yield* driver.initRepo({ cwd });
+        yield* git(cwd, ["config", "user.email", "test@test.com"]);
+        yield* git(cwd, ["config", "user.name", "Test"]);
+        yield* writeTextFile(cwd, "both.ts", "one\n");
+        yield* writeTextFile(cwd, "staged-only.ts", "a\nb\n");
+        yield* git(cwd, ["add", "both.ts", "staged-only.ts"]);
+        yield* writeTextFile(cwd, "both.ts", "one\ntwo\nthree\n");
+
+        const status = yield* driver.statusDetails(cwd);
+
+        assert.deepStrictEqual(status.workingTree.files, [
+          { path: "both.ts", insertions: 3, deletions: 0 },
+          { path: "staged-only.ts", insertions: 2, deletions: 0 },
+        ]);
+        assert.equal(status.workingTree.insertions, 5);
+        assert.equal(status.workingTree.deletions, 0);
+        assert.isFalse("omittedFileCount" in status.workingTree);
       }),
     );
 

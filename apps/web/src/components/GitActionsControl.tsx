@@ -108,6 +108,11 @@ import { useAtomCommand } from "~/state/use-atom-command";
 import { vcsActionManager, vcsEnvironment } from "~/state/vcs";
 import { randomUUID } from "~/lib/utils";
 import { resolvePathLinkTarget } from "@t3tools/shared/fileLinks";
+import {
+  describeOmittedWorkingTreeFiles,
+  selectWorkingTreeFiles,
+  workingTreeChangedFileCount,
+} from "@t3tools/shared/git";
 import { type DraftId, useComposerDraftStore } from "~/composerDraftStore";
 import {
   THREAD_DETAILS_PANEL_CHEVRON_CLASS,
@@ -1091,13 +1096,25 @@ export default function GitActionsControl({
   const gitStatusForActions = gitStatus;
   const changesTotals = gitStatusForActions?.branchChanges ?? gitStatusForActions?.workingTree;
 
-  const allFiles = gitStatusForActions?.workingTree.files ?? [];
+  const workingTree = gitStatusForActions?.workingTree;
+  const allFiles = workingTree?.files ?? [];
   // Changed-file paths are repository-relative, so they must resolve against
   // the worktree root from the same status snapshot, not the project cwd.
-  const workingTreeRoot = gitStatusForActions?.workingTree.rootPath ?? null;
-  const selectedFiles = allFiles.filter((f) => !excludedFiles.has(f.path));
-  const allSelected = excludedFiles.size === 0;
-  const noneSelected = selectedFiles.length === 0;
+  const workingTreeRoot = workingTree?.rootPath ?? null;
+  // The server lists a capped number of files. Beyond that, only the whole change set can be
+  // committed, so the list is read-only and the omitted files are counted instead.
+  const omittedFilesNote = workingTree ? describeOmittedWorkingTreeFiles(workingTree) : null;
+  const {
+    canSelectFiles,
+    isExcluded,
+    selectedFiles,
+    allSelected,
+    noneSelected,
+    filePaths: commitFilePaths,
+    insertions: selectedInsertions,
+    deletions: selectedDeletions,
+  } = selectWorkingTreeFiles(workingTree, excludedFiles);
+  const isSelectingFiles = isEditingFiles && canSelectFiles;
 
   const initAction = useVcsInitAction(sourceControlScope);
   const runImmediateGitAction = useGitStackedAction(sourceControlScope);
@@ -1396,7 +1413,7 @@ export default function GitActionsControl({
     void runGitActionWithToast({
       action: "commit",
       ...(commitMessage ? { commitMessage } : {}),
-      ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
+      ...(commitFilePaths ? { filePaths: commitFilePaths } : {}),
       featureBranch: true,
       skipDefaultBranchPrompt: true,
     });
@@ -1494,7 +1511,7 @@ export default function GitActionsControl({
     void runGitActionWithToast({
       action: "commit",
       ...(commitMessage ? { commitMessage } : {}),
-      ...(!allSelected ? { filePaths: selectedFiles.map((f) => f.path) } : {}),
+      ...(commitFilePaths ? { filePaths: commitFilePaths } : {}),
     });
   };
 
@@ -1895,7 +1912,7 @@ export default function GitActionsControl({
               <div className="space-y-1">
                 <div className="flex items-center justify-between">
                   <div className="flex items-center gap-2">
-                    {isEditingFiles && allFiles.length > 0 && (
+                    {isSelectingFiles && allFiles.length > 0 && (
                       <Checkbox
                         checked={allSelected}
                         indeterminate={!allSelected && !noneSelected}
@@ -1907,13 +1924,18 @@ export default function GitActionsControl({
                       />
                     )}
                     <span className="text-muted-foreground">Files</span>
-                    {!allSelected && !isEditingFiles && (
+                    {!allSelected && !isSelectingFiles && (
                       <span className="text-muted-foreground">
                         ({selectedFiles.length} of {allFiles.length})
                       </span>
                     )}
+                    {workingTree && !canSelectFiles && (
+                      <span className="text-muted-foreground">
+                        ({formatDiffCount(workingTreeChangedFileCount(workingTree))})
+                      </span>
+                    )}
                   </div>
-                  {allFiles.length > 0 && (
+                  {allFiles.length > 0 && canSelectFiles && (
                     <Button
                       variant="ghost"
                       size="xs"
@@ -1931,15 +1953,15 @@ export default function GitActionsControl({
                       <ScrollArea>
                         <div className="space-y-1 p-1">
                           {allFiles.map((file) => {
-                            const isExcluded = excludedFiles.has(file.path);
+                            const fileExcluded = isExcluded(file.path);
                             return (
                               <div
                                 key={file.path}
                                 className="flex w-full items-center gap-2 rounded-md px-2 py-1 font-mono hover:bg-accent/50"
                               >
-                                {isEditingFiles && (
+                                {isSelectingFiles && (
                                   <Checkbox
-                                    checked={!excludedFiles.has(file.path)}
+                                    checked={!fileExcluded}
                                     onCheckedChange={() => {
                                       setExcludedFiles((prev) => {
                                         const next = new Set(prev);
@@ -1962,10 +1984,10 @@ export default function GitActionsControl({
                                 >
                                   <StartTruncatedPath
                                     path={file.path}
-                                    className={`flex-1${isExcluded ? " text-muted-foreground" : ""}`}
+                                    className={`flex-1${fileExcluded ? " text-muted-foreground" : ""}`}
                                   />
                                   <span className="shrink-0">
-                                    {isExcluded ? (
+                                    {fileExcluded ? (
                                       <span className="text-muted-foreground">Excluded</span>
                                     ) : (
                                       <>
@@ -1986,13 +2008,19 @@ export default function GitActionsControl({
                         </div>
                       </ScrollArea>
                     </div>
+                    {omittedFilesNote && (
+                      <div className="space-y-1 text-muted-foreground text-xs">
+                        <p className="font-medium">{omittedFilesNote.listNote}</p>
+                        <p>{omittedFilesNote.selectionNote}</p>
+                      </div>
+                    )}
                     <div className="flex justify-end font-mono">
                       <span className="text-diff-addition">
-                        +{formatDiffCount(selectedFiles.reduce((sum, f) => sum + f.insertions, 0))}
+                        +{formatDiffCount(selectedInsertions)}
                       </span>
                       <span className="text-muted-foreground"> / </span>
                       <span className="text-diff-deletion">
-                        -{formatDiffCount(selectedFiles.reduce((sum, f) => sum + f.deletions, 0))}
+                        -{formatDiffCount(selectedDeletions)}
                       </span>
                     </div>
                   </div>

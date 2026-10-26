@@ -4,6 +4,11 @@ import { useNavigation, type StaticScreenProps } from "@react-navigation/native"
 import { useState } from "react";
 import { Platform, Pressable, ScrollView, useWindowDimensions, View } from "react-native";
 import { formatDiffCount } from "@t3tools/client-runtime/diff-count";
+import {
+  describeOmittedWorkingTreeFiles,
+  selectWorkingTreeFiles,
+  workingTreeChangedFileCount,
+} from "@t3tools/shared/git";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { SymbolView } from "../../../components/ui/AppSymbol";
@@ -43,16 +48,24 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
 
   const busy = gitState.gitOperationLabel !== null;
   const isDefaultRef = gitStatus.data?.isDefaultRef ?? false;
-  const allFiles = gitStatus.data?.workingTree?.files ?? [];
+  const workingTree = gitStatus.data?.workingTree;
+  const allFiles = workingTree?.files ?? [];
+  const omittedFilesNote = workingTree ? describeOmittedWorkingTreeFiles(workingTree) : null;
 
   const [dialogCommitMessage, setDialogCommitMessage] = useState("");
   const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
 
-  const selectedFiles = allFiles.filter((file) => !excludedFiles.has(file.path));
-  const allSelected = excludedFiles.size === 0;
-  const noneSelected = selectedFiles.length === 0;
-  const selectedInsertions = selectedFiles.reduce((sum, file) => sum + file.insertions, 0);
-  const selectedDeletions = selectedFiles.reduce((sum, file) => sum + file.deletions, 0);
+  // Past the server's file cap only the whole change set can be committed (canSelectFiles is false).
+  const {
+    canSelectFiles,
+    isExcluded,
+    selectedFiles,
+    allSelected,
+    noneSelected,
+    insertions: selectedInsertions,
+    deletions: selectedDeletions,
+    filePaths,
+  } = selectWorkingTreeFiles(workingTree, excludedFiles);
 
   const runCommitAction = async (featureBranch: boolean) => {
     if (!canWriteSourceControl || (featureBranch && !canChangeThreadBranch)) return;
@@ -62,7 +75,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
       action: "commit",
       featureBranch,
       ...(commitMessage ? { commitMessage } : {}),
-      ...(!allSelected ? { filePaths: selectedFiles.map((file) => file.path) } : {}),
+      ...(filePaths ? { filePaths } : {}),
     });
   };
 
@@ -119,11 +132,13 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
             <View className="flex-1 gap-1">
               <Text className="text-base font-t3-bold text-foreground">Changed files</Text>
               <Text className="text-xs text-foreground-muted">
-                {selectedFiles.length} of {allFiles.length} selected · +
-                {formatDiffCount(selectedInsertions)} −{formatDiffCount(selectedDeletions)}
+                {workingTree && !canSelectFiles
+                  ? `${formatDiffCount(workingTreeChangedFileCount(workingTree))} files, all included`
+                  : `${selectedFiles.length} of ${allFiles.length} selected`}{" "}
+                · +{formatDiffCount(selectedInsertions)} −{formatDiffCount(selectedDeletions)}
               </Text>
             </View>
-            {allFiles.length > 0 ? (
+            {allFiles.length > 0 && canSelectFiles ? (
               <Button
                 label={allSelected ? "Deselect all" : "Select all"}
                 tone="text"
@@ -139,7 +154,7 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
             <Text className="py-4 text-sm text-foreground-muted">No changed files to commit.</Text>
           ) : (
             allFiles.map((file) => {
-              const included = !excludedFiles.has(file.path);
+              const included = !isExcluded(file.path);
               const slash = file.path.lastIndexOf("/");
               const name = file.path.slice(slash + 1);
               const directory = slash >= 0 ? file.path.slice(0, slash) : null;
@@ -149,7 +164,8 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
                   className="min-h-16 flex-row items-center gap-3 border-t border-border-subtle py-3"
                   accessibilityRole="checkbox"
                   accessibilityLabel={file.path}
-                  accessibilityState={{ checked: included }}
+                  accessibilityState={{ checked: included, disabled: !canSelectFiles }}
+                  disabled={!canSelectFiles}
                   onPress={() =>
                     setExcludedFiles((current) => {
                       const next = new Set(current);
@@ -203,6 +219,16 @@ export function GitCommitSheet(_props: GitCommitSheetProps) {
               );
             })
           )}
+          {omittedFilesNote ? (
+            <View className="gap-1 border-t border-border-subtle pt-3">
+              <Text className="text-sm font-t3-medium text-foreground">
+                {omittedFilesNote.listNote}
+              </Text>
+              <Text className="text-xs text-foreground-muted">
+                {omittedFilesNote.selectionNote}
+              </Text>
+            </View>
+          ) : null}
         </View>
         <View className="gap-2">
           <Button
