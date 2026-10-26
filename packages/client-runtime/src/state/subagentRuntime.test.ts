@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -12,6 +13,7 @@ import {
   appWorkflowHeading,
   appWorkflowMemberThreads,
   canStopWorkflow,
+  canStopWorkflowWork,
   workflowGraphHeadline,
   workflowGraphNodeDetail,
   deriveWorkflowGroups,
@@ -746,6 +748,63 @@ describe("canStopWorkflow", () => {
       }),
     ).toBe(false);
     expect(canStopWorkflow({ status: "running", origin: "provider_native", driver: null })).toBe(
+      false,
+    );
+  });
+});
+
+describe("canStopWorkflowWork", () => {
+  const driver = ProviderDriverKind.make("codex");
+  const workflow = (
+    status: OrchestrationV2Subagent["status"],
+    origin: "app_owned" | "provider_native" = "app_owned",
+  ) => ({
+    id: NodeId.make("workflow-1"),
+    status,
+    origin,
+    driver,
+  });
+  const member = (
+    status: OrchestrationV2Subagent["status"],
+    overrides: Partial<
+      Pick<OrchestrationV2Subagent, "origin" | "parentNodeId" | "childThreadId">
+    > = {},
+  ) => ({
+    origin: "app_owned" as const,
+    parentNodeId: NodeId.make("workflow-1"),
+    childThreadId: ThreadId.make("thread-member"),
+    status,
+    ...overrides,
+  });
+
+  it("keeps Stop for a cancelled workflow while a member it started is still active", () => {
+    // A stop cancels the row first; when a member stop then fails, the member keeps running.
+    expect(canStopWorkflowWork(workflow("cancelled"), [member("running")])).toBe(true);
+    expect(canStopWorkflowWork(workflow("failed"), [member("waiting")])).toBe(true);
+    expect(canStopWorkflowWork(workflow("interrupted"), [member("pending")])).toBe(true);
+  });
+
+  it("drops Stop once the row and every member have settled", () => {
+    expect(
+      canStopWorkflowWork(workflow("cancelled"), [member("cancelled"), member("completed")]),
+    ).toBe(false);
+    expect(canStopWorkflowWork(workflow("completed"), [])).toBe(false);
+  });
+
+  it("offers Stop for a running workflow whatever its members do", () => {
+    expect(canStopWorkflowWork(workflow("running"), [])).toBe(true);
+    expect(canStopWorkflowWork(workflow("running"), [member("completed")])).toBe(true);
+  });
+
+  it("looks only at members this workflow started", () => {
+    const stranger = member("running", { parentNodeId: NodeId.make("another-workflow") });
+    const native = member("running", { origin: "provider_native" });
+    const noThread = member("running", { childThreadId: null });
+    expect(canStopWorkflowWork(workflow("cancelled"), [stranger, native, noThread])).toBe(false);
+  });
+
+  it("does not extend a provider-native workflow, whose members T3 does not own", () => {
+    expect(canStopWorkflowWork(workflow("cancelled", "provider_native"), [member("running")])).toBe(
       false,
     );
   });

@@ -8,7 +8,7 @@ import { PullRequestGlyph } from "../pullRequest/pullRequestIcons";
 import { scopedThreadKey, scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   appWorkflowMemberThreads,
-  canStopWorkflow,
+  canStopWorkflowWork,
   isAppWorkflow,
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
@@ -525,11 +525,15 @@ export function ThreadRelationshipsPanel(props: {
                 canOperateWorkflow &&
                 workflowGroup !== undefined &&
                 agent !== undefined &&
-                canStopWorkflow({
-                  status: workflowGroup.workflow.status,
-                  origin: agent.origin,
-                  driver: providerDriver ?? null,
-                });
+                canStopWorkflowWork(
+                  {
+                    id: agent.id,
+                    status: workflowGroup.workflow.status,
+                    origin: agent.origin,
+                    driver: providerDriver ?? null,
+                  },
+                  projected,
+                );
               const isAppWorkflowRow = workflowGroup !== undefined && agent?.origin === "app_owned";
               const trailingVisibilityClass = (workflowGroup ? showWorkflowStop : canStop)
                 ? "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0"

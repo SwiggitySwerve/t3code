@@ -8,7 +8,11 @@ import type {
   OrchestrationV2WorkflowNodeOutcome,
   OrchestrationV2WorkflowPlan,
 } from "@t3tools/contracts";
-import { isOrchestrationV2WorkActive, isProviderNativeSubagentThread } from "@t3tools/contracts";
+import {
+  isOrchestrationV2ActiveWorkflowMember,
+  isOrchestrationV2WorkActive,
+  isProviderNativeSubagentThread,
+} from "@t3tools/contracts";
 import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript";
 import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
@@ -617,6 +621,26 @@ export function canStopWorkflow(workflow: {
     workflow.status === "running" &&
     (workflow.origin === "app_owned" ||
       (workflow.origin === "provider_native" && workflow.driver === "claudeAgent"))
+  );
+}
+
+/**
+ * Whether Stop is on offer for a workflow row: it is running, or a T3-run workflow still has an
+ * active member. A stop cancels the row before its members, so a failed member stop leaves the row
+ * cancelled with members running, and Stop stays so the whole stop can be repeated.
+ */
+export function canStopWorkflowWork(
+  workflow: Pick<OrchestrationV2Subagent, "id" | "status" | "origin"> & {
+    readonly driver: OrchestrationV2Subagent["driver"] | null;
+  },
+  subagents: ReadonlyArray<
+    Pick<OrchestrationV2Subagent, "origin" | "parentNodeId" | "childThreadId" | "status">
+  >,
+): boolean {
+  return (
+    canStopWorkflow(workflow) ||
+    (workflow.origin === "app_owned" &&
+      subagents.some((member) => isOrchestrationV2ActiveWorkflowMember(member, workflow.id)))
   );
 }
 

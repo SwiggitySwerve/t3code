@@ -1,7 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   appWorkflowHeading,
-  canStopWorkflow,
+  canStopWorkflowWork,
   resolveAppWorkflowView,
   workflowProgressText,
 } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -28,7 +28,14 @@ export function AppWorkflowTimelineBlock(props: {
     environmentThreadDetails.threadAtom(props.parentRef),
     (thread) => thread?.projection.subagents.find((agent) => agent.id === props.subagentId) ?? null,
   );
-  const canStop = useAtomValue(
+  // A partly failed stop leaves the row cancelled with members still running; Stop stays until
+  // they settle (see `canStopWorkflowWork`), also after a remount.
+  const stoppable = useAtomValue(environmentThreadDetails.threadAtom(props.parentRef), (thread) => {
+    const subagents = thread?.projection.subagents ?? [];
+    const workflow = subagents.find((agent) => agent.id === props.subagentId);
+    return workflow !== undefined && canStopWorkflowWork(workflow, subagents);
+  });
+  const canOperate = useAtomValue(
     orchestrationEnvironment.stopWorkflow.permissionAtom(props.parentRef.environmentId),
   );
   const stopWorkflow = useAtomCommand(orchestrationEnvironment.stopWorkflow);
@@ -55,7 +62,7 @@ export function AppWorkflowTimelineBlock(props: {
       heading={appWorkflowHeading(row.status)}
       // While it runs, the script's latest log line; afterwards, what it returned or why it ended.
       progress={workflowProgressText(row)}
-      {...(canStop && canStopWorkflow(row)
+      {...(canOperate && stoppable
         ? { stop: { onStop: () => void stop(), stopping, disabled: stopping } }
         : {})}
     />

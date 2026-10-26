@@ -1,9 +1,12 @@
 import { useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { isAtomCommandInterrupted } from "@t3tools/client-runtime/state/runtime";
-import { canStopWorkflow, isAppWorkflow } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
-  isOrchestrationV2ActiveWorkflowMember,
+  canStopWorkflow,
+  canStopWorkflowWork,
+  isAppWorkflow,
+} from "@t3tools/client-runtime/state/subagentRuntime";
+import {
   NodeId,
   type EnvironmentId,
   type OrchestrationV2Subagent,
@@ -130,15 +133,12 @@ function AppWorkflowStopRow(props: AppWorkflowStopProps) {
   const { subagent } = props;
   // A stop cancels the row before it stops the members, so a failed member stop leaves the row
   // cancelled with members still running. The same control stays to retry until they settle.
-  const hasActiveMembers = useAtomValue(
+  const stoppable = useAtomValue(
     environmentThreadDetails.threadAtom(scopeThreadRef(props.environmentId, subagent.threadId)),
-    (thread) =>
-      (thread?.projection.subagents ?? []).some((candidate) =>
-        isOrchestrationV2ActiveWorkflowMember(candidate, subagent.id),
-      ),
+    (thread) => canStopWorkflowWork(subagent, thread?.projection.subagents ?? []),
   );
   const running = canStopWorkflow(subagent);
-  if (!running && !hasActiveMembers) return null;
+  if (!stoppable) return null;
   return (
     <WorkflowStopControl
       environmentId={props.environmentId}
