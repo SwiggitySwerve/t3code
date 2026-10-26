@@ -1,7 +1,10 @@
 import {
   ConnectionCatalogDocument,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
+  type CorruptCatalogArchive,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
+  catalogCorruptError,
+  preserveCorruptCatalog,
 } from "@t3tools/client-runtime/platform";
 import { ConnectionTransientError } from "@t3tools/client-runtime/connection";
 import * as Effect from "effect/Effect";
@@ -26,12 +29,6 @@ function catalogError(operation: string, cause: unknown) {
 const ConnectionCatalogDocumentJson = Schema.fromJsonString(ConnectionCatalogDocument);
 const decodeConnectionCatalogDocument = Schema.decodeEffect(ConnectionCatalogDocumentJson);
 const encodeConnectionCatalogDocument = Schema.encodeEffect(ConnectionCatalogDocumentJson);
-
-const decodeCatalog = Effect.fn("mobile.connectionStorage.decodeCatalog")(function* (raw: string) {
-  return yield* decodeConnectionCatalogDocument(raw).pipe(
-    Effect.mapError((cause) => catalogError("decode", cause)),
-  );
-});
 
 const encodeCatalog = Effect.fn("mobile.connectionStorage.encodeCatalog")(function* (
   catalog: ConnectionCatalogDocumentType,
@@ -61,22 +58,19 @@ export const make = Effect.fn("mobile.connectionStorage.makeCatalogStore")(funct
 
   const loadLegacyCatalog = Effect.fn("mobile.connectionStorage.loadLegacyCatalog")(function* () {
     const legacyRaw = yield* getItem(LEGACY_CONNECTIONS_KEY);
-    const catalog =
-      legacyRaw === null || legacyRaw.trim() === ""
-        ? EMPTY_CONNECTION_CATALOG_DOCUMENT
-        : yield* migrateLegacyConnectionCatalog(legacyRaw).pipe(
-            Effect.mapError((cause) => catalogError("migrate", cause)),
-            Effect.catch((error) =>
-              Effect.logWarning("Discarding corrupt legacy mobile connections", error).pipe(
-                Effect.as(EMPTY_CONNECTION_CATALOG_DOCUMENT),
-              ),
-            ),
-          );
-    if (legacyRaw !== null && legacyRaw.trim() !== "") {
-      const encoded = yield* encodeCatalog(catalog);
-      yield* setItem(CONNECTION_CATALOG_KEY, encoded);
-      yield* deleteItem(LEGACY_CONNECTIONS_KEY);
+    if (legacyRaw === null || legacyRaw.trim() === "") {
+      return EMPTY_CONNECTION_CATALOG_DOCUMENT;
     }
+    const catalog = yield* migrateLegacyConnectionCatalog(legacyRaw).pipe(
+      Effect.catch(() =>
+        Effect.logWarning("The legacy mobile connections could not be decoded.").pipe(
+          Effect.andThen(Effect.fail(catalogCorruptError())),
+        ),
+      ),
+    );
+    const encoded = yield* encodeCatalog(catalog);
+    yield* setItem(CONNECTION_CATALOG_KEY, encoded);
+    yield* deleteItem(LEGACY_CONNECTIONS_KEY);
     return catalog;
   });
 
@@ -88,11 +82,10 @@ export const make = Effect.fn("mobile.connectionStorage.makeCatalogStore")(funct
     const raw = yield* getItem(CONNECTION_CATALOG_KEY);
     let catalog: ConnectionCatalogDocumentType;
     if (raw !== null && raw.trim() !== "") {
-      catalog = yield* decodeCatalog(raw).pipe(
-        Effect.catch((error) =>
-          Effect.logWarning("Discarding corrupt mobile connection catalog", error).pipe(
-            Effect.andThen(deleteItem(CONNECTION_CATALOG_KEY)),
-            Effect.andThen(loadLegacyCatalog()),
+      catalog = yield* decodeConnectionCatalogDocument(raw).pipe(
+        Effect.catch(() =>
+          Effect.logWarning("The saved mobile connection catalog could not be decoded.").pipe(
+            Effect.andThen(Effect.fail(catalogCorruptError())),
           ),
         ),
       );
@@ -102,7 +95,6 @@ export const make = Effect.fn("mobile.connectionStorage.makeCatalogStore")(funct
     yield* Ref.set(state, Option.some(catalog));
     return catalog;
   });
-
   const read = lock.withPermits(1)(loadUnlocked());
   const update: CatalogStore["update"] = Effect.fn("mobile.connectionStorage.updateCatalog")(
     function* (transform) {
@@ -118,4 +110,59 @@ export const make = Effect.fn("mobile.connectionStorage.makeCatalogStore")(funct
   );
 
   return { read, update } satisfies CatalogStore;
+});
+
+const archiveFor = (
+  storage: MobileSecureStorage.MobileSecureStorage["Service"],
+  keyPrefix: string,
+): CorruptCatalogArchive<ConnectionTransientError> => ({
+  keyPrefix,
+  get: (key) => storage.getItem(key).pipe(Effect.mapError((cause) => catalogError("load", cause))),
+  set: (key, value) =>
+    storage.setItem(key, value).pipe(Effect.mapError((cause) => catalogError("save", cause))),
+  failure: (detail) => catalogError("preserve", detail),
+});
+
+/**
+ * The only path that discards an unreadable catalog. Every unreadable source is saved before any
+ * is removed, and a source that still decodes is never touched. Runs without the connection
+ * runtime, which cannot start while the catalog is unreadable.
+ */
+export const recover = Effect.fn("mobile.connectionStorage.recoverCatalog")(function* () {
+  const storage = yield* MobileSecureStorage.MobileSecureStorage;
+  const read = (key: string) =>
+    storage.getItem(key).pipe(Effect.mapError((cause) => catalogError("load", cause)));
+  const current = yield* read(CONNECTION_CATALOG_KEY);
+  const currentPresent = current !== null && current.trim() !== "";
+  const currentUnreadable =
+    currentPresent &&
+    (yield* decodeConnectionCatalogDocument(current).pipe(
+      Effect.as(false),
+      Effect.catch(() => Effect.succeed(true)),
+    ));
+  if (currentPresent && !currentUnreadable) return false;
+
+  const legacy = yield* read(LEGACY_CONNECTIONS_KEY);
+  const legacyUnreadable =
+    legacy !== null &&
+    legacy.trim() !== "" &&
+    (yield* migrateLegacyConnectionCatalog(legacy).pipe(
+      Effect.as(false),
+      Effect.catch(() => Effect.succeed(true)),
+    ));
+
+  const unreadable: Array<{ readonly key: string; readonly raw: string }> = [];
+  if (currentUnreadable) unreadable.push({ key: CONNECTION_CATALOG_KEY, raw: current });
+  if (legacyUnreadable) unreadable.push({ key: LEGACY_CONNECTIONS_KEY, raw: legacy });
+  if (unreadable.length === 0) return false;
+
+  for (const source of unreadable) {
+    yield* preserveCorruptCatalog(archiveFor(storage, `${source.key}.corrupt.`), source.raw);
+  }
+  for (const source of unreadable) {
+    yield* storage
+      .removeItem(source.key)
+      .pipe(Effect.mapError((cause) => catalogError("delete", cause)));
+  }
+  return true;
 });

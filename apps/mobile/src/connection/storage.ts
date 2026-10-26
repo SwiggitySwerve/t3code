@@ -4,6 +4,7 @@ import {
   removeConnectionFromCatalog,
   setConnectionEnabledInCatalog,
   setRoutesInCatalog,
+  isCatalogCorruptError,
   removeCatalogValue,
   replaceCatalogValue,
   Persistence,
@@ -36,6 +37,7 @@ function targetPersistenceError(
   return new Persistence.ConnectionPersistenceError({
     operation,
     message: error.message,
+    ...(isCatalogCorruptError(error) ? { reason: "catalog-corrupt" as const } : {}),
   });
 }
 

@@ -9,6 +9,7 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AndroidScreenHeader } from "../../components/ui/AndroidScreenHeader";
 import { useRemoteConnections } from "../../state/use-remote-environment-registry";
+import { CorruptCatalogSection } from "./CorruptCatalogSection";
 import { LocalEnvironmentList } from "./LocalEnvironmentList";
 import { PullRequestRoutingSettings } from "./PullRequestRoutingSettings";
 
@@ -60,6 +61,7 @@ export function ConnectionsRouteScreen() {
           paddingTop: 16,
         }}
       >
+        <CorruptCatalogSection />
         <LocalEnvironmentList
           environments={connectedEnvironments}
           expandedId={expandedId}

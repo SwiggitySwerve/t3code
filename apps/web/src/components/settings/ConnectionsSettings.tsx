@@ -133,6 +133,8 @@ import {
   SavedBackendListRow,
 } from "./SavedEnvironmentRows";
 import { AddEnvironmentDialog } from "./AddEnvironmentDialog";
+import { CorruptCatalogNotice } from "./CorruptCatalogNotice";
+import { SecureStorageUnavailableNotice } from "./SecureStorageUnavailableNotice";
 
 const DEFAULT_TAILSCALE_SERVE_PORT = 443;
 const EMPTY_ADVERTISED_ENDPOINTS: ReadonlyArray<AdvertisedEndpoint> = [];
@@ -1477,6 +1479,8 @@ export function ConnectionsSettings() {
 
   return (
     <SettingsPageContainer>
+      <CorruptCatalogNotice />
+      <SecureStorageUnavailableNotice />
       {primarySettings}
       <SettingsSection
         {...searchableSetting("remote-environments")}

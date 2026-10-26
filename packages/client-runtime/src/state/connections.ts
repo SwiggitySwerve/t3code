@@ -1,4 +1,5 @@
 import type { EnvironmentId as EnvironmentIdType } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Stream from "effect/Stream";
@@ -6,6 +7,7 @@ import * as SubscriptionRef from "effect/SubscriptionRef";
 import { AsyncResult, Atom } from "effect/reactivity";
 
 import * as EnvironmentRegistry from "../connection/registry.ts";
+import { isCatalogCorruptError } from "../platform/corruptCatalogPreservation.ts";
 import type { ConnectionCatalogEntry } from "../connection/catalog.ts";
 import { AVAILABLE_CONNECTION_STATE } from "../connection/model.ts";
 import * as EnvironmentSupervisor from "../connection/supervisor.ts";
@@ -64,6 +66,12 @@ export function createEnvironmentCatalogAtoms<R, E>(
   const catalogValueAtom = Atom.make((get) =>
     Option.getOrElse(AsyncResult.value(get(catalogAtom)), () => EMPTY_ENVIRONMENT_CATALOG_STATE),
   ).pipe(Atom.withLabel("environment-catalog-value"));
+
+  /** True only when the stored catalog failed to decode, the one failure a reset may fix. */
+  const catalogCorruptionAtom = Atom.make((get) => {
+    const result = get(catalogAtom);
+    return AsyncResult.isFailure(result) && isCatalogCorruptError(Cause.squash(result.cause));
+  }).pipe(Atom.withLabel("environment-catalog-corruption"));
 
   const pullRequestRoutingPermissionsAtom = runtime.atom(
     Stream.unwrap(
@@ -192,6 +200,7 @@ export function createEnvironmentCatalogAtoms<R, E>(
   return {
     catalogAtom,
     catalogValueAtom,
+    catalogCorruptionAtom,
     pullRequestRoutingPermissionsValueAtom,
     setPullRequestRoutingPermission,
     networkStatusAtom,

@@ -1,12 +1,16 @@
 import {
   ConnectionCatalogDocument,
   type ConnectionCatalogDocument as ConnectionCatalogDocumentType,
+  type CorruptCatalogArchive,
   EMPTY_CONNECTION_CATALOG_DOCUMENT,
   ORCHESTRATION_CACHE_SCHEMA_VERSION,
   ORCHESTRATION_THREAD_CACHE_SCHEMA_VERSION,
   StoredOrchestrationShellSnapshot,
   StoredOrchestrationThreadSnapshot,
+  catalogCorruptError,
   decodeOrDiscardOrchestrationCache,
+  isCatalogCorruptError,
+  preserveCorruptCatalog,
   putRemoteDpopTokenInCatalog,
   registerConnectionInCatalog,
   removeCatalogValue,
@@ -108,6 +112,7 @@ function persistenceError(
   return new Persistence.ConnectionPersistenceError({
     operation,
     message: `Could not ${operation.replaceAll("-", " ")}: ${String(cause)}`,
+    ...(isCatalogCorruptError(cause) ? { reason: "catalog-corrupt" as const } : {}),
   });
 }
 
@@ -365,12 +370,6 @@ function vcsRefsCacheKey(environmentId: EnvironmentId, cwd: string) {
   return `${environmentId}:${cwd}`;
 }
 
-const decodeCatalog = Effect.fn("web.connectionStorage.decodeCatalog")(function* (raw: string) {
-  return yield* decodeConnectionCatalogDocument(raw).pipe(
-    Effect.mapError((cause) => catalogError("decode", cause)),
-  );
-});
-
 const encodeCatalog = Effect.fn("web.connectionStorage.encodeCatalog")(function* (
   catalog: ConnectionCatalogDocumentType,
 ) {
@@ -382,13 +381,38 @@ const encodeCatalog = Effect.fn("web.connectionStorage.encodeCatalog")(function*
 export interface CatalogBackend {
   readonly read: Effect.Effect<string | null, ConnectionTransientError>;
   readonly write: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
-  readonly quarantine?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
+  /**
+   * Another process owns the stored catalog and may hold a newer one than this window loaded, for
+   * example after desktop secure storage returns. An update then starts from a fresh read.
+   */
+  readonly rereadBeforeUpdate?: boolean;
+  /** Saves the unreadable `raw` for good, then replaces it with an empty catalog. */
+  readonly recover?: (raw: string) => Effect.Effect<void, ConnectionTransientError>;
 }
+
+const catalogArchive = (
+  database: DatabaseHandle,
+): CorruptCatalogArchive<ConnectionTransientError> => ({
+  keyPrefix: `${CATALOG_KEY}:corrupt:`,
+  get: (key) =>
+    readDatabaseValue(database, CATALOG_STORE_NAME, key).pipe(
+      Effect.flatMap((value) =>
+        value === undefined
+          ? Effect.succeed(null)
+          : typeof value === "string"
+            ? Effect.succeed(value)
+            : Effect.fail(catalogError("read", "A saved copy of the catalog is malformed.")),
+      ),
+    ),
+  set: (key, value) => writeDatabaseValue(database, CATALOG_STORE_NAME, key, value),
+  failure: (detail) => catalogError("preserve", detail),
+});
 
 export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
   const bridge = window.desktopBridge;
   if (bridge?.getConnectionCatalog !== undefined && bridge.setConnectionCatalog !== undefined) {
     return {
+      rereadBeforeUpdate: true,
       read: Effect.tryPromise({
         try: () => bridge.getConnectionCatalog!(),
         catch: (cause) => catalogError("load", cause),
@@ -409,6 +433,16 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
                 ),
           ),
         ),
+      // The desktop process keeps a copy of the encrypted file before it clears it.
+      ...(bridge.clearConnectionCatalog === undefined
+        ? {}
+        : {
+            recover: () =>
+              Effect.tryPromise({
+                try: () => bridge.clearConnectionCatalog!(),
+                catch: (cause) => catalogError("reset", cause),
+              }),
+          }),
     };
   }
 
@@ -417,11 +451,15 @@ export function makeCatalogBackend(database: DatabaseHandle): CatalogBackend {
       Effect.map((value) => (typeof value === "string" ? value : null)),
     ),
     write: (raw) => writeDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY, raw),
-    quarantine: (raw) =>
-      writeDatabaseValue(database, CATALOG_STORE_NAME, `${CATALOG_KEY}:corrupt:${Date.now()}`, raw),
+    recover: (raw) =>
+      preserveCorruptCatalog(catalogArchive(database), raw).pipe(
+        Effect.andThen(encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT)),
+        Effect.flatMap((empty) =>
+          writeDatabaseValue(database, CATALOG_STORE_NAME, CATALOG_KEY, empty),
+        ),
+      ),
   };
 }
-
 interface CatalogStore {
   readonly read: Effect.Effect<ConnectionCatalogDocumentType, ConnectionTransientError>;
   readonly update: (
@@ -443,31 +481,11 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
     const raw = yield* backend.read;
     let catalog = EMPTY_CONNECTION_CATALOG_DOCUMENT;
     if (raw !== null && raw.trim() !== "") {
-      catalog = yield* decodeCatalog(raw).pipe(
-        Effect.catch((error) =>
-          Effect.gen(function* () {
-            yield* Effect.logWarning("Discarding a corrupt web connection catalog.", {
-              error: error.message,
-            });
-            if (backend.quarantine !== undefined) {
-              yield* backend.quarantine(raw).pipe(
-                Effect.catch((cause) =>
-                  Effect.logWarning("Could not quarantine the corrupt web connection catalog.", {
-                    error: cause.message,
-                  }),
-                ),
-              );
-            }
-            const encoded = yield* encodeCatalog(EMPTY_CONNECTION_CATALOG_DOCUMENT);
-            yield* backend.write(encoded).pipe(
-              Effect.catch((cause) =>
-                Effect.logWarning("Could not persist the recovered web connection catalog.", {
-                  error: cause.message,
-                }),
-              ),
-            );
-            return EMPTY_CONNECTION_CATALOG_DOCUMENT;
-          }),
+      catalog = yield* decodeConnectionCatalogDocument(raw).pipe(
+        Effect.catch(() =>
+          Effect.logWarning("The saved web connection catalog could not be decoded.").pipe(
+            Effect.andThen(Effect.fail(catalogCorruptError())),
+          ),
         ),
       );
     }
@@ -480,6 +498,7 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
     function* (transform) {
       yield* lock.withPermits(1)(
         Effect.gen(function* () {
+          if (backend.rereadBeforeUpdate === true) yield* Ref.set(state, Option.none());
           const next = transform(yield* loadUnlocked());
           yield* backend.write(yield* encodeCatalog(next));
           yield* Ref.set(state, Option.some(next));
@@ -491,6 +510,43 @@ export const makeCatalogStore = Effect.fn("web.connectionStorage.makeCatalogStor
   return { read, update } satisfies CatalogStore;
 });
 
+/**
+ * The only path that replaces an unreadable catalog. It resets only a catalog that still fails to
+ * decode, so a stale tab or a repeated call cannot wipe a healthy one.
+ */
+export const recoverCorruptCatalog = Effect.fn("web.connectionStorage.recoverCorruptCatalog")(
+  function* (backend: CatalogBackend) {
+    const raw = yield* backend.read;
+    if (raw === null || raw.trim() === "") return false;
+    const unreadable = yield* decodeConnectionCatalogDocument(raw).pipe(
+      Effect.as(false),
+      Effect.catch(() => Effect.succeed(true)),
+    );
+    if (!unreadable) return false;
+    if (backend.recover === undefined) {
+      return yield* catalogError("reset", "This storage cannot reset the catalog.");
+    }
+    yield* backend.recover(raw);
+    return true;
+  },
+);
+
+/**
+ * Why a saved catalog cannot be read, apart from corruption. The desktop reports
+ * `secure-storage-unavailable` when it holds a catalog it cannot decrypt right now; it then reads
+ * as empty and refuses writes, so the app keeps running and nothing saved is changed.
+ */
+export const readCatalogAccess = Effect.tryPromise({
+  try: async () => (await window.desktopBridge?.getConnectionCatalogAccess?.()) ?? "ok",
+  catch: (cause) => catalogError("check", cause),
+});
+
+/** Runs without the connection runtime, which cannot start while the catalog is unreadable. */
+export const recoverConnectionCatalog = Effect.acquireUseRelease(
+  makeDatabaseHandle(),
+  ({ handle }) => recoverCorruptCatalog(makeCatalogBackend(handle)),
+  ({ close }) => close,
+);
 // The stored names predate the rename and stay, so a tab still on an older version and an
 // updated one read and revoke the same grants.
 const PULL_REQUEST_ROUTING_KEY_PREFIX = "t3code:github-routing:";

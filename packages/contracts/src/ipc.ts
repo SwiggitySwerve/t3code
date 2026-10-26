@@ -110,6 +110,10 @@ export const DesktopAppBrandingSchema = Schema.Struct({
 export const DesktopSnapShotMode = Schema.Literals(["direct", "portal", "unavailable"]);
 export type DesktopSnapShotMode = typeof DesktopSnapShotMode.Type;
 
+/** Why the stored connection catalog cannot be read, when it cannot. `ok` includes having none. */
+export const DesktopConnectionCatalogAccess = Schema.Literals(["ok", "secure-storage-unavailable"]);
+export type DesktopConnectionCatalogAccess = typeof DesktopConnectionCatalogAccess.Type;
+
 export const DesktopCaptureExtensionState = Schema.Struct({
   status: Schema.Literals([
     "not-installed",
@@ -1031,6 +1035,8 @@ export interface DesktopBridge {
   getConnectionCatalog?: () => Promise<string | null>;
   setConnectionCatalog?: (catalog: string) => Promise<boolean>;
   clearConnectionCatalog?: () => Promise<void>;
+  /** `secure-storage-unavailable` means a saved catalog exists that this device cannot decrypt now. */
+  getConnectionCatalogAccess?: () => Promise<DesktopConnectionCatalogAccess>;
   discoverSshHosts: () => Promise<readonly DesktopDiscoveredSshHost[]>;
   resolveSshHost: (alias: string) => Promise<DesktopSshEnvironmentTarget>;
   requestSnapShotPermissions?: (includeAccessibility: boolean) => Promise<void>;

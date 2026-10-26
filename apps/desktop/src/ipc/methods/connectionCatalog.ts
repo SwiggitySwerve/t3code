@@ -1,3 +1,4 @@
+import { DesktopConnectionCatalogAccess } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
@@ -13,6 +14,16 @@ export const getConnectionCatalog = DesktopIpc.makeIpcMethod({
   handler: Effect.fn("desktop.ipc.connectionCatalog.get")(function* () {
     const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
     return Option.getOrNull(yield* store.get);
+  }),
+});
+
+export const getConnectionCatalogAccess = DesktopIpc.makeIpcMethod({
+  channel: IpcChannels.GET_CONNECTION_CATALOG_ACCESS_CHANNEL,
+  payload: Schema.Void,
+  result: DesktopConnectionCatalogAccess,
+  handler: Effect.fn("desktop.ipc.connectionCatalog.access")(function* () {
+    const store = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore;
+    return yield* store.access;
   }),
 });
 

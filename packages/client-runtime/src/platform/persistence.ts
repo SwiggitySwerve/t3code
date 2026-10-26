@@ -39,6 +39,8 @@ export class ConnectionPersistenceError extends Schema.TaggedError<ConnectionPer
       "clear-environment",
     ]),
     message: Schema.String,
+    /** Set only when the stored catalog failed to decode; the sole signal that allows a reset. */
+    reason: Schema.optionalKey(Schema.Literal("catalog-corrupt")),
   },
 ) {}
 
