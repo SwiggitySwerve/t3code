@@ -2113,6 +2113,43 @@ it.layer(layerTest)("orchestration V2 foundation persistence", (it) => {
     }).pipe(Effect.provide(layerIsolatedOutbox)),
   );
 
+  it.effect("reports whether given threads have effects in the given statuses", () =>
+    Effect.gen(function* () {
+      const outbox = yield* EffectOutbox.EffectOutboxV2;
+      const sql = yield* SqlClient.SqlClient;
+      const at = DateTime.formatIso(yield* DateTime.now);
+      const insert = (id: string, threadId: string, status: string) => sql`
+        INSERT INTO orchestration_v2_effect_outbox (
+          effect_id, command_id, thread_id, effect_type, payload_json, status,
+          available_at, created_at, updated_at
+        ) VALUES (
+          ${id}, 'command:has-effects', ${threadId}, 'terminal.cleanup',
+          '{"type":"terminal.cleanup"}', ${status}, ${at}, ${at}, ${at}
+        )
+      `;
+      yield* insert("a-pending", "thread:a", "pending");
+      yield* insert("b-failed", "thread:b", "failed");
+      yield* insert("c-succeeded", "thread:c", "succeeded");
+      yield* insert("c-cancelled", "thread:c", "cancelled");
+      yield* insert("d-running", "thread:d", "running");
+      const has = (threadIds: ReadonlyArray<string>, statuses: ReadonlyArray<string>) =>
+        outbox.hasThreadEffects({
+          threadIds: threadIds.map((id) => ThreadId.make(id)),
+          statuses: statuses as ReadonlyArray<EffectOutbox.OrchestrationEffectStatusV2>,
+        });
+      assert.equal(yield* has(["thread:a"], ["pending", "running"]), true);
+      assert.equal(yield* has(["thread:a", "thread:z"], ["pending"]), true);
+      assert.equal(yield* has(["thread:d"], ["pending", "running"]), true);
+      assert.equal(yield* has(["thread:b"], ["pending", "running"]), false);
+      assert.equal(yield* has(["thread:b"], ["failed"]), true);
+      assert.equal(yield* has(["thread:c"], ["pending", "running", "failed"]), false);
+      assert.equal(yield* has(["thread:a"], ["running", "failed"]), false);
+      assert.equal(yield* has(["thread:z"], ["pending", "running", "failed"]), false);
+      assert.equal(yield* has([], ["pending", "running", "failed"]), false);
+      assert.equal(yield* has(["thread:a", "thread:d"], []), false);
+    }).pipe(Effect.provide(layerIsolatedOutbox)),
+  );
+
   it.effect("wakes claimers when cancellation unblocks same-thread work", () =>
     Effect.gen(function* () {
       const outbox = yield* EffectOutbox.EffectOutboxV2;

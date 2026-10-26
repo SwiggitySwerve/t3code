@@ -208,6 +208,11 @@ export interface EffectOutboxV2Shape {
   readonly listByCommandId: (
     commandId: CommandId,
   ) => Effect.Effect<ReadonlyArray<OrchestrationEffectV2>, EffectOutboxError>;
+  /** True when any of these threads has an effect in one of these statuses. */
+  readonly hasThreadEffects: (input: {
+    readonly threadIds: ReadonlyArray<ThreadId>;
+    readonly statuses: ReadonlyArray<OrchestrationEffectStatusV2>;
+  }) => Effect.Effect<boolean, EffectOutboxError>;
   readonly cancelUnsettled: (input: {
     readonly threadId: ThreadId;
     readonly effectTypes: ReadonlyArray<OrchestrationEffectRequestV2["type"]>;
@@ -442,6 +447,21 @@ export const layer: Layer.Layer<EffectOutboxV2, never, SqlClient.SqlClient> = La
               : new EffectOutboxError({ operation: "list", cause }),
           ),
         ),
+      hasThreadEffects: ({ threadIds, statuses }) =>
+        threadIds.length === 0 || statuses.length === 0
+          ? Effect.succeed(false)
+          : sql`
+              SELECT 1
+              FROM orchestration_v2_effect_outbox
+              WHERE thread_id IN ${sql.in(threadIds)} AND status IN ${sql.in(statuses)}
+              LIMIT 1
+            `.pipe(
+              NodeSqliteClient.readOnly,
+              Effect.map((rows) => rows.length > 0),
+              Effect.mapError(
+                (cause) => new EffectOutboxError({ operation: "has-thread-effects", cause }),
+              ),
+            ),
       cancelUnsettled: Effect.fn("EffectOutbox.cancelUnsettled")(
         function* ({ threadId, effectTypes, reason }) {
           if (effectTypes.length === 0) return [];

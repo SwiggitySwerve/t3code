@@ -45,6 +45,7 @@ export function managedWorktreesDirectories(
 }
 
 // Client paths/branches are untrusted; recreate only real paths matching managed-folder/repo/branch.
+// Callers pass the stored path unchanged (turn start, rollback and explicit removal), so all agree.
 export const makeIsManagedWorktreePath = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;

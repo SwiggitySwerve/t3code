@@ -83,7 +83,7 @@ import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import { ThreadToolkit } from "./toolkits/thread/tools.ts";
-import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
+import { WorktreeRemovalToolkit, WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
@@ -5421,6 +5421,7 @@ describe("workflow approval", () => {
         OrchestratorToolkit,
         ThreadToolkit,
         WorktreeToolkit,
+        WorktreeRemovalToolkit,
         ProjectToolkit,
         EnvironmentToolkit,
         PreviewControlsToolkit,

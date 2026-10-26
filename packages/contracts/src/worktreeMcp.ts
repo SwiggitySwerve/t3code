@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 
 /** Uses the managed worktree folder; handoff detaches the provider, ending this turn and resuming there next run. */
 export const WorktreeMcpHandoffInput = Schema.Struct({
@@ -94,6 +94,23 @@ export const WorktreeMcpStatusResult = Schema.Struct({
 });
 export type WorktreeMcpStatusResult = typeof WorktreeMcpStatusResult.Type;
 
+export const WorktreeMcpRemoveInput = Schema.Struct({
+  threadId: ThreadId.annotate({
+    description:
+      "A finished member of a workflow you started, created with isolation 'worktree'. Its checkout is removed only if nothing in it would be lost.",
+  }),
+});
+export type WorktreeMcpRemoveInput = typeof WorktreeMcpRemoveInput.Type;
+
+export const WorktreeMcpRemoveResult = Schema.Struct({
+  status: Schema.Literals(["removed", "already_removed"]),
+  threadId: ThreadId,
+  worktreePath: TrimmedNonEmptyString,
+  branch: TrimmedNonEmptyString,
+  note: Schema.String,
+});
+export type WorktreeMcpRemoveResult = typeof WorktreeMcpRemoveResult.Type;
+
 export class WorktreeMcpFailure extends Schema.TaggedError<WorktreeMcpFailure>()(
   "WorktreeMcpFailure",
   {
@@ -106,6 +123,8 @@ export class WorktreeMcpFailure extends Schema.TaggedError<WorktreeMcpFailure>()
       "invalid_request",
       "operation_failed",
       "thread_credential_required",
+      "not_permitted",
+      "removal_refused",
     ]),
     message: Schema.String,
   },

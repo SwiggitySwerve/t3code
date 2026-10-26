@@ -18,6 +18,7 @@ import * as Stream from "effect/Stream";
 import { McpSchema, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpBody, HttpClient, HttpClientRequest, HttpRouter } from "effect/http";
 
+import * as GitWorkflowService from "../git/GitWorkflowService.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as PullRequestReviewGuideService from "../pullRequest/PullRequestReviewGuideService.ts";
 import * as ServerConfig from "../config.ts";
@@ -28,6 +29,7 @@ import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import { AttachmentToolkit } from "./toolkits/attachment/tools.ts";
@@ -38,7 +40,7 @@ import { PreviewStandardToolkit } from "./toolkits/preview/tools.ts";
 import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
 import { ThreadToolkit } from "./toolkits/thread/tools.ts";
-import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
+import { WorktreeRemovalToolkit, WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 
 const environmentId = EnvironmentId.make("environment-mcp-test");
 const threadId = ThreadId.make("thread-mcp-test");
@@ -996,6 +998,7 @@ it.effect(
           project: ProjectToolkit,
           environment: EnvironmentToolkit,
           attachment: AttachmentToolkit,
+          worktreeRemoval: WorktreeRemovalToolkit,
           preview: PreviewStandardToolkit,
           previewControls: PreviewControlsToolkit,
           device: DeviceStandardToolkit,
@@ -1080,6 +1083,7 @@ it.effect(
           expect.arrayContaining([
             "delegate_task",
             "t3_thread_read",
+            "t3_worktree_remove",
             "preview_open",
             "device_open",
           ]),
@@ -1095,16 +1099,65 @@ it.effect(
           ...namesOf(HtmlRenderToolkit as never),
         ].toSorted();
         expect(member.toSorted()).toEqual(expectedMember);
-        expect(expectedMember.length).toBeLessThanOrEqual(12);
+        expect(member).not.toContain("t3_worktree_remove");
+        expect(member).toHaveLength(9);
         // A thread that merely lacks browser access (it still has orchestration) is unchanged.
         expect(noBrowser).toEqual(expect.arrayContaining(namesOf(PreviewStandardToolkit as never)));
         // Hidden tools are not callable: the server reports them as unknown.
-        for (const name of ["delegate_task", "preview_open", "device_open", "t3_thread_read"]) {
+        for (const name of [
+          "delegate_task",
+          "preview_open",
+          "device_open",
+          "t3_thread_read",
+          "t3_worktree_remove",
+        ]) {
           const text = yield* session.call("memberToken", name);
           expect(text).toContain("not found");
         }
       }),
     ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.effect("registers the worktree removal tool for coordinators and hides it from members", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const scopes = new Map([
+        ["coordinatorToken", threadScope("coordinatorToken", ["orchestration", "worktree"], false)],
+        ["memberToken", threadScope("memberToken", ["worktree"], true)],
+      ]);
+      const serverLayer = McpHttpServer.layerWorktreeToolkit.pipe(
+        Layer.provideMerge(McpHttpServer.layerMcpTransport),
+        Layer.provide(
+          Layer.mock(McpSessionRegistry.McpSessionRegistry)({
+            resolve: (token) => Effect.succeed(scopes.get(token)),
+          }),
+        ),
+        Layer.provide(
+          Layer.mergeAll(
+            McpToolAccessTestkit.liveThreadsLayer,
+            Layer.mock(WorktreeMcpService.WorktreeMcpService)({}),
+            Layer.mock(GitWorkflowService.GitWorkflowService)({}),
+            Layer.mock(ProjectService.ProjectService)({}),
+          ),
+        ),
+        Layer.provide(NodeServices.layer),
+      );
+      yield* HttpRouter.serve(serverLayer, {
+        disableListenLog: true,
+        disableLogger: true,
+      }).pipe(Layer.build);
+      const session = yield* memberToolSession(scopes);
+      const everyWorktreeTool = [
+        ...Object.keys(WorktreeToolkit.tools),
+        ...Object.keys(WorktreeRemovalToolkit.tools),
+      ].toSorted();
+      expect((yield* session.list("coordinatorToken")).toSorted()).toEqual(everyWorktreeTool);
+      expect((yield* session.list("memberToken")).toSorted()).toEqual(
+        Object.keys(WorktreeToolkit.tools).toSorted(),
+      );
+      expect(yield* session.call("memberToken", "t3_worktree_remove")).toContain("not found");
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );
 
 it.effect("hides the image-returning preview tools from a member credential", () =>

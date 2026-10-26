@@ -60,7 +60,7 @@ import {
   PreviewStandardToolkit,
 } from "./toolkits/preview/tools.ts";
 import * as WorktreeHandlers from "./toolkits/worktree/handlers.ts";
-import { WorktreeToolkit } from "./toolkits/worktree/tools.ts";
+import { WorktreeRemovalToolkit, WorktreeToolkit } from "./toolkits/worktree/tools.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
 import * as PullRequestsHandlers from "./toolkits/pullRequests/handlers.ts";
 import { PullRequestsToolkit } from "./toolkits/pullRequests/tools.ts";
@@ -945,6 +945,7 @@ export const TOOLKIT_REQUIRED_CAPABILITY = {
   project: "orchestration",
   environment: "orchestration",
   attachment: "orchestration",
+  worktreeRemoval: "orchestration",
   preview: "preview",
   previewControls: "preview",
   device: "device",
@@ -1044,10 +1045,18 @@ export const layerThreadToolkit = toolkitRegistration(
   TOOLKIT_REQUIRED_CAPABILITY.thread,
 );
 
-const layerWorktreeToolkitRegistration = toolkitRegistration(
-  WorktreeToolkit,
-  WorktreeHandlers.layer,
-).pipe(Layer.provide(WorktreeMcpService.layer));
+export const layerWorktreeToolkit = Layer.mergeAll(
+  toolkitRegistration(WorktreeToolkit, WorktreeHandlers.layer),
+  toolkitRegistration(
+    WorktreeRemovalToolkit,
+    WorktreeHandlers.layerRemoval,
+    TOOLKIT_REQUIRED_CAPABILITY.worktreeRemoval,
+  ),
+);
+
+const layerWorktreeToolkitRegistration = layerWorktreeToolkit.pipe(
+  Layer.provide(WorktreeMcpService.layer),
+);
 
 const layerPreviewControlsRegistration = toolkitRegistration(
   PreviewControlsToolkit,

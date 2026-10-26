@@ -1,11 +1,16 @@
 import {
   CommandId,
+  isOrchestrationV2WorkActive,
+  isOrchestrationV2WorkflowMember,
   MessageId,
   type ProjectId,
+  type ThreadId,
   WorktreeMcpFailure,
   type WorktreeMcpContinuationStatus,
   type WorktreeMcpHandoffInput,
   type WorktreeMcpHandoffResult,
+  type WorktreeMcpRemoveInput,
+  type WorktreeMcpRemoveResult,
   type WorktreeMcpSetupScriptStatus,
   type WorktreeMcpStatusResult,
 } from "@t3tools/contracts";
@@ -21,6 +26,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as StorageCleanup from "../storageCleanup.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import type { McpInvocationScope, McpThreadInvocationScope } from "./McpInvocationContext.ts";
 
@@ -34,6 +40,10 @@ export class WorktreeMcpService extends Context.Service<
     readonly status: (
       scope: McpInvocationScope,
     ) => Effect.Effect<WorktreeMcpStatusResult, WorktreeMcpFailure>;
+    readonly remove: (
+      scope: McpInvocationScope,
+      input: WorktreeMcpRemoveInput,
+    ) => Effect.Effect<WorktreeMcpRemoveResult, WorktreeMcpFailure>;
   }
 >()("t3/mcp/WorktreeMcpService") {}
 
@@ -62,6 +72,7 @@ const make = Effect.gen(function* () {
   const gitWorkflow = yield* GitWorkflowService.GitWorkflowService;
   const setupScriptRunner = yield* ProjectSetupScriptRunner.ProjectSetupScriptRunner;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+  const storageCleanup = yield* StorageCleanup.StorageCleanup;
 
   // Serialize handoffs per thread to avoid creating two worktrees and orphaning one.
   const handoffThreadsInFlight = new Set<string>();
@@ -426,7 +437,84 @@ const make = Effect.gen(function* () {
     },
   );
 
-  return WorktreeMcpService.of({ handoff, status });
+  // One message for every unrelated, missing, deleted, or mismatched target: no existence oracle.
+  const notPermitted = failure(
+    "not_permitted",
+    "Only the coordinator that started a workflow can remove a finished member's worktree, and only for members created with isolation 'worktree'.",
+  );
+
+  const readThreadRecords = <K extends "runs" | "subagents">(threadId: ThreadId, fields: [K]) =>
+    threadManagement
+      .getThreadRecords(threadId, fields)
+      .pipe(
+        Effect.mapError((error) =>
+          error._tag === "OrchestratorProjectionError"
+            ? notPermitted
+            : failure(
+                "operation_failed",
+                `Unable to read thread ${threadId}: ${errorMessage(error)}`,
+              ),
+        ),
+      );
+
+  const remove: WorktreeMcpService["Service"]["remove"] = Effect.fn("WorktreeMcpService.remove")(
+    function* (callerScope, input) {
+      if (
+        !callerScope.capabilities.has("worktree") ||
+        !callerScope.capabilities.has("orchestration")
+      )
+        return yield* failure(
+          "capability_denied",
+          "Removing a workflow member's worktree needs a coordinator credential with worktree and orchestration capabilities.",
+        );
+      const scope = yield* requireThreadScope(callerScope);
+      const callerId = scope.thread.threadId;
+      const target = yield* readThreadRecords(input.threadId, ["runs"]);
+      const { lineage } = target.thread;
+      if (
+        target.thread.id === callerId ||
+        target.thread.deletedAt !== null ||
+        lineage.workflowId === undefined ||
+        lineage.parentThreadId !== callerId ||
+        lineage.relationshipToParent !== "subagent"
+      )
+        return yield* notPermitted;
+      const { workflowId } = lineage;
+      const caller = yield* readThreadRecords(callerId, ["subagents"]);
+      const member = caller.subagents.find(
+        (row) =>
+          isOrchestrationV2WorkflowMember(row, workflowId) &&
+          row.childThreadId === target.thread.id,
+      );
+      if (member === undefined) return yield* notPermitted;
+      if (isOrchestrationV2WorkActive(member.status))
+        return yield* failure("removal_refused", `The member is still ${member.status}.`);
+      if (!target.runs.some((run) => run.workspacePreparation?.type === "worktree"))
+        return yield* failure(
+          "removal_refused",
+          "The member was not created by worktree isolation, so it has no checkout of its own.",
+        );
+      const removal = yield* storageCleanup
+        .removeInactiveWorktree({ threadId: target.thread.id })
+        .pipe(
+          Effect.mapError((error) =>
+            error._tag === "StorageCleanupRemovalRefused"
+              ? failure("removal_refused", error.reason)
+              : failure("operation_failed", error.message),
+          ),
+        );
+      const result: WorktreeMcpRemoveResult = {
+        ...removal,
+        note:
+          removal.status === "removed"
+            ? "Checked clean (ignored node_modules/ aside) and removed. The branch and the thread's path and branch binding are kept. The next turn or a rollback recreates the checkout at the same path only if the branch still exists and is not checked out elsewhere; dependencies and setup are not recreated."
+            : "The checkout was already gone; nothing changed.",
+      };
+      return result;
+    },
+  );
+
+  return WorktreeMcpService.of({ handoff, status, remove });
 });
 
 export const layer: Layer.Layer<
@@ -439,4 +527,5 @@ export const layer: Layer.Layer<
   | GitWorkflowService.GitWorkflowService
   | ProjectSetupScriptRunner.ProjectSetupScriptRunner
   | VcsStatusBroadcaster.VcsStatusBroadcaster
+  | StorageCleanup.StorageCleanup
 > = Layer.effect(WorktreeMcpService, make);

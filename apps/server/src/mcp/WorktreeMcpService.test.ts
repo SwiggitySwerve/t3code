@@ -3,6 +3,7 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   EnvironmentId,
+  NodeId,
   type OrchestrationV2ThreadProjection,
   type Project,
   ProjectId,
@@ -18,6 +19,7 @@ import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
+import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import * as GitWorkflowService from "../git/GitWorkflowService.ts";
@@ -31,6 +33,7 @@ import * as ThreadManagementService from "../orchestration-v2/ThreadManagementSe
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProjectSetupScriptRunner from "../project/ProjectSetupScriptRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as StorageCleanup from "../storageCleanup.ts";
 import * as VcsStatusBroadcaster from "../vcs/VcsStatusBroadcaster.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as WorktreeMcpService from "./WorktreeMcpService.ts";
@@ -113,6 +116,14 @@ interface HarnessOptions {
   readonly removeWorktreeFails?: boolean;
   readonly deleteLocalBranchFails?: boolean;
   readonly createWorktreeGate?: Effect.Effect<void>;
+  readonly records?: (
+    id: ThreadId,
+    fields: ReadonlyArray<string>,
+  ) => Effect.Effect<unknown, OrchestratorProjectionError>;
+  readonly removal?: Effect.Effect<
+    Effect.Success<ReturnType<StorageCleanup.StorageCleanup["Service"]["removeInactiveWorktree"]>>,
+    StorageCleanup.StorageCleanupRemovalRefused | StorageCleanup.StorageCleanupRemovalFailed
+  >;
 }
 
 const makeHarness = (options: HarnessOptions = {}) => {
@@ -138,7 +149,8 @@ const makeHarness = (options: HarnessOptions = {}) => {
         : ["dev", "feature/taken", "feature/taken-idle"],
     ),
   );
-  const getThreadRecords = vi.fn((id: ThreadId) => {
+  const getThreadRecords = vi.fn((id: ThreadId, fields: ReadonlyArray<string> = []) => {
+    if (options.records !== undefined) return options.records(id, fields) as never;
     if (options.threadReadError === "dispatch") {
       return Effect.fail(
         new OrchestratorDispatchError({
@@ -262,6 +274,10 @@ const makeHarness = (options: HarnessOptions = {}) => {
     }),
   );
   const refreshStatus = vi.fn((_: string) => Effect.die("refreshStatus stub"));
+  const removeInactiveWorktree = vi.fn(
+    (_: { readonly threadId: ThreadId }) =>
+      options.removal ?? Effect.die("removal was not expected"),
+  );
   const runForThread = vi.fn((input: { readonly worktreePath: string }) => {
     switch (options.setupScript ?? "started") {
       case "no-script":
@@ -318,6 +334,9 @@ const makeHarness = (options: HarnessOptions = {}) => {
         Layer.mock(VcsStatusBroadcaster.VcsStatusBroadcaster)({
           refreshStatus,
         } satisfies Partial<VcsStatusBroadcaster.VcsStatusBroadcaster["Service"]>),
+        Layer.mock(StorageCleanup.StorageCleanup)({
+          removeInactiveWorktree,
+        } satisfies Partial<StorageCleanup.StorageCleanup["Service"]>),
         NodeServices.layer,
       ),
     ),
@@ -334,6 +353,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     deleteLocalBranch,
     localStatus,
     runForThread,
+    removeInactiveWorktree,
   };
 };
 
@@ -367,6 +387,16 @@ const runStatus = (harness: ReturnType<typeof makeHarness>) =>
   Effect.gen(function* () {
     const service = yield* WorktreeMcpService.WorktreeMcpService;
     return yield* service.status(harness.scope);
+  }).pipe(Effect.provide(harness.layer));
+
+const runRemove = (
+  harness: ReturnType<typeof makeHarness>,
+  input: Parameters<WorktreeMcpService.WorktreeMcpService["Service"]["remove"]>[1],
+  scope: McpInvocationContext.McpInvocationScope = harness.scope,
+) =>
+  Effect.gen(function* () {
+    const service = yield* WorktreeMcpService.WorktreeMcpService;
+    return yield* service.remove(scope, input);
   }).pipe(Effect.provide(harness.layer));
 
 const decodeHandoffInput = Schema.decodeUnknownEffect(WorktreeMcpHandoffInput);
@@ -670,6 +700,213 @@ describe("t3_worktree_handoff", () => {
       expect(harness.dispatch).toHaveBeenCalled();
     });
   });
+});
+
+describe("t3_worktree_remove", () => {
+  const workflowId = NodeId.make("node:workflow-remove");
+  const memberId = ThreadId.make("thread-member");
+  const coordinatorScope = new Set<McpInvocationContext.McpCapability>([
+    "worktree",
+    "orchestration",
+  ]);
+  const removed = {
+    status: "removed" as const,
+    threadId: memberId,
+    worktreePath: "/worktrees/project/repository/member",
+    branch: "t3/member",
+  };
+  interface World {
+    readonly target?: Record<string, unknown> | null;
+    readonly lineage?: Record<string, unknown>;
+    readonly rows?: ReadonlyArray<Record<string, unknown>>;
+    readonly runs?: ReadonlyArray<Record<string, unknown>>;
+  }
+  const memberRow = (overrides: Record<string, unknown> = {}) => ({
+    id: NodeId.make("node:member"),
+    origin: "app_owned",
+    parentNodeId: workflowId,
+    childThreadId: memberId,
+    status: "completed",
+    ...overrides,
+  });
+  const worktreeRun = { workspacePreparation: { type: "worktree" } };
+  const recordsFor =
+    (world: World) =>
+    (id: ThreadId): Effect.Effect<unknown, OrchestratorProjectionError> => {
+      if (id === threadId) {
+        return Effect.succeed({
+          thread: { id: threadId, deletedAt: null, lineage: {} },
+          subagents: world.rows ?? [memberRow()],
+        });
+      }
+      return world.target === null || id !== memberId
+        ? Effect.fail(new OrchestratorProjectionError({ threadId: id }))
+        : Effect.succeed({
+            thread: {
+              id: memberId,
+              deletedAt: null,
+              lineage: {
+                workflowId,
+                parentThreadId: threadId,
+                relationshipToParent: "subagent",
+                rootThreadId: threadId,
+                ...world.lineage,
+              },
+              ...world.target,
+            },
+            runs: world.runs ?? [worktreeRun],
+          });
+    };
+  const harnessFor = (world: World = {}, extra: Partial<HarnessOptions> = {}) =>
+    makeHarness({
+      capabilities: coordinatorScope,
+      records: recordsFor(world),
+      removal: Effect.succeed(removed),
+      ...extra,
+    });
+
+  it.effect("removes through the owner and passes only the thread id", () => {
+    const harness = harnessFor();
+    return Effect.gen(function* () {
+      const result = yield* runRemove(harness, { threadId: memberId });
+      expect(result).toMatchObject({ ...removed });
+      expect(result.note).toContain("branch and the thread's path and branch binding are kept");
+      expect(harness.removeInactiveWorktree).toHaveBeenCalledTimes(1);
+      expect(harness.removeInactiveWorktree).toHaveBeenCalledWith({ threadId: memberId });
+    });
+  });
+
+  it.effect.each([
+    ["an unrelated thread", { lineage: { parentThreadId: ThreadId.make("somebody-else") } }],
+    ["a sibling coordinator's member", { lineage: { parentThreadId: ThreadId.make("sibling") } }],
+    ["a thread with no workflow", { lineage: { workflowId: undefined } }],
+    ["a fork", { lineage: { relationshipToParent: "fork" } }],
+    ["a deleted member", { target: { deletedAt: "2026-01-02T00:00:00.000Z" } }],
+    ["a missing thread", { target: null }],
+    [
+      "a subagent the caller has no workflow row for",
+      { rows: [memberRow({ parentNodeId: NodeId.make("node:other") })] },
+    ],
+    ["a native subagent row", { rows: [memberRow({ origin: "provider_native" })] }],
+  ] as const satisfies ReadonlyArray<readonly [string, World]>)(
+    "refuses %s with the one not-permitted answer",
+    ([, world]) => {
+      const harness = harnessFor(world as World);
+      return Effect.gen(function* () {
+        const exit = yield* Effect.exit(runRemove(harness, { threadId: memberId }));
+        expectTypedFailure(exit, {
+          _tag: "WorktreeMcpFailure",
+          code: "not_permitted",
+          message: expect.stringContaining("Only the coordinator that started a workflow"),
+        });
+        expect(harness.removeInactiveWorktree).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it.effect("refuses the caller itself the same way", () => {
+    const harness = harnessFor();
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(runRemove(harness, { threadId }));
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "not_permitted" });
+      expect(harness.removeInactiveWorktree).not.toHaveBeenCalled();
+    });
+  });
+
+  it.effect.each([
+    ["still running", { rows: [memberRow({ status: "running" })] }, "still running"],
+    ["waiting", { rows: [memberRow({ status: "waiting" })] }, "still waiting"],
+    [
+      "without a worktree run",
+      { runs: [{}, { workspacePreparation: { type: "root" } }] },
+      "worktree isolation",
+    ],
+    ["with no runs", { runs: [] }, "worktree isolation"],
+  ] as const satisfies ReadonlyArray<readonly [string, World, string]>)(
+    "refuses a member that is %s",
+    ([, world, message]) => {
+      const harness = harnessFor(world as World);
+      return Effect.gen(function* () {
+        const exit = yield* Effect.exit(runRemove(harness, { threadId: memberId }));
+        expectTypedFailure(exit, {
+          _tag: "WorktreeMcpFailure",
+          code: "removal_refused",
+          message: expect.stringContaining(message),
+        });
+        expect(harness.removeInactiveWorktree).not.toHaveBeenCalled();
+      });
+    },
+  );
+
+  it.effect.each([
+    ["orchestration", new Set<McpInvocationContext.McpCapability>(["worktree"])],
+    ["worktree", new Set<McpInvocationContext.McpCapability>(["orchestration"])],
+  ] as const)("refuses a credential without %s", ([, capabilities]) => {
+    const harness = harnessFor({}, { capabilities });
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(runRemove(harness, { threadId: memberId }));
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "capability_denied" });
+      expect(harness.removeInactiveWorktree).not.toHaveBeenCalled();
+    });
+  });
+
+  it.effect("refuses a client that is not a thread", () => {
+    const harness = harnessFor();
+    return Effect.gen(function* () {
+      const exit = yield* Effect.exit(
+        runRemove(harness, { threadId: memberId }, { ...harness.scope, thread: undefined }),
+      );
+      expectTypedFailure(exit, { _tag: "WorktreeMcpFailure", code: "thread_credential_required" });
+      expect(harness.removeInactiveWorktree).not.toHaveBeenCalled();
+    });
+  });
+
+  it.effect("keeps the owner's refusal text and reports a failed removal", () =>
+    Effect.gen(function* () {
+      const refused = harnessFor(
+        {},
+        {
+          removal: Effect.fail(
+            new StorageCleanup.StorageCleanupRemovalRefused({ reason: "Open terminal" }),
+          ),
+        },
+      );
+      expectTypedFailure(yield* Effect.exit(runRemove(refused, { threadId: memberId })), {
+        _tag: "WorktreeMcpFailure",
+        code: "removal_refused",
+        message: "Open terminal",
+      });
+      const failed = harnessFor(
+        {},
+        {
+          removal: Effect.fail(
+            new StorageCleanup.StorageCleanupRemovalFailed({ detail: "Disk error", partial: true }),
+          ),
+        },
+      );
+      expectTypedFailure(yield* Effect.exit(runRemove(failed, { threadId: memberId })), {
+        _tag: "WorktreeMcpFailure",
+        code: "operation_failed",
+        message: expect.stringContaining("partly removed"),
+      });
+    }),
+  );
+
+  it.effect("is the only caller of the cleanup owner's removal", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const path = yield* Path.Path;
+      const root = path.resolve(import.meta.dirname, "..");
+      const callers: Array<string> = [];
+      for (const name of yield* fs.readDirectory(root, { recursive: true })) {
+        if (!/\.tsx?$/.test(name) || /\.test\.tsx?$/.test(name) || name.includes("node_modules"))
+          continue;
+        if ((yield* fs.readFileString(path.join(root, name))).includes("removeInactiveWorktree"))
+          callers.push(name.replaceAll("\\", "/"));
+      }
+      expect(callers.toSorted()).toEqual(["mcp/WorktreeMcpService.ts", "storageCleanup.ts"]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
 });
 
 describe("t3_worktree_status", () => {

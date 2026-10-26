@@ -6,6 +6,7 @@ import { EnvironmentId, NodeId, RunAttemptId, ThreadId, TrimmedNonEmptyString } 
 import {
   isOrchestrationV2ActiveWorkflowMember,
   isOrchestrationV2WorkActive,
+  isOrchestrationV2WorkflowMember,
   latestProviderTurnForAttempt,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
@@ -896,6 +897,41 @@ describe("isOrchestrationV2ActiveWorkflowMember", () => {
     expect(isOrchestrationV2ActiveWorkflowMember(member({ childThreadId: null }), workflowId)).toBe(
       false,
     );
+  });
+
+  it.each([
+    ["idle", true],
+    ["running", true],
+    ["completed", true],
+    ["failed", true],
+    ["cancelled", true],
+  ] as const)("is a member of the workflow whatever its status (%s)", (status, expected) => {
+    expect(isOrchestrationV2WorkflowMember(member({ status }), workflowId)).toBe(expected);
+  });
+
+  it("is a workflow member only when app-owned, parented to the workflow, and given a thread", () => {
+    expect(isOrchestrationV2WorkflowMember(member(), workflowId)).toBe(true);
+    expect(isOrchestrationV2WorkflowMember(member({ origin: "provider_native" }), workflowId)).toBe(
+      false,
+    );
+    expect(
+      isOrchestrationV2WorkflowMember(
+        member({ parentNodeId: NodeId.make("node:other-workflow") }),
+        workflowId,
+      ),
+    ).toBe(false);
+    expect(isOrchestrationV2WorkflowMember(member({ childThreadId: null }), workflowId)).toBe(
+      false,
+    );
+  });
+
+  it("narrows a member to the thread it runs in without needing a status", () => {
+    const { origin, parentNodeId, childThreadId } = member();
+    const memberOnly = { origin, parentNodeId, childThreadId };
+    const threads = [memberOnly, { ...memberOnly, childThreadId: null }]
+      .filter((candidate) => isOrchestrationV2WorkflowMember(candidate, workflowId))
+      .map((candidate) => candidate.childThreadId);
+    expect(threads).toEqual([memberThread]);
   });
 
   it("narrows an active member to the thread the stop must reach", () => {
