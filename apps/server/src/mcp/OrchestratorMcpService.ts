@@ -872,6 +872,9 @@ export function resolveInteractionMode(
  */
 const APPROVED_START_NAMESPACE = "workflow-approval";
 
+/** The folder, in the caller's checkout, that holds the answers a checker is pointed to. */
+const CHECKER_RESULT_DIR = ".t3/workflow-results";
+
 function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
@@ -2167,6 +2170,16 @@ const make = Effect.gen(function* () {
   ): McpThreadInvocationScope => ({ ...scope, requestNamespace: `workflow:${workflowId}` });
   const workflowScopes = new Map<NodeId, McpThreadInvocationScope>();
 
+  /** The thread's own checkout: its worktree, else its project's workspace root. */
+  const callerCheckoutRoot = Effect.fn("OrchestratorMcpService.callerCheckoutRoot")(function* (
+    threadId: ThreadId,
+  ) {
+    const parent = yield* loadProjection(threadId);
+    return (
+      parent.thread.worktreePath ?? (yield* requireProject(parent.thread.projectId)).workspaceRoot
+    );
+  });
+
   /**
    * A workspace-relative file in the thread's own checkout, read and hashed up to maxBytes.
    * Workflow agents with declared files, and graphs, share this checkout.
@@ -2176,9 +2189,7 @@ const make = Effect.gen(function* () {
     relativePath: string,
     maxBytes: number,
   ) {
-    const parent = yield* loadProjection(threadId);
-    const root =
-      parent.thread.worktreePath ?? (yield* requireProject(parent.thread.projectId)).workspaceRoot;
+    const root = yield* callerCheckoutRoot(threadId);
     const filePath = path.join(root, relativePath);
     const unreadable = (error: { readonly message: string }) =>
       failure("orchestration_error", `Unable to read ${relativePath}: ${error.message}`);
@@ -2369,6 +2380,50 @@ const make = Effect.gen(function* () {
     ),
     readWorkspaceFile: (workflow, relativePath, maxBytes) =>
       readCallerFile(workflow.threadId, relativePath, maxBytes),
+    writeCheckerResult: Effect.fn("OrchestratorMcpService.writeCheckerResult")(
+      function* (workflow, taskId, text) {
+        const root = yield* callerCheckoutRoot(workflow.threadId);
+        const name = NodeCrypto.createHash("sha256")
+          .update(`${workflow.workflowId}\n${taskId}`)
+          .digest("hex")
+          .slice(0, 24);
+        const relativePath = `${CHECKER_RESULT_DIR}/${name}.txt`;
+        const filePath = path.join(root, relativePath);
+        const unwritable = (error: { readonly message: string }) =>
+          failure("orchestration_error", `Unable to write ${relativePath}: ${error.message}`);
+        yield* fileSystem
+          .makeDirectory(path.dirname(filePath), { recursive: true })
+          .pipe(Effect.mapError(unwritable));
+        yield* fileSystem.writeFileString(filePath, text).pipe(Effect.mapError(unwritable));
+        return relativePath;
+      },
+    ),
+    removeCheckerResult: Effect.fn("OrchestratorMcpService.removeCheckerResult")(
+      function* (workflow, relativePath) {
+        const root = yield* callerCheckoutRoot(workflow.threadId);
+        const filePath = path.join(root, relativePath);
+        const unremovable = (error: { readonly message: string }) =>
+          failure("orchestration_error", `Unable to remove ${relativePath}: ${error.message}`);
+        yield* fileSystem.remove(filePath, { force: true }).pipe(
+          Effect.tapError((error) =>
+            Effect.logWarning("Could not remove a checker result file", {
+              path: relativePath,
+              error: error.message,
+            }),
+          ),
+          Effect.mapError(unremovable),
+        );
+        // The folders are ours only while they hold nothing else.
+        for (const folder of [path.dirname(filePath), path.dirname(path.dirname(filePath))]) {
+          yield* fileSystem.readDirectory(folder).pipe(
+            Effect.flatMap((entries) =>
+              entries.length === 0 ? fileSystem.remove(folder, { recursive: true }) : Effect.void,
+            ),
+            Effect.ignore,
+          );
+        }
+      },
+    ),
     stopAgent: Effect.fn("OrchestratorMcpService.stopWorkflowAgent")(
       function* (workflow, taskId, childThreadId, why) {
         const commandId = CommandId.make(`command:workflow-stall:${taskId}`);

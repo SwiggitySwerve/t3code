@@ -685,7 +685,13 @@ own threads. The row stores the script with a settings line for its args and bud
   2,048 after escaping (a summary that escapes to more is cut to a shorter start, never
   to nothing), a check's recorded detail 2,048, the check detail an agent sees when it
   retries 4,000, a graph's result 4,096, a failed workflow's 4,096, and a script's
-  return value 16,000 (`return a file path for large results`).
+  return value 16,000 (`return a file path for large results`). A judgment checker is shown
+  at most 24,000 bytes of the answer it judges, escaped, inside one `<t3-result>` block. A
+  longer answer is also written, up to 256 KiB, to `.t3/workflow-results/<hash>.txt` in the
+  caller's checkout, because a checker is a sibling of the agent it judges and cannot read
+  that agent's `task_status`. The cut marker names that file, and the file is removed when the
+  check ends (a server stop in the middle can leave one behind). If it cannot be written, the
+  checker sees the cut marker without a pointer.
 - **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its
   own checkout of the calling thread's commit, like `delegate_task`.
 

@@ -15,6 +15,7 @@ import * as Exit from "effect/Exit";
 import type * as Schema from "effect/Schema";
 
 import {
+  CHECKER_RESULT_FILE_BYTES,
   type CheckOutcome,
   checkFeedback,
   type FileRef,
@@ -29,7 +30,13 @@ import {
   type WorkflowCheck,
   type WorkspaceFile,
 } from "./workflowChecks.ts";
-import { boundText, HANDOFF_SUMMARY_BYTES, taskOutputAt } from "./workflowHandoff.ts";
+import {
+  boundText,
+  fullOutputAt,
+  HANDOFF_SUMMARY_BYTES,
+  judgedResultFits,
+  taskOutputAt,
+} from "./workflowHandoff.ts";
 import { MAX_AGENT_ATTEMPTS } from "./workflowLimits.ts";
 import type { WaitingAgent } from "./workflowSweep.ts";
 import type {
@@ -69,7 +76,13 @@ export interface AgentAttemptHost {
   readonly workflow: WorkflowContext;
   readonly deps: Pick<
     WorkflowRunnerDeps,
-    "spawnAgent" | "awaitAgent" | "agentStarted" | "runCommandCheck" | "readWorkspaceFile"
+    | "spawnAgent"
+    | "awaitAgent"
+    | "agentStarted"
+    | "runCommandCheck"
+    | "readWorkspaceFile"
+    | "writeCheckerResult"
+    | "removeCheckerResult"
   >;
   /** Aborts when the workflow is stopped or the server detaches the runner. */
   readonly signal: AbortSignal;
@@ -354,6 +367,24 @@ function readFile(host: AgentAttemptHost, ref: FileRef): Promise<WorkspaceFile |
   );
 }
 
+/**
+ * Writes the answer a checker is shown cut as a file it can read, bounded like a declared file; the
+ * file's own end says where the whole answer is for the coordinator. Undefined when it cannot be
+ * written: the checker then sees the cut marker alone, which says the result is partial.
+ */
+async function storeCheckerResult(
+  host: AgentAttemptHost,
+  input: { readonly taskId: NodeId },
+  answer: string,
+): Promise<string | undefined> {
+  const bounded = boundText(answer, CHECKER_RESULT_FILE_BYTES, taskOutputAt(input.taskId));
+  return Effect.runPromise(
+    host.deps
+      .writeCheckerResult(host.workflow, input.taskId, bounded)
+      .pipe(Effect.catch(() => Effect.undefined)),
+  );
+}
+
 async function runCheck(
   host: AgentAttemptHost,
   input: {
@@ -401,24 +432,38 @@ async function runCheck(
   }
   // An agent of its own, so it is independent of the work it judges and shows in the workflow.
   const target = check.target ?? input.target;
-  const verdict = await host.runAgent({
-    prompt: judgmentPrompt({
-      task: input.prompt,
-      result: resultText,
-      fullOutput: taskOutputAt(input.taskId),
-      rubric: check.rubric,
-      workspaceVisible: input.isolation !== "worktree",
-    }),
-    // Its prompt already pins the work it judges; a generated worker label would not.
-    keyLabel: null,
-    judgmentFor: input.judgmentFor,
-    options: {
-      label: `check ${input.label}`,
-      ...(input.phase === undefined ? {} : { phase: input.phase }),
-      ...(target === undefined ? {} : { target }),
-      schema: JUDGMENT_RESULT_SCHEMA,
-    },
-  });
+  // The checker sees a cut copy of a long answer. It cannot read the answer's task, so the whole
+  // answer is a file for the length of the check, which the cut copy points to.
+  const stored = judgedResultFits(resultText)
+    ? undefined
+    : await storeCheckerResult(host, input, resultText);
+  let verdict: Awaited<ReturnType<AgentAttemptHost["runAgent"]>>;
+  try {
+    verdict = await host.runAgent({
+      prompt: judgmentPrompt({
+        task: input.prompt,
+        result: resultText,
+        ...(stored === undefined ? {} : { fullOutput: fullOutputAt(stored) }),
+        rubric: check.rubric,
+        workspaceVisible: input.isolation !== "worktree",
+      }),
+      // Its prompt already pins the work it judges; a generated worker label would not.
+      keyLabel: null,
+      judgmentFor: input.judgmentFor,
+      options: {
+        label: `check ${input.label}`,
+        ...(input.phase === undefined ? {} : { phase: input.phase }),
+        ...(target === undefined ? {} : { target }),
+        schema: JUDGMENT_RESULT_SCHEMA,
+      },
+    });
+  } finally {
+    if (stored !== undefined) {
+      await Effect.runPromise(
+        host.deps.removeCheckerResult(host.workflow, stored).pipe(Effect.ignore),
+      );
+    }
+  }
   const outcome = judgmentOutcome(verdict.value);
   verdict.entry.judgmentOutcome = outcome.outcome;
   host.scheduleUpdate();

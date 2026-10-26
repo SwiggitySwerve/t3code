@@ -233,6 +233,11 @@ function inlineText(text: string, limitBytes: number, recovery?: string): string
   return escapeText(boundText(text, low, recovery));
 }
 
+/** Whether a checker is shown `result` whole: it fits `JUDGMENT_RESULT_BYTES` once escaped. */
+export function judgedResultFits(result: string): boolean {
+  return byteLength(escapeText(result)) <= JUDGMENT_RESULT_BYTES;
+}
+
 /**
  * The result a checker judges, as one block: inside `JUDGMENT_RESULT_BYTES` once escaped, and
  * unable to close the block or pass for the checker's own instructions. A cut result says where

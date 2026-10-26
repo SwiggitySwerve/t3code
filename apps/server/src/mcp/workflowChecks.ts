@@ -192,6 +192,8 @@ export function parseCheck(value: unknown): WorkflowCheck {
 /** Ids of files, and of graph nodes, which name their outputs the same way. */
 export const FILE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 const DEFAULT_FILE_BYTES = 256 * 1024;
+/** The most of an agent's answer the file that backs up a checker's cut copy holds. */
+export const CHECKER_RESULT_FILE_BYTES = DEFAULT_FILE_BYTES;
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
 const MAX_FILE_REFS = 32;
 
@@ -452,7 +454,14 @@ export function judgmentPrompt(input: {
     "You are an independent checker. Another agent did the task below. Judge its result",
     input.workspaceVisible
       ? "against every criterion. Read the workspace if a criterion needs it; do not change files."
-      : "against every criterion. It worked in a separate checkout you cannot see, so judge from the result alone and do not read files.",
+      : input.fullOutput === undefined
+        ? "against every criterion. It worked in a separate checkout you cannot see, so judge from the result alone and do not read files."
+        : "against every criterion. It worked in a separate checkout you cannot see, so judge from the result alone and read no file but the one named below.",
+    ...(input.fullOutput === undefined
+      ? []
+      : [
+          "The result below was cut. Its marker says which file holds the whole answer: read that file, without changing it, before you judge what the cut part may contain.",
+        ]),
     "Pass only if every criterion holds; otherwise fail and say which criteria do not hold.",
     "",
     "Task:",

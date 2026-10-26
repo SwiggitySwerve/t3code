@@ -78,6 +78,8 @@ interface HarnessOptions {
   readonly settleRowAfterAttempt?: number;
   /** An asynchronous step after the commit, such as the dispatcher's offer of the parent wake. */
   readonly afterCommit?: Effect.Effect<void>;
+  /** The file a checker is pointed to cannot be written. */
+  readonly failCheckerWrite?: boolean;
 }
 
 /** A runner whose agents finish as told, recording what it dispatches and stops. */
@@ -102,6 +104,11 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const taskUpdates = new Map<string, Queue.Queue<void>>();
     const stops: Array<string> = [];
     const keys = new Map<string, string>();
+    // The files the runner stored for checkers, those a checker could read when it started, and
+    // those removed afterwards.
+    const checkerFiles = new Map<string, string>();
+    const readableByChecker: Array<ReadonlyMap<string, string>> = [];
+    const removedCheckerFiles: Array<string> = [];
     const firstSpawn = yield* Deferred.make<void>();
     const firstCompletion = yield* Deferred.make<void>();
     const workflowUpdates: Array<OrchestrationV2SubagentWorkflow> = [];
@@ -236,6 +243,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
         Effect.gen(function* () {
           spawned += 1;
           keys.set(item.task, requestKey);
+          if (item.task.includes("independent checker"))
+            readableByChecker.push(new Map(checkerFiles));
           yield* Deferred.succeed(firstSpawn, undefined);
           const taskId = NodeId.make(options.taskId?.(spawned) ?? `node:agent-${spawned}`);
           const finish = options.finish?.(spawned) ?? "completed";
@@ -307,6 +316,19 @@ const makeHarness = (options: HarnessOptions = {}) =>
             : ({ status: "found", sha256: "0".repeat(64), sizeBytes: text.length, text } as const),
         );
       },
+      writeCheckerResult: (_workflow, taskId, text) =>
+        options.failCheckerWrite === true
+          ? Effect.fail({ code: "orchestration_error", message: "The disk is full." } as never)
+          : Effect.sync(() => {
+              const path = `.t3/workflow-results/${taskId}.txt`;
+              checkerFiles.set(path, text);
+              return path;
+            }),
+      removeCheckerResult: (_workflow, path) =>
+        Effect.sync(() => {
+          removedCheckerFiles.push(path);
+          checkerFiles.delete(path);
+        }),
       stopAgent: (_workflow, taskId, _childThreadId, why) =>
         Effect.gen(function* () {
           stopRequests.push(`${taskId}:${why}`);
@@ -334,6 +356,9 @@ const makeHarness = (options: HarnessOptions = {}) =>
       /** Done once the runner has dispatched its first workflow.complete. */
       firstCompletion,
       keys,
+      checkerFiles,
+      readableByChecker,
+      removedCheckerFiles,
       firstSpawn,
       /** Every row update the runner sent, oldest first. */
       workflowUpdates,
@@ -1458,11 +1483,12 @@ return errors`,
       { name: "four-byte code points", answer: "😀".repeat(40_000) },
     ])("gives a checker a cut, delimited result when the answer is long, for $name", ({ answer }) =>
       Effect.gen(function* () {
-        const { runner, completed, keys, workflowUpdates } = yield* makeHarness({
-          judgment: () => true,
-          summary: (spawned) => (spawned === 1 ? answer : "ok"),
-          taskId: (spawned) => `node:agent-${spawned}`,
-        });
+        const { runner, completed, keys, workflowUpdates, readableByChecker, removedCheckerFiles } =
+          yield* makeHarness({
+            judgment: () => true,
+            summary: (spawned) => (spawned === 1 ? answer : "ok"),
+            taskId: (spawned) => `node:agent-${spawned}`,
+          });
         yield* launch(
           runner,
           'return (await agent("work", { verify: { type: "judgment", rubric: ["It is right."] } }))?.length ?? null',
@@ -1477,14 +1503,86 @@ return errors`,
         const body = block.slice(block.indexOf("\n") + 1, block.indexOf("\n</t3-result>"));
         expect(byteLength(body)).toBeLessThanOrEqual(24_000);
         expect(body).not.toContain("\uFFFD");
+        // A checker cannot read the answer's task, so the marker names a file it can read.
+        const pointer = ".t3/workflow-results/node:agent-1.txt";
         expect(body).toMatch(
-          /\.\.\.truncated \(\d+ of \d+ bytes\), full output at task_status taskId=node:agent-1$/,
+          /\.\.\.truncated \(\d+ of \d+ bytes\), full output at \.t3\/workflow-results\/node:agent-1\.txt$/,
         );
+        expect(body).not.toContain("task_status");
+        // The file existed, holding the answer (within the file bound), when the checker started,
+        // and is gone once the check is over.
+        expect(readableByChecker).toHaveLength(1);
+        const stored = readableByChecker[0]!.get(pointer)!;
+        expect(stored.startsWith(answer.slice(0, 1_000))).toBe(true);
+        expect(removedCheckerFiles).toEqual([pointer]);
         expect(workflowUpdates.at(-1)?.agents[0]?.verification).toMatchObject({
           type: "judgment",
           outcome: "passed",
         });
       }),
+    );
+    it.effect("stores no file for a checker when the whole answer fits in its prompt", () =>
+      Effect.gen(function* () {
+        const { runner, completed, keys, readableByChecker, removedCheckerFiles } =
+          yield* makeHarness({ judgment: () => true, summary: () => "a haiku" });
+        yield* launch(
+          runner,
+          'await agent("work", { verify: { type: "judgment", rubric: ["It is right."] } })',
+        );
+        yield* Deferred.await(completed);
+        const judge = [...keys.keys()].find((task) => task.includes("independent checker"))!;
+        expect(judge).toContain('<t3-result v="1">\na haiku\n</t3-result>');
+        expect(judge).not.toContain("workflow-results");
+        expect(readableByChecker).toEqual([new Map()]);
+        expect(removedCheckerFiles).toEqual([]);
+      }),
+    );
+    it.effect(
+      "bounds the checker's file by the declared-file bound and says where the rest is",
+      () =>
+        Effect.gen(function* () {
+          const answer = "a".repeat(300_000);
+          const { runner, completed, readableByChecker } = yield* makeHarness({
+            judgment: () => true,
+            summary: (spawned) => (spawned === 1 ? answer : "ok"),
+          });
+          yield* launch(
+            runner,
+            'await agent("work", { verify: { type: "judgment", rubric: ["It is right."] } })',
+          );
+          yield* Deferred.await(completed);
+          const stored = readableByChecker[0]!.get(".t3/workflow-results/node:agent-1.txt")!;
+          expect(byteLength(stored)).toBeLessThanOrEqual(256 * 1024);
+          expect(stored).toMatch(
+            /\.\.\.truncated \(\d+ of 300000 bytes\), full output at task_status taskId=node:agent-1$/,
+          );
+        }),
+    );
+    it.effect(
+      "still judges a long answer, cut and unpointed, when the file cannot be written",
+      () =>
+        Effect.gen(function* () {
+          const { runner, completed, keys, workflowUpdates, removedCheckerFiles } =
+            yield* makeHarness({
+              judgment: () => true,
+              summary: (spawned) => (spawned === 1 ? "a".repeat(130_000) : "ok"),
+              failCheckerWrite: true,
+            });
+          yield* launch(
+            runner,
+            'await agent("work", { verify: { type: "judgment", rubric: ["It is right."] } })',
+          );
+          yield* Deferred.await(completed);
+          const judge = [...keys.keys()].find((task) => task.includes("independent checker"))!;
+          const block = judge.slice(judge.indexOf('<t3-result v="1">'));
+          const body = block.slice(block.indexOf("\n") + 1, block.indexOf("\n</t3-result>"));
+          expect(body).toMatch(/\.\.\.truncated \(\d+ of 130000 bytes\)$/);
+          expect(judge).not.toContain("read that file");
+          expect(removedCheckerFiles).toEqual([]);
+          expect(workflowUpdates.at(-1)?.agents[0]?.verification).toMatchObject({
+            outcome: "passed",
+          });
+        }),
     );
     it.effect("keeps a short agent result as it is", () =>
       Effect.gen(function* () {

@@ -3014,6 +3014,37 @@ describe("workflow checks", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("points a checker at a file with a long answer, and removes it after the check", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const answer = "a".repeat(130_000);
+      const existedBefore = NodeFS.existsSync(".t3/workflow-results");
+      const read: Array<{ readonly path: string | undefined; readonly text: string | undefined }> =
+        [];
+      yield* answerWorkflowAgents((prompt) => {
+        if (!prompt.includes("independent checker")) return answer;
+        // What a sibling agent does with the pointer: read the file at that path in the checkout.
+        const path = /full output at (\.t3\/workflow-results\/[0-9a-f]+\.txt)/.exec(prompt)?.[1];
+        const exists = path !== undefined && NodeFS.existsSync(path);
+        read.push({ path, text: exists ? NodeFS.readFileSync(path, "utf8") : undefined });
+        return `\`\`\`json\n${JSON.stringify({ outcome: "passed", reasons: "Read the whole answer." })}\n\`\`\``;
+      });
+      const started = yield* startWorkflow(
+        'return (await agent("write a long report", { verify: { type: "judgment", rubric: ["It is complete."] } }))?.length ?? null',
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toBe(answer.length);
+      expect(read).toHaveLength(1);
+      expect(read[0]?.path).toBeDefined();
+      // The checker's prompt is still bounded; the file it names holds the whole answer.
+      expect(read[0]?.text).toBe(answer);
+      // Nothing is left in the checkout once the check is over.
+      expect(NodeFS.existsSync(read[0]!.path!)).toBe(false);
+      if (!existedBefore) expect(NodeFS.existsSync(".t3")).toBe(false);
+      expect(ended.agents[0]?.verification).toMatchObject({ type: "judgment", outcome: "passed" });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("never runs two agents that write the same files at once", () =>
     Effect.gen(function* () {
       yield* startParent;
@@ -3933,7 +3964,7 @@ describe("graphs", () => {
       );
     }).pipe(Effect.provide(layerTest)),
   );
-  it.effect("graph_review binds inputs, reports a missing one, and records nothing", () =>
+  it.effect("graph_review binds inputs, reports a missing one, and records only its review", () =>
     withScratchDir((dir) =>
       Effect.gen(function* () {
         yield* startParent;
@@ -3954,7 +3985,10 @@ describe("graphs", () => {
           { path: `${dir}/missing.txt`, status: "missing", sha256: null, sizeBytes: null },
         ]);
         expect(reviewed.blockers).toEqual([`produce: input gone (${dir}/missing.txt) is missing.`]);
-        expect(yield* threads.getThreadEventSequence(parentThreadId)).toBe(before);
+        // The one event is the review's approval record; no workflow, agent or message was made.
+        expect(yield* threads.getThreadEventSequence(parentThreadId)).toBe(before + 1);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        expect((yield* orchestrator.getThreadProjection(parentThreadId)).subagents).toEqual([]);
         const refused = yield* invoke("graph_start", {
           graph,
           acceptedDigest: reviewed.digest,
