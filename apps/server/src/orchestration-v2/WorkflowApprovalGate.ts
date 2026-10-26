@@ -17,6 +17,7 @@ import {
   type WorkflowRequest,
   type WorkflowRequestInput,
   workflowRequestOf,
+  workflowTurnNote,
 } from "@t3tools/provider-core/server/workflowTrigger";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -85,6 +86,23 @@ interface PendingRequest {
 export interface WorkflowApprovalGateTurn extends WorkflowRequestInput {
   readonly threadId: ThreadId;
   readonly messageId: MessageId;
+  /**
+   * The message is a steer into work already under way. It can ask for a workflow like any
+   * message, but a plain steer adds to the request that waits and does not lift it.
+   */
+  readonly steering?: boolean;
+}
+
+/** A person's steering message, as it is about to reach a provider turn that is running. */
+export interface WorkflowApprovalGateSteer {
+  readonly threadId: ThreadId;
+  readonly messageId: MessageId;
+  /** The message as stored, before provider context projection: what the person wrote. */
+  readonly typedText: string;
+  readonly createdBy: WorkflowRequestInput["createdBy"];
+  readonly creationSource: WorkflowRequestInput["creationSource"];
+  readonly scheduledTaskId?: string | undefined;
+  readonly senderThreadId?: string | undefined;
 }
 
 /**
@@ -122,10 +140,19 @@ export class WorkflowApprovalGate extends Context.Service<
     /**
      * Turn start asks this for every message, before the provider sees it. A request arms the
      * gate, a plain person's message lifts it, and anything else (agent text, wakes, canned
-     * replies, steers, resumes) leaves it as it is. Returns the answer so the caller does not
-     * ask the detector again.
+     * replies, resumes) leaves it as it is. A steer arms it the same way but is never a plain
+     * message that lifts it. Returns the answer so the caller does not ask the detector again.
      */
     readonly observeTurn: (input: WorkflowApprovalGateTurn) => Effect.Effect<WorkflowRequest>;
+    /**
+     * Delivering a steer into a running turn asks this before the provider sees it, because a
+     * running turn has no turn start. Returns the plan-first note to append to the steer when a
+     * person's steer asks for a workflow (and arms the gate), otherwise undefined. A failed read
+     * of the thread refuses the delivery rather than guess.
+     */
+    readonly observeSteer: (
+      input: WorkflowApprovalGateSteer,
+    ) => Effect.Effect<string | undefined, WorkflowApprovalRequiredError>;
     /**
      * graph_review calls this first, before it reads or hashes anything. The ticket remembers
      * which request was armed at that moment.
@@ -199,9 +226,10 @@ const make = Effect.gen(function* () {
   });
 
   /**
-   * The request a restart made the gate forget: the thread's latest started person-typed
-   * message, if `workflowRequestOf` says it asked for a workflow (steers are not starts). A
-   * request dismissed or already started is armed again, and reviews and approvals are redone.
+   * The request a restart made the gate forget: the thread's latest person-typed message that
+   * started a turn or steered one, if `workflowRequestOf` says it asked for a workflow. A plain
+   * steer is skipped, as at turn start, where it leaves a waiting request armed. A request
+   * dismissed or already started is armed again, and reviews and approvals are redone.
    */
   const persistedRequest = Effect.fn("WorkflowApprovalGate.persistedRequest")(function* (
     threadId: ThreadId,
@@ -213,19 +241,14 @@ const make = Effect.gen(function* () {
     const delegatedThread = records.thread.lineage.relationshipToParent === "subagent";
     const runs = new Map(records.runs.map((run) => [run.id, run]));
     const runOf = (runId: RunId | null) => (runId === null ? undefined : runs.get(runId));
-    const starts = records.turnItems
-      .flatMap((item) =>
-        item.type === "user_message" &&
-        (item.inputIntent === "turn_start" || item.inputIntent === "queued_turn")
-          ? [item]
-          : [],
-      )
+    const messages = records.turnItems
+      .flatMap((item) => (item.type === "user_message" ? [item] : []))
       .toSorted(
         (left, right) =>
           (runOf(right.runId)?.ordinal ?? 0) - (runOf(left.runId)?.ordinal ?? 0) ||
           right.ordinal - left.ordinal,
       );
-    for (const item of starts) {
+    for (const item of messages) {
       const request = workflowRequestOf({
         workflowTriggers: settings.workflowTriggers,
         typedText: item.text,
@@ -236,7 +259,9 @@ const make = Effect.gen(function* () {
         delegatedThread,
         resumesEarlierTurn: runOf(item.runId)?.restartContinuationOfRunId !== undefined,
       });
-      if (request === "ignored") continue;
+      const steered =
+        item.inputIntent === "steer" || item.inputIntent === "promoted_queued_to_steer";
+      if (request === "ignored" || (steered && request === "plain")) continue;
       return request === "requested" ? item.messageId : null;
     }
     return null;
@@ -268,7 +293,7 @@ const make = Effect.gen(function* () {
     const request = workflowRequestOf(input);
     yield* Effect.sync(() => {
       if (request === "plain") {
-        pending.set(input.threadId, null);
+        if (input.steering !== true) pending.set(input.threadId, null);
       } else if (
         request === "requested" &&
         pending.get(input.threadId)?.request !== input.messageId
@@ -278,6 +303,31 @@ const make = Effect.gen(function* () {
       }
     });
     return request;
+  });
+
+  const observeSteer: WorkflowApprovalGate["Service"]["observeSteer"] = Effect.fn(
+    "WorkflowApprovalGate.observeSteer",
+  )(function* (input) {
+    const unverified = (cause: unknown) =>
+      new WorkflowApprovalRequiredError({ threadId: input.threadId, reason: "unverified", cause });
+    const settings = yield* serverSettings.getSettings.pipe(Effect.mapError(unverified));
+    const records = yield* projections
+      .getThreadRecords(input.threadId, [])
+      .pipe(Effect.mapError(unverified));
+    const request = yield* observeTurn({
+      workflowTriggers: settings.workflowTriggers,
+      typedText: input.typedText,
+      createdBy: input.createdBy,
+      creationSource: input.creationSource,
+      scheduledTaskId: input.scheduledTaskId,
+      senderThreadId: input.senderThreadId,
+      delegatedThread: records.thread.lineage.relationshipToParent === "subagent",
+      resumesEarlierTurn: false,
+      steering: true,
+      threadId: input.threadId,
+      messageId: input.messageId,
+    });
+    return request === "requested" ? workflowTurnNote(settings.workflowPresets) : undefined;
   });
 
   const beginReview: WorkflowApprovalGate["Service"]["beginReview"] = Effect.fn(
@@ -417,6 +467,7 @@ const make = Effect.gen(function* () {
 
   return WorkflowApprovalGate.of({
     observeTurn,
+    observeSteer,
     beginReview,
     completeReview,
     requireNoRequest,

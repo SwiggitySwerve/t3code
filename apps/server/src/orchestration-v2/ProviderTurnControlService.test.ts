@@ -1,6 +1,7 @@
 import { assert, it } from "@effect/vitest";
 import {
   type ModelSelection,
+  MessageId,
   NodeId,
   type OrchestrationV2ProviderThread,
   type OrchestrationV2ThreadProjection,
@@ -27,6 +28,9 @@ import * as ProjectionStore from "./ProjectionStore.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnControlService from "./ProviderTurnControlService.ts";
+import * as ServerSettings from "../serverSettings.ts";
+import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
+import { layerOpen } from "./WorkflowApprovalGate.testkit.ts";
 
 const driver = ProviderDriverKind.make("codex");
 const providerInstanceId = ProviderInstanceId.make("codex");
@@ -284,7 +288,7 @@ it.effect(
         }),
       );
       const layerControl = ProviderTurnControlService.layer.pipe(
-        Layer.provide(Layer.merge(layerProjection, layerSessionManager)),
+        Layer.provide(Layer.mergeAll(layerProjection, layerSessionManager, layerOpen)),
       );
 
       const [ordinaryInterrupt, unrelatedRestart] = yield* Effect.gen(function* () {
@@ -332,4 +336,179 @@ it.effect(
       assert.equal(interrupted?.id, providerThreadId);
       assert.equal(interrupted?.nativeThreadRef?.nativeId, "native-thread:restart-session");
     }),
+);
+
+/**
+ * A running turn that receives one steering message from `author`, with the real approval gate.
+ * Answers the text the provider received and what the gate then says to a graph_start.
+ */
+const steerOnce = (input: {
+  readonly key: string;
+  readonly text: string;
+  readonly author?: {
+    readonly createdBy: "user" | "agent";
+    readonly creationSource: "web" | "mcp";
+  };
+  readonly armedBefore?: boolean;
+}) =>
+  Effect.gen(function* () {
+    const now = yield* DateTime.now;
+    const threadId = ThreadId.make(`thread:${input.key}`);
+    const sessionId = ProviderSessionId.make(`provider-session:${input.key}`);
+    const providerThreadId = ProviderThreadId.make(`provider-thread:${input.key}`);
+    const providerTurnId = ProviderTurnId.make(`provider-turn:${input.key}`);
+    const attemptId = RunAttemptId.make(`run-attempt:${input.key}`);
+    const runId = RunId.make(`run:${input.key}`);
+    const providerThread: OrchestrationV2ProviderThread = {
+      id: providerThreadId,
+      driver,
+      providerInstanceId,
+      providerSessionId: sessionId,
+      appThreadId: threadId,
+      ownerNodeId: null,
+      nativeThreadRef: { driver, nativeId: `native-thread:${input.key}`, strength: "strong" },
+      nativeConversationHeadRef: null,
+      status: "not_loaded",
+      firstRunOrdinal: 1,
+      lastRunOrdinal: 1,
+      handoffIds: [],
+      forkedFrom: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    const projection = makeProjection({ now, threadId, providerThread, providerTurnId, attemptId });
+    const message = (id: string, text: string, author: NonNullable<typeof input.author>) => ({
+      ...author,
+      id: MessageId.make(id),
+      threadId,
+      runId,
+      nodeId: NodeId.make(`node:${input.key}`),
+      role: "user" as const,
+      text,
+      attachments: [],
+      streaming: false,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const person = { createdBy: "user", creationSource: "web" } as const;
+    const current = yield* Ref.make(message("message:armed", "Run it as a workflow", person));
+    const delivered = yield* Ref.make<ReadonlyArray<string>>([]);
+    const runtime = {
+      instanceId: providerInstanceId,
+      driver,
+      providerSessionId: sessionId,
+      providerSession: {
+        id: sessionId,
+        driver,
+        providerInstanceId,
+        status: "running" as const,
+        cwd: "/workspace",
+        model: modelSelection.model,
+        capabilities: CodexProviderCapabilitiesV2,
+        createdAt: now,
+        updatedAt: now,
+        lastError: null,
+      },
+      events: Stream.empty,
+      steerTurn: ({ message: steered }: { readonly message: { readonly text: string } }) =>
+        Ref.update(delivered, (texts) => [...texts, steered.text]),
+    } as unknown as ProviderAdapter.ProviderAdapterV2SessionRuntime;
+    const layerProjection = Layer.mock(ProjectionStore.ProjectionStoreV2)({
+      getThread: () => Effect.succeed(projection.thread),
+      getThreadRecords: () =>
+        Effect.succeed({ thread: projection.thread, runs: [], turnItems: [] } as never),
+      getProviderControlContext: () =>
+        Ref.get(current).pipe(
+          Effect.map(
+            (steering) =>
+              ({
+                providerThread,
+                providerTurn: projection.providerTurns[0],
+                attempt: undefined,
+                message: steering,
+                run: { id: runId },
+              }) as never,
+          ),
+        ),
+    });
+    const layerSessions = Layer.mock(ProviderSessionManager.ProviderSessionManagerV2)({
+      get: () => Effect.succeedSome(runtime),
+    });
+    const layerGate = WorkflowApprovalGate.layer.pipe(
+      Layer.provide(Layer.merge(layerProjection, ServerSettings.layerTest({}))),
+    );
+    const layerControl = ProviderTurnControlService.layer.pipe(
+      Layer.provide(Layer.mergeAll(layerProjection, layerSessions, layerGate)),
+      Layer.provideMerge(layerGate),
+    );
+    return yield* Effect.gen(function* () {
+      const control = yield* ProviderTurnControlService.ProviderTurnControlServiceV2;
+      const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+      if (input.armedBefore === true) {
+        yield* gate.observeTurn({
+          workflowTriggers: { enabled: true, extras: [] },
+          typedText: "Run it as a workflow",
+          threadId,
+          messageId: MessageId.make("message:armed"),
+          delegatedThread: false,
+          resumesEarlierTurn: false,
+          ...person,
+        });
+      }
+      yield* Ref.set(current, message("message:steer", input.text, input.author ?? person));
+      yield* control.steer({
+        threadId,
+        providerSessionId: sessionId,
+        providerThreadId,
+        providerTurnId,
+        messageId: MessageId.make("message:steer"),
+      });
+      const start = yield* Effect.exit(
+        gate.guardGraphStart({ threadId, digest: `sha256:${"a".repeat(64)}` }, () =>
+          Effect.succeed("started"),
+        ),
+      );
+      return {
+        delivered: yield* Ref.get(delivered),
+        start: Exit.isSuccess(start) ? "started" : "refused",
+      };
+    }).pipe(Effect.provide(layerControl));
+  });
+
+it.effect("a steer that asks for a workflow plans first and waits for approval", () =>
+  Effect.gen(function* () {
+    const steered = yield* steerOnce({ key: "steer-request", text: "Run it as a workflow" });
+    assert.equal(steered.start, "refused", "no workflow starts before the person approves");
+    assert.equal(steered.delivered.length, 1);
+    assert.isTrue(steered.delivered[0]?.startsWith("Run it as a workflow\n\n<t3-workflow>"));
+    assert.include(steered.delivered[0], "graph_review");
+  }),
+);
+
+it.effect("a steer that does not ask for a workflow arrives unchanged and arms nothing", () =>
+  Effect.gen(function* () {
+    const plain = yield* steerOnce({ key: "steer-plain", text: "Also check the tests" });
+    assert.deepEqual(plain.delivered, ["Also check the tests"]);
+    assert.equal(plain.start, "started");
+    // Only a person's words count: an agent's steer naming a workflow neither plans nor arms.
+    const agent = yield* steerOnce({
+      key: "steer-agent",
+      text: "Run it as a workflow",
+      author: { createdBy: "agent", creationSource: "mcp" },
+    });
+    assert.deepEqual(agent.delivered, ["Run it as a workflow"]);
+    assert.equal(agent.start, "started");
+  }),
+);
+
+it.effect("a plain steer does not lift a workflow request that waits for approval", () =>
+  Effect.gen(function* () {
+    const steered = yield* steerOnce({
+      key: "steer-keeps-request",
+      text: "Also check the tests",
+      armedBefore: true,
+    });
+    assert.deepEqual(steered.delivered, ["Also check the tests"]);
+    assert.equal(steered.start, "refused");
+  }),
 );

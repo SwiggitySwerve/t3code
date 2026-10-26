@@ -235,6 +235,76 @@ describe("turn start", () => {
       ),
   );
 
+  it.effect("arms for a steer that asks for a workflow, and a plain steer leaves it armed", () =>
+    withGate((gate) =>
+      Effect.gen(function* () {
+        const steer = (messageId: string, typedText: string) =>
+          gate.observeTurn(turn(messageId, typedText, { steering: true }));
+        assert.equal(yield* steer("message:1", "Actually, run it as a workflow"), "requested");
+        assert.equal(yield* reasonOf(gate.requireNoRequest(threadId)), "script-not-allowed");
+        assert.equal(yield* steer("message:2", "Also check the tests"), "plain");
+        assert.equal(yield* reasonOf(gate.requireNoRequest(threadId)), "script-not-allowed");
+        // A new message from the person, not a steer, still lifts it.
+        assert.equal(
+          yield* gate.observeTurn(turn("message:3", "Thanks, now fix the typo")),
+          "plain",
+        );
+        yield* gate.requireNoRequest(threadId);
+      }),
+    ),
+  );
+
+  it.effect(
+    "gives a steer the plan-first note only when a person's steer asks for a workflow",
+    () =>
+      withGate((gate) =>
+        Effect.gen(function* () {
+          const steer = (messageId: string, typedText: string, overrides = {}) =>
+            gate.observeSteer({
+              threadId,
+              messageId: MessageId.make(messageId),
+              typedText,
+              createdBy: "user",
+              creationSource: "web",
+              ...overrides,
+            });
+          assert.isUndefined(yield* steer("message:1", "Also check the tests"));
+          yield* gate.requireNoRequest(threadId);
+          for (const overrides of [
+            { createdBy: "agent", creationSource: "mcp" },
+            { scheduledTaskId: "task-1" },
+            { senderThreadId: otherThreadId },
+          ]) {
+            assert.isUndefined(
+              yield* steer("message:2", "Run it as a workflow", overrides),
+              JSON.stringify(overrides),
+            );
+            yield* gate.requireNoRequest(threadId);
+          }
+          const note = yield* steer("message:3", "Run it as a workflow");
+          assert.isTrue(note?.startsWith("<t3-workflow>"));
+          assert.equal(yield* reasonOf(gate.requireNoRequest(threadId)), "script-not-allowed");
+        }),
+      ),
+  );
+
+  it.effect("gives a steer in a delegated thread no note and arms nothing", () =>
+    withGate(
+      (gate) =>
+        Effect.gen(function* () {
+          const note = yield* gate.observeSteer({
+            threadId,
+            messageId: MessageId.make("message:1"),
+            typedText: "Run it as a workflow",
+            createdBy: "user",
+            creationSource: "web",
+          });
+          assert.isUndefined(note);
+          yield* gate.requireNoRequest(threadId);
+        }),
+      { relationshipToParent: "subagent", runs: [], items: [] },
+    ),
+  );
   it.effect("keeps a decision when the same message starts its run again", () =>
     withGate((gate) =>
       Effect.gen(function* () {
@@ -745,6 +815,26 @@ describe("after a restart", () => {
     ),
   );
 
+  it.effect("re-arms from a person's steer that asked for a workflow", () =>
+    withGate(
+      (gate) =>
+        Effect.gen(function* () {
+          assert.equal(yield* reasonOf(gate.requireNoRequest(threadId)), "script-not-allowed");
+          assert.equal(yield* reasonOf(guarded(gate, digestA)), "needs-approval");
+        }),
+      {
+        runs: runs(1),
+        items: [
+          start(1, "Thanks, that is enough"),
+          // Steers share the run of the message they joined; the later item decides.
+          {
+            ...start(2, "Actually, run it as a workflow", { inputIntent: "steer" }),
+            runId: "run:1",
+          },
+        ],
+      },
+    ),
+  );
   it.effect("never arms a delegated thread, whoever asked", () =>
     withGate(
       (gate) =>

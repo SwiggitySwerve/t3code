@@ -22,6 +22,7 @@ export const layerOpen = Layer.succeed(
   WorkflowApprovalGate,
   WorkflowApprovalGate.of({
     observeTurn: (input) => Effect.succeed(workflowRequestOf(input)),
+    observeSteer: () => Effect.undefined,
     beginReview: (threadId) => Effect.succeed({ threadId, armed: null }),
     completeReview: () => Effect.succeed({ approvalRequired: false }),
     requireNoRequest: () => Effect.void,

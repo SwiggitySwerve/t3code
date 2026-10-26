@@ -19,6 +19,7 @@ import * as Schema from "effect/Schema";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
+import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
 
 const yieldToRuntime = Effect.yieldNow.pipe(
   Effect.andThen(
@@ -84,12 +85,15 @@ export class ProviderTurnControlServiceV2 extends Context.Service<
 export const layer: Layer.Layer<
   ProviderTurnControlServiceV2,
   never,
-  ProjectionStore.ProjectionStoreV2 | ProviderSessionManager.ProviderSessionManagerV2
+  | ProjectionStore.ProjectionStoreV2
+  | ProviderSessionManager.ProviderSessionManagerV2
+  | WorkflowApprovalGate.WorkflowApprovalGate
 > = Layer.effect(
   ProviderTurnControlServiceV2,
   Effect.gen(function* () {
     const projections = yield* ProjectionStore.ProjectionStoreV2;
     const sessions = yield* ProviderSessionManager.ProviderSessionManagerV2;
+    const workflowApprovalGate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
 
     const load = Effect.fn("ProviderTurnControlService.load")(function* (input: {
       readonly threadId: ThreadId;
@@ -345,6 +349,17 @@ export const layer: Layer.Layer<
               cause: "The persisted steering message or target run is missing.",
             });
           }
+          // A running turn has no turn start, so the gate learns of a request here, before the
+          // provider reads the steer. A person's steer that asks for a workflow plans first.
+          const workflowNote = yield* workflowApprovalGate.observeSteer({
+            threadId: input.threadId,
+            messageId: message.id,
+            typedText: message.text,
+            createdBy: message.createdBy,
+            creationSource: message.creationSource,
+            scheduledTaskId: message.scheduledTaskId,
+            senderThreadId: message.senderThreadId,
+          });
           yield* loaded.session.value
             .steerTurn({
               threadId: input.threadId,
@@ -356,7 +371,7 @@ export const layer: Layer.Layer<
                 text: projectComposerContextForProvider({
                   text: message.text,
                   records: message.context?.records ?? [],
-                }),
+                }).concat(workflowNote === undefined ? "" : `\n\n${workflowNote}`),
                 attachments: message.attachments,
                 createdBy: message.createdBy,
                 creationSource: message.creationSource,

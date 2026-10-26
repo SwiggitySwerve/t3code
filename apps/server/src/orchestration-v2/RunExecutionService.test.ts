@@ -3248,7 +3248,6 @@ it.effect("never starts a workflow from anything but a person's new message", ()
           },
         },
       },
-      { name: "steering restart", input: { attemptReason: "steering_restart" } },
       {
         name: "restart continuation",
         input: { restartContinuationOfRunId: RunId.make("run:workflow-earlier") },
@@ -3266,28 +3265,83 @@ it.effect("never starts a workflow from anything but a person's new message", ()
   }),
 );
 
+/** The reasons the approval gate refuses a script start once the turn has been observed. */
+const gateRefusalsAfter = (
+  input: Partial<Parameters<typeof providerTextsFor>[0]> & { key: string },
+) =>
+  Effect.gen(function* () {
+    const key = input.key;
+    const refused = yield* Ref.make<ReadonlyArray<string>>([]);
+    yield* captureRootRunTermination({
+      messageText: "Run it as a workflow",
+      settings: { ultracode: "off" },
+      ...input,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      afterTurn: (gate) =>
+        gate.requireNoRequest(backgroundScenarioIds(key).threadId).pipe(
+          Effect.catchTags({
+            WorkflowApprovalRequiredError: (error) =>
+              Ref.update(refused, (reasons) => [...reasons, error.reason]),
+          }),
+        ),
+    });
+    return yield* Ref.get(refused);
+  });
+it.effect("plans a workflow first when a person's steering restart asks for one", () =>
+  Effect.gen(function* () {
+    const [text] = yield* providerTextsFor({
+      key: "workflow-steering-restart",
+      messageText: "Run it as a workflow",
+      attemptReason: "steering_restart",
+    });
+    assert.isTrue(text?.startsWith("Run it as a workflow\n\n<t3-workflow>"));
+    assert.deepEqual(
+      yield* gateRefusalsAfter({
+        key: "gate-steering-restart",
+        attemptReason: "steering_restart",
+      }),
+      ["script-not-allowed"],
+    );
+  }),
+);
+
+it.effect("keeps an armed request when a plain steering restart follows it", () =>
+  Effect.gen(function* () {
+    const key = "gate-steering-restart-plain";
+    const refused = yield* Ref.make<ReadonlyArray<string>>([]);
+    yield* captureRootRunTermination({
+      messageText: "Also check the tests",
+      attemptReason: "steering_restart",
+      settings: { ultracode: "off" },
+      key,
+      shouldFinalizeRun: () => Effect.succeed(true),
+      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+      beforeTurn: (gate) =>
+        gate.observeTurn({
+          workflowTriggers: { enabled: true, extras: [] },
+          typedText: "Run it as a workflow",
+          threadId: backgroundScenarioIds(key).threadId,
+          messageId: MessageId.make("message:earlier-request"),
+          createdBy: "user",
+          creationSource: "web",
+          delegatedThread: false,
+          resumesEarlierTurn: false,
+        }),
+      afterTurn: (gate) =>
+        gate.requireNoRequest(backgroundScenarioIds(key).threadId).pipe(
+          Effect.catchTags({
+            WorkflowApprovalRequiredError: (error) =>
+              Ref.update(refused, (reasons) => [...reasons, error.reason]),
+          }),
+        ),
+    });
+    assert.deepEqual(yield* Ref.get(refused), ["script-not-allowed"]);
+  }),
+);
 it.effect("arms the approval gate for a person's workflow request and for nothing else", () =>
   Effect.gen(function* () {
-    const armedBy = (input: Partial<Parameters<typeof providerTextsFor>[0]> & { key: string }) =>
-      Effect.gen(function* () {
-        const key = input.key;
-        const refused = yield* Ref.make<ReadonlyArray<string>>([]);
-        yield* captureRootRunTermination({
-          messageText: "Run it as a workflow",
-          settings: { ultracode: "off" },
-          ...input,
-          shouldFinalizeRun: () => Effect.succeed(true),
-          events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
-          afterTurn: (gate) =>
-            gate.requireNoRequest(backgroundScenarioIds(key).threadId).pipe(
-              Effect.catchTags({
-                WorkflowApprovalRequiredError: (error) =>
-                  Ref.update(refused, (reasons) => [...reasons, error.reason]),
-              }),
-            ),
-        });
-        return yield* Ref.get(refused);
-      });
+    const armedBy = gateRefusalsAfter;
     assert.deepEqual(
       yield* armedBy({ key: "gate-request" }),
       ["script-not-allowed"],
@@ -3323,7 +3377,6 @@ it.effect("arms the approval gate for a person's workflow request and for nothin
           rootThreadId: threadId,
         },
       },
-      { attemptReason: "steering_restart" },
       { restartContinuationOfRunId: RunId.make("run:gate-earlier") },
     ];
     for (const [index, input] of ignored.entries()) {
@@ -3456,6 +3509,10 @@ function captureRootRunTermination(input: {
   readonly settings?: Parameters<typeof ServerSettings.layerTest>[0];
   readonly attemptReason?: OrchestrationV2RunAttempt["reason"];
   readonly restartContinuationOfRunId?: RunId;
+  /** Runs before the turn starts, against the same approval gate turn start will use. */
+  readonly beforeTurn?: (
+    gate: WorkflowApprovalGate.WorkflowApprovalGate["Service"],
+  ) => Effect.Effect<unknown>;
   /** Runs after the turn, against the same approval gate turn start used. */
   readonly afterTurn?: (
     gate: WorkflowApprovalGate.WorkflowApprovalGate["Service"],
@@ -3658,6 +3715,7 @@ function captureRootRunTermination(input: {
           },
         },
       });
+      yield* input.beforeTurn?.(yield* WorkflowApprovalGate.WorkflowApprovalGate) ?? Effect.void;
       yield* start.pipe(
         Effect.catch((error) => input.onStartFailure?.(error) ?? Effect.fail(error)),
       );

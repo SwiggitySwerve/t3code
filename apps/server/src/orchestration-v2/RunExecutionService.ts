@@ -1680,12 +1680,12 @@ export const layer: Layer.Layer<
           scheduledTaskId: input.message.scheduledTaskId,
           senderThreadId: input.message.senderThreadId,
           delegatedThread: input.appThread.lineage?.relationshipToParent === "subagent",
-          resumesEarlierTurn:
-            input.attempt.reason === "steering_restart" ||
-            input.run.restartContinuationOfRunId !== undefined,
+          resumesEarlierTurn: input.run.restartContinuationOfRunId !== undefined,
         };
         const requested = yield* workflowApprovalGate.observeTurn({
           ...workflowRequest,
+          // A person's steer can ask for a workflow like any message; a plain one keeps what waits.
+          steering: input.attempt.reason === "steering_restart",
           threadId: input.run.threadId,
           messageId: input.message.messageId,
         });

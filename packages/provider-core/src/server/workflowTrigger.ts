@@ -2,7 +2,7 @@
  * Per-turn hooks that start orchestration from a person's words: a message asking for a
  * workflow puts the coordinator into graph planning, which wins over the ultracode note. Only a
  * person's message on a non-delegated thread can ask; agent text, wakes, canned replies,
- * schedules, steers and restarts never do, or each child could start a fan-out.
+ * schedules and restart continuations never do, or each child could start a fan-out. A person's steer into running work does, like any message.
  */
 import type {
   OrchestrationV2Actor,
@@ -85,7 +85,7 @@ export interface WorkflowRequestInput {
   readonly senderThreadId?: string | undefined;
   /** The thread is a delegated task or workflow member (persisted lineage: a subagent child). */
   readonly delegatedThread: boolean;
-  /** A steering restart or restart continuation: it resumes work, so it is not a new request. */
+  /** A restart continuation: it resumes work, so it is not a new request. */
   readonly resumesEarlierTurn: boolean;
 }
 
