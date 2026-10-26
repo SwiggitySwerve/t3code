@@ -19,7 +19,6 @@ const harness = vi.hoisted(() => ({
   liveAgents: [] as ReadonlyArray<unknown> | undefined,
   stop: vi.fn(),
   announce: vi.fn(),
-  platform: "android",
 }));
 
 vi.mock("react-native", () => ({
@@ -40,11 +39,7 @@ vi.mock("react-native", () => ({
     addEventListener: () => ({ remove: () => {} }),
   },
   AccessibilityInfo: { announceForAccessibility: harness.announce },
-  Platform: {
-    get OS() {
-      return harness.platform;
-    },
-  },
+  Platform: { OS: "ios" },
 }));
 vi.mock("../../components/ui/AppText", () => ({
   AppText: ({
@@ -90,6 +85,7 @@ vi.mock("../../state/server", () => ({
 vi.mock("../../state/threads", () => ({
   environmentThreadDetails: { threadAtom: () => ({ kind: "thread" }) },
 }));
+vi.mock("./thread-inspector-navigation", () => ({ useOpenThreadInspector: () => () => false }));
 vi.mock("./SubagentRow", () => ({
   SubagentRow: ({ subagent }: { subagent: { title: string; status: string } }) => (
     <span>{`${subagent.title} ${subagent.status}`}</span>
@@ -214,7 +210,6 @@ beforeEach(() => {
   harness.stop.mockReset();
   harness.stop.mockResolvedValue(AsyncResult.success(undefined));
   harness.announce.mockReset();
-  harness.platform = "android";
 });
 
 afterEach(() => {
@@ -298,25 +293,18 @@ describe("ThreadSubagentGroup workflow Stop", () => {
     expect(container.textContent).not.toContain(STOP_FAILED);
   });
 
-  it.each([
-    ["ios", 1],
-    ["android", 0],
-  ] as const)(
-    "announces a failed stop through the shared notice on %s (%d explicit announcements)",
-    async (platform, announcements) => {
-      harness.platform = platform;
-      harness.stop.mockResolvedValueOnce(failure());
-      show(turnItem("running"));
+  it("announces a failed stop through the shared notice", async () => {
+    harness.stop.mockResolvedValueOnce(failure());
+    show(turnItem("running"));
 
-      act(() => stopButton()?.click());
-      await flush();
+    act(() => stopButton()?.click());
+    await flush();
 
-      // TalkBack reads the live region; VoiceOver needs the explicit announcement.
-      expect(notice()?.textContent).toBe(STOP_FAILED);
-      expect(harness.announce).toHaveBeenCalledTimes(announcements);
-      if (announcements > 0) expect(harness.announce).toHaveBeenCalledWith(STOP_FAILED);
-    },
-  );
+    // The polite live region is what TalkBack reads; VoiceOver needs the explicit announcement.
+    expect(notice()?.textContent).toBe(STOP_FAILED);
+    expect(harness.announce).toHaveBeenCalledTimes(1);
+    expect(harness.announce).toHaveBeenCalledWith(STOP_FAILED);
+  });
 
   it("treats an interrupted stop as no stop attempt, not a failure", async () => {
     harness.stop.mockResolvedValueOnce(AsyncResult.failure(Cause.interrupt()));

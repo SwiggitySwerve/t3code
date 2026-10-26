@@ -3459,7 +3459,8 @@ function captureRootRunTermination(input: {
   /** Runs after the turn, against the same approval gate turn start used. */
   readonly afterTurn?: (
     gate: WorkflowApprovalGate.WorkflowApprovalGate["Service"],
-  ) => Effect.Effect<void>;}) {
+  ) => Effect.Effect<void>;
+}) {
   return Effect.gen(function* () {
     const ids = backgroundScenarioIds(input.key);
     const providerInstanceId = ProviderInstanceId.make("codex");

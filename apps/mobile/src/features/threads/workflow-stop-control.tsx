@@ -58,21 +58,27 @@ function WorkflowStopButton(props: StopProps) {
   const inFlight = useRef(false);
   if (!canOperate || (props.retryOnly === true && state === "idle")) return null;
   const stopping = state === "stopping";
+  const requestStop = async (): Promise<StopState> => {
+    const result = await stopWorkflow({
+      environmentId: props.environmentId,
+      input: { threadId: props.threadId, subagentId: NodeId.make(props.workflowId) },
+    });
+    return AsyncResult.isSuccess(result) || isAtomCommandInterrupted(result) ? "idle" : "failed";
+  };
+  const settle = (next: StopState) => {
+    inFlight.current = false;
+    setState(next);
+  };
   const stop = async () => {
     if (inFlight.current) return;
     inFlight.current = true;
     setState("stopping");
-    let next: StopState = "failed";
-    try {
-      const result = await stopWorkflow({
-        environmentId: props.environmentId,
-        input: { threadId: props.threadId, subagentId: NodeId.make(props.workflowId) },
-      });
-      next = AsyncResult.isSuccess(result) || isAtomCommandInterrupted(result) ? "idle" : "failed";
-    } finally {
-      inFlight.current = false;
-      setState(next);
-    }
+    // No try/finally: the React Compiler cannot lower a try without a catch. A rejected request
+    // still ends as a failed stop that can be retried, and the rejection still propagates.
+    await requestStop().then(settle, (cause: unknown) => {
+      settle("failed");
+      throw cause;
+    });
   };
   return (
     <View className={cn("gap-1", props.className)}>

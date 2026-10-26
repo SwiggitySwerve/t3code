@@ -43,6 +43,7 @@ const workflowAgentCodec = Schema.toCodecJson(OrchestrationV2WorkflowAgent);
 const decodeWorkflowAgent = Schema.decodeUnknownSync(OrchestrationV2WorkflowAgent);
 const encodeWorkflowAgent = Schema.encodeSync(workflowAgentCodec);
 const decodeWorkflowAgentJson = Schema.decodeUnknownSync(workflowAgentCodec);
+const decodeOrchestrationV2SubagentJson = Schema.decodeUnknownSync(OrchestrationV2SubagentJson);
 
 describe("orchestration V2 contracts", () => {
   it("keeps patch identity when phases and agents also match the legacy snapshot shape", () => {
@@ -516,7 +517,7 @@ describe("orchestration V2 contracts", () => {
         ...encodeOrchestrationV2SubagentJson(coordinator()),
         workflow: { phases: [], agents: [{ index: 0, label: "Member", state: "completed" }] },
       };
-      const decoded = Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(legacy).workflow;
+      const decoded = decodeOrchestrationV2SubagentJson(legacy).workflow;
       expect(decoded?.plan).toBeUndefined();
       expect(decoded?.nodeOutcomes).toBeUndefined();
       expect(decoded?.agents[0]?.graphNodeKey).toBeUndefined();
@@ -549,7 +550,7 @@ describe("orchestration V2 contracts", () => {
         ...encodeOrchestrationV2SubagentJson(coordinator()),
         workflow: { ...planned, ...patch },
       };
-      expect(() => Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(subagent)).toThrow();
+      expect(() => decodeOrchestrationV2SubagentJson(subagent)).toThrow();
     });
   });
 

@@ -251,7 +251,7 @@ const make = Effect.gen(function* () {
     if (pending.has(threadId)) return;
     const persisted = yield* persistedRequest(threadId).pipe(
       // A thread that does not exist has no request, and is not worth remembering.
-      Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.succeed(undefined) }),
+      Effect.catchTags({ ProjectionStoreThreadNotFoundError: () => Effect.undefined }),
       Effect.mapError(
         (cause) => new WorkflowApprovalRequiredError({ threadId, reason: "unverified", cause }),
       ),

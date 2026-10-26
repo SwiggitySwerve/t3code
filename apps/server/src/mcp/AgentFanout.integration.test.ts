@@ -172,7 +172,7 @@ const makeLayerTest = (
   );
   const layerSecretStore = Layer.sync(ServerSecretStore.ServerSecretStore, () =>
     ServerSecretStore.ServerSecretStore.of({
-      get: () => Effect.succeed(Option.none()),
+      get: () => Effect.succeedNone,
       set: () => Effect.void,
       create: () => Effect.void,
       getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
@@ -198,14 +198,12 @@ const makeLayerTest = (
     Layer.provideMerge(
       Layer.mock(ProjectService.ProjectService)({
         getById: (projectId) =>
-          Effect.succeed(
-            Option.some({
-              id: projectId,
-              title: "Delegate tasks",
-              // A real directory, so process checks have somewhere to run.
-              workspaceRoot: process.cwd(),
-            } as never),
-          ),
+          Effect.succeedSome({
+            id: projectId,
+            title: "Delegate tasks",
+            // A real directory, so process checks have somewhere to run.
+            workspaceRoot: process.cwd(),
+          } as never),
       }),
     ),
     Layer.provideMerge(

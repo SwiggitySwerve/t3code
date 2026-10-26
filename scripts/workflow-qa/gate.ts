@@ -43,7 +43,6 @@ export function decodeLog(bytes: Uint8Array): string {
 
 /** What failed in a gate log, without ANSI colors. */
 export function parseGateLog(log: string): GateResult {
-  // eslint-disable-next-line no-control-regex -- the escape character is what ANSI colors start with
   const lines = log.replace(/\u001b\[[0-9;]*m/g, "").split(/\r?\n/);
   const steps = new Set<string>();
   const tests = new Map<string, number>();

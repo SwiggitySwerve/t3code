@@ -1063,12 +1063,10 @@ const make = Effect.gen(function* () {
           threadId: input.threadId,
           workflowId: task.id,
         }),
-      ).pipe(Effect.mapError(stopFailed));
-      const stopped = yield* orchestrator
-        .getThreadRecords(input.threadId, ["subagents"])
-        .pipe(Effect.mapError(stopFailed));
+      );
+      const stopped = yield* orchestrator.getThreadRecords(input.threadId, ["subagents"]);
       return activeWorkflowMembers(stopped.subagents, task.id);
-    });
+    }).pipe(Effect.mapError(stopFailed));
     const memberThreadIds = task.status === "running" ? yield* stopRow : snapshotMembers;
     const failures: Array<unknown> = [];
     for (const childThreadId of memberThreadIds) {

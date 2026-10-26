@@ -93,6 +93,7 @@ export function WorkflowWaveCanvas(props: {
   // Only cards in view (plus a margin) draw in full; a 150-node graph stays fast to render.
   const scrollRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState<WaveViewport | null>(null);
+  // oxlint-disable-next-line t3code/react-effect-budget -- subscribes to the scroll container's scroll and resize events, which only the DOM reports.
   useLayoutEffect(() => {
     const element = scrollRef.current;
     if (element === null) return;
@@ -132,6 +133,7 @@ export function WorkflowWaveCanvas(props: {
         ]);
   // Tabbing onto a placeholder draws that card in full; focus then moves to its main control.
   const focusRequest = useRef<string | null>(null);
+  // oxlint-disable-next-line t3code/react-effect-budget -- moves DOM focus after the highlighted card has rendered in full; focus cannot be set during render.
   useLayoutEffect(() => {
     const key = focusRequest.current;
     if (key === null || key !== highlighted) return;

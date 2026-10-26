@@ -197,6 +197,7 @@ function WorkflowProgress(props: { readonly text: string }) {
   const [overflows, setOverflows] = useState(false);
   const textRef = useRef<HTMLParagraphElement>(null);
   const contentId = useId();
+  // oxlint-disable-next-line t3code/react-effect-budget -- measures the clamped text and re-measures when its box resizes: layout read from the DOM, not state derivable in render.
   useEffect(() => {
     const element = textRef.current;
     if (element === null || expanded) return;

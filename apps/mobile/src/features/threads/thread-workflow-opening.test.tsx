@@ -80,6 +80,10 @@ vi.mock("../settings/appearance/AppearancePreferencesProvider", () => ({
   useAppearancePreferences: () => ({ themeAppearance: "light" }),
 }));
 vi.mock("./markdownCodeHighlightState", () => ({ useMarkdownCodeHighlight: () => null }));
+vi.mock("./useOpenLinkedThread", () => ({
+  useOpenLinkedThread: () => (target: { environmentId: string; threadId: string }) =>
+    harness.dispatch({ type: "PUSH", name: "Thread", params: target }),
+}));
 vi.mock("./SubagentRow", () => ({
   SubagentRow: ({ subagent }: { subagent: { title: string } }) => <span>{subagent.title}</span>,
 }));

@@ -683,9 +683,10 @@ describe("EnvironmentThreads", () => {
         (value) => Option.getOrNull(value.error) === "This thread fell out of sync. Reloading it.",
       );
       // The client resubscribes without a cursor, so the server sends a snapshot.
-      yield* Effect.gen(function* () {
-        while ((yield* Ref.get(harness.subscriptionCount)) < 2) yield* Effect.yieldNow;
-      });
+      yield* SubscriptionRef.changes(harness.subscriptionCount).pipe(
+        Stream.filter((count) => count >= 2),
+        Stream.runHead,
+      );
       expect(yield* Ref.get(harness.lastSubscribeAfterSequence)).toBeUndefined();
       yield* Queue.offer(harness.inputs, snapshot(BASE_PROJECTION, CACHED_SNAPSHOT_SEQUENCE + 2));
       const recovered = yield* awaitThreadState(

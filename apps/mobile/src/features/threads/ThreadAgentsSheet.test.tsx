@@ -23,7 +23,7 @@ const harness = vi.hoisted(() => ({
 }));
 
 vi.mock("react-native", () => ({
-  Platform: { OS: "android", Version: 34 },
+  Platform: { OS: "ios", Version: 26 },
   AccessibilityInfo: { announceForAccessibility: harness.announce },
   View: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
   ScrollView: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
@@ -52,7 +52,9 @@ vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => null }));
 vi.mock("../../components/ui/GlassSurface", () => ({
   GlassSurface: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
-vi.mock("react-native-screens", () => ({ ScreenStack: () => null }));
+vi.mock("react-native-screens", () => ({
+  ScreenStack: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+}));
 vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ bottom: 0 }) }));
 vi.mock("expo-haptics", () => ({ selectionAsync: () => {} }));
 vi.mock("@react-navigation/native", () => ({
@@ -69,7 +71,7 @@ vi.mock("../../native/StackHeader", () => ({
 }));
 vi.mock("../../native/ThemedScreenStack", () => ({
   NativeHeader: () => null,
-  NativeScreen: () => null,
+  NativeScreen: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
 vi.mock("../layout/AdaptiveWorkspaceLayout", () => ({
   useAdaptiveWorkspaceLayout: () => ({ layout: { usesSplitView: false } }),
@@ -99,6 +101,7 @@ vi.mock("../../state/threads", () => ({
     threadAtom: () => ({ kind: "thread" }),
   },
 }));
+vi.mock("./thread-inspector-navigation", () => ({ useOpenThreadInspector: () => () => false }));
 vi.mock("./SubagentRow", () => ({
   SubagentRow: ({ subagent }: { subagent: { title: string; status: string } }) => (
     <span>{`${subagent.title} ${subagent.status}`}</span>
