@@ -377,7 +377,7 @@ export function reviewGraph(
     blockers,
     inputs,
     // Advice only: the digest below never reads it.
-    advisory: parsed.ok ? graphAdvisory(parsed.graph, layers, drivers) : undefined,
+    advisory: parsed.ok ? graphAdvisory(parsed.graph, layers, drivers, inputs) : undefined,
     digest: parsed.ok
       ? "sha256:" +
         NodeCrypto.createHash("sha256")

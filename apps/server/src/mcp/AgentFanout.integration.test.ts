@@ -3627,7 +3627,9 @@ describe("graphs", () => {
             estimatedTokens: { coordinator: { low: 288_000, high: 424_000 } },
           },
         });
-        expect(fan.advisory?.suggestedBudgetTokens).toBe(1_612_800);
+        // Members: 12 calls x 96k, one more attempt of the costliest agent (3 x 96k), 1.4 headroom, plus
+        // the Codex coordinator's 4 x 106k as reserve.
+        expect(fan.advisory?.suggestedBudgetTokens).toBe(2_440_000);
         // The advisory is not part of what the user approves: an identical review gives an identical digest.
         const again = yield* review({
           a: task(),
@@ -3658,7 +3660,7 @@ describe("graphs", () => {
             workerTarget: { providerInstanceId: instanceId, model },
           })).structuredContent,
         );
-        expect(codexFan.advisory?.suggestedBudgetTokens).toBe(436_800);
+        expect(codexFan.advisory?.suggestedBudgetTokens).toBe(970_000);
         expect(codexFan.advisory?.overshootBoundTokens).toBe(234_000);
         expect(codexFan.digest).not.toBe(fan.digest);
       }).pipe(Effect.provide(layerTest)),
@@ -3692,7 +3694,7 @@ describe("graphs", () => {
             overshootBoundTokens: 864_000,
           },
         });
-        expect(review.advisory?.suggestedBudgetTokens).toBe(1_612_800);
+        expect(review.advisory?.suggestedBudgetTokens).toBe(2_400_000);
         expect(review.advisory?.estimatedTokens.basis).toContain("Other drivers are not measured");
       }).pipe(Effect.provide(layerTest)),
   );

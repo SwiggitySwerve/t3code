@@ -419,7 +419,7 @@ export const OrchestratorMcpGraphAdvisory = Schema.Struct({
   }),
   suggestedBudgetTokens: NonNegativeInt.annotate({
     description:
-      "A starting budgetTokens: 1.4 times the agents' high estimate, without the coordinator.",
+      "A starting budgetTokens, an estimate: 1.4 times the agents' high estimate plus one retry of the costliest agent, plus your own high estimate as reserve so the last node can still start. The budget does not count your tokens.",
   }),
   overshootBoundTokens: NonNegativeInt.annotate({
     description:

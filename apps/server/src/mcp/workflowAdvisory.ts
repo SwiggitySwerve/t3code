@@ -33,6 +33,13 @@ const UNMEASURED_FIGURES: DriverFigures = {
 const figuresFor = (driver: string | undefined): DriverFigures =>
   driver === MEASURED_DRIVER ? MEASURED_FIGURES : UNMEASURED_FIGURES;
 const BUDGET_HEADROOM = 1.4;
+/**
+ * A node that reads files makes more calls, and every later call carries what was read. Review 7 (G5)
+ * recorded 4-9 calls (mean 6.5) and 132k-348k tokens for each of six nodes that read ten 4.7 KB files,
+ * against C4's 2-3 calls of 17k-26k for nodes that read one or two small files. These are estimates.
+ */
+const INPUTS_PER_EXTRA_CALL = { low: 5, high: 3 } as const;
+const BYTES_PER_TOKEN = 4;
 
 /** The provider driver that runs each agent of a reviewed graph. A missing entry is unknown. */
 export interface AdvisoryDrivers {
@@ -45,8 +52,45 @@ export interface AdvisoryDrivers {
 
 /** The parts of a parsed graph the advisory reads; workflowGraph.ts passes its own types. */
 interface AdvisoryGraph {
-  readonly nodes: Readonly<Record<string, { readonly verify?: { readonly type: string } }>>;
+  readonly nodes: Readonly<
+    Record<
+      string,
+      {
+        readonly verify?: { readonly type: string };
+        readonly inputs?: ReadonlyArray<{ readonly kind: string; readonly path?: string }>;
+      }
+    >
+  >;
 }
+
+/** What review hashed for each input path; a missing or oversize file has no size to read. */
+export type AdvisoryInputSizes = Readonly<
+  Record<string, { readonly sizeBytes: number } | "missing" | "too_large">
+>;
+
+interface AgentLoad {
+  readonly calls: { readonly low: number; readonly high: number };
+  readonly tokens: { readonly low: number; readonly high: number };
+}
+
+/** One agent's calls and tokens: C4's per-call figures plus the reads its inputs add. */
+const agentLoad = (
+  figures: DriverFigures,
+  reads: { readonly count: number; readonly bytes: number },
+): AgentLoad => {
+  const readTokens = Math.ceil(reads.bytes / BYTES_PER_TOKEN);
+  const calls = {
+    low: CALLS_PER_AGENT.low + Math.floor(reads.count / INPUTS_PER_EXTRA_CALL.low),
+    high: CALLS_PER_AGENT.high + Math.ceil(reads.count / INPUTS_PER_EXTRA_CALL.high),
+  };
+  return {
+    calls,
+    tokens: {
+      low: calls.low * (figures.member.low + Math.floor(readTokens / 2)),
+      high: calls.high * (figures.member.high + readTokens),
+    },
+  };
+};
 
 const kTokens = (tokens: number) => `${tokens / 1000}k`;
 const rangeText = (figure: CallFigure) =>
@@ -63,7 +107,7 @@ const basisFor = (members: ReadonlyArray<DriverFigures>, coordinator: DriverFigu
     all.some((figures) => !figures.measured)
       ? "Other drivers are not measured; their figures are the earlier estimate."
       : "",
-    "Headroom is opinion.",
+    "Estimates: each 3 inputs add a call, input bytes/4 add tokens per call. Headroom is opinion.",
   ].filter((note) => note !== "");
   return `Per agent 2-3 model calls of ${rangesText(members.map((figures) => figures.member))} tokens, coordinator 3-4 of ${rangeText(coordinator.coordinator)} tokens. ${notes.join(" ")}`;
 };
@@ -94,26 +138,40 @@ export function graphAdvisory(
   graph: AdvisoryGraph,
   layers: ReadonlyArray<ReadonlyArray<string>>,
   drivers?: AdvisoryDrivers,
+  inputSizes: AdvisoryInputSizes = {},
 ): OrchestratorMcpGraphAdvisory {
   const entries = Object.entries(graph.nodes);
   const nodeCount = entries.length;
   const widestWave = Math.max(0, ...layers.map((layer) => layer.length));
   const verifierCount = entries.filter(([, node]) => node.verify !== undefined).length;
   const nodeFigures = (id: string) => figuresFor(drivers?.nodes.get(id));
-  // A judgment check runs as one more agent, on its own driver.
-  const memberFigures = entries.flatMap(([id, node]) => [
-    nodeFigures(id),
-    ...(node.verify?.type === "judgment" ? [figuresFor(drivers?.judges.get(id))] : []),
-  ]);
+  const readsOf = (inputs: NonNullable<AdvisoryGraph["nodes"][string]["inputs"]>) => ({
+    count: inputs.length,
+    bytes: inputs.reduce((sum, input) => {
+      const size = input.path === undefined ? undefined : inputSizes[input.path];
+      return typeof size === "object" ? sum + size.sizeBytes : sum;
+    }, 0),
+  });
+  const nodeLoads = new Map(
+    entries.map(([id, node]) => [id, agentLoad(nodeFigures(id), readsOf(node.inputs ?? []))]),
+  );
+  // A judgment check runs as one more agent, on its own driver, and reads nothing but the result.
+  const judgeFigures = entries.flatMap(([id, node]) =>
+    node.verify?.type === "judgment" ? [figuresFor(drivers?.judges.get(id))] : [],
+  );
+  const memberFigures = [...entries.map(([id]) => nodeFigures(id)), ...judgeFigures];
+  const loads = [
+    ...nodeLoads.values(),
+    ...judgeFigures.map((figures) => agentLoad(figures, { count: 0, bytes: 0 })),
+  ];
   const coordinatorFigures = figuresFor(drivers?.coordinator);
-  const agents = memberFigures.length;
   const calls = {
-    low: agents * CALLS_PER_AGENT.low + COORDINATOR_CALLS.low,
-    high: agents * CALLS_PER_AGENT.high + COORDINATOR_CALLS.high,
+    low: loads.reduce((sum, load) => sum + load.calls.low, 0) + COORDINATOR_CALLS.low,
+    high: loads.reduce((sum, load) => sum + load.calls.high, 0) + COORDINATOR_CALLS.high,
   };
   const members = {
-    low: CALLS_PER_AGENT.low * memberFigures.reduce((sum, f) => sum + f.member.low, 0),
-    high: CALLS_PER_AGENT.high * memberFigures.reduce((sum, f) => sum + f.member.high, 0),
+    low: loads.reduce((sum, load) => sum + load.tokens.low, 0),
+    high: loads.reduce((sum, load) => sum + load.tokens.high, 0),
   };
   const coordinator = {
     low: COORDINATOR_CALLS.low * coordinatorFigures.coordinator.low,
@@ -122,11 +180,14 @@ export function graphAdvisory(
   // Agents already running finish after the budget is spent, so the widest wave bounds the overshoot.
   const overshootBoundTokens = Math.max(
     0,
-    ...layers.map(
-      (layer) =>
-        CALLS_PER_AGENT.high * layer.reduce((sum, id) => sum + nodeFigures(id).member.high, 0),
+    ...layers.map((layer) =>
+      layer.reduce((sum, id) => sum + (nodeLoads.get(id)?.tokens.high ?? 0), 0),
     ),
   );
+  // The budget only stops new starts, so the last node is the one a short budget drops. Cover every
+  // agent, one retry of the costliest (C4/S06: a retried node costs one more attempt), and the
+  // coordinator's estimate as reserve (the budget does not count it).
+  const retryTokens = Math.max(0, ...loads.map((load) => load.tokens.high));
   const reasons = singleAgentReasons({ nodeCount, widestWave, verifierCount });
   return {
     fanOut: reasons.length > 0 ? "consider_single" : "ok",
@@ -142,8 +203,8 @@ export function graphAdvisory(
       coordinator,
       basis: basisFor(memberFigures, coordinatorFigures),
     },
-    // budgetTokens counts finished agents only, so the coordinator's share is left out.
-    suggestedBudgetTokens: Math.round(BUDGET_HEADROOM * members.high),
+    suggestedBudgetTokens:
+      Math.round(BUDGET_HEADROOM * (members.high + retryTokens)) + coordinator.high,
     overshootBoundTokens,
   };
 }

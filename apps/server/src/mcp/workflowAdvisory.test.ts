@@ -97,14 +97,17 @@ describe("graph advisory", () => {
       high: 12 * 26_000 + 4 * 106_000,
       coordinator: { low: 3 * 96_000, high: 4 * 106_000 },
     });
-    expect(advisory.suggestedBudgetTokens).toBe(Math.round(1.4 * 12 * 26_000));
+    // 12 agent calls, one more attempt of the costliest agent (3 calls), and the coordinator as reserve.
+    expect(advisory.suggestedBudgetTokens).toBe(
+      Math.round(1.4 * (12 * 26_000 + 3 * 26_000)) + 4 * 106_000,
+    );
     // The widest wave of 3 agents, each 3 calls of 26k tokens, may overshoot a spent budget.
     expect(advisory.overshootBoundTokens).toBe(3 * 3 * 26_000);
     const { basis } = advisory.estimatedTokens;
     expect(basis).toContain("17k-26k");
     expect(basis).toContain("Measured in C4 on the Codex driver");
     expect(basis).not.toContain("not measured");
-    expect(Buffer.byteLength(basis, "utf8")).toBeLessThanOrEqual(300);
+    expect(Buffer.byteLength(basis, "utf8")).toBeLessThanOrEqual(360);
   });
 
   it("keeps the earlier 37k-96k estimate for a Claude graph, which C4 did not measure", () => {
@@ -117,14 +120,16 @@ describe("graph advisory", () => {
     });
     // A Claude member's first call alone is near 37k, so a 4-agent fan-in must not be advised
     // a budget below the 12 x 37k its members plausibly spend.
-    expect(advisory.suggestedBudgetTokens).toBe(Math.round(1.4 * 12 * 96_000));
+    expect(advisory.suggestedBudgetTokens).toBe(
+      Math.round(1.4 * (12 * 96_000 + 3 * 96_000)) + 4 * 96_000,
+    );
     expect(advisory.suggestedBudgetTokens).toBeGreaterThan(12 * 37_000);
     expect(advisory.overshootBoundTokens).toBe(3 * 3 * 96_000);
     const { basis } = advisory.estimatedTokens;
     expect(basis).toContain("37k-96k");
     expect(basis).toContain("Other drivers are not measured");
     expect(basis).not.toContain("Measured in C4");
-    expect(Buffer.byteLength(basis, "utf8")).toBeLessThanOrEqual(300);
+    expect(Buffer.byteLength(basis, "utf8")).toBeLessThanOrEqual(360);
   });
 
   it("prices each agent by its own driver in a mixed graph", () => {
@@ -143,7 +148,9 @@ describe("graph advisory", () => {
       high: 3 * 96_000 + 3 * 3 * 26_000 + 4 * 96_000,
       coordinator: { low: 3 * 37_000, high: 4 * 96_000 },
     });
-    expect(advisory.suggestedBudgetTokens).toBe(Math.round(1.4 * (3 * 96_000 + 3 * 3 * 26_000)));
+    expect(advisory.suggestedBudgetTokens).toBe(
+      Math.round(1.4 * (3 * 96_000 + 3 * 3 * 26_000 + 3 * 96_000)) + 4 * 96_000,
+    );
     // The widest wave is a, b and c at once, so a's 96k figure counts.
     expect(advisory.overshootBoundTokens).toBe(3 * (96_000 + 26_000 + 26_000));
     const { basis } = advisory.estimatedTokens;
@@ -151,7 +158,7 @@ describe("graph advisory", () => {
     expect(basis).toContain("37k-96k");
     expect(basis).toContain("Measured in C4 on the Codex driver");
     expect(basis).toContain("Other drivers are not measured");
-    expect(Buffer.byteLength(basis, "utf8")).toBeLessThanOrEqual(300);
+    expect(Buffer.byteLength(basis, "utf8")).toBeLessThanOrEqual(360);
     // A Codex coordinator over Claude members keeps the measured coordinator figure.
     expect(
       advise(fanIn, driversOf("codex", claudeNodes)).advisory.estimatedTokens.coordinator,
@@ -164,7 +171,7 @@ describe("graph advisory", () => {
       low: 11 * 37_000,
       high: 16 * 96_000,
     });
-    expect(advisory.suggestedBudgetTokens).toBe(1_612_800);
+    expect(advisory.suggestedBudgetTokens).toBe(2_400_000);
     expect(advisory.estimatedTokens.basis).toContain("Other drivers are not measured");
   });
 
@@ -199,5 +206,91 @@ describe("graph advisory", () => {
     const review = reviewGraph(graph({ a: node({ dependsOn: ["missing"] }) }), {});
     expect(review.advisory).toBeUndefined();
     expect(review.digest).toBeNull();
+  });
+});
+
+/**
+ * G5 of review 7: six extract nodes that each read ten ~4.7 KB runbooks, one merge node that reads
+ * their twelve outputs and carries a judgment check. Its members recorded 1,451,543 tokens across
+ * the six extract nodes before the merge node was asked to start.
+ */
+describe("graph advisory budget for a read-heavy fan-in (review 7, G5)", () => {
+  const RUNBOOK_BYTES = 4_707;
+  const RECORDED_BEFORE_MERGE = 1_451_543;
+  const OLD_SUGGESTION = Math.round(1.4 * 8 * 3 * 26_000);
+  const extractKeys = Array.from({ length: 6 }, (_, index) => `extract-${index + 1}`);
+  const runbook = (n: number) => `runbooks/rb-${String(n).padStart(3, "0")}.md`;
+  const g5 = graph({
+    ...Object.fromEntries(
+      extractKeys.map((key, index) => [
+        key,
+        node({
+          inputs: Array.from({ length: 10 }, (_, file) => ({
+            id: `rb${file + 1}`,
+            kind: "workspace_snapshot",
+            path: runbook(index * 10 + file + 1),
+          })),
+          outputs: [{ id: "part", path: `out/g5/parts/part-${index + 1}.json` }],
+        }),
+      ]),
+    ),
+    merge: node({
+      dependsOn: extractKeys,
+      inputs: extractKeys.map((key) => ({
+        id: `p-${key}`,
+        kind: "task_output",
+        nodeId: key,
+        outputId: "part",
+      })),
+      outputs: [{ id: "table", path: "out/g5/table.json" }],
+      verify: { type: "judgment", rubric: ["Is the table complete?"] },
+    }),
+  });
+  const hashes = Object.fromEntries(
+    Array.from({ length: 60 }, (_, index) => [
+      runbook(index + 1),
+      { sha256: "a".repeat(64), sizeBytes: RUNBOOK_BYTES },
+    ]),
+  );
+  const onCodex = driversOf(
+    "codex",
+    Object.fromEntries([...extractKeys, "merge"].map((key) => [key, "codex"])),
+    { merge: "codex" },
+  );
+  const review = reviewGraph(g5, hashes, onCodex);
+
+  it("reproduces the shape: the old suggestion is spent before the merge node can start", () => {
+    expect(review.blockers).toEqual([]);
+    expect(review.layers.map((layer) => layer.length)).toEqual([6, 1]);
+    // graph_start refused the merge node once the recorded tokens reached the budget.
+    expect(OLD_SUGGESTION).toBe(873_600);
+    expect(RECORDED_BEFORE_MERGE).toBeGreaterThanOrEqual(OLD_SUGGESTION);
+  });
+
+  it("suggests a budget the merge node can still start under", () => {
+    const { suggestedBudgetTokens, estimatedTokens, overshootBoundTokens } = review.advisory!;
+    expect(suggestedBudgetTokens).toBeGreaterThan(RECORDED_BEFORE_MERGE);
+    // The estimate is a ceiling, not a licence: it stays within about twice what the members used.
+    expect(suggestedBudgetTokens).toBeLessThan(3 * RECORDED_BEFORE_MERGE);
+    // The six extract nodes at once are the widest wave, and the bound covers what they recorded.
+    expect(overshootBoundTokens).toBeGreaterThan(RECORDED_BEFORE_MERGE);
+    expect(estimatedTokens.high).toBeGreaterThan(RECORDED_BEFORE_MERGE);
+    expect(estimatedTokens.basis).toContain("Estimates");
+  });
+
+  it("scales a node's estimate with the bytes it reads", () => {
+    const small = Object.fromEntries(
+      Object.entries(hashes).map(([path, hash]) => [path, { ...hash, sizeBytes: 100 }]),
+    );
+    const lean = reviewGraph(g5, small, onCodex).advisory!;
+    expect(lean.estimatedTokens.high).toBeLessThan(review.advisory!.estimatedTokens.high);
+    expect(lean.suggestedBudgetTokens).toBeLessThan(review.advisory!.suggestedBudgetTokens);
+  });
+
+  it("does not starve the last node when a retry doubles the costliest earlier node", () => {
+    const costliestExtract = 360_511;
+    expect(review.advisory!.suggestedBudgetTokens).toBeGreaterThan(
+      RECORDED_BEFORE_MERGE + costliestExtract,
+    );
   });
 });
