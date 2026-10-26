@@ -10,7 +10,7 @@ import { workflowFixture } from "./workflowFixtures";
 
 export const LINEAGE_PARENT = ThreadId.make("qa-parent");
 /** The thread the fixture gives the workflow's first agent. */
-export const LINEAGE_FIRST_AGENT_THREAD = ThreadId.make("qa-thread-0");
+const LINEAGE_FIRST_AGENT_THREAD = ThreadId.make("qa-thread-0");
 /** What the first agent's thread is called; never the workflow's name. */
 export const LINEAGE_FIRST_AGENT_TITLE = "Write out/s05/1.txt";
 
