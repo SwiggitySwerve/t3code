@@ -2914,6 +2914,69 @@ describe("workflow checks", () => {
       }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "does not run a process check once the calling thread left full access after the worker finished",
+    () =>
+      withScratchDir((dir) =>
+        Effect.gen(function* () {
+          yield* startParent;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const marker = NodePath.join(dir, "check-ran.txt");
+          const lowered = new Set<string>();
+          // The user lowers the thread's mode while the worker finishes, after workflow_start's
+          // own check but before the runner starts the process check.
+          yield* orchestrator
+            .streamStoredEventsFrom({
+              threadId: parentThreadId,
+              afterSequence: 0,
+              eventType: "subagent.updated",
+            })
+            .pipe(
+              Stream.runForEach((stored) =>
+                Effect.gen(function* () {
+                  if (stored.event.type !== "subagent.updated") return;
+                  const task = stored.event.payload;
+                  if (
+                    task.childThreadId === null ||
+                    task.status !== "running" ||
+                    lowered.has(task.id) ||
+                    !String(task.parentNodeId).startsWith("workflow:")
+                  )
+                    return;
+                  lowered.add(task.id);
+                  yield* orchestrator.dispatch({
+                    type: "thread.runtime-mode.set",
+                    commandId: CommandId.make(`command:lower-mode:${task.id}`),
+                    threadId: parentThreadId,
+                    runtimeMode: "approval-required",
+                  });
+                  yield* completeChild(task.childThreadId, "ok", { status: "completed" });
+                }),
+              ),
+              Effect.forkChild,
+            );
+          const check = JSON.stringify({
+            type: "process",
+            argv: [
+              process.execPath,
+              "-e",
+              "require('fs').writeFileSync(process.argv[1], 'ran')",
+              marker,
+            ],
+          });
+          const started = yield* startWorkflow(`return await agent("work", { verify: ${check} })`);
+          const ended = yield* awaitWorkflowEnd(started.workflowId);
+          expect(NodeFS.existsSync(marker)).toBe(false);
+          expect(JSON.parse(ended.result!)).toBeNull();
+          expect(ended.agents[0]).toMatchObject({
+            status: "failed",
+            verification: { type: "process", outcome: "error", attempts: 1 },
+          });
+          expect(ended.agents[0]?.verification?.detail).toContain("approval-required");
+        }).pipe(Effect.provide(layerTest)),
+      ),
+  );
+
   it.effect("has a separate agent judge the result against a rubric", () =>
     Effect.gen(function* () {
       yield* startParent;

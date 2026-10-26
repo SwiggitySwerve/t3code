@@ -2202,6 +2202,17 @@ const make = Effect.gen(function* () {
     } as const;
   });
 
+  // A process check runs a command on the host, so the calling thread must be in full access.
+  // Every ask reads the thread's current mode: its user can lower it while an agent works.
+  const callerCommandAuthority = (threadId: ThreadId) =>
+    threadManagement.getThreadShell(threadId).pipe(
+      Effect.mapError(threadManagementFailure),
+      Effect.map((shell) => ({
+        allowed: shell?.runtimeMode === "full-access",
+        runtimeMode: shell?.runtimeMode ?? null,
+      })),
+    );
+
   const workflowRunner = makeWorkflowRunner({
     threads: threadManagement,
     spawnAgent: Effect.fn("OrchestratorMcpService.spawnWorkflowAgent")(
@@ -2255,9 +2266,7 @@ const make = Effect.gen(function* () {
       },
     ),
     canRunCommands: (workflow) =>
-      loadProjection(workflow.threadId).pipe(
-        Effect.map((projection) => projection.thread.runtimeMode === "full-access"),
-      ),
+      callerCommandAuthority(workflow.threadId).pipe(Effect.map(({ allowed }) => allowed)),
     runCommandCheck: Effect.fn("OrchestratorMcpService.runWorkflowCommandCheck")(
       function* (workflow, childThreadId, check, result, files) {
         const parent = yield* loadProjection(workflow.threadId);
@@ -2294,6 +2303,14 @@ const make = Effect.gen(function* () {
               return {
                 outcome: "error",
                 detail: `Unknown token in ${unknownToken}; checks support {{result}}, and {{input:<id>}} and {{output:<id>}} for the agent's declared files.`,
+              } satisfies CheckOutcome;
+            }
+            // The agent finished some time ago: ask again, right before the process starts.
+            const authority = yield* callerCommandAuthority(workflow.threadId);
+            if (!authority.allowed) {
+              return {
+                outcome: "error",
+                detail: `A process check runs a command, which needs the calling thread in full-access mode; it now runs in ${authority.runtimeMode ?? "an unknown mode"}.`,
               } satisfies CheckOutcome;
             }
             const ran = yield* processRunner
