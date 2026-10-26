@@ -301,8 +301,7 @@ function WorkflowNodePlaceholder(props: {
   return (
     <div
       role="group"
-      aria-label={node.label}
-      aria-description={WORKFLOW_GRAPH_STATE_LABEL[node.state]}
+      aria-label={workflowNodeName(node)}
       tabIndex={0}
       onFocus={props.onFocus}
       className={cn(
@@ -325,6 +324,14 @@ function WorkflowNodePlaceholder(props: {
       </span>
     </div>
   );
+}
+
+/**
+ * What assistive technology reads for a node: its full label and its state in words. A card
+ * truncates both visually, and colour alone never says whether a node passed, failed or waits.
+ */
+function workflowNodeName(node: WorkflowGraphNodeView<RuntimeSubagent>): string {
+  return `${node.label}, ${WORKFLOW_GRAPH_STATE_LABEL[node.state]}`;
 }
 
 interface WorkflowNodeCardProps {
@@ -353,7 +360,8 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   const state = WORKFLOW_GRAPH_STATE_LABEL[node.state];
   const identity = workflowMemberIdentity(node.member);
   const totals = `${countText(accounting.tokens, formatTokens)} tokens · ${countText(accounting.elapsed, formatDuration)}`;
-  const description = [state, identity, retries, detail, totals].filter(Boolean).join(", ");
+  const facts = [identity, retries, detail, totals].filter(Boolean).join(", ");
+  const description = `${state}, ${facts}`;
   const className = cn(
     "group/node flex min-w-0 flex-1 items-center gap-2 px-2 text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
     props.emphasis === false ? "opacity-35" : MUTED_STATES.has(node.state) && "opacity-60",
@@ -390,7 +398,8 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
           )}
         >
           {retries ? <span className="font-medium">{retries} · </span> : null}
-          {detail ?? state}
+          {/* The state word always shows; a node's reason or the nodes it runs after follow it. */}
+          {detail ? `${state} · ${detail}` : state}
         </span>
         <span className="truncate text-2xs text-muted-foreground tabular-nums">{totals}</span>
       </span>
@@ -431,8 +440,8 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
             threadId === null ? (
               <div
                 role="group"
-                aria-label={node.label}
-                aria-description={description}
+                aria-label={workflowNodeName(node)}
+                aria-description={facts}
                 className={className}
                 style={{ height: WAVE_CARD_HEIGHT }}
                 data-node-state={node.state}
@@ -443,8 +452,8 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
             ) : (
               <button
                 type="button"
-                aria-label={`Open ${node.label}`}
-                aria-description={description}
+                aria-label={`Open ${workflowNodeName(node)}`}
+                aria-description={facts}
                 onClick={() => props.onOpenThread(threadId)}
                 className={cn(
                   className,

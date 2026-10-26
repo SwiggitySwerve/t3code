@@ -7,6 +7,7 @@ import {
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
+  workflowMemberIdentity,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   EnvironmentId,
@@ -364,7 +365,8 @@ it("ticks running attempt totals with the shared clock and stops after completio
   await expect.element(screen.getByText("≥100 tokens · ≥3.5s", { exact: true })).toBeVisible();
   await act(() => vi.advanceTimersByTime(1000));
   await expect.element(screen.getByText("≥100 tokens · ≥4.5s", { exact: true })).toBeVisible();
-  const card = screen.getByRole("button", { name: "Open Audit", exact: true });
+  // The card's name carries its state, which changes with the run.
+  const card = screen.getByRole("button", { name: /^Open Audit, / });
   card.element().focus();
   await screen.rerender(
     <WorkflowWaveCanvas
@@ -387,7 +389,7 @@ it("shows summed usage and both attempts in the tooltip and opens earlier childr
       onOpenThread={onOpenThread}
     />,
   );
-  const latest = screen.getByRole("button", { name: "Open Audit", exact: true });
+  const latest = screen.getByRole("button", { name: "Open Audit, interrupted", exact: true });
   await expect
     .element(latest)
     .toHaveAccessibleDescription(expect.stringContaining("100 tokens · 5.0s"));
@@ -415,7 +417,7 @@ it("opens current and earlier attempts by keyboard and restores history-trigger 
   await userEvent.tab();
   await userEvent.tab();
   await expect
-    .element(screen.getByRole("button", { name: "Open Audit", exact: true }))
+    .element(screen.getByRole("button", { name: "Open Audit, interrupted", exact: true }))
     .toHaveFocus();
   await userEvent.keyboard("{Enter}");
   expect(onOpenThread).toHaveBeenLastCalledWith("latest");
@@ -457,7 +459,9 @@ it("never shows the generated runner of a graph workflow", async () => {
     />,
   );
   await expect.element(screen.getByRole("region", { name: "Workflow graph" })).toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Open Audit", exact: true }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Open Audit, interrupted", exact: true }),
+  );
   expect(onOpenThread).toHaveBeenLastCalledWith("latest");
   expectNoScript(screen.container, marker);
 });
@@ -593,7 +597,9 @@ it("lets keyboard users inspect a checker with no child thread", async () => {
   );
   await userEvent.tab();
   await userEvent.tab();
-  await expect.element(screen.getByRole("group", { name: "Audit", exact: true })).toHaveFocus();
+  await expect
+    .element(screen.getByRole("group", { name: "Audit, failed", exact: true }))
+    .toHaveFocus();
   await userEvent.tab();
   const trigger = screen.getByRole("group", { name: "Audit checker", exact: true });
   await expect.element(trigger).toHaveFocus();
@@ -610,6 +616,149 @@ it("lets keyboard users inspect a checker with no child thread", async () => {
   await expect.element(popup).not.toBeInTheDocument();
 });
 
+// A card cuts a long label and model with an ellipsis, and a dependent node is dimmed. The full
+// text and the state in words must reach assistive technology and show on hover and on focus,
+// and colour alone must never be what says a node waits.
+const LONG_LABEL =
+  "Notes on corpus part one and the cross references between every chapter of the appendix";
+const LONG_MODEL = "claude-haiku-5-5-with-a-model-name-too-long-for-the-card";
+
+function cutGraph(): WorkflowGraphView<RuntimeSubagent> {
+  const seed = retryGraph().waves[0]![0]!;
+  const notes = {
+    ...seed,
+    key: "notes",
+    label: LONG_LABEL,
+    wave: 0,
+    state: "passed" as const,
+    dependsOn: [],
+    dependents: ["combine"],
+    reason: null,
+    attempts: 1,
+    checkers: [],
+    member: { ...seed.member!, model: LONG_MODEL },
+  };
+  const combine = {
+    ...seed,
+    key: "combine",
+    label: "Combine the notes",
+    wave: 1,
+    state: "waiting" as const,
+    dependsOn: ["notes"],
+    dependents: [],
+    reason: null,
+    attempts: null,
+    checkers: [],
+    member: null,
+  };
+  return {
+    waves: [[notes], [combine]],
+    counts: { passed: 1, waiting: 1 },
+    waitingOn: null,
+    otherMembers: [],
+  };
+}
+
+it("names each card by its full label and its state, and says a dependent node waits in words", async () => {
+  const graph = cutGraph();
+  await using screen = await render(
+    <WorkflowWaveCanvas
+      graph={graph}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  const identity = workflowMemberIdentity(graph.waves[0]![0]!.member);
+  const notes = screen.getByRole("button", { name: `Open ${LONG_LABEL}, passed`, exact: true });
+  await expect.element(notes).toBeVisible();
+  await expect.element(notes).toHaveAccessibleDescription(expect.stringContaining(identity));
+  const combine = screen.getByRole("group", { name: "Combine the notes, waiting", exact: true });
+  await expect.element(combine).toBeVisible();
+  // The state is a word on the card; the nodes it runs after follow it.
+  expect(combine.element().textContent).toContain(`waiting · after ${LONG_LABEL}`);
+  expect(notes.element().textContent).toContain("passed");
+});
+
+it("shows a cut label, model and state in full when a card is hovered", async () => {
+  const graph = cutGraph();
+  await using screen = await render(
+    <WorkflowWaveCanvas
+      graph={graph}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  const identity = workflowMemberIdentity(graph.waves[0]![0]!.member);
+  await userEvent.hover(
+    screen.getByRole("button", { name: `Open ${LONG_LABEL}, passed`, exact: true }),
+  );
+  await expect
+    .element(page.getByText(`${LONG_LABEL}: passed, ${identity}`, { exact: false }))
+    .toBeVisible();
+});
+
+it("shows a cut label, model and state in full when a card takes keyboard focus", async () => {
+  const graph = cutGraph();
+  await using screen = await render(
+    <WorkflowWaveCanvas
+      graph={graph}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  const identity = workflowMemberIdentity(graph.waves[0]![0]!.member);
+  await userEvent.tab();
+  await expect.element(screen.getByRole("region", { name: "Workflow graph" })).toHaveFocus();
+  await userEvent.tab();
+  await expect
+    .element(screen.getByRole("button", { name: `Open ${LONG_LABEL}, passed`, exact: true }))
+    .toHaveFocus();
+  await expect
+    .element(page.getByText(`${LONG_LABEL}: passed, ${identity}`, { exact: false }))
+    .toBeVisible();
+  // Tabbing on reaches the dependent card, named with its state as well.
+  await userEvent.tab();
+  await userEvent.tab();
+  await expect
+    .element(screen.getByRole("group", { name: "Combine the notes, waiting", exact: true }))
+    .toHaveFocus();
+});
+
+it("lets the keyboard reach a workflow block's graph, its cards and its Stop", async () => {
+  const onStop = vi.fn();
+  await using screen = await render(
+    <>
+      <button type="button">Before the block</button>
+      <WorkflowOpeningBlock
+        opening={{ ...opening, name: "Retry", group: retryGroup(true) }}
+        environmentId={EnvironmentId.make("test")}
+        onOpenThread={() => {}}
+        heading="Workflow running"
+        stop={{ onStop, stopping: false, disabled: false }}
+      />
+    </>,
+  );
+  const block = screen.container.querySelector("[data-workflow-opening]")!;
+  expect(block).not.toBeNull();
+  screen.getByRole("button", { name: "Before the block" }).element().focus();
+  const stops: Array<string> = [];
+  for (let press = 0; press < 6; press += 1) {
+    await userEvent.tab();
+    const active = document.activeElement;
+    if (active !== null && block.contains(active)) {
+      stops.push(active.getAttribute("aria-label") ?? active.tagName);
+    }
+  }
+  // The block is in the page's tab order: Stop, the graph region, a card and its attempts.
+  expect(stops).toEqual(
+    expect.arrayContaining([
+      "Workflow graph",
+      expect.stringMatching(/^Open Audit, /),
+      "Attempts for Audit",
+      expect.stringMatching(/^Stop workflow /),
+    ]),
+  );
+});
 // Find paints what the server counts: the drawn declaration, never a status line, and nothing at
 // all in a block whose thread the server does not index.
 function foundText(root: HTMLElement, query: string) {
