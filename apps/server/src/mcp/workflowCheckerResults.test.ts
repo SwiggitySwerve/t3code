@@ -17,6 +17,17 @@ const ID_ONE = "11111111-1111-4111-8111-111111111111";
 const ID_TWO = "22222222-2222-4222-8222-222222222222";
 const ID_OLD = "33333333-3333-4333-8333-333333333333";
 
+const NOW = DateTime.makeUnsafe("2026-10-26T12:00:00Z");
+const PAST_MAX_AGE = Duration.sum(CHECKER_RESULT_MAX_AGE, Duration.hours(1));
+const ID_NEW = "44444444-4444-4444-8444-444444444444";
+
+const age = (file: string, by: Duration.Duration) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    const mtime = DateTime.toDateUtc(DateTime.subtractDuration(NOW, by));
+    yield* fileSystem.utimes(file, mtime, mtime);
+  });
+
 /** A results folder inside a fresh temp folder, which also holds a file the folder does not own. */
 const setup = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -187,6 +198,59 @@ it.layer(NodeServices.layer)("workflowCheckerResults", (it) => {
         for (const kept of [recent, oldNotes, oldLookalike, insideOldFolder, fresh]) {
           assert.isTrue(yield* fileSystem.exists(kept), kept);
         }
+      }),
+    ),
+  );
+
+  it.effect("keeps an old file whose check is still running when another write sweeps", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fileSystem, results } = yield* setup;
+        yield* TestClock.setTime(DateTime.toEpochMillis(NOW));
+        // A queued checker can wait longer than a day for its turn.
+        const live = yield* results.write({ id: ID_ONE, text: "still needed" });
+        yield* age(live, PAST_MAX_AGE);
+
+        const fresh = yield* results.write({ id: ID_NEW, text: "fresh" });
+
+        assert.strictEqual(yield* fileSystem.readFileString(live), "still needed");
+        assert.isTrue(yield* fileSystem.exists(fresh));
+      }),
+    ),
+  );
+
+  it.effect("removes an old file that no check in this process is using", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fileSystem, path, dir, results } = yield* setup;
+        yield* TestClock.setTime(DateTime.toEpochMillis(NOW));
+        // Left by a server that stopped mid-check: on disk, never written by this process.
+        yield* fileSystem.makeDirectory(dir, { recursive: true });
+        const abandoned = path.join(dir, checkerResultName(ID_OLD));
+        yield* fileSystem.writeFileString(abandoned, "left behind");
+        yield* age(abandoned, PAST_MAX_AGE);
+
+        yield* results.write({ id: ID_NEW, text: "fresh" });
+
+        assert.isFalse(yield* fileSystem.exists(abandoned));
+      }),
+    ),
+  );
+
+  it.effect("stops protecting a file once its check removed it", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const { fileSystem, results } = yield* setup;
+        yield* TestClock.setTime(DateTime.toEpochMillis(NOW));
+        const file = yield* results.write({ id: ID_ONE, text: "answer" });
+        assert.isTrue(yield* results.remove(file));
+        // Something puts a file back under the same name (a leftover that is not any check's).
+        yield* fileSystem.writeFileString(file, "leftover");
+        yield* age(file, PAST_MAX_AGE);
+
+        yield* results.write({ id: ID_NEW, text: "fresh" });
+
+        assert.isFalse(yield* fileSystem.exists(file));
       }),
     ),
   );

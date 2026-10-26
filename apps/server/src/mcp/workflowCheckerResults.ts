@@ -16,8 +16,16 @@ import type * as Path from "effect/Path";
 const OWNED_NAME = /^checker-[0-9a-f]{32}\.txt$/;
 
 /**
- * A check ends within its attempt budget, which is far shorter. A file this old was left by a
- * server that stopped mid-check, so the next write clears it.
+ * Files written by this server process whose check has not removed them yet. A queued checker can
+ * wait far longer than `CHECKER_RESULT_MAX_AGE` for its turn, so the age sweep must not take its
+ * answer. A file from an earlier server process is not in here, so age alone decides about it.
+ * It is per process, not per instance, so every instance sharing a folder sees the same files.
+ */
+const liveFiles = new Set<string>();
+
+/**
+ * A file this old that no check in this process is using was left by a server that stopped
+ * mid-check, so the next write clears it.
  */
 export const CHECKER_RESULT_MAX_AGE = Duration.days(1);
 
@@ -32,13 +40,17 @@ export function makeCheckerResults(input: {
   const { fileSystem, path } = input;
   const dir = path.resolve(input.dir);
 
-  /** Removes the owned files last written before the cutoff. A failure leaves that file alone. */
+  /**
+   * Removes the owned files last written before the cutoff, except live ones. A failure leaves
+   * that file alone.
+   */
   const pruneStale = Effect.fn("workflowCheckerResults.pruneStale")(function* () {
     const cutoff = (yield* Clock.currentTimeMillis) - Duration.toMillis(CHECKER_RESULT_MAX_AGE);
     const names = yield* fileSystem.readDirectory(dir);
     let removed = 0;
     for (const name of names.filter((entry) => OWNED_NAME.test(entry))) {
       const filePath = path.join(dir, name);
+      if (liveFiles.has(filePath)) continue;
       const gone = yield* fileSystem.stat(filePath).pipe(
         Effect.flatMap((info) =>
           info.type === "File" && Option.exists(info.mtime, (mtime) => mtime.getTime() < cutoff)
@@ -54,7 +66,8 @@ export function makeCheckerResults(input: {
 
   /**
    * Writes `text` to a new file and returns its absolute path. Files an earlier server run left
-   * behind are cleared first, as far as that can be done.
+   * behind are cleared first, as far as that can be done. The new file stays out of that sweep
+   * until `remove` is called for it.
    */
   const write = Effect.fn("workflowCheckerResults.write")(function* (request: {
     readonly id: string;
@@ -72,6 +85,7 @@ export function makeCheckerResults(input: {
     const filePath = path.join(dir, checkerResultName(request.id));
     // A new file only: an id that is already taken must not overwrite another check's answer.
     yield* fileSystem.writeFileString(filePath, request.text, { flag: "wx" });
+    liveFiles.add(filePath);
     return filePath;
   });
 
@@ -88,6 +102,9 @@ export function makeCheckerResults(input: {
       });
       return false;
     }
+    // Unregistered first: the check is over even if the file cannot be removed, and the age sweep
+    // may then clear it.
+    liveFiles.delete(resolved);
     yield* fileSystem.remove(resolved, { force: true });
     return true;
   });

@@ -693,7 +693,8 @@ own threads. The row stores the script with a settings line for its args and bud
   agent's `task_status`. The cut marker names the file by absolute path. Each check has its own
   file, and the check removes only that file when it ends; the folder is shared and is never
   removed. A file left by a server that stopped mid-check is cleared by the next write once it is a
-  day old, and only files with that name are ever cleared. Codex members can read the path under
+  day old, and only files with that name are ever cleared; a file whose check is still running in
+  this server process is never cleared, however long that check waits in a queue. Codex members can read the path under
   every runtime mode (their sandbox limits writes, not reads); Claude members get the folder as an
   added directory. If the file cannot be written, the checker sees the cut marker without a
   pointer.
