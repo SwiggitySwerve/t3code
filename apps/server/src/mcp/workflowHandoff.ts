@@ -6,6 +6,8 @@
 
 /** Largest summary kept for one agent: its stored result, and what the next agent reads inline. */
 export const HANDOFF_SUMMARY_BYTES = 2_048;
+/** Largest part of an agent's result that a checker reads inline; the agent keeps the whole. */
+export const JUDGMENT_RESULT_BYTES = 24_000;
 /** Largest stored result of a finished graph. */
 export const GRAPH_RESULT_BYTES = 4_096;
 /** Largest stored result of a failed workflow. */
@@ -24,6 +26,10 @@ const decoder = new TextDecoder();
 
 /** The recovery clause of a marker, for text whose whole is kept at `pointer`. */
 export const fullOutputAt = (pointer: string): string => `full output at ${pointer}`;
+
+/** The recovery clause for an agent's whole answer, which `task_status` reads by task id. */
+export const taskOutputAt = (taskId: string): string =>
+  fullOutputAt(`task_status taskId=${taskId}`);
 
 /** Longest prefix of `bytes` that is at most `length` bytes and ends between characters. */
 function cutUtf8(bytes: Uint8Array, length: number): string {
@@ -209,22 +215,35 @@ const escapeText = (text: string): string => text.replaceAll("&", "&amp;").repla
 const escapeAttribute = (text: string): string => escapeText(text).replaceAll('"', "&quot;");
 
 /**
- * `summary` as block text: escaped so it cannot close the block, and within the cap once
- * escaped. One that does not fit escaped is cut with the usual marker at the longest start that
- * does, so some of the text always remains.
+ * `text` as block text: escaped so it cannot close the block, and within `limitBytes` once
+ * escaped. One that does not fit escaped is cut with the usual marker (and `recovery`, when
+ * given) at the longest start that does, so some of the text always remains.
  */
-function inlineSummary(summary: string): string {
-  const fits = (text: string) => byteLength(escapeText(text)) <= HANDOFF_SUMMARY_BYTES;
-  if (fits(summary)) return escapeText(summary);
+function inlineText(text: string, limitBytes: number, recovery?: string): string {
+  const fits = (candidate: string) => byteLength(escapeText(candidate)) <= limitBytes;
+  if (fits(text)) return escapeText(text);
   // Escaping only lengthens text, so a start that fits at one limit fits at every smaller one.
   let low = 0;
-  let high = HANDOFF_SUMMARY_BYTES;
+  let high = limitBytes;
   while (low < high) {
     const middle = Math.ceil((low + high) / 2);
-    if (fits(boundText(summary, middle))) low = middle;
+    if (fits(boundText(text, middle, recovery))) low = middle;
     else high = middle - 1;
   }
-  return escapeText(boundText(summary, low));
+  return escapeText(boundText(text, low, recovery));
+}
+
+/**
+ * The result a checker judges, as one block: inside `JUDGMENT_RESULT_BYTES` once escaped, and
+ * unable to close the block or pass for the checker's own instructions. A cut result says where
+ * its whole is (`recovery`), so a long answer never makes the checker's task too long to start.
+ */
+export function renderJudgedResult(result: string, recovery?: string): string {
+  return [
+    '<t3-result v="1">',
+    inlineText(result, JUDGMENT_RESULT_BYTES, recovery),
+    "</t3-result>",
+  ].join("\n");
 }
 
 const HANDOFF_PREAMBLE =
@@ -248,7 +267,7 @@ export function renderHandoff(inputs: ReadonlyArray<HandoffInput>): string {
     const summary = input.summary?.trim() ?? "";
     return summary.length === 0
       ? `<input ${attributes} />`
-      : `<input ${attributes}>\n${inlineSummary(summary)}\n</input>`;
+      : `<input ${attributes}>\n${inlineText(summary, HANDOFF_SUMMARY_BYTES)}\n</input>`;
   });
   return ['<t3-handoff v="1">', HANDOFF_PREAMBLE, ...blocks, "</t3-handoff>"].join("\n");
 }

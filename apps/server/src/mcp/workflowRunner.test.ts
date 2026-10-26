@@ -1453,6 +1453,39 @@ return errors`,
         );
       }),
     );
+    it.effect.each([
+      { name: "ASCII", answer: "a".repeat(130_000) },
+      { name: "four-byte code points", answer: "😀".repeat(40_000) },
+    ])("gives a checker a cut, delimited result when the answer is long, for $name", ({ answer }) =>
+      Effect.gen(function* () {
+        const { runner, completed, keys, workflowUpdates } = yield* makeHarness({
+          judgment: () => true,
+          summary: (spawned) => (spawned === 1 ? answer : "ok"),
+          taskId: (spawned) => `node:agent-${spawned}`,
+        });
+        yield* launch(
+          runner,
+          'return (await agent("work", { verify: { type: "judgment", rubric: ["It is right."] } }))?.length ?? null',
+        );
+        // The script still receives the agent's whole answer.
+        expect(JSON.parse(yield* Deferred.await(completed))).toBe(answer.length);
+        const judge = [...keys.keys()].find((task) => task.includes("independent checker"));
+        expect(judge).toBeDefined();
+        // The checker's task has a 120,000 character limit.
+        expect(judge!.length).toBeLessThan(120_000);
+        const block = judge!.slice(judge!.indexOf('<t3-result v="1">'));
+        const body = block.slice(block.indexOf("\n") + 1, block.indexOf("\n</t3-result>"));
+        expect(byteLength(body)).toBeLessThanOrEqual(24_000);
+        expect(body).not.toContain("\uFFFD");
+        expect(body).toMatch(
+          /\.\.\.truncated \(\d+ of \d+ bytes\), full output at task_status taskId=node:agent-1$/,
+        );
+        expect(workflowUpdates.at(-1)?.agents[0]?.verification).toMatchObject({
+          type: "judgment",
+          outcome: "passed",
+        });
+      }),
+    );
     it.effect("keeps a short agent result as it is", () =>
       Effect.gen(function* () {
         const { runner, completed, workflowUpdates } = yield* makeHarness({

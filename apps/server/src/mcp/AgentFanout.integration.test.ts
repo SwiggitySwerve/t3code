@@ -2983,7 +2983,7 @@ describe("workflow checks", () => {
       yield* answerWorkflowAgents((prompt) => {
         if (!prompt.includes("independent checker"))
           return retried(prompt) ? "a haiku" : "a limerick";
-        const passed = prompt.includes("Result:\na haiku");
+        const passed = prompt.includes('<t3-result v="1">\na haiku\n</t3-result>');
         return `Checked.\n\`\`\`json\n${JSON.stringify({ outcome: passed ? "passed" : "failed", reasons: passed ? "It is a haiku." : "It is not a haiku." })}\n\`\`\``;
       }, 400);
       const started = yield* startWorkflow(

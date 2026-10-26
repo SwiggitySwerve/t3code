@@ -5,6 +5,7 @@
  * `AgentAttemptHost`.
  */
 import type {
+  NodeId,
   OrchestrationV2WorkflowAgent,
   OrchestratorMcpDelegateTasksItem,
   ThreadId,
@@ -28,7 +29,7 @@ import {
   type WorkflowCheck,
   type WorkspaceFile,
 } from "./workflowChecks.ts";
-import { boundText, HANDOFF_SUMMARY_BYTES } from "./workflowHandoff.ts";
+import { boundText, HANDOFF_SUMMARY_BYTES, taskOutputAt } from "./workflowHandoff.ts";
 import { MAX_AGENT_ATTEMPTS } from "./workflowLimits.ts";
 import type { WaitingAgent } from "./workflowSweep.ts";
 import type {
@@ -295,6 +296,7 @@ export async function runAttempts(
         label,
         phase,
         target,
+        taskId: started.value.taskId,
         childThreadId: started.value.childThreadId,
         summary,
         structuredResult,
@@ -361,6 +363,7 @@ async function runCheck(
     readonly label: string;
     readonly phase: string | undefined;
     readonly target: unknown;
+    readonly taskId: NodeId;
     readonly childThreadId: ThreadId;
     readonly summary: string | null;
     readonly structuredResult: unknown;
@@ -402,6 +405,7 @@ async function runCheck(
     prompt: judgmentPrompt({
       task: input.prompt,
       result: resultText,
+      fullOutput: taskOutputAt(input.taskId),
       rubric: check.rubric,
       workspaceVisible: input.isolation !== "worktree",
     }),
