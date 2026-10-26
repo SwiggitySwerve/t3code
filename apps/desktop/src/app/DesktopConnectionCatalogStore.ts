@@ -623,7 +623,9 @@ export const make = Effect.gen(function* () {
         return false;
       }
       // A file that cannot be read back is evidence; refuse to replace it. `clear` is the reset.
-      yield* readStoredCatalog;
+      if ((yield* readStoredCatalog)._tag === "unavailable") {
+        return false;
+      }
       yield* writeCatalog(catalog);
       return true;
     }),

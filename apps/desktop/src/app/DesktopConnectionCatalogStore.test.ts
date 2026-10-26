@@ -419,6 +419,30 @@ describe("DesktopConnectionCatalogStore", () => {
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
 
+  it.effect("refuses a write when its own re-read finds secure storage unavailable", () =>
+    Effect.gen(function* () {
+      const path = yield* Path.Path;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "t3-desktop-connection-catalog-test-",
+      });
+      const writer = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore.pipe(
+        Effect.provide(layerFor(baseDir, true)),
+      );
+      assert.isTrue(yield* writer.set('{"schemaVersion":1,"targets":["saved"]}'));
+      const catalogPath = path.join(baseDir, "userdata", "connection-catalog.json");
+      const stored = yield* fileSystem.readFileString(catalogPath);
+      // Available at the start of the write, gone when it re-reads the file, back before it would
+      // encrypt: the write must still be refused.
+      const flaky = yield* DesktopConnectionCatalogStore.DesktopConnectionCatalogStore.pipe(
+        Effect.provide(layerFor(baseDir, yield* availabilitySequence([true, false, true]))),
+      );
+
+      assert.isFalse(yield* flaky.set('{"schemaVersion":1,"targets":["new"]}'));
+      assert.equal(yield* fileSystem.readFileString(catalogPath), stored);
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
   it.effect("does not report a problem when no catalog is stored or secure storage works", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

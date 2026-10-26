@@ -174,6 +174,38 @@ describe("ConnectionStorage.makeCatalogStore", () => {
       }),
   );
 
+  it.effect("writes nothing when the fresh read before a desktop update fails", () =>
+    Effect.gen(function* () {
+      const written: string[] = [];
+      const bridge = {
+        getConnectionCatalog: vi
+          .fn<() => Promise<string | null>>()
+          .mockResolvedValueOnce(null)
+          .mockRejectedValue(new Error("desktop unreachable")),
+        setConnectionCatalog: vi.fn((raw: string) => {
+          written.push(raw);
+          return Promise.resolve(true);
+        }),
+      };
+      vi.stubGlobal("window", { desktopBridge: bridge });
+      const store = yield* ConnectionStorage.makeCatalogStore(
+        ConnectionStorage.makeCatalogBackend(
+          fixedHandle({ transaction: () => undefined } as unknown as IDBDatabase),
+        ),
+      );
+
+      expect(yield* store.read).toEqual(emptyCatalog);
+      yield* Effect.flip(
+        store.update((document) => ({
+          ...document,
+          disabledEnvironmentIds: [EnvironmentId.make("env-new")],
+        })),
+      );
+
+      expect(written).toEqual([]);
+    }),
+  );
+
   it.effect("loads an older valid catalog without optional fields unchanged", () =>
     Effect.gen(function* () {
       const writes: string[] = [];
