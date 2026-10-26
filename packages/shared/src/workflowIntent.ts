@@ -94,7 +94,7 @@ export function workflowTriggerExtrasProblems(
 const foldCase = (text: string) => text.toLowerCase().replace(/\u03c2/gu, "\u03c3");
 
 /** The text a person typed: context chips and the legacy context blocks removed. */
-function typedText(text: string): string {
+export function personTypedWords(text: string): string {
   return replaceComposerContextReferences(upgradeLegacyContextMessage(text).text, () => " ");
 }
 
@@ -217,7 +217,7 @@ export function detectWorkflowIntent(
     const words = normalizeWorkflowTriggerPhrase(keyword).split(" ");
     return words[0] === "" ? [] : [{ keyword: keyword.trim(), words }];
   });
-  const typed = typedText(text);
+  const typed = personTypedWords(text);
   // Masking only removes characters, so a message without any phrase's first word has no match.
   // Skipping the Markdown parse then keeps nested lists, which parse slowly, off messages that
   // never mention a trigger. It never rejects a text the full scan would match.

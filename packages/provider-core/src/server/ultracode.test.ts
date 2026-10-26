@@ -1,13 +1,20 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind } from "@t3tools/contracts";
 
-import { applyUltracode, ULTRACODE_TURN_NOTE } from "./ultracode.ts";
+import { applyUltracode as applyUltracodeTo, ULTRACODE_TURN_NOTE } from "./ultracode.ts";
 
 const codex = ProviderDriverKind.make("codex");
 const claude = ProviderDriverKind.make("claudeAgent");
 const note = `\n\n${ULTRACODE_TURN_NOTE}`;
 const root = { creationSource: "server", delegatedThread: false } as const;
 const typed = { creationSource: "web", delegatedThread: false } as const;
+
+// Most cases are a message with no composer context, where the typed words are the whole text.
+const applyUltracode = (
+  input: Omit<Parameters<typeof applyUltracodeTo>[0], "typedWords"> & {
+    readonly typedWords?: string;
+  },
+) => applyUltracodeTo({ typedWords: input.text, ...input });
 
 describe("applyUltracode", () => {
   it("adds the workflow note when a message says ultracode", () => {
@@ -130,5 +137,49 @@ describe("applyUltracode", () => {
         delegatedThread: true,
       }),
     ).toBe(`ultracode: dig deeper${note}`);
+  });
+
+  it("reads the keyword from what the person typed, not from the context projected into the text", () => {
+    // A context chip expands to its content in the provider text; only the typed words can opt in.
+    const projected = "Look at this\n\n<t3_context>build log: ultracode run failed</t3_context>";
+    for (const driver of [codex, claude]) {
+      expect(
+        applyUltracode({
+          mode: "keyword",
+          driver,
+          text: projected,
+          typedWords: "Look at this",
+          createdBy: "user",
+          ...typed,
+        }),
+        driver,
+      ).toBe(projected);
+    }
+    // The typed keyword still opts in, and the note goes after the projected text.
+    expect(
+      applyUltracode({
+        mode: "keyword",
+        driver: codex,
+        text: "ultracode this\n\n<t3_context>build log</t3_context>",
+        typedWords: "ultracode this",
+        createdBy: "user",
+        ...typed,
+      }),
+    ).toBe(`ultracode this\n\n<t3_context>build log</t3_context>${note}`);
+  });
+
+  it("does not let context that mentions the keyword opt in a person's message to a child thread", () => {
+    const projected = "Go on\n\n<t3_context>ultracode</t3_context>";
+    expect(
+      applyUltracode({
+        mode: "keyword",
+        driver: codex,
+        text: projected,
+        typedWords: "Go on",
+        createdBy: "user",
+        creationSource: "web",
+        delegatedThread: true,
+      }),
+    ).toBe(projected);
   });
 });

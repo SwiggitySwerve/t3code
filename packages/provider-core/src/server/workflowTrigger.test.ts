@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vite-plus/test";
 import { ProviderDriverKind } from "@t3tools/contracts";
 import type { WorkflowPresets, WorkflowTriggers } from "@t3tools/contracts/settings";
+import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
 import { detectWorkflowIntent } from "@t3tools/shared/workflowIntent";
 
 import { ULTRACODE_TURN_NOTE } from "./ultracode.ts";
@@ -103,6 +104,31 @@ describe("applyTurnTriggers", () => {
     const providerText = "Look at this\n\n<t3_context>the workflow log</t3_context>";
     expect(turn(providerText, { typedText: "Look at this" })).toBe(providerText);
     expect(isWorkflowTurn(turn("Look at this", { typedText: "Look at this workflow" }))).toBe(true);
+  });
+
+  it("does not opt a turn into ultracode from words that only the projected context contains", () => {
+    // The chip's content is in the provider text; the person never typed the keyword.
+    const providerText = "Look at this\n\n<t3_context>build log: ultracode run failed</t3_context>";
+    for (const driver of [codex, claude, cursor]) {
+      expect(turn(providerText, { typedText: "Look at this", driver }), driver).toBe(providerText);
+    }
+    // Typing the keyword still opts in, and the note follows the projected text.
+    expect(turn(providerText, { typedText: "ultracode: look at this", driver: codex })).toBe(
+      `${providerText}\n\n${ULTRACODE_TURN_NOTE}`,
+    );
+    // A chip's label is not a typed word: a file called ultracode.ts must not opt the turn in.
+    const chip = formatComposerContextReference({
+      kind: "terminal",
+      contextId: "ctx-log" as never,
+      label: "ultracode.log",
+    });
+    expect(turn(`Look at ${chip}`, { typedText: `Look at ${chip}`, driver: codex })).toBe(
+      `Look at ${chip}`,
+    );
+    // A person's message to a delegated child needs the keyword in their own words too.
+    expect(
+      turn(providerText, { typedText: "Look at this", delegatedThread: true, driver: codex }),
+    ).toBe(providerText);
   });
 
   it("uses the person's extra words and respects the off switch", () => {

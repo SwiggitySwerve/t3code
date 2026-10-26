@@ -29,6 +29,8 @@ export function applyUltracode(input: {
   readonly mode: UltracodeMode;
   readonly driver: ProviderDriverKind;
   readonly text: string;
+  /** What the person typed, without composer context. Only these words can say the keyword. */
+  readonly typedWords: string;
   readonly createdBy: "agent" | "system" | "user";
   readonly creationSource: OrchestrationV2CreationSource;
   /** The thread is a delegated task or workflow member (persisted lineage: a subagent child). */
@@ -36,7 +38,7 @@ export function applyUltracode(input: {
 }): string {
   // System turns (completion wakes, restart continuations) report back; they do not start work.
   if (input.mode === "off" || input.createdBy === "system") return input.text;
-  const typed = KEYWORD.test(input.text);
+  const typed = KEYWORD.test(input.typedWords);
   if (input.delegatedThread && !(typed && isPersonTypedMessage(input))) return input.text;
   if (input.mode === "keyword" && !typed) return input.text;
   if (input.driver === CLAUDE_DRIVER) {

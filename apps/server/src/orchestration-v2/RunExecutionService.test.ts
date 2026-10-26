@@ -26,6 +26,7 @@ import {
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
+import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
 import * as Cause from "effect/Cause";
 import * as Exit from "effect/Exit";
 import * as DateTime from "effect/DateTime";
@@ -3124,6 +3125,42 @@ it.effect("reads the typed words, not the context projected into the provider te
   }),
 );
 
+it.effect("reads the ultracode keyword from the typed words, not the projected context", () =>
+  Effect.gen(function* () {
+    const projected = 'Look at this\n\n<t3_context version="1">\nthe ultracode log\n</t3_context>';
+    for (const providerDriver of ["codex", "claudeAgent"]) {
+      const [unchanged] = yield* providerTextsFor({
+        key: `ultracode-projected-context-${providerDriver}`,
+        messageText: projected,
+        typedText: "Look at this",
+        providerDriver: ProviderDriverKind.make(providerDriver),
+        settings: { ultracode: "keyword" },
+      });
+      assert.equal(unchanged, projected, providerDriver);
+    }
+    // A chip labelled with the word is not typed either: a file called ultracode.ts.
+    const chip = formatComposerContextReference({
+      kind: "terminal",
+      contextId: "ctx-log" as never,
+      label: "ultracode.log",
+    });
+    const [chipText] = yield* providerTextsFor({
+      key: "ultracode-chip-label",
+      messageText: `Look at ${chip}\n\n<t3_context version="1">\nbuild output\n</t3_context>`,
+      typedText: `Look at ${chip}`,
+      settings: { ultracode: "keyword" },
+    });
+    assert.notInclude(chipText, "<t3-ultracode>");
+    const [codexText] = yield* providerTextsFor({
+      key: "ultracode-typed-keyword",
+      messageText: projected,
+      typedText: "Look at this, ultracode",
+      settings: { ultracode: "keyword" },
+    });
+    assert.isTrue(codexText?.startsWith(projected), "keeps the projected text ahead of the note");
+    assert.include(codexText, "<t3-ultracode>");
+  }),
+);
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
   Effect.gen(function* () {
     const { observed } = yield* captureRootRunTermination({

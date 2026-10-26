@@ -4,6 +4,7 @@ import { formatComposerContextReference } from "./composerContextReferences.ts";
 import {
   detectWorkflowIntent,
   normalizeWorkflowTriggerPhrase,
+  personTypedWords,
   WORKFLOW_TRIGGER_PHRASE_MAX_CHARS,
   workflowTriggerExtrasProblems,
 } from "./workflowIntent.ts";
@@ -149,6 +150,23 @@ describe("detectWorkflowIntent", () => {
         "look at this\n\n<terminal_context>\n- build line 1:\n  1 | workflow\n</terminal_context>",
       ),
     ).toBeNull();
+  });
+
+  it("reads a person's typed words with chips and legacy context blocks taken out", () => {
+    const chip = formatComposerContextReference({
+      kind: "mention",
+      contextId: "ctx-1" as never,
+      label: "ultracode.ts",
+    });
+    expect(personTypedWords(`look at ${chip} now`)).not.toContain("ultracode");
+    expect(personTypedWords(`look at ${chip} now`)).toContain("look at");
+    expect(personTypedWords(`look at ${chip} now`)).toContain("now");
+    expect(
+      personTypedWords(
+        "look\n\n<terminal_context>\n- build line 1:\n  1 | ultracode\n</terminal_context>",
+      ),
+    ).not.toContain("ultracode");
+    expect(personTypedWords("plain words")).toBe("plain words");
   });
 
   it("matches the user's extra words and phrases literally", () => {

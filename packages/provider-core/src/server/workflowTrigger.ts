@@ -10,7 +10,7 @@ import type {
   ProviderDriverKind,
 } from "@t3tools/contracts";
 import type { UltracodeMode, WorkflowPresets, WorkflowTriggers } from "@t3tools/contracts/settings";
-import { detectWorkflowIntent } from "@t3tools/shared/workflowIntent";
+import { detectWorkflowIntent, personTypedWords } from "@t3tools/shared/workflowIntent";
 
 import { isPersonTypedMessage } from "./personMessage.ts";
 import { applyUltracode } from "./ultracode.ts";
@@ -124,6 +124,7 @@ export function applyTurnTriggers(
     mode: input.ultracode,
     driver: input.driver,
     text: input.text,
+    typedWords: personTypedWords(input.typedText),
     createdBy: input.createdBy,
     creationSource: input.creationSource,
     delegatedThread: input.delegatedThread,
