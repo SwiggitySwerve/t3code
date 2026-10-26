@@ -152,4 +152,39 @@ describe("CorruptCatalogSection", () => {
     expect(footer()).toBe("Saved connections were reset. Restart the app to continue.");
     expect(container.querySelector("button")?.disabled).toBe(true);
   });
+  it("lets the user try again after a failed reset", async () => {
+    mocks.recover
+      .mockReturnValueOnce(Effect.fail(new Error("could not preserve")))
+      .mockReturnValueOnce(Effect.succeed(true));
+    await mount();
+    await act(async () => press());
+    const request = () => mocks.confirm.mock.calls[0]![0] as ConfirmRequest;
+    await act(async () => request().onConfirm());
+    await vi.waitFor(() => expect(footer()).toContain("Nothing was changed"));
+
+    await act(async () => request().onConfirm());
+    await vi.waitFor(() => expect(mocks.reload).toHaveBeenCalledTimes(1));
+    expect(mocks.recover).toHaveBeenCalledTimes(2);
+  });
+
+  it("ignores a second confirmation while a reset runs, then accepts another", async () => {
+    let release: () => void = () => {};
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    mocks.recover
+      .mockReturnValueOnce(Effect.promise(() => held).pipe(Effect.as(true)))
+      .mockReturnValueOnce(Effect.fail(new Error("could not preserve")));
+    await mount();
+    await act(async () => press());
+    const request = () => mocks.confirm.mock.calls[0]![0] as ConfirmRequest;
+    await act(async () => request().onConfirm());
+    await act(async () => request().onConfirm());
+    expect(mocks.recover).toHaveBeenCalledTimes(1);
+
+    release();
+    await vi.waitFor(() => expect(mocks.reload).toHaveBeenCalledTimes(1));
+    await act(async () => request().onConfirm());
+    await vi.waitFor(() => expect(mocks.recover).toHaveBeenCalledTimes(2));
+  });
 });

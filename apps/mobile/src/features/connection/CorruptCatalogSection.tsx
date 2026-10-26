@@ -30,9 +30,24 @@ export function CorruptCatalogSection() {
   const inFlight = useRef(false);
   const controller = useRef<AbortController | null>(null);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- aborts a reset still running when the section unmounts, so it cannot update state afterwards
   useEffect(() => () => controller.current?.abort(), []);
 
   if (!corrupt) return null;
+
+  const attemptReset = async (abort: AbortController) => {
+    const exit = await Effect.runPromiseExit(
+      recover().pipe(Effect.provide(MobileSecureStorage.layer)),
+      { signal: abort.signal },
+    );
+    if (abort.signal.aborted) return;
+    if (!Exit.isSuccess(exit)) {
+      setState("failed");
+      return;
+    }
+    // The runtime failed to build at startup; a new launch is the only way to build it again.
+    await Updates.reloadAsync().catch(() => setState("restart"));
+  };
 
   const reset = async () => {
     if (inFlight.current) return;
@@ -40,21 +55,10 @@ export function CorruptCatalogSection() {
     setState("resetting");
     const abort = new AbortController();
     controller.current = abort;
-    try {
-      const exit = await Effect.runPromiseExit(
-        recover().pipe(Effect.provide(MobileSecureStorage.layer)),
-        { signal: abort.signal },
-      );
-      if (abort.signal.aborted) return;
-      if (!Exit.isSuccess(exit)) {
-        setState("failed");
-        return;
-      }
-      // The runtime failed to build at startup; a new launch is the only way to build it again.
-      await Updates.reloadAsync().catch(() => setState("restart"));
-    } finally {
+    // Release the guard however the attempt ends: finished, failed, aborted or thrown.
+    await attemptReset(abort).finally(() => {
       inFlight.current = false;
-    }
+    });
   };
 
   return (

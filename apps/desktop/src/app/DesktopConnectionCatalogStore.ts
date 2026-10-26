@@ -613,7 +613,7 @@ export const make = Effect.gen(function* () {
           case "unavailable":
             return Effect.succeed(Option.none<string>());
           case "value":
-            return Effect.succeed(Option.some(stored.catalog));
+            return Effect.succeedSome(stored.catalog);
         }
       }),
       Effect.withSpan("desktop.connectionCatalogStore.get"),

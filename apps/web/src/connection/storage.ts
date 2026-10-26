@@ -520,7 +520,7 @@ export const recoverCorruptCatalog = Effect.fn("web.connectionStorage.recoverCor
     if (raw === null || raw.trim() === "") return false;
     const unreadable = yield* decodeConnectionCatalogDocument(raw).pipe(
       Effect.as(false),
-      Effect.catch(() => Effect.succeed(true)),
+      Effect.orElseSucceed(() => true),
     );
     if (!unreadable) return false;
     if (backend.recover === undefined) {

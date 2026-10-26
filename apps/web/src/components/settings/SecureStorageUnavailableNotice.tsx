@@ -12,6 +12,7 @@ import { Alert, AlertDescription, AlertTitle } from "../ui/alert";
 export function SecureStorageUnavailableNotice() {
   const [unavailable, setUnavailable] = useState(false);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- reads the desktop bridge's secure-storage state on mount and abandons the read on unmount
   useEffect(() => {
     const abort = new AbortController();
     void Effect.runPromise(readCatalogAccess, { signal: abort.signal }).then(

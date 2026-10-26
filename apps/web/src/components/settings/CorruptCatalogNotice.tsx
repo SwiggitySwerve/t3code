@@ -28,6 +28,7 @@ export function CorruptCatalogNotice({
   const inFlight = useRef(false);
   const controller = useRef<AbortController | null>(null);
 
+  // oxlint-disable-next-line t3code/react-effect-budget -- aborts a reset still running when the notice unmounts, so it cannot update state afterwards
   useEffect(() => () => controller.current?.abort(), []);
 
   if (!corrupt) return null;
