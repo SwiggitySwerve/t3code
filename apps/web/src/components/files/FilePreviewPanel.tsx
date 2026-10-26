@@ -110,6 +110,7 @@ import { resolveCenteredFileLineScrollTop } from "./fileLineReveal";
 import { DiffCommentAnnotation } from "../diffs/DiffCommentAnnotation";
 import { projectFileCacheKey } from "./fileContentRevision";
 import {
+  canEditFile,
   filePreviewReadErrorMessage,
   isMarkdownPreviewFile,
   resolveFilePreviewPath,
@@ -1039,6 +1040,11 @@ export default function FilePreviewPanel({
     attachment === undefined && relativePath !== null,
   );
   const [fileRefreshRevision, setFileRefreshRevision] = useState(0);
+  const fileEditable = canEditFile({
+    isHostFile,
+    canWriteFiles,
+    truncated: file.data?.truncated === true,
+  });
   const attemptedPath = file.readError?.resolvedPath ?? file.readError?.operationPath;
   // Folder links fail file reads; retain mutation refresh to detect conversion to files. Host folders own
   // roots; folderTrail keeps descendants.
@@ -1475,7 +1481,7 @@ export default function FilePreviewPanel({
                 threadRef={threadRef}
                 contents={file.data.contents}
                 workspaceMutationId={workspaceMutationId}
-                readOnly={isHostFile || !canWriteFiles}
+                readOnly={!fileEditable}
                 onPendingChange={onPendingChange}
               />
             ) : tableDelimiter && renderTable ? (
@@ -1485,7 +1491,7 @@ export default function FilePreviewPanel({
                 text={file.data.contents}
                 delimiter={tableDelimiter}
               />
-            ) : file.data.truncated || isHostFile || !canWriteFiles ? (
+            ) : !fileEditable ? (
               <SourceFilePreview
                 name={relativePath}
                 text={file.data.contents}

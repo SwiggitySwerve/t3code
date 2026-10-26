@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { remapFileCommentAnnotations } from "./fileCommentAnnotations";
 import {
+  canEditFile,
   filePreviewReadErrorMessage,
   isMarkdownPreviewFile,
   resolveFilePreviewPath,
@@ -25,6 +26,18 @@ describe("file preview read errors", () => {
       message: "Legacy file read failure.",
     });
     expect(filePreviewReadErrorMessage(error)).toBe("Legacy file read failure.");
+  });
+});
+
+describe("binary file read errors", () => {
+  // A Latin-1 text file is rejected for its encoding, not because it is binary.
+  it("names invalid UTF-8 as well as binary content", () => {
+    const error = decodeReadError({
+      _tag: "ProjectReadFileError",
+      failure: "binary_file",
+      message: "Workspace file is binary or not valid UTF-8.",
+    });
+    expect(filePreviewReadErrorMessage(error)).toContain("not valid UTF-8");
   });
 });
 
@@ -88,6 +101,24 @@ describe("setMarkdownTaskChecked", () => {
   it("leaves the document unchanged for a stale or invalid marker offset", () => {
     expect(setMarkdownTaskChecked(markdown, 0, true)).toBe(markdown);
     expect(setMarkdownTaskChecked(markdown, 200, true)).toBe(markdown);
+  });
+});
+
+describe("canEditFile", () => {
+  const editable = { isHostFile: false, canWriteFiles: true, truncated: false };
+
+  it("allows editing a complete workspace file", () => {
+    expect(canEditFile(editable)).toBe(true);
+  });
+
+  // A save would write the first 1 MB back over the whole file.
+  it("refuses to edit a file that was read only in part", () => {
+    expect(canEditFile({ ...editable, truncated: true })).toBe(false);
+  });
+
+  it("keeps host files and read-only connections read-only", () => {
+    expect(canEditFile({ ...editable, isHostFile: true })).toBe(false);
+    expect(canEditFile({ ...editable, canWriteFiles: false })).toBe(false);
   });
 });
 

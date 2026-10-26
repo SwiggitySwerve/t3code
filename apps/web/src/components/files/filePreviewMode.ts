@@ -15,7 +15,7 @@ export function filePreviewReadErrorMessage(error: ProjectReadFileError): string
     case "path_not_file":
       return "The path is a directory or special file, not a regular file.";
     case "binary_file":
-      return "The file is binary and cannot be displayed as text.";
+      return "The file is binary or not valid UTF-8 text and cannot be displayed as text.";
     case "workspace_path_outside_root":
       return "The requested path is outside the workspace.";
     case "resolved_path_outside_root":
@@ -38,6 +38,15 @@ export function shouldShowFileExplorer(input: {
     return false;
   }
   return input.explorerOpen || input.relativePath === null;
+}
+
+/** A file read in part cannot be saved: the write would replace the whole file with its first part. */
+export function canEditFile(input: {
+  readonly isHostFile: boolean;
+  readonly canWriteFiles: boolean;
+  readonly truncated: boolean;
+}): boolean {
+  return input.canWriteFiles && !input.isHostFile && !input.truncated;
 }
 
 export function setMarkdownTaskChecked(

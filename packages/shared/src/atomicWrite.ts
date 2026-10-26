@@ -17,6 +17,48 @@ export const isWindowsRenameLock = (error: PlatformError.PlatformError) => {
 const LOCKED_RENAME_RETRIES = 20;
 const LOCKED_RENAME_RETRY_DELAY = "100 millis";
 
+/**
+ * Renames over the target. On Windows an open-file lock can block the rename, so
+ * it retries a bounded number of times while the target stays unchanged.
+ */
+export const renameWithLockRetry = Effect.fn("atomicWrite.renameWithLockRetry")(function* (
+  tempPath: string,
+  targetPath: string,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const platform = yield* HostProcess.Platform;
+  if (platform !== "win32") return yield* fs.rename(tempPath, targetPath);
+
+  // Stop retrying if another save changes the target; read-only targets also return permanent EPERM.
+  const targetVersion = fs.stat(targetPath).pipe(
+    Effect.map((info) => ({
+      id: `${Option.getOrUndefined(info.ino)}:${info.size}:${Option.getOrUndefined(info.mtime)?.getTime()}`,
+      readOnly: (info.mode & 0o200) === 0,
+    })),
+    Effect.catchIf(
+      (error) => error.reason._tag === "NotFound",
+      () => Effect.succeed({ id: "missing", readOnly: false }),
+    ),
+    Effect.option,
+  );
+  const before = yield* targetVersion;
+  const firstAttempt = yield* Effect.result(fs.rename(tempPath, targetPath));
+  if (Result.isSuccess(firstAttempt)) return;
+  const lockError = firstAttempt.failure;
+  if (!isWindowsRenameLock(lockError) || Option.isNone(before) || before.value.readOnly) {
+    return yield* lockError;
+  }
+  for (let retry = 0; retry < LOCKED_RENAME_RETRIES; retry += 1) {
+    yield* Effect.sleep(LOCKED_RENAME_RETRY_DELAY);
+    const current = yield* targetVersion;
+    if (Option.isNone(current) || current.value.id !== before.value.id) break;
+    const attempt = yield* Effect.result(fs.rename(tempPath, targetPath));
+    if (Result.isSuccess(attempt)) return;
+    if (!isWindowsRenameLock(attempt.failure)) return yield* attempt.failure;
+  }
+  return yield* lockError;
+});
+
 /** Resolves symlink targets before renaming so writes preserve the link. */
 export const writeFileStringAtomically = (input: {
   readonly filePath: string;
@@ -26,7 +68,6 @@ export const writeFileStringAtomically = (input: {
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
-      const platform = yield* HostProcess.Platform;
       const targetPath = yield* resolveSymlinkTarget(input.filePath);
       const targetDirectory = path.dirname(targetPath);
 
@@ -42,35 +83,6 @@ export const writeFileStringAtomically = (input: {
       const tempPath = path.join(tempDirectory, "contents.tmp");
 
       yield* fs.writeFileString(tempPath, input.contents);
-      if (platform !== "win32") return yield* fs.rename(tempPath, targetPath);
-
-      // Stop retrying if another save changes the target; read-only targets also return permanent EPERM.
-      const targetVersion = fs.stat(targetPath).pipe(
-        Effect.map((info) => ({
-          id: `${Option.getOrUndefined(info.ino)}:${info.size}:${Option.getOrUndefined(info.mtime)?.getTime()}`,
-          readOnly: (info.mode & 0o200) === 0,
-        })),
-        Effect.catchIf(
-          (error) => error.reason._tag === "NotFound",
-          () => Effect.succeed({ id: "missing", readOnly: false }),
-        ),
-        Effect.option,
-      );
-      const before = yield* targetVersion;
-      const firstAttempt = yield* Effect.result(fs.rename(tempPath, targetPath));
-      if (Result.isSuccess(firstAttempt)) return;
-      const lockError = firstAttempt.failure;
-      if (!isWindowsRenameLock(lockError) || Option.isNone(before) || before.value.readOnly) {
-        return yield* lockError;
-      }
-      for (let retry = 0; retry < LOCKED_RENAME_RETRIES; retry += 1) {
-        yield* Effect.sleep(LOCKED_RENAME_RETRY_DELAY);
-        const current = yield* targetVersion;
-        if (Option.isNone(current) || current.value.id !== before.value.id) break;
-        const attempt = yield* Effect.result(fs.rename(tempPath, targetPath));
-        if (Result.isSuccess(attempt)) return;
-        if (!isWindowsRenameLock(attempt.failure)) return yield* attempt.failure;
-      }
-      return yield* lockError;
+      yield* renameWithLockRetry(tempPath, targetPath);
     }),
   );

@@ -8,7 +8,9 @@ import { it, describe, expect } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Logger from "effect/Logger";
 import * as Path from "effect/Path";
+import * as PlatformError from "effect/PlatformError";
 
 import * as ServerConfig from "../config.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -73,6 +75,50 @@ const writeTextFile = Effect.fn("writeTextFile")(function* (
     .pipe(Effect.orDie);
   yield* fileSystem.writeFileString(absolutePath, contents).pipe(Effect.orDie);
 });
+
+const UTF8_BOM = [0xef, 0xbb, 0xbf] as const;
+
+const systemError = (method: string, code: string, path: string) =>
+  PlatformError.systemError({
+    _tag: "Unknown",
+    module: "FileSystem",
+    method,
+    pathOrDescriptor: path,
+    cause: Object.assign(new Error(`${code}, ${method}`), { code }),
+  });
+
+// The final rename and cleanup go through the FileSystem service, so a test can fail them.
+const makeWithFileSystem = (
+  override: (fileSystem: FileSystem.FileSystem) => Partial<FileSystem.FileSystem>,
+  platform: "win32" | "linux" = "linux",
+) =>
+  Effect.gen(function* () {
+    const fileSystem = yield* FileSystem.FileSystem;
+    return yield* WorkspaceFileSystem.make.pipe(
+      Effect.provide(layerKnownWorkspacesTest),
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.make({ ...fileSystem, ...override(fileSystem) }),
+      ),
+      Effect.provideService(HostProcess.Platform, platform),
+    );
+  });
+
+const stubEffectiveIds = (uid: number, gid: number) => {
+  const originals = (["geteuid", "getegid"] as const).map(
+    (name) => [name, Object.getOwnPropertyDescriptor(process, name)] as const,
+  );
+  Object.defineProperty(process, "geteuid", { configurable: true, value: () => uid });
+  Object.defineProperty(process, "getegid", { configurable: true, value: () => gid });
+  return {
+    [Symbol.dispose]: () => {
+      for (const [name, descriptor] of originals) {
+        if (descriptor) Object.defineProperty(process, name, descriptor);
+        else delete (process as unknown as Record<string, unknown>)[name];
+      }
+    },
+  };
+};
 
 it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (it) => {
   describe("getMetadata", () => {
@@ -364,6 +410,47 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
         });
         expect("cause" in error).toBe(false);
         expect("contents" in error).toBe(false);
+      }),
+    );
+
+    // Decoding 0xE9 as U+FFFD and saving it back would destroy the original byte.
+    it.effect("refuses a file that is not valid UTF-8 instead of decoding it lossily", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.writeFile(
+          path.join(cwd, "latin1.md"),
+          Buffer.from("caf\xe9\n", "latin1"),
+        );
+
+        const error = yield* workspaceFileSystem
+          .readFile({ cwd, relativePath: "latin1.md" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceBinaryFileError);
+        expect("contents" in error).toBe(false);
+      }),
+    );
+
+    it.effect("reads the valid prefix when the size cap cuts a UTF-8 character in half", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const capBytes = 1024 * 1024;
+        yield* fileSystem.writeFile(
+          path.join(cwd, "big.md"),
+          Buffer.from(`${"a".repeat(capBytes - 1)}\u00e9tail`),
+        );
+
+        const result = yield* workspaceFileSystem.readFile({ cwd, relativePath: "big.md" });
+
+        expect(result.truncated).toBe(true);
+        expect(result.byteLength).toBe(capBytes + 5);
+        expect(result.contents).toBe("a".repeat(capBytes - 1));
       }),
     );
   });
@@ -665,6 +752,225 @@ it.layer(layerTest, { excludeTestServices: true })("WorkspaceFileSystemLive", (i
           expect(yield* fileSystem.readFileString(path.join(cwd, relativePath))).toBe("ok\n");
         }
       }),
+    );
+
+    // The BOM is a property of the file: reads leave it out of the text, so a save must put it back.
+    it.effect("keeps a UTF-8 BOM and CRLF line endings through a save", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        const original = Buffer.from([...UTF8_BOM, ...Buffer.from("# Tasks\r\n- [ ] one\r\n")]);
+        const absolutePath = path.join(cwd, "tasks.md");
+        yield* fileSystem.writeFile(absolutePath, original);
+
+        const { contents } = yield* workspaceFileSystem.readFile({ cwd, relativePath: "tasks.md" });
+        expect(contents).toBe("# Tasks\r\n- [ ] one\r\n");
+        yield* workspaceFileSystem.writeFile({ cwd, relativePath: "tasks.md", contents });
+        expect(Buffer.from(yield* fileSystem.readFile(absolutePath))).toEqual(original);
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "tasks.md",
+          contents: "# Tasks\r\n- [x] one\r\n",
+        });
+        expect(Buffer.from(yield* fileSystem.readFile(absolutePath))).toEqual(
+          Buffer.from([...UTF8_BOM, ...Buffer.from("# Tasks\r\n- [x] one\r\n")]),
+        );
+      }),
+    );
+
+    it.effect("does not add a BOM to a file that had none", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "plain.md", "old\n");
+
+        yield* workspaceFileSystem.writeFile({ cwd, relativePath: "plain.md", contents: "new\n" });
+
+        expect(Buffer.from(yield* fileSystem.readFile(path.join(cwd, "plain.md")))).toEqual(
+          Buffer.from("new\n"),
+        );
+      }),
+    );
+
+    it.effect("leaves the original file and no stray files when the replacement fails", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "plan.md", "keep\n");
+        const service = yield* makeWithFileSystem(() => ({
+          rename: (_from, to) => Effect.fail(systemError("rename", "ENOSPC", to)),
+        }));
+
+        const error = yield* service
+          .writeFile({ cwd, relativePath: "plan.md", contents: "lost\n" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspaceFileSystemOperationError);
+        expect(error).toMatchObject({ operation: "write-file" });
+        expect(yield* fileSystem.readFileString(path.join(cwd, "plan.md"))).toBe("keep\n");
+        expect(yield* fileSystem.readDirectory(cwd)).toEqual(["plan.md"]);
+      }),
+    );
+
+    it.effect("logs a temporary file it cannot remove and still reports the write failure", () =>
+      Effect.gen(function* () {
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "plan.md", "keep\n");
+        const removed: Array<string> = [];
+        const service = yield* makeWithFileSystem(() => ({
+          rename: (_from, to) => Effect.fail(systemError("rename", "ENOSPC", to)),
+          remove: (target) =>
+            Effect.suspend(() => {
+              removed.push(path.basename(target));
+              return Effect.fail(systemError("remove", "EACCES", target));
+            }),
+        }));
+        const logged: Array<string> = [];
+        const logger = Logger.make(({ message }) => {
+          logged.push(String(message));
+        });
+
+        const error = yield* service
+          .writeFile({ cwd, relativePath: "plan.md", contents: "lost\n" })
+          .pipe(Effect.flip, Effect.provide(Logger.layer([logger], { mergeWithExisting: false })));
+
+        expect(error).toMatchObject({
+          operation: "write-file",
+          cause: { reason: { method: "rename" } },
+        });
+        expect(removed).toHaveLength(1);
+        expect(removed[0]).toMatch(/^\.t3-save-.*\.tmp$/);
+        expect(logged.length).toBeGreaterThan(0);
+      }),
+    );
+
+    // Windows antivirus and indexers hold files open briefly, and a rename over one fails with EPERM.
+    it.effect("retries the final rename on Windows when a lock briefly blocks it", () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "plan.md", "old\n");
+        let attempts = 0;
+        const service = yield* makeWithFileSystem(
+          (real) => ({
+            rename: (from, to) =>
+              Effect.suspend(() => {
+                attempts += 1;
+                return attempts === 1
+                  ? Effect.fail(systemError("rename", "EPERM", to))
+                  : real.rename(from, to);
+              }),
+          }),
+          "win32",
+        );
+
+        yield* service.writeFile({ cwd, relativePath: "plan.md", contents: "new\n" });
+
+        expect(attempts).toBe(2);
+        expect(yield* fileSystem.readFileString(path.join(cwd, "plan.md"))).toBe("new\n");
+        expect(yield* fileSystem.readDirectory(cwd)).toEqual(["plan.md"]);
+      }),
+    );
+
+    it.effect("reports a directory as not a file instead of an access failure", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* fileSystem.makeDirectory(path.join(cwd, "docs"));
+
+        const error = yield* workspaceFileSystem
+          .writeFile({ cwd, relativePath: "docs", contents: "text\n" })
+          .pipe(Effect.flip);
+
+        expect(error).toBeInstanceOf(WorkspaceFileSystem.WorkspacePathNotFileError);
+        expect(yield* fileSystem.readDirectory(path.join(cwd, "docs"))).toEqual([]);
+      }),
+    );
+
+    // Replacing makes the server the owner, which would turn a user's files root-owned in a container.
+    it.effect("hands the file back to its owner when the server runs as someone else", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "plan.md", "old\n");
+        const absolutePath = path.join(cwd, "plan.md");
+        const { uid, gid } = yield* Effect.promise(() => NodeFSP.stat(absolutePath));
+        const probe = yield* Effect.promise(() => NodeFSP.open(absolutePath, "r"));
+        const handlePrototype = Object.getPrototypeOf(probe) as { chown: () => Promise<void> };
+        yield* Effect.promise(() => probe.close());
+        const chown = vi.spyOn(handlePrototype, "chown");
+
+        {
+          // A non-root server may not give a file away: the save still succeeds under the server's own ownership.
+          using _ids = stubEffectiveIds(uid + 1, gid + 1);
+          chown.mockRejectedValueOnce(Object.assign(new Error("EPERM"), { code: "EPERM" }));
+          yield* workspaceFileSystem.writeFile({ cwd, relativePath: "plan.md", contents: "one\n" });
+          expect(chown).toHaveBeenCalledExactlyOnceWith(uid, gid);
+          expect(yield* fileSystem.readFileString(absolutePath)).toBe("one\n");
+        }
+        chown.mockClear();
+        {
+          using _ids = stubEffectiveIds(uid, gid);
+          yield* workspaceFileSystem.writeFile({ cwd, relativePath: "plan.md", contents: "two\n" });
+          expect(chown).not.toHaveBeenCalled();
+        }
+        chown.mockRestore();
+      }),
+    );
+
+    it.effect("replaces a file without leaving temporary files beside it", () =>
+      Effect.gen(function* () {
+        const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const cwd = yield* makeTempDir;
+        yield* writeTextFile(cwd, "docs/plan.md", "old\n");
+
+        yield* workspaceFileSystem.writeFile({
+          cwd,
+          relativePath: "docs/plan.md",
+          contents: "new\n",
+        });
+
+        expect(yield* fileSystem.readFileString(path.join(cwd, "docs/plan.md"))).toBe("new\n");
+        expect(yield* fileSystem.readDirectory(path.join(cwd, "docs"))).toEqual(["plan.md"]);
+      }),
+    );
+
+    // Windows has no POSIX mode bits to carry over.
+    it.effect.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+      "keeps the permissions of the file it replaces",
+      () =>
+        Effect.gen(function* () {
+          const workspaceFileSystem = yield* WorkspaceFileSystem.WorkspaceFileSystem;
+          const path = yield* Path.Path;
+          const cwd = yield* makeTempDir;
+          yield* writeTextFile(cwd, "run.sh", "#!/bin/sh\n");
+          const absolutePath = path.join(cwd, "run.sh");
+          yield* Effect.promise(() => NodeFSP.chmod(absolutePath, 0o750));
+
+          yield* workspaceFileSystem.writeFile({
+            cwd,
+            relativePath: "run.sh",
+            contents: "#!/bin/sh\necho hi\n",
+          });
+
+          expect((yield* Effect.promise(() => NodeFSP.stat(absolutePath))).mode & 0o777).toBe(
+            0o750,
+          );
+        }),
     );
   });
 });

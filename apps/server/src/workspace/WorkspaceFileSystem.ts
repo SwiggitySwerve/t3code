@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
 
@@ -12,6 +13,7 @@ import type {
   ProjectWriteFileResult,
 } from "@t3tools/contracts";
 import { expandHomePath } from "@t3tools/provider-core/server/pathExpansion";
+import { renameWithLockRetry } from "@t3tools/shared/atomicWrite";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import { isNetworkPath } from "@t3tools/shared/path";
 import * as Context from "effect/Context";
@@ -27,6 +29,97 @@ import * as WorkspacePaths from "./WorkspacePaths.ts";
 import { fileHeaderMimeType } from "./fileHeaderMimeType.ts";
 
 const PROJECT_READ_FILE_MAX_BYTES = 1024 * 1024;
+const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
+
+type ExistingFile = {
+  readonly mode: number;
+  readonly uid: number;
+  readonly gid: number;
+  readonly hasBom: boolean;
+};
+
+/**
+ * Describes the file at the path when it is opened. A symlink in the last
+ * position is refused (O_NOFOLLOW). A later rename replaces whatever is at the
+ * path by then, and the write-permission check is by path after the handle closes.
+ */
+const inspectExistingFile = async (
+  targetPath: string,
+): Promise<ExistingFile | "not-file" | null> => {
+  const handle = await NodeFSP.open(
+    targetPath,
+    NodeFS.constants.O_RDONLY |
+      (NodeFS.constants.O_NOFOLLOW ?? 0) |
+      (NodeFS.constants.O_NONBLOCK ?? 0),
+  ).catch((error: NodeJS.ErrnoException) => {
+    if (error.code === "ENOENT") return null;
+    if (error.code === "EISDIR") return "not-file" as const;
+    throw error;
+  });
+  if (handle === null || handle === "not-file") return handle;
+  let existing: ExistingFile | "not-file";
+  try {
+    const stat = await handle.stat();
+    if (!stat.isFile()) return "not-file";
+    const head = Buffer.alloc(UTF8_BOM.length);
+    const { bytesRead } = await handle.read(head, 0, head.length, 0);
+    existing = {
+      mode: stat.mode & 0o777,
+      uid: stat.uid,
+      gid: stat.gid,
+      hasBom: bytesRead === head.length && head.equals(UTF8_BOM),
+    };
+  } finally {
+    await handle.close();
+  }
+  // Renaming over a file ignores its write permission, which opening it for write did not.
+  await NodeFSP.access(targetPath, NodeFS.constants.W_OK);
+  return existing;
+};
+
+/**
+ * Writes the replacement beside the target with the original's mode. Returns
+ * the error when ownership could not be copied: only a privileged server may
+ * give a file to another user, so the saved file then belongs to the server's user.
+ */
+const writeReplacementFile = async (
+  temporaryPath: string,
+  contents: string,
+  existing: ExistingFile | null,
+): Promise<NodeJS.ErrnoException | null> => {
+  const temporary = await NodeFSP.open(
+    temporaryPath,
+    NodeFS.constants.O_WRONLY |
+      NodeFS.constants.O_CREAT |
+      NodeFS.constants.O_EXCL |
+      (NodeFS.constants.O_NOFOLLOW ?? 0),
+    existing?.mode ?? 0o666,
+  );
+  let ownershipError: NodeJS.ErrnoException | null = null;
+  try {
+    const bytes = Buffer.from(contents, "utf8");
+    await temporary.writeFile(existing?.hasBom ? Buffer.concat([UTF8_BOM, bytes]) : bytes);
+    if (existing !== null) {
+      const euid = process.geteuid?.();
+      const egid = process.getegid?.();
+      if (
+        euid !== undefined &&
+        egid !== undefined &&
+        (existing.uid !== euid || existing.gid !== egid)
+      ) {
+        // Before chmod: changing the owner can clear permission bits.
+        await temporary.chown(existing.uid, existing.gid).catch((error: NodeJS.ErrnoException) => {
+          ownershipError = error;
+        });
+      }
+      await temporary.chmod(existing.mode);
+    }
+    await temporary.sync();
+  } finally {
+    await temporary.close();
+  }
+  return ownershipError;
+};
 
 // NTFS reaches .git through trailing dots/spaces, stream suffixes and GIT~1; compare uppercased names.
 const isGitMetadataName = (segment: string) => {
@@ -95,7 +188,7 @@ export class WorkspaceBinaryFileError extends Schema.TaggedError<WorkspaceBinary
   },
 ) {
   override get message(): string {
-    return `Workspace file '${this.relativePath}' in '${this.workspaceRoot}' is binary and cannot be previewed as text.`;
+    return `Workspace file '${this.relativePath}' in '${this.workspaceRoot}' is binary or not valid UTF-8 and cannot be previewed as text.`;
   }
 }
 
@@ -136,6 +229,7 @@ export class WorkspaceFileSystem extends Context.Service<
 export const make = Effect.gen(function* () {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const platform = yield* HostProcess.Platform;
   const workspacePaths = yield* WorkspacePaths.WorkspacePaths;
   const knownWorkspaces = yield* KnownWorkspaces.KnownWorkspaces;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
@@ -410,19 +504,27 @@ export const make = Effect.gen(function* () {
               }),
           });
           const fileBytes = buffer.subarray(0, bytesRead);
-          if (fileBytes.includes(0)) {
-            return yield* new WorkspaceBinaryFileError({
+          const truncated = stat.size > PROJECT_READ_FILE_MAX_BYTES;
+          const binaryFileError = () =>
+            new WorkspaceBinaryFileError({
               workspaceRoot: input.cwd,
               relativePath: input.relativePath,
               resolvedPath: realTargetPath,
             });
-          }
+          if (fileBytes.includes(0)) return yield* binaryFileError();
+          // Text that does not decode exactly would be saved back with U+FFFD in place of the bytes.
+          // A size cap can cut a character in half; streaming holds that tail back.
+          const contents = yield* Effect.try({
+            try: () =>
+              new TextDecoder("utf-8", { fatal: true }).decode(fileBytes, { stream: truncated }),
+            catch: binaryFileError,
+          });
 
           return {
             relativePath: target.relativePath,
-            contents: new TextDecoder("utf-8").decode(fileBytes),
+            contents,
             byteLength: stat.size,
-            truncated: stat.size > PROJECT_READ_FILE_MAX_BYTES,
+            truncated,
           };
         }),
       (handle) =>
@@ -525,6 +627,61 @@ export const make = Effect.gen(function* () {
     return { relativePath: target.relativePath, realTargetPath };
   });
 
+  /**
+   * Saves through a temporary sibling so a failed write leaves the original
+   * intact. A UTF-8 BOM belongs to the file rather than its text: reads omit it,
+   * so a replacement keeps the one the file had. Hard links are not preserved,
+   * and ownership only when the server may give files away.
+   */
+  const replaceFileContents = Effect.fn("WorkspaceFileSystem.replaceFileContents")(function* (
+    input: ProjectWriteFileInput,
+    targetPath: string,
+  ) {
+    const writeFailure = (cause: unknown) =>
+      new WorkspaceFileSystemOperationError({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+        resolvedPath: targetPath,
+        operationPath: targetPath,
+        operation: "write-file",
+        cause,
+      });
+    const existing = yield* Effect.tryPromise({
+      try: () => inspectExistingFile(targetPath),
+      catch: writeFailure,
+    });
+    if (existing === "not-file") {
+      return yield* new WorkspacePathNotFileError({
+        workspaceRoot: input.cwd,
+        relativePath: input.relativePath,
+        resolvedPath: targetPath,
+      });
+    }
+    const temporaryPath = path.join(
+      path.dirname(targetPath),
+      `.t3-save-${NodeCrypto.randomUUID()}.tmp`,
+    );
+    yield* Effect.gen(function* () {
+      const ownershipError = yield* Effect.tryPromise({
+        try: () => writeReplacementFile(temporaryPath, input.contents, existing),
+        catch: writeFailure,
+      });
+      if (ownershipError !== null) {
+        yield* Effect.logDebug("Saved file keeps the server's ownership.", ownershipError);
+      }
+      yield* renameWithLockRetry(temporaryPath, targetPath).pipe(
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(HostProcess.Platform, platform),
+        Effect.mapError(writeFailure),
+      );
+    }).pipe(
+      // A leftover temporary file would sit untracked in the user's repository.
+      Effect.onError(() =>
+        fileSystem.remove(temporaryPath, { force: true }).pipe(Effect.ignore({ log: true })),
+      ),
+    );
+  });
+
   const writeFile: WorkspaceFileSystem["Service"]["writeFile"] = Effect.fn(
     "WorkspaceFileSystem.writeFile",
   )(function* (input) {
@@ -545,26 +702,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    yield* Effect.tryPromise({
-      // A symlink swapped in after the check is not followed. Windows lacks O_NOFOLLOW.
-      try: () =>
-        NodeFSP.writeFile(realTargetPath, input.contents, {
-          flag:
-            NodeFS.constants.O_WRONLY |
-            NodeFS.constants.O_CREAT |
-            NodeFS.constants.O_TRUNC |
-            (NodeFS.constants.O_NOFOLLOW ?? 0),
-        }),
-      catch: (cause) =>
-        new WorkspaceFileSystemOperationError({
-          workspaceRoot: input.cwd,
-          relativePath: input.relativePath,
-          resolvedPath: realTargetPath,
-          operationPath: realTargetPath,
-          operation: "write-file",
-          cause,
-        }),
-    });
+    yield* replaceFileContents(input, realTargetPath);
     yield* workspaceEntries.refresh(input.cwd);
     return { relativePath: target.relativePath };
   });
