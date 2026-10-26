@@ -44,6 +44,8 @@ export interface ServerDerivedPaths {
   readonly worktreesDir: string;
   readonly attachmentsDir: string;
   readonly browserArtifactsDir: string;
+  /** Whole worker answers a checker reads: server-owned, never inside a user's checkout. */
+  readonly workflowResultsDir: string;
   readonly logsDir: string;
   readonly serverTracePath: string;
   readonly providerLogsDir: string;
@@ -160,6 +162,7 @@ export const deriveServerPaths = Effect.fn(function* (
     worktreesDir: join(baseDir, "worktrees"),
     attachmentsDir,
     browserArtifactsDir: join(stateDir, "browser-artifacts"),
+    workflowResultsDir: join(stateDir, "workflow-results"),
     logsDir,
     serverTracePath: join(logsDir, "server.trace.ndjson"),
     providerLogsDir,

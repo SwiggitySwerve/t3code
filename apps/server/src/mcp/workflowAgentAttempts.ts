@@ -433,7 +433,8 @@ async function runCheck(
   // An agent of its own, so it is independent of the work it judges and shows in the workflow.
   const target = check.target ?? input.target;
   // The checker sees a cut copy of a long answer. It cannot read the answer's task, so the whole
-  // answer is a file for the length of the check, which the cut copy points to.
+  // answer is a file, outside the checkout, for the length of the check; the cut copy points to its
+  // absolute path.
   const stored = judgedResultFits(resultText)
     ? undefined
     : await storeCheckerResult(host, input, resultText);

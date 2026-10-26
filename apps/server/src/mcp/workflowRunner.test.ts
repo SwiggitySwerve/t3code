@@ -31,6 +31,8 @@ import { aggregateWorkflowUsage } from "./workflowUsage.ts";
 
 const threadId = ThreadId.make("thread:workflow-runner");
 const workflowId = NodeId.make("workflow:runner-test");
+/** Where the fake host keeps a checker's file: an absolute path, as the real one is. */
+const CHECKER_FOLDER = "/server-state/workflow-results";
 
 interface HarnessOptions {
   readonly onAwaitRelease?: () => Effect.Effect<unknown>;
@@ -320,7 +322,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
         options.failCheckerWrite === true
           ? Effect.fail({ code: "orchestration_error", message: "The disk is full." } as never)
           : Effect.sync(() => {
-              const path = `.t3/workflow-results/${taskId}.txt`;
+              const path = `${CHECKER_FOLDER}/checker-${taskId}.txt`;
               checkerFiles.set(path, text);
               return path;
             }),
@@ -1503,10 +1505,11 @@ return errors`,
         const body = block.slice(block.indexOf("\n") + 1, block.indexOf("\n</t3-result>"));
         expect(byteLength(body)).toBeLessThanOrEqual(24_000);
         expect(body).not.toContain("\uFFFD");
-        // A checker cannot read the answer's task, so the marker names a file it can read.
-        const pointer = ".t3/workflow-results/node:agent-1.txt";
+        // A checker cannot read the answer's task, so the marker names a file it can read, by an
+        // absolute path outside the checkout.
+        const pointer = `${CHECKER_FOLDER}/checker-node:agent-1.txt`;
         expect(body).toMatch(
-          /\.\.\.truncated \(\d+ of \d+ bytes\), full output at \.t3\/workflow-results\/node:agent-1\.txt$/,
+          new RegExp(`\\.\\.\\.truncated \\(\\d+ of \\d+ bytes\\), full output at ${pointer}$`),
         );
         expect(body).not.toContain("task_status");
         // The file existed, holding the answer (within the file bound), when the checker started,
@@ -1551,7 +1554,7 @@ return errors`,
             'await agent("work", { verify: { type: "judgment", rubric: ["It is right."] } })',
           );
           yield* Deferred.await(completed);
-          const stored = readableByChecker[0]!.get(".t3/workflow-results/node:agent-1.txt")!;
+          const stored = readableByChecker[0]!.get(`${CHECKER_FOLDER}/checker-node:agent-1.txt`)!;
           expect(byteLength(stored)).toBeLessThanOrEqual(256 * 1024);
           expect(stored).toMatch(
             /\.\.\.truncated \(\d+ of 300000 bytes\), full output at task_status taskId=node:agent-1$/,

@@ -89,6 +89,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
@@ -209,6 +210,8 @@ const makeLayerTest = (
     Layer.provideMerge(
       SecretRequests.layer.pipe(Layer.provide(layerSecretStore), Layer.provide(layerOrchestration)),
     ),
+    // Where the checkers' whole-answer files go: the server's own folder, not this checkout.
+    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-agent-fanout-test-" })),
     Layer.provideMerge(NodeServices.layer),
   );
 };
@@ -1633,6 +1636,31 @@ const awaitMember = (workflowId: string, count: number) =>
     return seen[count - 1]!;
   });
 
+/** Waits for the workflow's `count` checker tasks, which have a thread, in start order. */
+const awaitCheckers = (workflowId: string, count: number) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const seen: Array<OrchestrationV2Subagent> = [];
+    yield* orchestrator
+      .streamStoredEventsFrom({
+        threadId: parentThreadId,
+        afterSequence: 0,
+        eventType: "subagent.updated",
+      })
+      .pipe(
+        Stream.filter((stored) => {
+          if (stored.event.type !== "subagent.updated") return false;
+          const task = stored.event.payload;
+          if (task.parentNodeId !== workflowId || task.childThreadId === null) return false;
+          if (!task.prompt.includes("independent checker")) return false;
+          if (!seen.some((known) => known.id === task.id)) seen.push(task);
+          return seen.length >= count;
+        }),
+        Stream.runHead,
+      );
+    return seen.slice(0, count);
+  });
+
 /** Runs `use` against a fresh workflow service, then shuts it down as a server stop would. */
 const withServerProcess = <A, E, R>(
   use: (
@@ -3014,34 +3042,139 @@ describe("workflow checks", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("points a checker at a file with a long answer, and removes it after the check", () =>
+  /** The path a checker's cut copy of a long answer names as holding the whole answer. */
+  const checkerPointer = (prompt: string) =>
+    /full output at (.+?checker-[0-9a-f]{32}\.txt)/.exec(prompt)?.[1];
+  const passed = `\`\`\`json\n${JSON.stringify({ outcome: "passed", reasons: "Read the whole answer." })}\n\`\`\``;
+  const judged = 'verify: { type: "judgment", rubric: ["It is complete."] }';
+  /** The checkout's own `.t3` folder, where an earlier version put checker files. */
+  const checkoutFolder = ".t3";
+
+  it.effect("points a checker at an absolute file outside the checkout, and removes it after", () =>
     Effect.gen(function* () {
       yield* startParent;
+      const { workflowResultsDir } = yield* ServerConfig.ServerConfig;
       const answer = "a".repeat(130_000);
-      const existedBefore = NodeFS.existsSync(".t3/workflow-results");
-      const read: Array<{ readonly path: string | undefined; readonly text: string | undefined }> =
-        [];
+      const existedBefore = NodeFS.existsSync(checkoutFolder);
+      const seen: Array<{
+        readonly path: string | undefined;
+        readonly text: string | undefined;
+        readonly inCheckout: boolean;
+      }> = [];
       yield* answerWorkflowAgents((prompt) => {
         if (!prompt.includes("independent checker")) return answer;
-        // What a sibling agent does with the pointer: read the file at that path in the checkout.
-        const path = /full output at (\.t3\/workflow-results\/[0-9a-f]+\.txt)/.exec(prompt)?.[1];
+        // What a sibling agent does with the pointer: read the file at that path.
+        const path = checkerPointer(prompt);
         const exists = path !== undefined && NodeFS.existsSync(path);
-        read.push({ path, text: exists ? NodeFS.readFileSync(path, "utf8") : undefined });
-        return `\`\`\`json\n${JSON.stringify({ outcome: "passed", reasons: "Read the whole answer." })}\n\`\`\``;
+        seen.push({
+          path,
+          text: exists ? NodeFS.readFileSync(path, "utf8") : undefined,
+          inCheckout: NodeFS.existsSync(`${checkoutFolder}/workflow-results`),
+        });
+        return passed;
       });
       const started = yield* startWorkflow(
-        'return (await agent("write a long report", { verify: { type: "judgment", rubric: ["It is complete."] } }))?.length ?? null',
+        `return (await agent("write a long report", { ${judged} }))?.length ?? null`,
       );
       const ended = yield* awaitWorkflowEnd(started.workflowId);
       expect(JSON.parse(ended.result!)).toBe(answer.length);
-      expect(read).toHaveLength(1);
-      expect(read[0]?.path).toBeDefined();
-      // The checker's prompt is still bounded; the file it names holds the whole answer.
-      expect(read[0]?.text).toBe(answer);
-      // Nothing is left in the checkout once the check is over.
-      expect(NodeFS.existsSync(read[0]!.path!)).toBe(false);
-      if (!existedBefore) expect(NodeFS.existsSync(".t3")).toBe(false);
+      expect(seen).toHaveLength(1);
+      const [read] = seen;
+      // The checker's prompt is still bounded; the absolute path it names holds the whole answer.
+      expect(read?.path).toBeDefined();
+      expect(NodePath.isAbsolute(read!.path!)).toBe(true);
+      expect(NodePath.dirname(read!.path!)).toBe(NodePath.resolve(workflowResultsDir));
+      expect(read?.text).toBe(answer);
+      // Nothing is made in the checkout, before or after the check.
+      expect(read?.inCheckout).toBe(false);
+      expect(NodeFS.existsSync(checkoutFolder)).toBe(existedBefore);
+      // The file is gone once the check is over; the server's shared folder stays.
+      expect(NodeFS.existsSync(read!.path!)).toBe(false);
+      expect(NodeFS.existsSync(workflowResultsDir)).toBe(true);
       expect(ended.agents[0]?.verification).toMatchObject({ type: "judgment", outcome: "passed" });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("keeps one check's file when another check ends", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const { workflowResultsDir } = yield* ServerConfig.ServerConfig;
+      const answers = { one: "a".repeat(130_000), two: "b".repeat(130_000) };
+      // Workers answer at once; their checkers wait, so both files exist together.
+      yield* answerWorkflowAgents((prompt) =>
+        prompt.includes("independent checker")
+          ? undefined
+          : prompt.includes("report one")
+            ? answers.one
+            : answers.two,
+      );
+      const started = yield* startWorkflow(
+        `return (await parallel([() => agent("write report one", { ${judged} }), () => agent("write report two", { ${judged} })])).length`,
+      );
+      const checkers = yield* awaitCheckers(started.workflowId, 2);
+      const files = new Map(
+        checkers.map((checker) => [
+          checker.prompt.includes("write report one") ? "one" : "two",
+          checkerPointer(checker.prompt),
+        ]),
+      );
+      const [one, two] = [files.get("one"), files.get("two")];
+      expect(one).toBeDefined();
+      expect(two).toBeDefined();
+      expect(one).not.toBe(two);
+      expect(NodeFS.readFileSync(one!, "utf8")).toBe(answers.one);
+      expect(NodeFS.readFileSync(two!, "utf8")).toBe(answers.two);
+
+      // The first check ends; only its file goes.
+      const first = checkers.find((checker) => checker.prompt.includes("write report one"))!;
+      yield* completeChild(first.childThreadId!, passed);
+      // The file is removed by the host once the checker's run is over, outside the test clock.
+      yield* Effect.promise(() => expect.poll(() => NodeFS.existsSync(one!)).toBe(false));
+      expect(NodeFS.readFileSync(two!, "utf8")).toBe(answers.two);
+      expect(NodeFS.existsSync(workflowResultsDir)).toBe(true);
+
+      const second = checkers.find((checker) => checker.prompt.includes("write report two"))!;
+      yield* completeChild(second.childThreadId!, passed);
+      // The workflow ends after its last check has cleaned up.
+      yield* awaitWorkflowEnd(started.workflowId);
+      expect(NodeFS.readdirSync(workflowResultsDir)).toEqual([]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("removes nothing but its own file, in the server's folder or the checkout", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const { workflowResultsDir } = yield* ServerConfig.ServerConfig;
+      // Data this feature did not make: next to its files, and an empty folder the user has.
+      const kept = {
+        notes: NodePath.join(workflowResultsDir, "notes.txt"),
+        lookalike: NodePath.join(workflowResultsDir, "checker-short.txt"),
+        nested: NodePath.join(workflowResultsDir, "keep", "data.txt"),
+      };
+      NodeFS.mkdirSync(NodePath.dirname(kept.nested), { recursive: true });
+      for (const file of Object.values(kept)) NodeFS.writeFileSync(file, "data");
+      const userFolderExisted = NodeFS.existsSync(checkoutFolder);
+      if (!userFolderExisted) NodeFS.mkdirSync(checkoutFolder);
+      try {
+        yield* answerWorkflowAgents((prompt) =>
+          prompt.includes("independent checker") ? passed : "a".repeat(130_000),
+        );
+        const started = yield* startWorkflow(
+          `return (await agent("write a long report", { ${judged} }))?.length ?? null`,
+        );
+        yield* awaitWorkflowEnd(started.workflowId);
+        for (const file of Object.values(kept)) expect(NodeFS.existsSync(file)).toBe(true);
+        expect(NodeFS.readdirSync(workflowResultsDir).toSorted()).toEqual([
+          "checker-short.txt",
+          "keep",
+          "notes.txt",
+        ]);
+        // The user's own folder is still there, and nothing was added to it.
+        expect(NodeFS.existsSync(checkoutFolder)).toBe(true);
+        expect(NodeFS.readdirSync(checkoutFolder)).toEqual([]);
+      } finally {
+        if (!userFolderExisted) NodeFS.rmSync(checkoutFolder, { recursive: true, force: true });
+      }
     }).pipe(Effect.provide(layerTest)),
   );
 

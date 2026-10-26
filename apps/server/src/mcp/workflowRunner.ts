@@ -283,16 +283,16 @@ export interface WorkflowRunnerDeps {
     maxBytes: number,
   ) => Effect.Effect<WorkspaceFile, OrchestratorMcpFailure>;
   /**
-   * Stores an agent's answer as a file in the caller's checkout and returns its workspace-relative
-   * path. A checker is a sibling of the agent it judges and cannot read that agent's task, so a cut
-   * copy of the answer points here instead.
+   * Stores an agent's answer as a new file in a folder the server owns, outside every checkout, and
+   * returns its absolute path. A checker is a sibling of the agent it judges and cannot read that
+   * agent's task, so a cut copy of the answer points here instead. Each call makes its own file.
    */
   readonly writeCheckerResult: (
     workflow: WorkflowContext,
     taskId: NodeId,
     text: string,
   ) => Effect.Effect<string, OrchestratorMcpFailure>;
-  /** Removes a file `writeCheckerResult` made, and the folders it leaves empty. */
+  /** Removes the one file `writeCheckerResult` made at `path`; never a folder or another file. */
   readonly removeCheckerResult: (
     workflow: WorkflowContext,
     path: string,

@@ -130,6 +130,7 @@ import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingEr
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   clientRuntimeModeCeiling,
@@ -145,6 +146,7 @@ import {
   withResultSchema,
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
+import { makeCheckerResults } from "./workflowCheckerResults.ts";
 import {
   makeWorkflowRunner,
   presetPreference,
@@ -872,9 +874,6 @@ export function resolveInteractionMode(
  */
 const APPROVED_START_NAMESPACE = "workflow-approval";
 
-/** The folder, in the caller's checkout, that holds the answers a checker is pointed to. */
-const CHECKER_RESULT_DIR = ".t3/workflow-results";
-
 function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
@@ -1229,6 +1228,8 @@ const make = Effect.gen(function* () {
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const { workflowResultsDir } = yield* ServerConfig.ServerConfig;
+  const checkerResults = makeCheckerResults({ dir: workflowResultsDir, fileSystem, path });
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -2381,47 +2382,35 @@ const make = Effect.gen(function* () {
     readWorkspaceFile: (workflow, relativePath, maxBytes) =>
       readCallerFile(workflow.threadId, relativePath, maxBytes),
     writeCheckerResult: Effect.fn("OrchestratorMcpService.writeCheckerResult")(
-      function* (workflow, taskId, text) {
-        const root = yield* callerCheckoutRoot(workflow.threadId);
-        const name = NodeCrypto.createHash("sha256")
-          .update(`${workflow.workflowId}\n${taskId}`)
-          .digest("hex")
-          .slice(0, 24);
-        const relativePath = `${CHECKER_RESULT_DIR}/${name}.txt`;
-        const filePath = path.join(root, relativePath);
-        const unwritable = (error: { readonly message: string }) =>
-          failure("orchestration_error", `Unable to write ${relativePath}: ${error.message}`);
-        yield* fileSystem
-          .makeDirectory(path.dirname(filePath), { recursive: true })
-          .pipe(Effect.mapError(unwritable));
-        yield* fileSystem.writeFileString(filePath, text).pipe(Effect.mapError(unwritable));
-        return relativePath;
+      function* (_workflow, _taskId, text) {
+        // Outside every checkout, in a folder of the server's own, one file for each check.
+        const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+        return yield* checkerResults
+          .write({ id, text })
+          .pipe(
+            Effect.mapError((error) =>
+              failure(
+                "orchestration_error",
+                `Unable to write a checker result file: ${error.message}`,
+              ),
+            ),
+          );
       },
     ),
     removeCheckerResult: Effect.fn("OrchestratorMcpService.removeCheckerResult")(
-      function* (workflow, relativePath) {
-        const root = yield* callerCheckoutRoot(workflow.threadId);
-        const filePath = path.join(root, relativePath);
-        const unremovable = (error: { readonly message: string }) =>
-          failure("orchestration_error", `Unable to remove ${relativePath}: ${error.message}`);
-        yield* fileSystem.remove(filePath, { force: true }).pipe(
+      function* (_workflow, filePath) {
+        // Only the file this check wrote; the folder is shared with other checks.
+        yield* checkerResults.remove(filePath).pipe(
           Effect.tapError((error) =>
             Effect.logWarning("Could not remove a checker result file", {
-              path: relativePath,
+              path: filePath,
               error: error.message,
             }),
           ),
-          Effect.mapError(unremovable),
+          Effect.mapError((error) =>
+            failure("orchestration_error", `Unable to remove ${filePath}: ${error.message}`),
+          ),
         );
-        // The folders are ours only while they hold nothing else.
-        for (const folder of [path.dirname(filePath), path.dirname(path.dirname(filePath))]) {
-          yield* fileSystem.readDirectory(folder).pipe(
-            Effect.flatMap((entries) =>
-              entries.length === 0 ? fileSystem.remove(folder, { recursive: true }) : Effect.void,
-            ),
-            Effect.ignore,
-          );
-        }
       },
     ),
     stopAgent: Effect.fn("OrchestratorMcpService.stopWorkflowAgent")(
@@ -4717,6 +4706,7 @@ export const layer: Layer.Layer<
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
   | ChildProcessSpawner.ChildProcessSpawner
+  | ServerConfig.ServerConfig
   | FileSystem.FileSystem
   | Path.Path
 > = Layer.effect(OrchestratorMcpService, make).pipe(Layer.provide(ProcessRunner.layer));

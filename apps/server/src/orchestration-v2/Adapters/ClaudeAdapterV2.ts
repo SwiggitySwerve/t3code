@@ -1409,6 +1409,11 @@ export function makeClaudeQueryOptions(input: {
   readonly resumeSessionAt?: string;
   readonly cwd: string | null;
   readonly attachmentsDir?: string;
+  /**
+   * The server's folder of whole worker answers. A workflow member may read it, because a checker
+   * is pointed to a file there; other sessions get no access.
+   */
+  readonly workflowResultsDir?: string;
   readonly settings?: ClaudeSettings;
   readonly sdkSettings?: string | ClaudeSdkSettings;
   readonly environment?: NodeJS.ProcessEnv;
@@ -1542,6 +1547,9 @@ export function makeClaudeQueryOptions(input: {
   const additionalDirectories = [
     ...(input.cwd === null ? [] : [input.cwd]),
     ...(input.attachmentsDir === undefined ? [] : [input.attachmentsDir]),
+    ...(input.workflowMember === true && input.workflowResultsDir !== undefined
+      ? [input.workflowResultsDir]
+      : []),
   ];
   const withDirectories =
     additionalDirectories.length === 0 ? options : { ...options, additionalDirectories };
@@ -4235,6 +4243,7 @@ export interface ClaudeAdapterV2Options {
   readonly settings: ClaudeSettings;
   readonly environment: NodeJS.ProcessEnv;
   readonly attachmentsDir: string;
+  readonly workflowResultsDir?: string;
   readonly fileSystem: FileSystem.FileSystem;
   readonly path: Path.Path;
   readonly crypto: Crypto.Crypto;
@@ -9748,6 +9757,9 @@ export const makeClaudeAdapterV2 = Effect.fn("makeClaudeAdapterV2")(function* (
             ...(resumeSessionAt === undefined ? {} : { resumeSessionAt }),
             cwd: turnInput.runtimePolicy.cwd,
             attachmentsDir,
+            ...(adapterOptions.workflowResultsDir === undefined
+              ? {}
+              : { workflowResultsDir: adapterOptions.workflowResultsDir }),
             settings: adapterOptions.settings,
             environment: claudeQueryEnvironment(
               adapterOptions.environment,
@@ -11046,6 +11058,7 @@ export const createClaudeAdapterV2 = Effect.fn("ClaudeAdapterV2Driver.create")(
       settings: { ...config, enabled, binaryPath },
       environment: claudeEnvironment,
       attachmentsDir: serverConfig.attachmentsDir,
+      workflowResultsDir: serverConfig.workflowResultsDir,
       fileSystem,
       path,
       crypto,

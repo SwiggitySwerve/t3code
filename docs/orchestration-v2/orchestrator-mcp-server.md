@@ -687,11 +687,16 @@ own threads. The row stores the script with a settings line for its args and bud
   retries 4,000, a graph's result 4,096, a failed workflow's 4,096, and a script's
   return value 16,000 (`return a file path for large results`). A judgment checker is shown
   at most 24,000 bytes of the answer it judges, escaped, inside one `<t3-result>` block. A
-  longer answer is also written, up to 256 KiB, to `.t3/workflow-results/<hash>.txt` in the
-  caller's checkout, because a checker is a sibling of the agent it judges and cannot read
-  that agent's `task_status`. The cut marker names that file, and the file is removed when the
-  check ends (a server stop in the middle can leave one behind). If it cannot be written, the
-  checker sees the cut marker without a pointer.
+  longer answer is also written, up to 256 KiB, to a new file `checker-<id>.txt` in the
+  server's own `workflow-results` folder under its state directory, never in the user's
+  checkout, because a checker is a sibling of the agent it judges and cannot read that
+  agent's `task_status`. The cut marker names the file by absolute path. Each check has its own
+  file, and the check removes only that file when it ends; the folder is shared and is never
+  removed. A file left by a server that stopped mid-check is cleared by the next write once it is a
+  day old, and only files with that name are ever cleared. Codex members can read the path under
+  every runtime mode (their sandbox limits writes, not reads); Claude members get the folder as an
+  added directory. If the file cannot be written, the checker sees the cut marker without a
+  pointer.
 - **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its
   own checkout of the calling thread's commit, like `delegate_task`.
 

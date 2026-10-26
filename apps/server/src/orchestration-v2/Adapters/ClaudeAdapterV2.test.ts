@@ -251,6 +251,27 @@ describe("ClaudeAdapterV2 runtime query policy", () => {
     assert.isUndefined(options.extraArgs?.["dangerously-skip-permissions"]);
   });
 
+  it("lets only a workflow member read the folder a checker's answer file is in", () => {
+    const query = (workflowMember: boolean) =>
+      ClaudeAdapterV2.makeClaudeQueryOptions({
+        modelSelection: CLAUDE_TEST_MODEL_SELECTION,
+        nativeThreadId: "native-workflow-results",
+        resume: false,
+        cwd: "/workspace",
+        attachmentsDir: "/state/attachments",
+        workflowResultsDir: "/state/workflow-results",
+        permissionMode: "default",
+        settings: AUTO_COMPACT_CLAUDE_SETTINGS,
+        ...(workflowMember ? { workflowMember: true } : {}),
+      });
+    assert.deepEqual(query(true).additionalDirectories, [
+      "/workspace",
+      "/state/attachments",
+      "/state/workflow-results",
+    ]);
+    assert.deepEqual(query(false).additionalDirectories, ["/workspace", "/state/attachments"]);
+  });
+
   it("gives delegated children Claude's subagent prompt cache TTL", () => {
     const lineage = (relationshipToParent: "fork" | "subagent" | null) => ({
       lineage: {
