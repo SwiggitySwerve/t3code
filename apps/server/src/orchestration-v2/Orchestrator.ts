@@ -97,6 +97,7 @@ import {
   goalCommandStopsActiveRun,
   isNativeMaintenanceCommand,
   resolveMessageDispatchIntent,
+  runningProviderTurnForRun,
 } from "./CommandPolicy.ts";
 import { CommandReceiptStoreV2 } from "./CommandReceiptStore.ts";
 import { ContextHandoffServiceV2 } from "./ContextHandoffService.ts";
@@ -4285,6 +4286,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     readonly idleCompaction?: OrchestrationV2ConversationMessage["idleCompaction"];
     readonly delegatedCompletion?: OrchestrationV2ConversationMessage["delegatedCompletion"];
     readonly forceRestart: boolean;
+    /** Report a missing running provider turn to the caller instead of failing the command. */
+    readonly queueWhenNoRunningTurn?: boolean;
   }) {
     const targetRun = input.projection.runs.find((candidate) => candidate.id === input.targetRunId);
     if (targetRun === undefined) {
@@ -4360,11 +4363,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       });
     }
     const providerSessionId = providerThread.providerSessionId;
-    const providerTurn = input.projection.providerTurns.find(
-      (candidate) =>
-        candidate.runAttemptId === targetRun.activeAttemptId && candidate.status === "running",
-    );
+    const providerTurn = runningProviderTurnForRun(input.projection, targetRun);
     if (providerTurn === undefined) {
+      if (input.queueWhenNoRunningTurn === true) return "no_running_turn" as const;
       return yield* new OrchestratorDispatchError({
         commandId: input.command.commandId,
         commandType: input.command.type,
@@ -4565,7 +4566,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           },
         } satisfies PendingOrchestrationEffectV2,
       ]);
-      return;
+      return "steered" as const;
     }
 
     const currentAttempt = input.projection.attempts.find(
@@ -4978,6 +4979,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         },
       } satisfies PendingOrchestrationEffectV2,
     ]);
+    return "steered" as const;
   });
 
   const dispatchMessage = Effect.fn("Orchestrator.dispatchMessage")(function* (
@@ -5334,9 +5336,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const providerThread = projection.providerThreads.find(
         (row) => row.id === active?.providerThreadId,
       );
-      const activeTurn = projection.providerTurns.find(
-        (turn) => turn.runAttemptId === active?.activeAttemptId && turn.status === "running",
-      );
+      const activeTurn =
+        active === undefined ? undefined : runningProviderTurnForRun(projection, active);
       const activeMessage = projection.messages.find(
         (message) => message.id === active?.userMessageId,
       );
@@ -5413,7 +5414,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           });
 
     if (dispatchMode.type === "steer_active" || dispatchMode.type === "restart_active") {
-      yield* dispatchSteerIntoRun({
+      const steerMode = dispatchMode;
+      const outcome = yield* dispatchSteerIntoRun({
         command,
         events,
         effects,
@@ -5421,10 +5423,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         modelSelection:
           delegatedCompletion === undefined
             ? modelSelection
-            : (projection.runs.find((run) => run.id === dispatchMode.targetRunId)?.modelSelection ??
+            : (projection.runs.find((run) => run.id === steerMode.targetRunId)?.modelSelection ??
               modelSelection),
         delegatedCompletion,
-        targetRunId: dispatchMode.targetRunId,
+        targetRunId: steerMode.targetRunId,
         messageId: command.messageId,
         text: dispatchText,
         ...(command.context ? { context: command.context } : {}),
@@ -5436,9 +5438,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           : { scheduledTaskId: command.scheduledTaskId }),
         ...(command.senderThreadId === undefined ? {} : { senderThreadId: command.senderThreadId }),
         ...(command.idleCompaction === undefined ? {} : { idleCompaction: command.idleCompaction }),
-        forceRestart: dispatchMode.type === "restart_active",
+        forceRestart: steerMode.type === "restart_active",
+        queueWhenNoRunningTurn: steerMode.type === "steer_active",
       });
-      return;
+      if (outcome === "steered") return;
+      // The run reads as running before its provider announces the turn, so there is
+      // nothing to steer yet. Wait behind the run like an automatic send does.
+      dispatchMode = { type: "queue_after_active" };
     }
 
     const activeProviderThread = projection.providerThreads.find(

@@ -219,3 +219,35 @@ layer("CommandPolicyV2", (it) => {
     }),
   );
 });
+
+it("finds only a running provider turn of the run's active attempt", () => {
+  const turn = (runAttemptId: string | null, status: string) =>
+    ({
+      runAttemptId,
+      status,
+    }) as unknown as OrchestrationV2ThreadProjection["providerTurns"][number];
+  const projection = (providerTurns: OrchestrationV2ThreadProjection["providerTurns"]) => ({
+    providerTurns,
+  });
+  const run = { activeAttemptId };
+  const running = turn(activeAttemptId, "running");
+  assert.strictEqual(
+    CommandPolicy.runningProviderTurnForRun(
+      projection([
+        turn(activeAttemptId, "completed"),
+        turn(RunAttemptId.make("other-attempt"), "running"),
+        running,
+      ]),
+      run,
+    ),
+    running,
+  );
+  assert.isUndefined(
+    CommandPolicy.runningProviderTurnForRun(projection([turn(activeAttemptId, "completed")]), run),
+  );
+  assert.isUndefined(
+    CommandPolicy.runningProviderTurnForRun(projection([turn(null, "running")]), {
+      activeAttemptId: null,
+    }),
+  );
+});

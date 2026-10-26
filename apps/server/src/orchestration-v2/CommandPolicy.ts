@@ -150,6 +150,18 @@ export function goalCommandStopsActiveRun(
   }
 }
 
+/** The provider turn a steer or restart can join: one still running on the run's active attempt. */
+export function runningProviderTurnForRun(
+  projection: Pick<OrchestrationV2ThreadProjection, "providerTurns">,
+  run: Pick<OrchestrationV2Run, "activeAttemptId">,
+) {
+  return run.activeAttemptId === null
+    ? undefined
+    : projection.providerTurns.find(
+        (turn) => turn.runAttemptId === run.activeAttemptId && turn.status === "running",
+      );
+}
+
 export function resolveMessageDispatchIntent(
   projection: OrchestrationV2ThreadProjection,
   requestedMode: MessageDispatchMode,
@@ -191,9 +203,7 @@ function resolveDeliveryIntent(
   if (
     activeRun.status === "preparing" ||
     activeRun.status === "starting" ||
-    !projection.providerTurns.some(
-      (turn) => turn.runAttemptId === activeRun.activeAttemptId && turn.status === "running",
-    )
+    runningProviderTurnForRun(projection, activeRun) === undefined
   ) {
     return { type: "queue_after_active" };
   }
@@ -463,13 +473,7 @@ const decideMessageDispatch: CommandPolicyV2Shape["decideMessageDispatch"] = (in
           }),
         );
       }
-      const providerTurnId =
-        activeRun.activeAttemptId === null
-          ? undefined
-          : input.projection.providerTurns.find(
-              (turn) =>
-                turn.runAttemptId === activeRun.activeAttemptId && turn.status === "running",
-            )?.id;
+      const providerTurnId = runningProviderTurnForRun(input.projection, activeRun)?.id;
       return providerTurnId === undefined
         ? Effect.fail(
             new CommandPolicyMessageDispatchError({
@@ -495,9 +499,7 @@ const decideMessageDispatch: CommandPolicyV2Shape["decideMessageDispatch"] = (in
           }),
         );
       }
-      const providerTurnId = input.projection.providerTurns.find(
-        (turn) => turn.runAttemptId === activeRun.activeAttemptId && turn.status === "running",
-      )?.id;
+      const providerTurnId = runningProviderTurnForRun(input.projection, activeRun)?.id;
       return providerTurnId === undefined
         ? Effect.fail(
             new CommandPolicyMessageDispatchError({
