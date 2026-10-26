@@ -731,6 +731,8 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly hasT3Mcp?: boolean;
     readonly browserToolsAvailable?: boolean;
     readonly deviceToolsAvailable?: boolean;
+    /** False for workflow members: they cannot call the tools the orchestration text describes. */
+    readonly orchestrationAvailable?: boolean;
     /** ChatGPT token sharing does not accept service tiers. */
     readonly omitServiceTier?: boolean;
     readonly appContext?: ProviderAdapter.ProviderAdapterV2TurnInput["appContext"];
@@ -768,6 +770,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
             },
+            input.orchestrationAvailable ?? true,
           )
         : undefined;
     const additionalContext =
@@ -1338,6 +1341,11 @@ function codexThreadRuntimeParams(input: {
     ...(input.modelSelection === undefined ? {} : { model: input.modelSelection.model }),
     config: {
       ...CODEX_THREAD_CONFIG,
+      // Workflow members never use skills; the catalog is the largest uncached part of their first request.
+      // Codex reads this per thread and a resumed thread gets its catalog back unless the key is sent again.
+      ...(McpProviderSession.isWorkflowMemberSession(mcpSession)
+        ? { "skills.include_instructions": false }
+        : {}),
       ...(mcpSession === undefined
         ? {}
         : {
@@ -6328,6 +6336,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               hasT3Mcp: mcpSession !== undefined,
               browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+              orchestrationAvailable: !McpProviderSession.isWorkflowMemberSession(mcpSession),
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
             });

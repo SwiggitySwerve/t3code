@@ -8,6 +8,7 @@ import {
   type RuntimeMode,
   type ThreadId,
 } from "@t3tools/contracts";
+import { hasMemberToolset } from "@t3tools/provider-core/server/mcpSession";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -62,6 +63,19 @@ export const hiddenFromSubagents = (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
   return scope?.thread?.subagent !== true;
+};
+
+/**
+ * `McpSchema.EnabledWhen` for the tools of a toolkit that needs `capability`.
+ * Only a workflow member's thread credential is filtered: it sees nothing outside its toolset.
+ * Other callers keep every tool, and handlers still refuse a call that lacks the capability.
+ */
+export const visibleToMembersWith = (capability: McpCapability) => (): boolean => {
+  const fiber = Fiber.getCurrent();
+  const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  return scope === undefined || scope.thread === undefined
+    ? true
+    : !hasMemberToolset(scope.capabilities) || scope.capabilities.has(capability);
 };
 
 export type McpCapabilityError<C extends McpCapability> = C extends "preview"

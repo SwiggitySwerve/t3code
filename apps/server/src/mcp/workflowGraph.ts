@@ -5,6 +5,7 @@ import type { OrchestrationV2WorkflowPlan } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
+import { graphAdvisory } from "./workflowAdvisory.ts";
 import {
   FILE_ID,
   type FileRef,
@@ -371,6 +372,8 @@ export function reviewGraph(value: unknown, inputHashes: Readonly<Record<string,
     writeConflicts,
     blockers,
     inputs,
+    // Advice only: the digest below never reads it.
+    advisory: parsed.ok ? graphAdvisory(parsed.graph, layers) : undefined,
     digest: parsed.ok
       ? "sha256:" +
         NodeCrypto.createHash("sha256")

@@ -1628,7 +1628,7 @@ it.effect.each([
 );
 
 it.effect(
-  "ProviderSessionManagerV2 withholds orchestration from workflow members and replaces an overprivileged credential",
+  "ProviderSessionManagerV2 withholds orchestration, preview and device from workflow members and replaces an overprivileged credential",
   () =>
     Effect.gen(function* () {
       const state = yield* Ref.make(emptyState);
@@ -1683,7 +1683,9 @@ it.effect(
         assert.isDefined(token);
         const resolved = yield* registry.resolve(token!);
         assert.equal(resolved?.thread.threadId, threadId);
-        assert.deepEqual(resolved?.capabilities, new Set(["preview", "worktree", "pull-requests"]));
+        // Preview and device tools belong to the thread that answers the user, not to workflow members.
+        assert.deepEqual(resolved?.capabilities, new Set(["worktree", "pull-requests"]));
+        assert.isFalse(captured?.browserToolsAvailable);
 
         yield* manager.close(providerSessionId);
         assert.isUndefined(yield* mcpSessions.read(threadId));

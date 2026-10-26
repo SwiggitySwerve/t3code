@@ -1197,6 +1197,166 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  const workflowMemberCases = [
+    { name: "a session without recorded capabilities", capabilities: undefined, member: false },
+    {
+      name: "a coordinator or ordinary thread",
+      capabilities: ["orchestration", "worktree", "pull-requests"],
+      member: false,
+    },
+    { name: "a workflow member", capabilities: ["worktree", "pull-requests"], member: true },
+  ] as const;
+
+  const setCodexMemberSession = (
+    scenario: string,
+    capabilities: ReadonlyArray<string> | undefined,
+  ) =>
+    Effect.gen(function* () {
+      yield* (yield* McpProviderSessions.McpProviderSessions).set({
+        environmentId: EnvironmentId.make("environment-codex-member"),
+        threadId: ThreadId.make(`thread-${scenario}`),
+        providerSessionId: `provider-session-${scenario}`,
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        endpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer secret-codex-token",
+        browserToolsAvailable: false,
+        ...(capabilities === undefined ? {} : { capabilities: new Set(capabilities) }),
+      });
+    });
+
+  /** The replay enforces non-MCP thread config, so the recorded thread/start must carry the skills key too. */
+  const withSkillsOverride = (
+    entries: ReadonlyArray<CodexReplay.CodexAppServerReplayEntry>,
+    member: boolean,
+  ) =>
+    entries.map((entry) =>
+      member &&
+      entry.type === "expect_outbound" &&
+      (entry.frame as { readonly method?: string }).method === "thread/start"
+        ? {
+            ...entry,
+            frame: {
+              ...(entry.frame as Record<string, unknown>),
+              params: {
+                config: {
+                  ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+                  "skills.include_instructions": false,
+                },
+              },
+            },
+          }
+        : entry,
+    );
+
+  const codexT3Server = {
+    url: "http://127.0.0.1:43123/mcp",
+    tool_timeout_sec: 3_900,
+    http_headers: { Authorization: "Bearer secret-codex-token" },
+  };
+
+  it.effect.each(workflowMemberCases)(
+    "thread/start for $name drops the skills catalog only for workflow members",
+    ({ capabilities, member }) =>
+      Effect.gen(function* () {
+        const scenario = `member-skills-start-${member ? "member" : "other"}-${capabilities?.length ?? "none"}`;
+        yield* setCodexMemberSession(scenario, capabilities);
+        const requests: Array<unknown> = [];
+        yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario,
+            entries: withSkillsOverride(
+              codexReplayPreamble({
+                nativeThreadId: "member-skills-thread",
+                nativeTurnId: "unused",
+                prompt: "unused",
+              }).slice(0, 5),
+              member,
+            ),
+          }),
+          () => Effect.void,
+          (method, params) =>
+            Effect.sync(() => {
+              if (method === "thread/start") requests.push(params);
+            }),
+        );
+        assert.deepEqual(requests, [
+          {
+            cwd: "/workspace",
+            model: "gpt-5.4",
+            config: {
+              ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+              ...(member ? { "skills.include_instructions": false } : {}),
+              "mcp_servers.t3-code": codexT3Server,
+            },
+          },
+        ]);
+      }).pipe(
+        Effect.scoped,
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+  );
+
+  it.effect.each(workflowMemberCases)(
+    "thread/resume for $name sends the skills override again only for workflow members",
+    ({ capabilities, member }) =>
+      Effect.scoped(
+        Effect.gen(function* () {
+          const scenario = `member-skills-resume-${member ? "member" : "other"}-${capabilities?.length ?? "none"}`;
+          yield* setCodexMemberSession(scenario, capabilities);
+          const nativeThreadId = `native-${scenario}-thread`;
+          const transcript = makeCodexReplayTranscript({
+            scenario,
+            entries: [
+              ...withSkillsOverride(
+                codexReplayPreamble({
+                  nativeThreadId,
+                  nativeTurnId: "unused-turn",
+                  prompt: "unused-prompt",
+                }).slice(0, 5),
+                member,
+              ),
+              {
+                type: "expect_outbound",
+                label: "thread/resume",
+                frame: {
+                  id: 3,
+                  method: "thread/resume",
+                  params: {
+                    threadId: nativeThreadId,
+                    excludeTurns: true,
+                    cwd: CODEX_TEST_RUNTIME_POLICY.cwd,
+                    model: CODEX_TEST_MODEL_SELECTION.model,
+                    config: {
+                      ...CodexAdapterV2.CODEX_THREAD_CONFIG,
+                      ...(member ? { "skills.include_instructions": false } : {}),
+                      "mcp_servers.t3-code": codexT3Server,
+                    },
+                  },
+                },
+              },
+              {
+                type: "emit_inbound",
+                label: "thread/resume",
+                frame: { id: 3, result: { thread: { id: nativeThreadId, updatedAt: 1782622450 } } },
+              },
+            ],
+          });
+          const harness = yield* makeCodexReplayHarness(transcript);
+          const resumed = yield* harness.runtime.resumeThread({
+            providerThread: harness.providerThread,
+            modelSelection: CODEX_TEST_MODEL_SELECTION,
+            runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          });
+          assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          ),
+        ),
+      ),
+  );
   // regression: #15839 launch-arg MCP servers survive the thread's t3-code server
   it.effect("replays historical and dotted MCP config while enforcing other thread config", () =>
     Effect.gen(function* () {
@@ -1817,6 +1977,88 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  it.effect("sends a workflow member the runtime context without the orchestration text", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const nativeThreadId = "member-context-thread";
+        const nativeTurnId = "member-context-turn";
+        const params = yield* CodexAdapterV2.buildCodexTurnStartParams({
+          nativeThreadId,
+          codexInput: [{ type: "text", text: "work" }],
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          hasT3Mcp: true,
+          orchestrationAvailable: false,
+          browserToolsAvailable: false,
+        });
+        const keys = Object.keys(params.additionalContext ?? {});
+        assert.deepEqual(keys, ["t3_code_runtime"]);
+        const full = yield* CodexAdapterV2.buildCodexTurnStartParams({
+          nativeThreadId,
+          codexInput: [{ type: "text", text: "work" }],
+          runtimePolicy: CODEX_TEST_RUNTIME_POLICY,
+          modelSelection: CODEX_TEST_MODEL_SELECTION,
+          hasT3Mcp: true,
+        });
+        assert.isTrue(
+          Object.keys(full.additionalContext ?? {}).some((key) =>
+            key.startsWith("t3_code_orchestration_"),
+          ),
+        );
+        const entries = codexReplayPreamble({ nativeThreadId, nativeTurnId, prompt: "work" });
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario: "member-turn-context",
+            entries: [
+              ...entries.slice(0, 5),
+              {
+                type: "expect_outbound",
+                label: "member turn",
+                frame: { id: 3, method: "turn/start", params },
+              },
+              ...entries.slice(6),
+              {
+                type: "emit_inbound",
+                label: "done",
+                frame: {
+                  method: "turn/completed",
+                  params: {
+                    threadId: nativeThreadId,
+                    turn: makeCodexReplayTurn({ id: nativeTurnId, status: "completed" }),
+                  },
+                },
+              },
+            ],
+          }),
+        );
+        yield* (yield* McpProviderSessions.McpProviderSessions).set({
+          environmentId: EnvironmentId.make("test"),
+          threadId: harness.threadId,
+          providerSessionId: "member-context-session",
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          endpoint: "http://127.0.0.1:43123/mcp",
+          authorizationHeader: "Bearer test",
+          browserToolsAvailable: false,
+          capabilities: new Set(["worktree", "pull-requests"]),
+        });
+        yield* harness.runtime.startTurn(
+          makeCodexTestTurnInput({
+            threadId: harness.threadId,
+            providerThread: harness.providerThread,
+            now: yield* DateTime.now,
+            attemptId: RunAttemptId.make("member-context-attempt"),
+            text: "work",
+          }),
+        );
+        yield* harness.firstTerminal;
+        assert.equal(harness.terminalEvents()[0]?.status, "completed");
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
   it.effect("compacts Codex with the native RPC and completes the compaction turn", () =>
     Effect.scoped(
       Effect.gen(function* () {

@@ -423,8 +423,7 @@ export const layerWithOptions = (
               threadId,
               Effect.gen(function* () {
                 // Live providers build MCP clients once; reuse credentials across workspace handoffs.
-                const { browser: browserToolsAvailable, device: deviceToolsAvailable } =
-                  yield* agentAccessSettings(threadId);
+                const agentAccess = yield* agentAccessSettings(threadId);
                 const capabilities = new Set<
                   import("../mcp/McpInvocationContext.ts").McpCapability
                 >(["orchestration", "worktree", "pull-requests"]);
@@ -434,9 +433,14 @@ export const layerWithOptions = (
                 );
                 // An unreadable lineage may belong to a workflow member, so it gets no orchestration;
                 // the credential is replaced once the read works.
-                if (lineage === undefined || lineage.workflowId !== undefined) {
+                const workflowMember = lineage === undefined || lineage.workflowId !== undefined;
+                if (workflowMember) {
                   capabilities.delete("orchestration");
                 }
+                // Members get the member toolset; preview and device tools stay with the thread that
+                // answers the user.
+                const browserToolsAvailable = agentAccess.browser && !workflowMember;
+                const deviceToolsAvailable = agentAccess.device && !workflowMember;
                 if (browserToolsAvailable) capabilities.add("preview");
                 if (deviceToolsAvailable) capabilities.add("device");
                 const subagent = lineage?.relationshipToParent === "subagent";

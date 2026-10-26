@@ -2712,6 +2712,7 @@ const make = Effect.gen(function* () {
         : { path: filePath, status: "found", sha256: hash.sha256, sizeBytes: hash.sizeBytes },
     ),
     blockers: review.blockers,
+    ...(review.advisory === undefined ? {} : { advisory: review.advisory }),
   });
 
   /**

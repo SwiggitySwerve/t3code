@@ -89,6 +89,13 @@ const scope: McpInvocationContext.McpInvocationScope = {
   issuedAt: 0,
   capabilities: new Set(["orchestration"]),
 };
+/** An MCP client without a thread has no member toolset to filter, so handlers decide what it may do. */
+const capabilityLessClientScope: McpInvocationContext.McpInvocationScope = {
+  ...scope,
+  thread: undefined,
+  client: { sessionId: "mcp-core-client", label: "Test client", access: "auto" },
+  capabilities: new Set<never>(),
+};
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
   protocolVersion: "2025-06-18",
@@ -106,18 +113,24 @@ it.effect("checks capability through the production registration", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     expect(server.tools.some(({ tool }) => tool.name === "t3_thread_organize")).toBe(true);
-    const result = yield* server
-      .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
-      .pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, {
-          ...scope,
-          capabilities: new Set<never>(),
-        }),
-        Effect.provideService(McpSchema.McpServerClient, client),
-      );
+    const callAs = (invocation: McpInvocationContext.McpInvocationScope) =>
+      server
+        .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const result = yield* callAs(capabilityLessClientScope);
     expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toBeUndefined();
+    // A workflow member (a thread credential without orchestration) cannot see or call the tool at all.
+    const member = yield* callAs({ ...scope, capabilities: new Set(["worktree"]) }).pipe(
+      Effect.flip,
+    );
+    expect(String((member as { readonly message?: unknown }).message ?? member)).toContain(
+      "not found",
+    );
   }).pipe(
     Effect.provide(
       layerThreadToolkit.pipe(
@@ -295,16 +308,21 @@ it.effect("records only failed calls of tools that hand off no work", () => {
   const recorded = Deferred.makeUnsafe<{ event: string; properties: object }>();
   return Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
-    const organize = (capabilities: McpInvocationContext.McpInvocationScope["capabilities"]) =>
+    const organize = (
+      capabilities: McpInvocationContext.McpInvocationScope["capabilities"],
+      base: McpInvocationContext.McpInvocationScope = scope,
+    ) =>
       server.callTool({ name: "t3_thread_organize", arguments: { action: "pin" } }).pipe(
         Effect.provideService(McpInvocationContext.McpInvocationContext, {
-          ...scope,
+          ...base,
           capabilities,
         }),
         Effect.provideService(McpSchema.McpServerClient, client),
       );
     expect((yield* organize(scope.capabilities)).isError).not.toBe(true);
-    expect(declaredFailure(yield* organize(new Set<never>()))).toMatchObject({
+    expect(
+      declaredFailure(yield* organize(new Set<never>(), capabilityLessClientScope)),
+    ).toMatchObject({
       code: "capability_denied",
     });
     // The successful call ran first, so it would be the first event if it were recorded.

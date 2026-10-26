@@ -47,7 +47,8 @@ Before `ProviderSessionManager` opens a new V2 provider session, it asks
 
 Workflow members (including judges) receive no `orchestration` capability, so they
 cannot delegate or start workflows. Ordinary delegated children retain orchestration
-access. Browser, device, worktree and pull-request access follow their existing settings. Credentials
+access. A member also gets no preview or device capability. Worktree and pull-request access follow
+their existing settings. Credentials
 expire after a maximum lifetime, expire when idle, and are revoked when the
 provider session is released. The raw token is not persisted in orchestration
 state.
@@ -55,6 +56,22 @@ state.
 The MCP HTTP server resolves the bearer token and supplies the resulting
 `McpInvocationScope` to tool handlers. Orchestration handlers additionally
 check the `orchestration` capability before reading or mutating state.
+
+**Member toolset.** A thread credential without `orchestration` belongs to a workflow member
+(`hasMemberToolset` in `@t3tools/provider-core/server/mcpSession` owns the test). One filter at
+`McpHttpServer` (`TOOLKIT_REQUIRED_CAPABILITY`, applied where toolkits and image tools register)
+lists and calls only the tools of toolkits whose capability the member holds: the orchestrator,
+thread, project, environment and attachment tools need `orchestration`, the preview tools need
+`preview` and the device tools need `device`. A member sees the worktree, pull-request and html
+tools; in the test registration that is 9 tools and 21,637 bytes of `tools/list` against 88 tools
+and 283,106 bytes for a coordinator. A hidden tool is not listed and a call to it returns "Tool
+'<name>' not found". Coordinators, ordinary threads and OAuth clients keep every tool, and
+handlers still check their capability. The same test sets the instructions a member gets: Codex
+members send `skills.include_instructions=false` on `thread/start` and `thread/resume` (Codex
+reads it per thread and restores the catalog on a resume that omits it) and no
+`t3_code_orchestration_*` context; Claude members get no orchestration or background-wait text and
+keep every settings source (user and local settings hold permission rules, hooks and env that T3
+also reads). Built-in Claude tools, skills and the system prompt preset are not restricted.
 
 ## Provider Injection
 
@@ -637,7 +654,9 @@ own threads. The row stores the script with a settings line for its args and bud
   person sends a new message that asks for a workflow. A retry after the committed workflow
   changed a reviewed input file fails closed rather than returning the workflow.
 - **Budget.** `budgetTokens` counts cumulative input plus output for finished
-  attempts, including cached reads and writes, retries and judges. It is an estimate
+  attempts, including cached reads and writes, retries and judges. It does not count the
+  coordinator's own tokens, which were 20-26% of the total in the C1 baseline. `graph_review`
+  suggests a value (`advisory.suggestedBudgetTokens`). It is an estimate
   rather than a bill. Once it is spent, `agent()` throws for any agent that has not
   already started; agents already running finish. `workflow_status` reports
   `tokensUsed`, `usage`, and `budgetTokens`. The script's `budget.spent` and remaining
@@ -717,7 +736,16 @@ when every node passed its checks.
   `workspace_snapshot` input and returns the run order as `layers`, `writeConflicts`
   between nodes with no path between them (the runner runs those one at a time), the
   inputs it found, `ready`, and a `digest` over the normalized graph and the input
-  hashes. It starts nothing; Claude's read-only tool list includes it. It also returns
+  hashes. It starts nothing; Claude's read-only tool list includes it. A graph that parses also
+  gets an `advisory` with `fanOut` (`consider_single` for a lone node, a chain, or two nodes
+  with no check), up to three short `reasons`, the node count, widest wave, depth and verifier
+  count, `estimatedModelCalls` and `estimatedTokens` (low and high, with the coordinator's part
+  and a `basis`), `suggestedBudgetTokens` (1.4 times the agents' high estimate, without the
+  coordinator) and `overshootBoundTokens` (the widest wave times three calls at the high
+  per-call figure). Call counts and the 96k high figure come from the C1 baseline of 2026-10-26,
+  the 37k low figure from M7's Claude prefix; all are opinion until C4 recalibrates them. The advisory counts one judge agent per judgment check. It is not in the
+  digest and never changes `ready`, `blockers` or `approvalRequired`, and it never blocks a start,
+  including when the user asked for a workflow. It also returns
   a `reviewId` the server made for this review, and `approvalRequired`, true while a
   user's request for a workflow waits for approval (above). The server keeps the review
   in memory so the user's decision can be bound to it; the client decides by `reviewId`

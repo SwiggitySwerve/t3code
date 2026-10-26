@@ -850,7 +850,11 @@ describe("ClaudeAdapterV2 Auto-accept edits", () => {
 });
 
 describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
-  const startTurnWithLaunchArgs = Effect.fnUntraced(function* (launchArgs: string, cwd: string) {
+  const startTurnWithLaunchArgs = Effect.fnUntraced(function* (
+    launchArgs: string,
+    cwd: string,
+    mcpCapabilities?: ReadonlyArray<string>,
+  ) {
     const fileSystem = yield* FileSystem.FileSystem;
     const opened: Array<ClaudeAdapterV2.ClaudeAgentSdkQueryOptions> = [];
     const adapter = yield* ClaudeAdapterV2.makeClaudeAdapterV2({
@@ -890,6 +894,18 @@ describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
       cwd,
     });
     const threadId = ThreadId.make("thread-claude-append-file");
+    if (mcpCapabilities !== undefined) {
+      yield* (yield* McpProviderSessions.McpProviderSessions).set({
+        environmentId: EnvironmentId.make("environment-claude-append-file"),
+        threadId,
+        providerSessionId: "provider-session-claude-append-file",
+        providerInstanceId: ProviderInstanceId.make("claudeAgent"),
+        endpoint: "http://127.0.0.1:43123/mcp",
+        authorizationHeader: "Bearer secret-claude-token",
+        browserToolsAvailable: false,
+        capabilities: new Set(mcpCapabilities),
+      });
+    }
     const runtime = yield* adapter.openSession({
       threadId,
       providerSessionId: ProviderSessionId.make("provider-session-claude-append-file"),
@@ -948,6 +964,36 @@ describe("ClaudeAdapterV2 append-system-prompt-file launch argument", () => {
     ),
   );
 
+  it.effect.each([
+    { name: "a coordinator", capabilities: ["orchestration", "worktree"], member: false },
+    { name: "a workflow member", capabilities: ["worktree", "pull-requests"], member: true },
+  ] as const)("gives $name Claude query options that match its role", ({ capabilities, member }) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const cwd = yield* fileSystem.makeTempDirectoryScoped({ prefix: "t3-claude-member-cwd-" });
+        const { exit, opened } = yield* startTurnWithLaunchArgs("", cwd, capabilities);
+        assert.isTrue(Exit.isSuccess(exit));
+        const append = appendSystemPrompt(opened[0]) ?? "";
+        assert.equal(append.includes("Use `delegate_task`"), !member);
+        assert.equal(append.includes("call `t3_background_wait`"), !member);
+        // Runtime text stays for every thread.
+        assert.include(append, "Claude Code");
+        // Every thread keeps its settings sources: they carry permissions, hooks and env.
+        assert.isUndefined(opened[0]?.settingSources);
+        // Built-in tools, skills and the system prompt preset are not restricted.
+        assert.isUndefined(opened[0]?.skills);
+        assert.equal(
+          (opened[0]!.systemPrompt as { readonly preset?: string }).preset,
+          "claude_code",
+        );
+      }).pipe(
+        Effect.provide(
+          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+        ),
+      ),
+    ),
+  );
   // regression: #20413 malformed append-system-prompt launch args fail before a query opens
   it.effect.each([
     [

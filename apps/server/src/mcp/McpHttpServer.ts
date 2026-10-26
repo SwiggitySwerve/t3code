@@ -934,6 +934,46 @@ const withToolAnalytics =
   });
 
 /**
+ * The capability each gated toolkit needs. A workflow member (a thread credential without
+ * `orchestration`) lists and calls only the tools of toolkits whose capability it holds, so it sees the
+ * worktree, pull request and html tools and none of the orchestration, thread, preview or device
+ * tools. Image tools registered outside a toolkit take the same value.
+ */
+export const TOOLKIT_REQUIRED_CAPABILITY = {
+  orchestrator: "orchestration",
+  thread: "orchestration",
+  project: "orchestration",
+  environment: "orchestration",
+  attachment: "orchestration",
+  preview: "preview",
+  previewControls: "preview",
+  device: "device",
+} as const satisfies Record<string, McpInvocationContext.McpCapability>;
+
+/** Hides the tools it registers from workflow members that lack `capability`; a hidden tool is "not found". */
+const withRequiredCapability = <A, E, R>(
+  registration: Effect.Effect<A, E, R>,
+  capability: McpInvocationContext.McpCapability | undefined,
+): Effect.Effect<A, E, R | McpServer.McpServer> => {
+  if (capability === undefined) return registration;
+  const visibleToCaller = McpInvocationContext.visibleToMembersWith(capability);
+  return Effect.updateService(registration, McpServer.McpServer, (server) => ({
+    ...server,
+    addTool: (options) => {
+      const inherited = Context.getOrUndefined(options.annotations, McpSchema.EnabledWhen);
+      return server.addTool({
+        ...options,
+        annotations: Context.add(
+          options.annotations,
+          McpSchema.EnabledWhen,
+          (client) => (inherited?.(client) ?? true) && visibleToCaller(),
+        ),
+      });
+    },
+  }));
+};
+
+/**
  * `McpServer.toolkit` asks for every service its tools declare when it
  * registers them, but the auth middleware provides `McpInvocationContext` to
  * each request instead. Registration must not get one: the services it
@@ -942,9 +982,15 @@ const withToolAnalytics =
 export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, RX>(
   toolkit: Toolkit.Toolkit<Tools>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
+  requiredCapability?: McpInvocationContext.McpCapability,
 ) => {
   const registration = Layer.effectDiscard(
-    withToolAnalytics(McpServer.registerToolkit(decodeAsAdvertised(toolkit))),
+    withToolAnalytics(
+      withRequiredCapability(
+        McpServer.registerToolkit(decodeAsAdvertised(toolkit)),
+        requiredCapability,
+      ),
+    ),
   ).pipe(Layer.provide(McpServer.McpServer.layer));
   // @effect-diagnostics-next-line unsafeEffectTypeAssertion:off - the auth middleware provides it per request.
   const registered = registration as Layer.Layer<
@@ -958,8 +1004,9 @@ export const toolkitRegistration = <Tools extends Record<string, Tool.Any>, EX, 
 const imageToolRegistration = <Tools extends Record<string, Tool.Any>, A, E, R, EX, RX>(
   register: Effect.Effect<A, E, R>,
   handlers: McpToolAccess.HandlersLayer<Tools, EX, RX>,
+  requiredCapability?: McpInvocationContext.McpCapability,
 ) =>
-  Layer.effectDiscard(withToolAnalytics(register)).pipe(
+  Layer.effectDiscard(withToolAnalytics(withRequiredCapability(register, requiredCapability))).pipe(
     Layer.provide(McpToolAccess.HandlersLayer.layer(handlers)),
   );
 
@@ -971,11 +1018,13 @@ export const layerHtmlToolkit = Layer.mergeAll(
 const layerPreviewStandardToolkitRegistration = toolkitRegistration(
   PreviewStandardToolkit,
   PreviewHandlers.layerStandard,
+  TOOLKIT_REQUIRED_CAPABILITY.preview,
 );
 
 const layerPreviewSnapshotRegistration = imageToolRegistration(
   registerPreviewSnapshot(),
   PreviewHandlers.layerSnapshot,
+  TOOLKIT_REQUIRED_CAPABILITY.preview,
 );
 
 export const layerPreviewToolkit = Layer.mergeAll(
@@ -986,9 +1035,14 @@ export const layerPreviewToolkit = Layer.mergeAll(
 export const layerOrchestratorToolkit = toolkitRegistration(
   OrchestratorToolkit,
   OrchestratorHandlers.layer,
+  TOOLKIT_REQUIRED_CAPABILITY.orchestrator,
 ).pipe(Layer.provide(OrchestratorMcpService.layer), Layer.provide(ThreadMetadataMcpService.layer));
 
-export const layerThreadToolkit = toolkitRegistration(ThreadToolkit, ThreadHandlers.layer);
+export const layerThreadToolkit = toolkitRegistration(
+  ThreadToolkit,
+  ThreadHandlers.layer,
+  TOOLKIT_REQUIRED_CAPABILITY.thread,
+);
 
 const layerWorktreeToolkitRegistration = toolkitRegistration(
   WorktreeToolkit,
@@ -998,18 +1052,25 @@ const layerWorktreeToolkitRegistration = toolkitRegistration(
 const layerPreviewControlsRegistration = toolkitRegistration(
   PreviewControlsToolkit,
   PreviewControlsHandlers.layer,
+  TOOLKIT_REQUIRED_CAPABILITY.previewControls,
 );
 
 const layerEnvironmentToolkit = toolkitRegistration(
   EnvironmentToolkit,
   EnvironmentHandlers.layer,
+  TOOLKIT_REQUIRED_CAPABILITY.environment,
 ).pipe(Layer.provide(ThreadCommandExecutor.layer));
 
-const layerProjectRegistration = toolkitRegistration(ProjectToolkit, ProjectHandlers.layer);
+const layerProjectRegistration = toolkitRegistration(
+  ProjectToolkit,
+  ProjectHandlers.layer,
+  TOOLKIT_REQUIRED_CAPABILITY.project,
+);
 
 export const layerAttachmentToolkit = toolkitRegistration(
   AttachmentToolkit,
   AttachmentHandlers.layer,
+  TOOLKIT_REQUIRED_CAPABILITY.attachment,
 );
 
 export const layerPullRequestsToolkit = toolkitRegistration(
@@ -1020,11 +1081,13 @@ export const layerPullRequestsToolkit = toolkitRegistration(
 const layerDeviceStandardToolkitRegistration = toolkitRegistration(
   DeviceStandardToolkit,
   DeviceHandlers.layerStandard,
+  TOOLKIT_REQUIRED_CAPABILITY.device,
 );
 
 const layerDeviceScreenshotRegistration = imageToolRegistration(
   registerDeviceScreenshot(),
   DeviceHandlers.layerScreenshot,
+  TOOLKIT_REQUIRED_CAPABILITY.device,
 );
 
 export const layerDeviceToolkit = Layer.mergeAll(

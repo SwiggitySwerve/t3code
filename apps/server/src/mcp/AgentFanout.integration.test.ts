@@ -3489,6 +3489,68 @@ describe("graphs", () => {
       expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
     }).pipe(Effect.provide(layerTest)),
   );
+  it.effect(
+    "graph_review reports a fan-out advisory that never blocks, gates or changes the digest",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const workerTarget = { providerInstanceId: claudeInstanceId, model: claudeModel };
+        const task = (dependsOn: ReadonlyArray<string> = []) => ({
+          subject: "worker",
+          description: "work",
+          dependsOn,
+        });
+        const review = (nodes: Record<string, unknown>) =>
+          Effect.gen(function* () {
+            const result = yield* invoke("graph_review", {
+              graph: { schemaVersion: 1, nodes },
+              workerTarget,
+            });
+            return yield* decodeReview(result.structuredContent);
+          });
+        const chain = yield* review({ a: task(), b: task(["a"]), c: task(["b"]) });
+        // A chain is advised against, yet it is ready, has a digest and needs no approval of its own.
+        expect(chain).toMatchObject({
+          ready: true,
+          blockers: [],
+          approvalRequired: false,
+          advisory: { fanOut: "consider_single", nodeCount: 3, widestWave: 1, depth: 3 },
+        });
+        expect(chain.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+        const fan = yield* review({
+          a: task(),
+          b: task(),
+          c: task(),
+          combine: task(["a", "b", "c"]),
+        });
+        expect(fan).toMatchObject({
+          ready: true,
+          blockers: [],
+          advisory: {
+            fanOut: "ok",
+            widestWave: 3,
+            estimatedModelCalls: { low: 11, high: 16 },
+            estimatedTokens: { coordinator: { low: 111_000, high: 384_000 } },
+          },
+        });
+        expect(fan.advisory?.suggestedBudgetTokens).toBe(1_612_800);
+        // The advisory is not part of what the user approves: an identical review gives an identical digest.
+        const again = yield* review({
+          a: task(),
+          b: task(),
+          c: task(),
+          combine: task(["a", "b", "c"]),
+        });
+        expect(again.digest).toBe(fan.digest);
+        // A graph that does not parse has no advisory.
+        const broken = yield* decodeReview(
+          (yield* invoke("graph_review", { graph: { schemaVersion: 1, nodes: {} } }))
+            .structuredContent,
+        );
+        expect(broken.advisory).toBeUndefined();
+        expect(broken.ready).toBe(false);
+      }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("C3 expands defaults before hashing and reports target provenance", () =>
     Effect.gen(function* () {
       yield* startParent;

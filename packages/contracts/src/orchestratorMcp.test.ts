@@ -18,6 +18,54 @@ const decodeGraphStartInput = Schema.decodeUnknownSync(OrchestratorMcpGraphStart
 const decodeWorkflowStartInput = Schema.decodeUnknownSync(OrchestratorMcpWorkflowStartInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("states what budgetTokens counts and points at the suggested budget", () => {
+    const description = String(
+      OrchestratorMcpWorkflowStartInput.fields.budgetTokens.ast.annotations?.description ?? "",
+    );
+    expect(description).toContain("does not count your own tokens");
+    expect(description).toContain("suggestedBudgetTokens");
+    expect(OrchestratorMcpGraphStartInput.fields.budgetTokens).toBe(
+      OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
+    );
+  });
+
+  it("decodes a graph review with and without the advisory", () => {
+    const base = {
+      reviewId: "review-1",
+      approvalRequired: false,
+      digest: `sha256:${"a".repeat(64)}`,
+      ready: true,
+      expandedGraph: null,
+      targets: [],
+      layers: [["a"]],
+      writeConflicts: [],
+      inputs: [],
+      blockers: [],
+    };
+    const advisory = {
+      fanOut: "consider_single",
+      reasons: ["One chain."],
+      nodeCount: 1,
+      widestWave: 1,
+      depth: 1,
+      verifierCount: 0,
+      estimatedModelCalls: { low: 5, high: 7 },
+      estimatedTokens: {
+        low: 185_000,
+        high: 672_000,
+        coordinator: { low: 111_000, high: 384_000 },
+        basis: "test",
+      },
+      suggestedBudgetTokens: 403_200,
+      overshootBoundTokens: 288_000,
+    };
+    expect(decodeGraphReviewResult(base).advisory).toBeUndefined();
+    expect(decodeGraphReviewResult({ ...base, advisory }).advisory).toEqual(advisory);
+    expect(() =>
+      decodeGraphReviewResult({ ...base, advisory: { ...advisory, fanOut: "stop" } }),
+    ).toThrow();
+  });
+
   it("decodes worker defaults consistently on scripts, graph review and graph start", () => {
     for (const options of [{ reasoningEffort: "high" }, [], {}]) {
       const workerTarget = { model: "sol", options };

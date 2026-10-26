@@ -362,7 +362,7 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   }),
   budgetTokens: Schema.optional(PositiveInt).annotate({
     description:
-      "Token budget, counted from the usage providers report for finished agents. Once spent, starting another agent throws in the script; agents already running finish. The script reads it as budget.total, budget.spent and budget.remaining().",
+      "Token budget, counted from the usage providers report for finished agents, judges and retries included. It does not count your own tokens as coordinator. Once spent, starting another agent throws in the script; agents already running finish, so a wide wave can overshoot it. graph_review returns suggestedBudgetTokens and overshootBoundTokens as a starting point. The script reads it as budget.total, budget.spent and budget.remaining().",
   }),
   title: Schema.optional(OrchestratorMcpTitle),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
@@ -400,6 +400,52 @@ export const OrchestratorMcpProfileChoice = Schema.Struct({
   ).annotate({ description: "Entries tried before the chosen one, each with why it was skipped." }),
 });
 export type OrchestratorMcpProfileChoice = typeof OrchestratorMcpProfileChoice.Type;
+
+const LowHighRange = Schema.Struct({ low: NonNegativeInt, high: NonNegativeInt });
+
+/**
+ * A cost and fan-out estimate for the coordinator and the user. It is advice: it is not part of the
+ * digest and never blocks a review or a start, including when the user asked for a workflow.
+ */
+export const OrchestratorMcpGraphAdvisory = Schema.Struct({
+  fanOut: Schema.Literals(["ok", "consider_single"]).annotate({
+    description:
+      "consider_single when one agent would likely do the same work for less: a chain, a lone node, or two unchecked nodes. Say so to the user in one sentence; do not drop a requested workflow because of it.",
+  }),
+  reasons: Schema.Array(Schema.String).annotate({
+    description: "At most 3 short reasons for consider_single; empty for ok.",
+  }),
+  nodeCount: NonNegativeInt,
+  widestWave: NonNegativeInt.annotate({
+    description: "Most nodes in one dependency layer, which may run at once.",
+  }),
+  depth: NonNegativeInt.annotate({ description: "Number of dependency layers." }),
+  verifierCount: NonNegativeInt.annotate({ description: "Nodes that carry a verify check." }),
+  estimatedModelCalls: LowHighRange.annotate({
+    description:
+      "Model calls of all agents, judges and the coordinator, as a low and high estimate.",
+  }),
+  estimatedTokens: Schema.Struct({
+    low: NonNegativeInt,
+    high: NonNegativeInt,
+    coordinator: LowHighRange.annotate({
+      description: "The part of low and high that is your own, as coordinator.",
+    }),
+    basis: Schema.String,
+  }).annotate({
+    description:
+      "Estimated tokens of the run, your own included. budgetTokens does not count the coordinator's part.",
+  }),
+  suggestedBudgetTokens: NonNegativeInt.annotate({
+    description:
+      "A starting budgetTokens: 1.4 times the agents' high estimate, without the coordinator.",
+  }),
+  overshootBoundTokens: NonNegativeInt.annotate({
+    description:
+      "About how far past budgetTokens one wave of running agents can go before it stops.",
+  }),
+});
+export type OrchestratorMcpGraphAdvisory = typeof OrchestratorMcpGraphAdvisory.Type;
 
 export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   reviewId: Schema.String.annotate({
@@ -466,6 +512,10 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
     }),
   ),
   blockers: Schema.Array(Schema.String),
+  advisory: Schema.optional(OrchestratorMcpGraphAdvisory).annotate({
+    description:
+      "Fan-out and cost advice for the reviewed graph. Informational only: it never changes ready, blockers, approvalRequired or the digest. Absent when the graph does not parse.",
+  }),
 });
 export type OrchestratorMcpGraphReviewResult = typeof OrchestratorMcpGraphReviewResult.Type;
 
