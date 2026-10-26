@@ -1027,6 +1027,75 @@ describe("deriveMessagesTimelineRows", () => {
     ).toBeDefined();
   });
 
+  it("keeps the coordinator's reviewed graph out of the turn fold, so it can be approved", () => {
+    const fixture = makeStreamingTimelineFixture();
+    const tool = fixture.visibleTurnItems.find((row) => row.item.type === "dynamic_tool")!;
+    if (tool.item.type !== "dynamic_tool") throw new Error("Expected tool fixture");
+    const review = {
+      ...tool,
+      item: {
+        ...tool.item,
+        toolName: "t3-code.graph_review",
+        output: undefined,
+        outputOmitted: true,
+      },
+    };
+    const entry = (id: string, at: string, extra: object) => ({
+      id: `${id}-entry`,
+      kind: "work" as const,
+      createdAt: at,
+      entry: {
+        id,
+        createdAt: at,
+        runId: "turn-1" as never,
+        label: "Ran tool",
+        tone: "tool" as const,
+        ...extra,
+      },
+    });
+    const message = (id: string, role: "user" | "assistant", at: string) => ({
+      id: `${id}-entry`,
+      kind: "message" as const,
+      createdAt: at,
+      message: {
+        id: id as never,
+        role,
+        text: id,
+        runId: role === "user" ? null : ("turn-1" as never),
+        createdAt: at,
+        updatedAt: at,
+        streaming: false,
+      },
+    });
+    const rows = deriveMessagesTimelineRows({
+      timelineEntries: [
+        message("user", "user", "2026-01-01T00:00:00Z"),
+        entry("read", "2026-01-01T00:00:05Z", {}),
+        entry("review", "2026-01-01T00:00:08Z", {
+          itemType: "dynamic_tool",
+          toolLifecycleStatus: "completed",
+          projectedItem: review,
+        }),
+        message("assistant-final", "assistant", "2026-01-01T00:00:20Z"),
+      ],
+      isWorking: false,
+      activeTurnStartedAt: null,
+      turnDiffSummaries: [],
+      supportsConversationRollback: false,
+    });
+    expect(rows.map((row) => row.id)).toEqual([
+      "user-entry",
+      "turn-fold:turn-1",
+      "review-entry",
+      "assistant-final-entry",
+    ]);
+    expect(rows.find((row) => row.id === "review-entry")).toMatchObject({
+      kind: "work",
+      groupedEntries: [{ id: "review" }],
+      isExpandedToolGroup: false,
+    });
+  });
+
   it.each([1, 2, 3])("folds %i completed activities after the terminal response", (count) => {
     const runId = RunId.make("turn-1");
     const timelineEntries = [

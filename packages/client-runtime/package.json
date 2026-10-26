@@ -287,6 +287,10 @@
       "types": "./src/state/subagentDisplay.ts",
       "default": "./src/state/subagentDisplay.ts"
     },
+    "./state/workflowReview": {
+      "types": "./src/state/workflowReview.ts",
+      "default": "./src/state/workflowReview.ts"
+    },
     "./state/subagentRuntime": {
       "types": "./src/state/subagentRuntime.ts",
       "default": "./src/state/subagentRuntime.ts"

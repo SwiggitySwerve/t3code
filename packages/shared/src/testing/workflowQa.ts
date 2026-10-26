@@ -281,6 +281,18 @@ export const WORKFLOW_QA_SETTINGS_STATES = [
   "many-profiles",
 ] as const;
 
+/**
+ * The review card the coordinator's `graph_review` becomes: waiting for the person ("pending"),
+ * with the decision on its way, then settled, or found out of date by the server.
+ */
+export const WORKFLOW_QA_REVIEW_STATES = [
+  "pending",
+  "approving",
+  "approved",
+  "dismissed",
+  "stale",
+] as const;
+
 /** A graph surface's own extra state: the 150-node run scrolled to its running wave. */
 export const WORKFLOW_QA_RUNNING_WAVE = "many-nodes-running-wave";
 /** The Lineage Stop button only exists while hovered, so the hover is its own named state. */
@@ -310,6 +322,7 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
   "lineage-collapsed-script": COLLAPSED_SCRIPT_STATES,
   "sidebar-status": WORKFLOW_QA_SIDEBAR_STATES,
   "settings-agents": WORKFLOW_QA_SETTINGS_STATES,
+  "workflow-review": WORKFLOW_QA_REVIEW_STATES,
 };
 
 /** States a surface deliberately has no frame for, with why. They are listed in every manifest. */

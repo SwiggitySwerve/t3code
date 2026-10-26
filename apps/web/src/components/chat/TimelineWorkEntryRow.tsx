@@ -13,6 +13,7 @@ import {
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import { Link } from "@tanstack/react-router";
 import { notificationChildThreadId } from "@t3tools/client-runtime/state/thread-execution";
+import { isWorkflowReviewItem } from "@t3tools/client-runtime/state/workflowReview";
 import {
   resolveViewedImageAsset,
   workEntryViewedImagePath,
@@ -46,6 +47,7 @@ import { cn } from "~/lib/utils";
 import { formatUpcomingTimestamp } from "../../timestampFormat";
 import { FetchedToolOutput, V2ItemInspector } from "./V2ItemInspector";
 import { SubagentNotificationLink } from "./V2LifecycleRow";
+import { WorkflowReviewTimelineBlock } from "./WorkflowReviewTimelineBlock";
 import {
   TimelineRowCtx,
   TimelineRowActivityCtx,
@@ -149,9 +151,21 @@ type WorkEntryRowProps = {
 
 export const SimpleWorkEntryRow = memo(function SimpleWorkEntryRow(props: WorkEntryRowProps) {
   const ctx = use(TimelineRowCtx);
-  const item = props.workEntry.projectedItem?.item;
+  const projectedItem = props.workEntry.projectedItem;
+  const item = projectedItem?.item;
   const childThreadId =
     item?.type === "notification" ? notificationChildThreadId(item.source) : undefined;
+  if (projectedItem !== undefined && item !== undefined && isWorkflowReviewItem(item)) {
+    // The person approves or dismisses the reviewed graph here; any review the card cannot read
+    // keeps the generic tool row.
+    return (
+      <WorkflowReviewTimelineBlock
+        environmentId={ctx.activeThreadEnvironmentId}
+        projectedItem={projectedItem}
+        fallback={<WorkEntryLogRow {...props} />}
+      />
+    );
+  }
   if (item?.type !== "notification" || childThreadId === undefined) {
     return <WorkEntryLogRow {...props} />;
   }

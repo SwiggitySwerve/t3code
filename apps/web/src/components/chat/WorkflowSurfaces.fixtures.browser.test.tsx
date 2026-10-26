@@ -9,6 +9,7 @@ import { render, type Screen } from "../../../test/render";
 import {
   LineageRowSurface,
   WorkflowBlockSurface,
+  WorkflowReviewSurface,
   WorkflowCanvasSurface,
   scrollWavesToNode,
 } from "../../../test/workflow-fixtures/surfaces";
@@ -21,6 +22,7 @@ import {
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import {
   WORKFLOW_QA_EXPECTED_STATES,
+  WORKFLOW_QA_REVIEW_STATES,
   WORKFLOW_QA_RUNNING_WAVE,
   WORKFLOW_QA_STOP_VISIBLE,
 } from "@t3tools/shared/testing/workflowQa";
@@ -147,6 +149,20 @@ describe.each(["graph", "script"] as const)("lineage row at rest, %s", (kind) =>
       frame: "[data-qa-panel]",
       widthIndependent: true,
       element: () => <LineageRowSurface kind={kind} variant={variant} />,
+    });
+  });
+});
+
+// The review card, in every state a person meets it in. The frames show what the shared
+// presentation says for each state of the decision, not a hand-drawn copy.
+describe("workflow review card", () => {
+  it.each(WORKFLOW_QA_REVIEW_STATES)("%s", async (state) => {
+    await captureSurface({
+      surface: "workflow-review",
+      state,
+      selector: "[data-workflow-review]",
+      frame: "[data-qa-column]",
+      element: () => <WorkflowReviewSurface state={state} />,
     });
   });
 });

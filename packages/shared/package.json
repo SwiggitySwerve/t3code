@@ -359,6 +359,10 @@
       "types": "./src/testing/longTempDir.ts",
       "import": "./src/testing/longTempDir.ts"
     },
+    "./testing/workflowReviewFixture": {
+      "types": "./src/testing/workflowReviewFixture.ts",
+      "import": "./src/testing/workflowReviewFixture.ts"
+    },
     "./testing/workflowQa": {
       "types": "./src/testing/workflowQa.ts",
       "import": "./src/testing/workflowQa.ts"

@@ -35,6 +35,7 @@ import {
   setPendingUserInputCustomAnswer,
   isPendingUserInputOptionSelected,
   buildPendingUserInputAnswers,
+  isWorkflowReviewActivityGroup,
 } from "./threadActivity";
 
 const threadId = ThreadId.make("thread-1");
@@ -751,6 +752,54 @@ describe("buildThreadFeed", () => {
       "message-middle",
       "message-assistant",
     ]);
+  });
+
+  it("keeps the coordinator's reviewed graph out of the folded work, as a card of its own", () => {
+    const review = {
+      ...base("item-review", "2026-06-20T00:00:02.500Z", 3),
+      type: "dynamic_tool" as const,
+      toolName: "t3-code.graph_review",
+      input: {},
+      outputOmitted: true,
+    };
+    const feed = buildThreadFeed([
+      projected(userMessage(), 0),
+      projected(command(), 1),
+      projected(review, 2),
+      projected(assistantMessage(), 3),
+    ]);
+    const latestRun = {
+      runId,
+      status: "completed" as const,
+      startedAt: "2026-06-20T00:00:01.000Z",
+      completedAt: "2026-06-20T00:00:03.000Z",
+    };
+    const collapsed = deriveThreadFeedPresentation(feed, latestRun, new Set());
+    const groups = collapsed.filter(
+      (entry): entry is Extract<(typeof collapsed)[number], { type: "activity-group" }> =>
+        entry.type === "activity-group",
+    );
+    expect(collapsed.map((entry) => entry.type)).toEqual([
+      "message",
+      "run-fold",
+      "activity-group",
+      "message",
+    ]);
+    expect(groups).toHaveLength(1);
+    expect(groups[0]!.activities.map((activity) => activity.projectedItem.item.id)).toEqual([
+      review.id,
+    ]);
+    expect(isWorkflowReviewActivityGroup(groups[0]!)).toBe(true);
+    // The ordinary command beside it folds, and is no review.
+    const [, fold] = collapsed;
+    expect(fold).toMatchObject({ type: "run-fold" });
+    expect(
+      isWorkflowReviewActivityGroup(
+        buildThreadFeed([projected(command(), 0)]).find(
+          (entry) => entry.type === "activity-group",
+        )!,
+      ),
+    ).toBe(false);
   });
 
   // regression: #21393 show plans and fold settled progress notes

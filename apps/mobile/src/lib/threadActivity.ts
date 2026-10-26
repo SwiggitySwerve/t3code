@@ -7,6 +7,7 @@ import { turnItemIsWorkspacePreparation } from "@t3tools/client-runtime/state/tu
 import type { ThreadCheckpointSummary } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { formatSubagentDisplayTitle } from "@t3tools/client-runtime/state/subagent-display";
 import { isLiveSubagentTurnItem } from "@t3tools/client-runtime/state/subagentRuntime";
+import { isWorkflowReviewItem } from "@t3tools/client-runtime/state/workflowReview";
 import { extractToolActivityPresentation } from "@t3tools/client-runtime/work-log/tool-presentation";
 import {
   turnItemDetailRevision,
@@ -407,6 +408,13 @@ export function isSecretRequestActivityGroup(entry: ThreadFeedActivityGroup): bo
   );
 }
 
+/** The coordinator's reviewed graph, which the person decides on in a card of its own. */
+export function isWorkflowReviewActivityGroup(entry: ThreadFeedActivityGroup): boolean {
+  return (
+    entry.activities.length === 1 && isWorkflowReviewItem(entry.activities[0]!.projectedItem.item)
+  );
+}
+
 function isUserInputActivityGroup(entry: ThreadFeedActivityGroup): boolean {
   return entry.activities.some((activity) => activity.workEntry.questionAnswer !== undefined);
 }
@@ -515,7 +523,9 @@ function itemIsProminent(item: OrchestrationV2TurnItem): boolean {
     item.type === "thread_created" ||
     item.type === "system_notice" ||
     item.type === "proposed_plan" ||
-    item.type === "secret_request"
+    item.type === "secret_request" ||
+    // Kept out of the folded summary: the person approves or dismisses it there.
+    isWorkflowReviewItem(item)
   );
 }
 

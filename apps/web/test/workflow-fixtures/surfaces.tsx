@@ -13,6 +13,7 @@ import {
   threadRelationshipStatusLabel,
 } from "../../src/components/chat/ThreadRelationshipIcon";
 import { WorkflowOpeningBlock } from "../../src/components/chat/WorkflowOpeningBlock";
+import { WorkflowReviewCard } from "../../src/components/chat/WorkflowReviewCard";
 import { WorkflowWaveCanvas } from "../../src/components/chat/WorkflowWaveCanvas";
 import {
   hasUnseenCompletion,
@@ -24,7 +25,14 @@ import {
   sidebarThreadTopStatus,
 } from "../../src/components/sidebar/SidebarThreadStatus";
 import type { SidebarThreadSummary } from "../../src/types";
+import {
+  presentWorkflowReview,
+  readWorkflowReviewOutput,
+  type WorkflowReviewDecision,
+} from "@t3tools/client-runtime/state/workflowReview";
 import { RunId } from "@t3tools/contracts";
+import type { WORKFLOW_QA_REVIEW_STATES } from "@t3tools/shared/testing/workflowQa";
+import { workflowReviewFixtureResult } from "@t3tools/shared/testing/workflowReviewFixture";
 import type { ReactNode } from "react";
 import { vi } from "vite-plus/test";
 
@@ -305,4 +313,42 @@ export async function scrollWavesToNode(container: HTMLElement, nodeKey: string)
       throw new Error(`Node "${nodeKey}" is still a placeholder.`);
     }
   });
+}
+
+const REVIEW_DECISIONS: Record<(typeof WORKFLOW_QA_REVIEW_STATES)[number], WorkflowReviewDecision> =
+  {
+    pending: { _tag: "idle" },
+    approving: { _tag: "pending", action: "approve" },
+    approved: { _tag: "settled", action: "approve" },
+    dismissed: { _tag: "settled", action: "dismiss" },
+    stale: {
+      _tag: "failed",
+      action: "approve",
+      kind: "stale",
+      message: "This review is out of date. Ask the agent to review the graph again.",
+    },
+  };
+
+/** The card the coordinator's reviewed graph becomes, in the chat column. */
+export function WorkflowReviewSurface(props: {
+  readonly state: (typeof WORKFLOW_QA_REVIEW_STATES)[number];
+}) {
+  const review = readWorkflowReviewOutput(workflowReviewFixtureResult());
+  if (review === null) throw new Error("The review fixture must decode.");
+  return (
+    <ChatColumn>
+      <WorkflowReviewCard
+        review={review}
+        presentation={presentWorkflowReview({
+          review,
+          decision: REVIEW_DECISIONS[props.state],
+          canDecide: true,
+          superseded: false,
+        })}
+        providers={QA_PROVIDERS}
+        onApprove={noop}
+        onDismiss={noop}
+      />
+    </ChatColumn>
+  );
 }
