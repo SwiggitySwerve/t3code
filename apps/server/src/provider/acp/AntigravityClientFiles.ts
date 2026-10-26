@@ -1,5 +1,6 @@
 import * as Effect from "effect/Effect";
 import type * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import type * as Path from "effect/Path";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/compat";
@@ -12,7 +13,10 @@ function isInsideRoot(path: Path.Path, root: string, candidate: string): boolean
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-/** Resolve all symlinks, including the final component, before checking workspace containment. */
+/**
+ * Follow links on the nearest existing ancestor and re-attach the missing tail; unreadable entries are denied.
+ * Check and use are separate calls, so this does not stop a link swapped in between them.
+ */
 const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFilePath")(
   function* (input: {
     readonly fileSystem: FileSystem.FileSystem;
@@ -20,30 +24,31 @@ const resolveClientFilePath = Effect.fn("AntigravityClientFiles.resolveClientFil
     readonly allowedRoots: ReadonlyArray<string>;
     readonly requestPath: string;
   }) {
-    const { path } = input;
+    const { fileSystem, path } = input;
     const resolved = path.resolve(input.requestPath);
     const outside = EffectAcpErrors.AcpRequestError.invalidParams(
       `Path '${input.requestPath}' is outside the session workspace.`,
     );
-    const real = yield* input.fileSystem.realPath(resolved).pipe(
-      Effect.catch(() =>
-        Effect.gen(function* () {
-          // Fall back to the parent only for missing files, never dangling or unreadable links.
-          const entryExists = yield* input.fileSystem.readLink(resolved).pipe(
-            Effect.as(true),
-            Effect.catch(() => input.fileSystem.exists(resolved)),
-            Effect.orElseSucceed(() => true),
-          );
-          if (entryExists) return yield* outside;
-          const parent = yield* input.fileSystem
-            .realPath(path.dirname(resolved))
-            .pipe(Effect.orElseSucceed(() => path.dirname(resolved)));
-          return path.join(parent, path.basename(resolved));
-        }),
-      ),
-    );
+    const real = yield* Effect.gen(function* () {
+      const missingTail: Array<string> = [];
+      let candidate = resolved;
+      while (true) {
+        const existing = yield* fileSystem.realPath(candidate).pipe(Effect.option);
+        if (Option.isSome(existing)) return path.join(existing.value, ...missingTail);
+        const entryExists = yield* fileSystem.readLink(candidate).pipe(
+          Effect.as(true),
+          Effect.catch(() => fileSystem.exists(candidate)),
+          Effect.orElseSucceed(() => true),
+        );
+        if (entryExists) return yield* outside;
+        const parent = path.dirname(candidate);
+        if (parent === candidate) return resolved;
+        missingTail.unshift(path.basename(candidate));
+        candidate = parent;
+      }
+    });
     const roots = yield* Effect.forEach(input.allowedRoots, (root) =>
-      input.fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root)),
+      fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root)),
     );
     if (!roots.some((root) => isInsideRoot(path, root, real))) {
       return yield* outside;
