@@ -19,6 +19,8 @@ import {
   V2LifecycleRow,
 } from "./V2LifecycleRow";
 import { SecretRequestCard } from "./SecretRequestCard";
+import { isProjectedWorkflowReview } from "@t3tools/client-runtime/state/workflowReview";
+import { WorkflowReviewTimelineBlock } from "./WorkflowReviewTimelineBlock";
 import { TimelineRowCtx, type TimelineRow } from "./timelineRowContext";
 import { v2EventPresentation, subagentGroupTiming } from "./TimelineV2EventRow.logic";
 
@@ -34,6 +36,14 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
         environmentId={ctx.activeThreadEnvironmentId}
         item={item}
         visibility={visibility}
+      />
+    );
+  }
+  if (isProjectedWorkflowReview(row.projectedItem)) {
+    return (
+      <WorkflowReviewTimelineBlock
+        environmentId={ctx.activeThreadEnvironmentId}
+        projectedItem={row.projectedItem}
       />
     );
   }

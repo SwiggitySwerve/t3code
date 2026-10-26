@@ -3,13 +3,14 @@ import {
   OrchestrationV2WorkflowApprovalError,
   ThreadId,
   TurnItemId,
+  type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import {
   WORKFLOW_REVIEW_FIXTURE_DIGEST,
   WORKFLOW_REVIEW_FIXTURE_ID,
-  workflowReviewFixtureResult,
-  workflowReviewStoredByClaude,
-  workflowReviewStoredByCodex,
+  workflowReviewFixtureLargeRecord,
+  workflowReviewFixtureRecord,
 } from "@t3tools/shared/testing/workflowReviewFixture";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -17,30 +18,49 @@ import { AsyncResult, AtomRegistry } from "effect/reactivity";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  isProjectedWorkflowReview,
   isWorkflowReviewItem,
   latestWorkflowReviewItemId,
   presentWorkflowReview,
-  readWorkflowReviewOutput,
   runWorkflowReviewDecision,
   workflowReviewDecisionAtom,
   workflowReviewDecisionKey,
+  workflowReviewNodeLines,
+  workflowReviewOf,
   workflowReviewSteps,
   workflowReviewSummary,
   workflowReviewTargetLabel,
   type WorkflowReviewDecision,
-  type WorkflowReviewView,
 } from "./workflowReview.ts";
 
-const result = () => workflowReviewFixtureResult();
-const readOrThrow = (output: unknown): WorkflowReviewView => {
-  const review = readWorkflowReviewOutput(output);
-  if (review === null) throw new Error("The review did not decode.");
-  return review;
-};
+const at = DateTime.makeUnsafe("2026-10-26T12:00:00.000Z");
+const reviewItem = (
+  overrides: Parameters<typeof workflowReviewFixtureRecord>[0] = {},
+  id = "review-item",
+  time = at,
+): Extract<OrchestrationV2TurnItem, { readonly type: "workflow_review" }> => ({
+  id: TurnItemId.make(id),
+  threadId: ThreadId.make("thread-1"),
+  runId: null,
+  nodeId: null,
+  providerThreadId: null,
+  providerTurnId: null,
+  nativeItemRef: null,
+  parentItemId: null,
+  ordinal: 0,
+  status: "completed",
+  title: null,
+  startedAt: time,
+  completedAt: time,
+  updatedAt: time,
+  ...workflowReviewFixtureRecord(overrides),
+});
+const reviewOf = (overrides: Parameters<typeof workflowReviewFixtureRecord>[0] = {}) =>
+  workflowReviewOf(workflowReviewFixtureRecord(overrides));
 
-describe("readWorkflowReviewOutput", () => {
+describe("workflowReviewOf", () => {
   it("reads the plan: tasks by wave, what each waits for, who runs it, and the advice", () => {
-    const review = readOrThrow(workflowReviewStoredByCodex(result()));
+    const review = reviewOf();
     expect(review).toMatchObject({
       reviewId: WORKFLOW_REVIEW_FIXTURE_ID,
       digest: WORKFLOW_REVIEW_FIXTURE_DIGEST,
@@ -48,6 +68,7 @@ describe("readWorkflowReviewOutput", () => {
       approvalRequired: true,
       name: "Fix the sync bug",
       blockers: [],
+      taskCount: 4,
       writeConflictCount: 0,
     });
     expect(review.nodes.map((node) => [node.id, node.wave, node.dependsOn])).toEqual([
@@ -60,10 +81,11 @@ describe("readWorkflowReviewOutput", () => {
       subject: "Survey the API surface",
       worker: { providerInstanceId: "cliproxy", model: "claude-opus-5-5" },
       judge: null,
+      check: null,
     });
-    expect(review.nodes[3]?.judge).toEqual({
-      providerInstanceId: "cliproxy",
-      model: "claude-opus-5-5",
+    expect(review.nodes[3]).toMatchObject({
+      judge: { providerInstanceId: "cliproxy", model: "claude-opus-5-5" },
+      check: "judgment",
     });
     expect(review.advice).toMatchObject({
       nodeCount: 4,
@@ -72,103 +94,69 @@ describe("readWorkflowReviewOutput", () => {
     });
   });
 
-  it("reads the result however the coordinator stored it", () => {
-    const codex = readOrThrow(workflowReviewStoredByCodex(result()));
-    expect(readOrThrow(workflowReviewStoredByClaude(result()))).toEqual(codex);
-    expect(readOrThrow({ content: [{ type: "text", text: JSON.stringify(result()) }] })).toEqual(
-      codex,
-    );
-    expect(readOrThrow(JSON.stringify(result()))).toEqual(codex);
-  });
-
-  it("returns null for output that is not a review, so the generic tool row stays", () => {
-    expect(readWorkflowReviewOutput(undefined)).toBeNull();
-    expect(readWorkflowReviewOutput("not json")).toBeNull();
-    // A truncated string, as the on-demand read returns a result over its size bound.
-    expect(readWorkflowReviewOutput(JSON.stringify(result()).slice(0, 300))).toBeNull();
-    // A tool error wraps what the provider reported; there is nothing to decide on.
-    expect(
-      readWorkflowReviewOutput({ error: "refused", result: { content: [{ type: "text" }] } }),
-    ).toBeNull();
-    expect(readWorkflowReviewOutput(workflowReviewFixtureResult({ reviewId: 7 }))).toBeNull();
-  });
-
-  it("offers no approval for a digest the server would not have issued", () => {
-    expect(readOrThrow(result()).digest).toBe(WORKFLOW_REVIEW_FIXTURE_DIGEST);
-    expect(readOrThrow(workflowReviewFixtureResult({ digest: "sha256:abc" })).digest).toBeNull();
-    expect(readOrThrow(workflowReviewFixtureResult({ digest: null })).digest).toBeNull();
-  });
-
-  it("keeps the ability to decide when plan details cannot be read", () => {
-    const review = readOrThrow(
-      workflowReviewFixtureResult({
-        expandedGraph: "gone",
-        targets: "broken",
-        layers: 3,
-        advisory: { fanOut: "maybe" },
-      }),
-    );
-    expect(review).toMatchObject({
+  it("keeps the id and digest of a review with no plan, advice or digest", () => {
+    expect(reviewOf({ tasks: [], taskCount: 0, advice: undefined })).toMatchObject({
       reviewId: WORKFLOW_REVIEW_FIXTURE_ID,
       digest: WORKFLOW_REVIEW_FIXTURE_DIGEST,
       nodes: [],
       advice: null,
     });
-  });
-
-  it("lists blockers and carries a review that has none ready", () => {
-    const review = readOrThrow(
-      workflowReviewFixtureResult({
-        ready: false,
-        digest: null,
-        blockers: ["Node tests has a cycle"],
-      }),
-    );
-    expect(review).toMatchObject({
+    expect(reviewOf({ digest: null, ready: false, blockers: ["A cycle"] })).toMatchObject({
       ready: false,
       digest: null,
-      blockers: ["Node tests has a cycle"],
+      blockers: ["A cycle"],
+    });
+  });
+
+  it("keeps the controls of a review larger than the record lists, and says how many are not shown", () => {
+    const review = workflowReviewOf(workflowReviewFixtureLargeRecord(400));
+    expect(review).toMatchObject({
+      reviewId: WORKFLOW_REVIEW_FIXTURE_ID,
+      digest: WORKFLOW_REVIEW_FIXTURE_DIGEST,
+      taskCount: 400,
+    });
+    expect(review.nodes).toHaveLength(120);
+    expect(
+      presentWorkflowReview({
+        review,
+        decision: { _tag: "idle" },
+        canDecide: true,
+        superseded: false,
+        local: true,
+      }),
+    ).toMatchObject({ status: "ready", approve: { enabled: true }, dismiss: { enabled: true } });
+    expect(workflowReviewSummary(review)).toMatchObject({
+      shape: "400 tasks in 1 step",
+      moreTasks: "280 more tasks not listed here.",
     });
   });
 });
 
 describe("isWorkflowReviewItem and latestWorkflowReviewItemId", () => {
-  const item = (
-    id: string,
-    toolName: string | null,
-    at: string,
-    type: "dynamic_tool" | "command_execution" = "dynamic_tool",
-  ) => ({
-    id: TurnItemId.make(id),
-    type,
-    toolName,
-    startedAt: DateTime.makeUnsafe(at),
-    updatedAt: DateTime.makeUnsafe(at),
-  });
-
-  it("matches graph_review under every server prefix and nothing else", () => {
-    for (const name of ["graph_review", "t3-code.graph_review", "mcp__t3-code__graph_review"]) {
-      expect(isWorkflowReviewItem({ type: "dynamic_tool", toolName: name })).toBe(true);
-    }
-    for (const name of ["workflow_start", "graph_start", "other.graph_review", null]) {
-      expect(isWorkflowReviewItem({ type: "dynamic_tool", toolName: name })).toBe(false);
-    }
-    expect(isWorkflowReviewItem({ type: "command_execution", toolName: "graph_review" })).toBe(
-      false,
-    );
+  it("is true for review records only: a graph_review tool call carries nothing to decide on", () => {
+    expect(isWorkflowReviewItem(reviewItem())).toBe(true);
+    expect(isWorkflowReviewItem({ type: "dynamic_tool" })).toBe(false);
+    expect(isWorkflowReviewItem({ type: "secret_request" })).toBe(false);
+    const row = (item: OrchestrationV2TurnItem): OrchestrationV2ProjectedTurnItem => ({
+      position: 0,
+      visibility: "local",
+      sourceThreadId: item.threadId,
+      sourceItemId: item.id,
+      item,
+    });
+    expect(isProjectedWorkflowReview(row(reviewItem()))).toBe(true);
   });
 
   it("names the newest review of the thread, and none when there is no review", () => {
+    const later = (second: number) => DateTime.makeUnsafe(Date.UTC(2026, 9, 26, 12, 0, second));
     expect(
       latestWorkflowReviewItemId([
-        item("old", "graph_review", "2026-10-26T10:00:00.000Z"),
-        item("new", "t3-code.graph_review", "2026-10-26T11:00:00.000Z"),
-        item("later-tool", "workflow_start", "2026-10-26T12:00:00.000Z"),
+        reviewItem({}, "old", later(0)),
+        reviewItem({}, "new", later(30)),
+        { ...reviewItem({}, "tool", later(50)), type: "dynamic_tool" as never },
       ]),
     ).toBe("new");
-    expect(
-      latestWorkflowReviewItemId([item("only", "workflow_start", "2026-10-26T12:00:00.000Z")]),
-    ).toBe(null);
+    expect(latestWorkflowReviewItemId([])).toBe(null);
   });
 });
 
@@ -281,10 +269,8 @@ describe("runWorkflowReviewDecision", () => {
 });
 
 describe("presentWorkflowReview", () => {
-  const ready = readOrThrow(result());
-  const blocked = readOrThrow(
-    workflowReviewFixtureResult({ ready: false, digest: null, blockers: ["A cycle"] }),
-  );
+  const ready = reviewOf();
+  const blocked = reviewOf({ ready: false, digest: null, blockers: ["A cycle"] });
   const idle: WorkflowReviewDecision = { _tag: "idle" };
   const present = (
     overrides: Partial<Parameters<typeof presentWorkflowReview>[0]> = {},
@@ -294,6 +280,7 @@ describe("presentWorkflowReview", () => {
       decision: idle,
       canDecide: true,
       superseded: false,
+      local: true,
       ...overrides,
     });
 
@@ -373,6 +360,14 @@ describe("presentWorkflowReview", () => {
     });
   });
 
+  it("shows a review inherited from a forked thread without buttons", () => {
+    expect(present({ local: false })).toMatchObject({
+      status: "info",
+      approve: { visible: false },
+      dismiss: { visible: false },
+    });
+  });
+
   it("offers no buttons to a person who may not decide here", () => {
     expect(present({ canDecide: false })).toMatchObject({
       status: "read-only",
@@ -412,8 +407,10 @@ describe("workflowReviewTargetLabel", () => {
 
 describe("workflowReviewSummary", () => {
   it("states the shape, the estimate and its basis from the review", () => {
-    expect(workflowReviewSummary(readOrThrow(result()))).toEqual({
+    expect(workflowReviewSummary(reviewOf())).toEqual({
       shape: "4 tasks in 3 steps",
+      moreTasks: null,
+      moreBlockers: null,
       cost: "About 180K to 437K tokens, your agent included. Suggested budget 420K.",
       costBasis: "Measured figures for Codex workers; other drivers are not measured.",
       fanOutReasons: [],
@@ -422,35 +419,59 @@ describe("workflowReviewSummary", () => {
   });
 
   it("passes on the server's reason to consider one agent, and write conflicts", () => {
+    const base = workflowReviewFixtureRecord();
     const summary = workflowReviewSummary(
-      readOrThrow(
-        workflowReviewFixtureResult({
-          writeConflicts: [{ nodes: ["tests", "change"], paths: ["src/a.ts"] }],
-          advisory: {
-            ...(workflowReviewFixtureResult().advisory as object),
-            fanOut: "consider_single",
-            reasons: ["The nodes form a chain."],
-          },
-        }),
-      ),
+      reviewOf({
+        writeConflictCount: 1,
+        advice: {
+          ...base.advice!,
+          fanOut: "consider_single",
+          reasons: ["The nodes form a chain."],
+        },
+      }),
     );
     expect(summary.fanOutReasons).toEqual(["The nodes form a chain."]);
     expect(summary.writeConflicts).toBe("1 group of tasks write the same paths.");
   });
 
-  it("omits the cost line when the server gave no advice", () => {
-    const summary = workflowReviewSummary(
-      readOrThrow(workflowReviewFixtureResult({ advisory: undefined })),
-    );
+  it("omits the cost line when the server gave no advice, and counts blockers it did not list", () => {
+    const summary = workflowReviewSummary(reviewOf({ advice: undefined, blockersMore: 3 }));
     expect(summary.cost).toBeNull();
     expect(summary.costBasis).toBeNull();
+    expect(summary.moreBlockers).toBe("3 more blockers not listed.");
+  });
+});
+
+describe("workflowReviewNodeLines", () => {
+  it("names who runs a task, how it is checked and what it waits for", () => {
+    const [survey, , , verify] = reviewOf().nodes;
+    expect(workflowReviewNodeLines(survey!, undefined)).toEqual({
+      runs: "cliproxy \u00b7 claude-opus-5-5",
+      after: null,
+    });
+    expect(workflowReviewNodeLines(verify!, undefined)).toEqual({
+      runs: "cliproxy \u00b7 claude-haiku-5-5 \u00b7 checked by cliproxy \u00b7 claude-opus-5-5",
+      after: "After tests, change",
+    });
+    expect(
+      workflowReviewNodeLines(
+        { ...survey!, check: "process", dependsOn: ["a"], dependsOnMore: 2 },
+        undefined,
+      ),
+    ).toEqual({
+      runs: "cliproxy \u00b7 claude-opus-5-5 \u00b7 checked by a command",
+      after: "After a, 2 more",
+    });
+    expect(workflowReviewNodeLines({ ...survey!, check: "structured" }, undefined).runs).toContain(
+      "checked against its output",
+    );
   });
 });
 
 describe("workflowReviewSteps", () => {
   it("groups tasks by dependency layer, in layer order, numbered from one", () => {
     expect(
-      workflowReviewSteps(readOrThrow(result())).map(({ step, nodes }) => [
+      workflowReviewSteps(reviewOf()).map(({ step, nodes }) => [
         step,
         nodes.map((node) => node.id),
       ]),
@@ -459,10 +480,6 @@ describe("workflowReviewSteps", () => {
       [2, ["tests", "change"]],
       [3, ["verify"]],
     ]);
-    expect(
-      workflowReviewSteps(
-        readOrThrow(workflowReviewFixtureResult({ layers: [], expandedGraph: null, targets: [] })),
-      ),
-    ).toEqual([]);
+    expect(workflowReviewSteps(reviewOf({ tasks: [], taskCount: 0 }))).toEqual([]);
   });
 });

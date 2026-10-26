@@ -283,10 +283,12 @@ export const WORKFLOW_QA_SETTINGS_STATES = [
 
 /**
  * The review card the coordinator's `graph_review` becomes: waiting for the person ("pending"),
- * with the decision on its way, then settled, or found out of date by the server.
+ * with the decision on its way, then settled, or found out of date by the server. "large" is a
+ * review of 400 tasks, more than its record lists, which keeps its buttons.
  */
 export const WORKFLOW_QA_REVIEW_STATES = [
   "pending",
+  "large",
   "approving",
   "approved",
   "dismissed",

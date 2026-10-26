@@ -192,7 +192,7 @@ import {
   isContextCompactionActivityGroup,
   isContextHandoffActivityGroup,
   isSecretRequestActivityGroup,
-  isWorkflowReviewActivityGroup,
+  workflowReviewOfActivityGroup,
   type ThreadFeedEntry,
   type ThreadFeedLatestRun,
   messageFoldRunId,
@@ -1421,6 +1421,14 @@ function renderFeedEntry(
     );
   }
 
+  const workflowReview =
+    entry.type === "activity-group" ? workflowReviewOfActivityGroup(entry) : null;
+  if (workflowReview !== null) {
+    return (
+      <ThreadWorkflowReview environmentId={props.environmentId} projectedItem={workflowReview} />
+    );
+  }
+
   if (entry.type === "activity-group" && isContextCompactionActivityGroup(entry)) {
     const label = entry.activities[0]!.summary;
     const item = entry.activities[0]!.projectedItem.item;
@@ -1811,7 +1819,7 @@ function renderFeedEntry(
     );
   }
 
-  const workLog = (
+  return (
     <ThreadWorkLog
       key={`${entry.id}:${props.workRowSizing.textSizeKey}`}
       activities={entry.activities}
@@ -1833,17 +1841,6 @@ function renderFeedEntry(
       onPressPreview={props.onPressPreview}
     />
   );
-  if (entry.type === "activity-group" && isWorkflowReviewActivityGroup(entry)) {
-    // The person decides on the reviewed graph here; a review the card cannot read keeps the row.
-    return (
-      <ThreadWorkflowReview
-        environmentId={props.environmentId}
-        projectedItem={entry.activities[0]!.projectedItem}
-        fallback={workLog}
-      />
-    );
-  }
-  return workLog;
 }
 
 function TurnDiffStat(props: {

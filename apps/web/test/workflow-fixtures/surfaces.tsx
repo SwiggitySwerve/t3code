@@ -27,12 +27,15 @@ import {
 import type { SidebarThreadSummary } from "../../src/types";
 import {
   presentWorkflowReview,
-  readWorkflowReviewOutput,
+  workflowReviewOf,
   type WorkflowReviewDecision,
 } from "@t3tools/client-runtime/state/workflowReview";
 import { RunId } from "@t3tools/contracts";
 import type { WORKFLOW_QA_REVIEW_STATES } from "@t3tools/shared/testing/workflowQa";
-import { workflowReviewFixtureResult } from "@t3tools/shared/testing/workflowReviewFixture";
+import {
+  workflowReviewFixtureLargeRecord,
+  workflowReviewFixtureRecord,
+} from "@t3tools/shared/testing/workflowReviewFixture";
 import type { ReactNode } from "react";
 import { vi } from "vite-plus/test";
 
@@ -318,6 +321,7 @@ export async function scrollWavesToNode(container: HTMLElement, nodeKey: string)
 const REVIEW_DECISIONS: Record<(typeof WORKFLOW_QA_REVIEW_STATES)[number], WorkflowReviewDecision> =
   {
     pending: { _tag: "idle" },
+    large: { _tag: "idle" },
     approving: { _tag: "pending", action: "approve" },
     approved: { _tag: "settled", action: "approve" },
     dismissed: { _tag: "settled", action: "dismiss" },
@@ -333,8 +337,9 @@ const REVIEW_DECISIONS: Record<(typeof WORKFLOW_QA_REVIEW_STATES)[number], Workf
 export function WorkflowReviewSurface(props: {
   readonly state: (typeof WORKFLOW_QA_REVIEW_STATES)[number];
 }) {
-  const review = readWorkflowReviewOutput(workflowReviewFixtureResult());
-  if (review === null) throw new Error("The review fixture must decode.");
+  const record =
+    props.state === "large" ? workflowReviewFixtureLargeRecord(400) : workflowReviewFixtureRecord();
+  const review = workflowReviewOf(record);
   return (
     <ChatColumn>
       <WorkflowReviewCard
@@ -344,6 +349,7 @@ export function WorkflowReviewSurface(props: {
           decision: REVIEW_DECISIONS[props.state],
           canDecide: true,
           superseded: false,
+          local: true,
         })}
         providers={QA_PROVIDERS}
         onApprove={noop}

@@ -563,6 +563,19 @@ and ends its turn; the user approves or dismisses that review in the client
 (`orchestration.approveWorkflowReview`, `orchestration.dismissWorkflowReview`, which need
 the operate grant and are not MCP tools).
 
+The client decides from the review's **approval record**, never from the `graph_review` tool
+output. When `graph_review` finishes, the server writes a `workflow_review` turn item (command
+`workflow.review.record`, built by `apps/server/src/mcp/workflowReviewRecord.ts`) next to the
+tool call: the review id and digest the gate issued, whether it is ready and needs approval,
+blockers, and a compact plan (each task's name, step, dependencies, worker and judge target,
+and check type) with the cost advice. It is bounded: at most 120 tasks, 24 dependencies per
+task and 20 blockers, each text clipped at 400 characters, and the item says how many it left
+out, so a review whose full result is too large to store still carries its decision data. If a
+review the user must approve cannot be recorded, `graph_review` fails with an error that tells
+the agent to call it again; any other review loses only its card. A thread from before the
+record existed has the tool call alone, which shows as an ordinary tool row with no approval
+controls.
+
 A request is armed until it is settled. Armed refuses; settled does not.
 
 - **Approve** records the digest and sends the agent a message, from the server on the

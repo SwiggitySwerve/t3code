@@ -1,22 +1,20 @@
 /**
- * The person's decision on a reviewed workflow graph, shared by every client. The review is the
- * `graph_review` result read from the stored tool item; Approve and Dismiss name it by its review
- * id and digest, and the server refuses anything it did not issue. Nothing here grants anything.
+ * The person's decision on a reviewed workflow graph, for every client. It reads the typed
+ * `workflow_review` record the server writes, never the `graph_review` tool output. Approve and
+ * Dismiss name the record's id and digest; the server refuses any it did not issue.
  */
 import {
   OrchestrationV2WorkflowApprovalError,
-  OrchestrationV2WorkflowReviewDigest,
-  OrchestratorMcpGraphAdvisory,
-  OrchestratorMcpGraphReviewResult,
   type EnvironmentId,
+  type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2WorkflowReviewRecord,
+  type OrchestrationV2WorkflowReviewTarget,
   type ServerProvider,
   type ThreadId,
 } from "@t3tools/contracts";
-import { resolveT3McpToolId } from "@t3tools/shared/t3McpToolPresentation";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import * as DateTime from "effect/DateTime";
-import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { Atom, type AtomRegistry } from "effect/reactivity";
 
@@ -26,17 +24,23 @@ import {
   type AtomCommandResult,
 } from "./runtime.ts";
 
-/** One graph node as the card lists it: what it does, what it waits for, and who runs it. */
+type WorkflowReviewItem = Extract<OrchestrationV2TurnItem, { readonly type: "workflow_review" }>;
+
+/** One task as the card lists it: what it does, what it waits for, and who runs it. */
 export interface WorkflowReviewNodeView {
   readonly id: string;
   readonly subject: string;
   readonly dependsOn: ReadonlyArray<string>;
-  /** Dependency layer, 0 for nodes with no dependencies. */
+  /** Dependencies the record lists no further. */
+  readonly dependsOnMore: number;
+  /** Dependency step, 0 for tasks with no dependencies. */
   readonly wave: number;
   /** The concrete provider and model the digest covers; null when the review lists none. */
   readonly worker: WorkflowReviewTargetView | null;
-  /** The judge's target, when the node has a judgment check. */
+  /** The judge's target, when the task has a judgment check. */
   readonly judge: WorkflowReviewTargetView | null;
+  /** How the task's result is checked, when it is. */
+  readonly check: "process" | "structured" | "judgment" | null;
 }
 
 export interface WorkflowReviewTargetView {
@@ -63,90 +67,44 @@ export interface WorkflowReviewAdviceView {
 
 export interface WorkflowReviewView {
   readonly reviewId: string;
-  /** Null when the server could not digest the graph, or the digest is not one it would issue. */
+  /** Null when the server could not digest the graph. */
   readonly digest: string | null;
   readonly ready: boolean;
   /** True while the person's request for a workflow waits for this review's decision. */
   readonly approvalRequired: boolean;
   readonly blockers: ReadonlyArray<string>;
+  /** Blockers the record lists no further. */
+  readonly blockersMore: number;
   readonly name: string | null;
   readonly nodes: ReadonlyArray<WorkflowReviewNodeView>;
+  /** Tasks in the reviewed graph, listed or not. */
+  readonly taskCount: number;
   readonly writeConflictCount: number;
   readonly advice: WorkflowReviewAdviceView | null;
 }
 
-const GRAPH_REVIEW_TOOL = "graph_review";
+const WORKFLOW_REVIEW_ITEM = "workflow_review";
 
-const reviewFields = OrchestratorMcpGraphReviewResult.fields;
-const decodeCore = Schema.decodeUnknownOption(
-  Schema.Struct({
-    reviewId: reviewFields.reviewId,
-    approvalRequired: reviewFields.approvalRequired,
-    digest: reviewFields.digest,
-    ready: reviewFields.ready,
-    blockers: reviewFields.blockers,
-  }),
-);
-const decodeTargets = Schema.decodeUnknownOption(reviewFields.targets);
-const decodeLayers = Schema.decodeUnknownOption(reviewFields.layers);
-const decodeConflicts = Schema.decodeUnknownOption(reviewFields.writeConflicts);
-const decodeAdvisory = Schema.decodeUnknownOption(OrchestratorMcpGraphAdvisory);
-const isDigest = Schema.is(OrchestrationV2WorkflowReviewDigest);
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
+/** Whether a turn item is a review record, the one a person approves or dismisses from. */
+export function isWorkflowReviewItem(
+  item: Pick<OrchestrationV2TurnItem, "type">,
+): item is WorkflowReviewItem {
+  return item.type === WORKFLOW_REVIEW_ITEM;
 }
 
-function parseJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}
+/** A projected turn item known to be a review record. */
+export type ProjectedWorkflowReviewItem = OrchestrationV2ProjectedTurnItem & {
+  readonly item: WorkflowReviewItem;
+};
 
-/**
- * Where the result can sit in a stored tool output: as is (Codex), under `structuredContent`, or as
- * the JSON text of a content block (Claude stores both). A truncated or foreign output has none.
- */
-function reviewResultCandidates(output: unknown): ReadonlyArray<unknown> {
-  if (typeof output === "string") return [parseJson(output)];
-  if (!isRecord(output)) return [];
-  const blocks = Array.isArray(output.content) ? output.content : [];
-  return [
-    output,
-    output.structuredContent,
-    ...blocks.map((block) =>
-      isRecord(block) && typeof block.text === "string" ? parseJson(block.text) : undefined,
-    ),
-  ];
-}
-
-function readGraphNodes(expandedGraph: unknown): {
-  readonly name: string | null;
-  readonly nodes: ReadonlyMap<string, { subject: string; dependsOn: ReadonlyArray<string> }>;
-} {
-  const nodes = new Map<string, { subject: string; dependsOn: ReadonlyArray<string> }>();
-  if (!isRecord(expandedGraph)) return { name: null, nodes };
-  if (isRecord(expandedGraph.nodes)) {
-    for (const [id, node] of Object.entries(expandedGraph.nodes)) {
-      if (!isRecord(node)) continue;
-      nodes.set(id, {
-        subject: typeof node.subject === "string" && node.subject.trim() ? node.subject : id,
-        dependsOn: Array.isArray(node.dependsOn)
-          ? node.dependsOn.filter((entry): entry is string => typeof entry === "string")
-          : [],
-      });
-    }
-  }
-  const name = typeof expandedGraph.name === "string" ? expandedGraph.name.trim() : "";
-  return { name: name === "" ? null : name, nodes };
+export function isProjectedWorkflowReview(
+  row: OrchestrationV2ProjectedTurnItem,
+): row is ProjectedWorkflowReviewItem {
+  return isWorkflowReviewItem(row.item);
 }
 
 function targetView(
-  target:
-    | { readonly providerInstanceId?: string | undefined; readonly model?: string | undefined }
-    | undefined,
+  target: OrchestrationV2WorkflowReviewTarget | undefined,
 ): WorkflowReviewTargetView | null {
   if (target === undefined) return null;
   const providerInstanceId = target.providerInstanceId ?? null;
@@ -154,86 +112,50 @@ function targetView(
   return providerInstanceId === null && model === null ? null : { providerInstanceId, model };
 }
 
-/**
- * Reads the review out of a stored `graph_review` tool output. The identity of the review (id,
- * digest, ready, approval, blockers) must decode, or this returns null and the client falls back
- * to the generic tool row. The plan details decode on their own, so one the card cannot read costs
- * only that detail, never the person's ability to decide.
- */
-export function readWorkflowReviewOutput(output: unknown): WorkflowReviewView | null {
-  for (const candidate of reviewResultCandidates(output)) {
-    const core = decodeCore(candidate);
-    if (Option.isNone(core) || !isRecord(candidate)) continue;
-    const { reviewId, approvalRequired, digest, ready, blockers } = core.value;
-    if (reviewId.trim() === "") continue;
-    const graph = readGraphNodes(candidate.expandedGraph);
-    const targets = Option.getOrElse(decodeTargets(candidate.targets), () => []);
-    const layers = Option.getOrElse(decodeLayers(candidate.layers), () => []);
-    const waveOf = new Map<string, number>();
-    layers.forEach((layer, wave) => layer.forEach((id) => waveOf.set(id, wave)));
-    const targetOf = new Map(targets.map((entry) => [entry.nodeId, entry]));
-    const ids = [...new Set([...layers.flat(), ...graph.nodes.keys(), ...targetOf.keys()])];
-    const advisory = Option.getOrNull(decodeAdvisory(candidate.advisory));
-    return {
-      reviewId,
-      digest: digest !== null && isDigest(digest) ? digest : null,
-      ready,
-      approvalRequired,
-      blockers,
-      name: graph.name,
-      nodes: ids.map((id) => {
-        const node = graph.nodes.get(id);
-        const entry = targetOf.get(id);
-        return {
-          id,
-          subject: node?.subject ?? id,
-          dependsOn: node?.dependsOn ?? [],
-          wave: waveOf.get(id) ?? 0,
-          worker: targetView(entry?.target),
-          judge: targetView(entry?.judgmentTarget),
-        };
-      }),
-      writeConflictCount: Option.getOrElse(decodeConflicts(candidate.writeConflicts), () => [])
-        .length,
-      advice:
-        advisory === null
-          ? null
-          : {
-              fanOut: advisory.fanOut,
-              reasons: advisory.reasons,
-              nodeCount: advisory.nodeCount,
-              widestWave: advisory.widestWave,
-              depth: advisory.depth,
-              verifierCount: advisory.verifierCount,
-              estimatedTokens: {
-                low: advisory.estimatedTokens.low,
-                high: advisory.estimatedTokens.high,
-                basis: advisory.estimatedTokens.basis,
-              },
-              suggestedBudgetTokens: advisory.suggestedBudgetTokens,
-            },
-    };
-  }
-  return null;
-}
-
-/** Whether a turn item is the coordinator's `graph_review` call, whatever server prefix it carries. */
-export function isWorkflowReviewItem(
-  item: Pick<OrchestrationV2TurnItem, "type"> & { readonly toolName?: string | null | undefined },
-): boolean {
-  return item.type === "dynamic_tool" && resolveT3McpToolId(item.toolName) === GRAPH_REVIEW_TOOL;
+/** The review a record carries, in the shape the cards draw. The record is already typed and bounded. */
+export function workflowReviewOf(item: OrchestrationV2WorkflowReviewRecord): WorkflowReviewView {
+  return {
+    reviewId: item.reviewId,
+    digest: item.digest,
+    ready: item.ready,
+    approvalRequired: item.approvalRequired,
+    blockers: item.blockers,
+    blockersMore: item.blockersMore ?? 0,
+    name: item.name,
+    nodes: item.tasks.map((task) => ({
+      id: task.key,
+      subject: task.label,
+      dependsOn: task.dependsOn,
+      dependsOnMore: task.dependsOnMore ?? 0,
+      wave: task.wave,
+      worker: targetView(task.worker),
+      judge: targetView(task.judge),
+      check: task.check ?? null,
+    })),
+    taskCount: item.taskCount,
+    writeConflictCount: item.writeConflictCount,
+    advice:
+      item.advice === undefined
+        ? null
+        : {
+            fanOut: item.advice.fanOut,
+            reasons: item.advice.reasons,
+            nodeCount: item.advice.nodeCount,
+            widestWave: item.advice.widestWave,
+            depth: item.advice.depth,
+            verifierCount: item.advice.verifierCount,
+            estimatedTokens: item.advice.estimatedTokens,
+            suggestedBudgetTokens: item.advice.suggestedBudgetTokens,
+          },
+  };
 }
 
 /**
- * The review a person can still decide: the newest `graph_review` of the thread. An older one was
+ * The review a person can still decide: the newest review record of the thread. An older one was
  * replaced by it, so only the newest offers buttons.
  */
 export function latestWorkflowReviewItemId(
-  items: ReadonlyArray<
-    Pick<OrchestrationV2TurnItem, "id" | "type" | "startedAt" | "updatedAt"> & {
-      readonly toolName?: string | null | undefined;
-    }
-  >,
+  items: ReadonlyArray<Pick<OrchestrationV2TurnItem, "id" | "type" | "startedAt" | "updatedAt">>,
 ): string | null {
   let latest: { readonly id: string; readonly at: number } | null = null;
   for (const item of items) {
@@ -372,8 +294,13 @@ export function presentWorkflowReview(input: {
   readonly decision: WorkflowReviewDecision;
   readonly canDecide: boolean;
   readonly superseded: boolean;
+  /** False for a review this thread inherited from the one it was forked from: shown, not decidable. */
+  readonly local: boolean;
 }): WorkflowReviewPresentation {
   const { review, decision } = input;
+  if (!input.local) {
+    return { status: "info", statusLabel: "Reviewed", note: null, ...NO_BUTTONS };
+  }
   if (decision._tag === "settled") {
     return decision.action === "approve"
       ? {
@@ -470,9 +397,37 @@ export function workflowReviewTargetLabel(
   return [providerName, modelName].filter((part): part is string => part !== null).join(" \u00b7 ");
 }
 
+/** The two lines under a task's name: who runs it and how it is checked, and what it waits for. */
+export function workflowReviewNodeLines(
+  node: WorkflowReviewNodeView,
+  providers: Parameters<typeof workflowReviewTargetLabel>[1],
+): { readonly runs: string; readonly after: string | null } {
+  const worker = workflowReviewTargetLabel(node.worker, providers);
+  const checkedBy =
+    node.check === "judgment"
+      ? `checked by ${node.judge === null ? "a judge" : workflowReviewTargetLabel(node.judge, providers)}`
+      : node.check === "process"
+        ? "checked by a command"
+        : node.check === "structured"
+          ? "checked against its output"
+          : null;
+  const waits = [
+    ...node.dependsOn,
+    ...(node.dependsOnMore > 0 ? [`${node.dependsOnMore} more`] : []),
+  ];
+  return {
+    runs: checkedBy === null ? worker : `${worker} \u00b7 ${checkedBy}`,
+    after: waits.length === 0 ? null : `After ${waits.join(", ")}`,
+  };
+}
+
 export interface WorkflowReviewSummary {
   /** "4 tasks in 3 steps". */
   readonly shape: string;
+  /** Said under the task list when the record lists fewer tasks than the graph has. */
+  readonly moreTasks: string | null;
+  /** Likewise for blockers the record does not list. */
+  readonly moreBlockers: string | null;
   /** The server's token estimate and suggested budget, in words; null when it gave no advice. */
   readonly cost: string | null;
   /** How the estimate was made, for a line of small print. */
@@ -487,10 +442,18 @@ const plural = (count: number, noun: string) => `${count} ${noun}${count === 1 ?
 
 /** The numbers above the task list, in words. Both clients show these lines as given. */
 export function workflowReviewSummary(review: WorkflowReviewView): WorkflowReviewSummary {
-  const steps = review.nodes.reduce((deepest, node) => Math.max(deepest, node.wave + 1), 0);
   const { advice } = review;
+  // The server's depth counts every task, listed or not.
+  const steps =
+    advice?.depth ?? review.nodes.reduce((deepest, node) => Math.max(deepest, node.wave + 1), 0);
+  const unlisted = Math.max(0, review.taskCount - review.nodes.length);
   return {
-    shape: `${plural(review.nodes.length, "task")} in ${plural(steps, "step")}`,
+    shape: `${plural(review.taskCount, "task")} in ${plural(steps, "step")}`,
+    moreTasks: unlisted === 0 ? null : `${plural(unlisted, "more task")} not listed here.`,
+    moreBlockers:
+      review.blockersMore === 0
+        ? null
+        : `${plural(review.blockersMore, "more blocker")} not listed.`,
     cost:
       advice === null
         ? null

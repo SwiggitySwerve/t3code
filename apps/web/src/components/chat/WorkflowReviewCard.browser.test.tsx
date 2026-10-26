@@ -5,12 +5,13 @@ import {
   ThreadId,
   TurnItemId,
   type OrchestrationV2ProjectedTurnItem,
+  type OrchestrationV2WorkflowReviewRecord,
 } from "@t3tools/contracts";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   WORKFLOW_REVIEW_FIXTURE_DIGEST,
-  workflowReviewFixtureResult,
-  workflowReviewStoredByCodex,
+  workflowReviewFixtureLargeRecord,
+  workflowReviewFixtureRecord,
 } from "@t3tools/shared/testing/workflowReviewFixture";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -32,25 +33,16 @@ const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const THREAD_ID = ThreadId.make("thread-review");
 const RUN_ID = RunId.make("run-review");
 
-// Everything the card reads from the app is replaced at the seam it reads it through: the stored
-// tool output, the two commands, the permission, the provider catalog and the thread's items. The
-// decision state itself is the real shared atom, so the card is tested as the person uses it.
+// Everything the card reads from the app is replaced at the seam it reads it through: the two
+// commands, the permission, the provider catalog and the thread's items. The decision state itself
+// is the real shared atom, so the card is tested as the person uses it.
 const app = vi.hoisted(() => ({
-  output: undefined as unknown,
   canDecide: true,
   turnItems: [] as ReadonlyArray<unknown>,
   approve: undefined as unknown as ReturnType<typeof vi.fn>,
   dismiss: undefined as unknown as ReturnType<typeof vi.fn>,
 }));
 
-vi.mock(import("../../state/queries"), async (original) => ({
-  ...(await original()),
-  useTurnItemDetail: (() => ({
-    data: { item: { type: "dynamic_tool", output: app.output } },
-    isPending: false,
-    error: null,
-  })) as never,
-}));
 // The app modules are imported statically: a factory for the atom library must not import them,
 // because they import the library back and the mock would wait on itself.
 vi.mock(import("../../state/use-atom-command"), () => ({
@@ -139,11 +131,34 @@ const base = (id: string, second: number) => ({
   updatedAt: at(second),
 });
 
-function reviewItem(id: string, second: number, toolName = "t3-code.graph_review") {
+/** The review record the server writes beside the graph_review call. */
+function reviewItem(
+  id: string,
+  second: number,
+  record: Partial<OrchestrationV2WorkflowReviewRecord> = {},
+) {
+  const item = {
+    ...base(id, second),
+    ...workflowReviewFixtureRecord(record),
+  };
+  return {
+    position: second,
+    visibility: "local" as const,
+    sourceThreadId: THREAD_ID,
+    sourceItemId: item.id,
+    item,
+  } satisfies OrchestrationV2ProjectedTurnItem;
+}
+
+/**
+ * The graph_review call as the thread holds it: its result is model-facing text the client never
+ * reads, and may be too large to store at all, so the item carries no output.
+ */
+function reviewToolCall(id: string, second: number) {
   const item = {
     ...base(id, second),
     type: "dynamic_tool" as const,
-    toolName,
+    toolName: "t3-code.graph_review",
     input: { graph: "..." },
     outputOmitted: true,
   };
@@ -158,11 +173,15 @@ function reviewItem(id: string, second: number, toolName = "t3-code.graph_review
 
 /** A finished turn: the person's request, the agent's review, and the agent's closing message. */
 async function renderReviewTurn(options: {
-  readonly result: Record<string, unknown>;
+  readonly record?: Partial<OrchestrationV2WorkflowReviewRecord>;
+  readonly fullRecord?: OrchestrationV2WorkflowReviewRecord;
   readonly reviewItemId?: string;
 }) {
-  app.output = workflowReviewStoredByCodex(options.result);
-  const review = reviewItem(options.reviewItemId ?? "review-item", 2);
+  const review = reviewItem(
+    options.reviewItemId ?? "review-item",
+    3,
+    options.fullRecord ?? options.record,
+  );
   app.turnItems = app.turnItems.length > 0 ? app.turnItems : [review.item];
   const entries = deriveTimelineEntriesFromVisibleTurnItems({
     visibleTurnItems: [
@@ -183,14 +202,15 @@ async function renderReviewTurn(options: {
           creationSource: "web",
         },
       },
+      reviewToolCall("review-tool-call", 2),
       review,
       {
-        position: 3,
+        position: 4,
         visibility: "local",
         sourceThreadId: THREAD_ID,
         sourceItemId: TurnItemId.make("assistant-item"),
         item: {
-          ...base("assistant-item", 3),
+          ...base("assistant-item", 4),
           type: "assistant_message",
           messageId: "assistant-message" as never,
           text: "I reviewed the graph. Approve it to start.",
@@ -234,7 +254,7 @@ describe("workflow review card in the chat timeline", () => {
   it("shows the reviewed graph on a finished turn: tasks, order, workers and cost", async () => {
     resetApp();
     await using screen = await renderReviewTurn({
-      result: workflowReviewFixtureResult({ reviewId: "review-shows" }),
+      record: { reviewId: "review-shows" },
     });
     await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
     const text = card(screen.container)!.textContent ?? "";
@@ -256,8 +276,6 @@ describe("workflow review card in the chat timeline", () => {
     ]) {
       expect(text).toContain(expected);
     }
-    // The generic "Reviewed a workflow graph" row is replaced by the card, not shown beside it.
-    expect(text).not.toContain("Reviewed a workflow graph");
   });
 
   it("approves with the review id and digest the server issued, once, and shows it as approved", async () => {
@@ -270,7 +288,7 @@ describe("workflow review card in the chat timeline", () => {
         }),
     );
     await using screen = await renderReviewTurn({
-      result: workflowReviewFixtureResult({ reviewId: "review-approve" }),
+      record: { reviewId: "review-approve" },
     });
     await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
     const approve = button(screen.container, "Approve & run");
@@ -303,7 +321,7 @@ describe("workflow review card in the chat timeline", () => {
   it("dismisses with the same id and digest", async () => {
     resetApp();
     await using screen = await renderReviewTurn({
-      result: workflowReviewFixtureResult({ reviewId: "review-dismiss" }),
+      record: { reviewId: "review-dismiss" },
     });
     await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
     await click(button(screen.container, "Dismiss"));
@@ -326,12 +344,12 @@ describe("workflow review card in the chat timeline", () => {
   it("cannot approve a review with blockers, but can dismiss it by id with no digest", async () => {
     resetApp();
     await using screen = await renderReviewTurn({
-      result: workflowReviewFixtureResult({
+      record: {
         reviewId: "review-blocked",
         ready: false,
         digest: null,
         blockers: ["Task tests depends on itself"],
-      }),
+      },
     });
     await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
     expect(card(screen.container)!.dataset.workflowReviewStatus).toBe("blocked");
@@ -358,7 +376,7 @@ describe("workflow review card in the chat timeline", () => {
       .mockResolvedValueOnce(failure(new Error("offline")))
       .mockResolvedValueOnce(AsyncResult.success<void, unknown>(undefined));
     await using screen = await renderReviewTurn({
-      result: workflowReviewFixtureResult({ reviewId: "review-retry" }),
+      record: { reviewId: "review-retry" },
     });
     await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
     await click(button(screen.container, "Approve & run"));
@@ -379,7 +397,7 @@ describe("workflow review card in the chat timeline", () => {
     resetApp();
     app.approve = vi.fn(async () => failure(approvalError("review-stale", "review-not-found")));
     await using screen = await renderReviewTurn({
-      result: workflowReviewFixtureResult({ reviewId: "review-stale" }),
+      record: { reviewId: "review-stale" },
     });
     await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
     await click(button(screen.container, "Approve & run"));
@@ -394,10 +412,10 @@ describe("workflow review card in the chat timeline", () => {
 
   it("offers no decision on a review a newer one replaced, or to someone who may not decide", async () => {
     resetApp();
-    app.turnItems = [reviewItem("review-item", 2).item, reviewItem("newer-review-item", 9).item];
+    app.turnItems = [reviewItem("review-item", 3).item, reviewItem("newer-review-item", 9).item];
     {
       await using screen = await renderReviewTurn({
-        result: workflowReviewFixtureResult({ reviewId: "review-old" }),
+        record: { reviewId: "review-old" },
       });
       await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
       expect(card(screen.container)!.dataset.workflowReviewStatus).toBe("superseded");
@@ -406,21 +424,52 @@ describe("workflow review card in the chat timeline", () => {
     resetApp();
     app.canDecide = false;
     await using screen = await renderReviewTurn({
-      result: workflowReviewFixtureResult({ reviewId: "review-readonly" }),
+      record: { reviewId: "review-readonly" },
     });
     await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
     expect(card(screen.container)!.dataset.workflowReviewStatus).toBe("read-only");
     expect(card(screen.container)!.querySelector("button")).toBeNull();
   });
 
-  it("keeps the generic tool row when the stored result cannot be read", async () => {
+  it("keeps Approve and Dismiss on a review whose tool result is too large to store", async () => {
     resetApp();
+    // 400 tasks with long labels: the graph_review result is over 256 KiB, so the thread's tool item
+    // holds no output. The decision comes from the record the server wrote, which lists 120 tasks.
     await using screen = await renderReviewTurn({
-      result: { error: "the tool failed" },
+      fullRecord: { ...workflowReviewFixtureLargeRecord(400), reviewId: "review-large" },
     });
-    await vi.waitFor(() =>
-      expect(screen.container.textContent).toContain("Reviewed a workflow graph"),
+    await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
+    expect(card(screen.container)!.dataset.workflowReviewStatus).toBe("ready");
+    expect(card(screen.container)!.textContent).toContain("400 tasks in 1 step");
+    expect(card(screen.container)!.textContent).toContain("280 more tasks not listed here.");
+    expect(button(screen.container, "Approve & run").disabled).toBe(false);
+    await click(button(screen.container, "Approve & run"));
+    expect(app.approve).toHaveBeenCalledTimes(1);
+    expect(app.approve).toHaveBeenCalledWith({
+      environmentId: ENVIRONMENT_ID,
+      input: {
+        environmentId: ENVIRONMENT_ID,
+        threadId: THREAD_ID,
+        reviewId: "review-large",
+        digest: WORKFLOW_REVIEW_FIXTURE_DIGEST,
+      },
+    });
+  });
+
+  it("keeps the generic tool row for a review made before records existed", async () => {
+    resetApp();
+    // An older thread holds the graph_review call and nothing else: there is no record to decide on,
+    // so the call is an ordinary tool row in the turn's work and no card offers a decision.
+    const entries = deriveTimelineEntriesFromVisibleTurnItems({
+      visibleTurnItems: [reviewToolCall("old-review-tool-call", 1)],
+      optimisticMessages: [],
+    });
+    await using screen = await render(
+      <MessagesTimeline {...timelineProps()} timelineEntries={entries} />,
+      { container: document.createElement("div") },
     );
+    await vi.waitFor(() => expect(screen.container.textContent).toContain("Worked for"));
     expect(card(screen.container)).toBeNull();
+    expect(screen.container.textContent).not.toContain("Approve & run");
   });
 });

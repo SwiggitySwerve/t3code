@@ -1614,6 +1614,88 @@ export type OrchestrationV2SecretRequestStatus = typeof OrchestrationV2SecretReq
 /** `file`: the value goes to an owner-only file the agent's shell commands can read. */
 export const OrchestrationV2SecretRequestDelivery = Schema.Literal("file");
 
+/** The digest `graph_review` returns: `sha256:` and 64 lowercase hex digits. */
+export const OrchestrationV2WorkflowReviewDigest = Schema.String.check(
+  Schema.isPattern(/^sha256:[a-f0-9]{64}$/),
+);
+
+/** The provider and model a reviewed task runs on, as the digest covers them. */
+export const OrchestrationV2WorkflowReviewTarget = Schema.Struct({
+  providerInstanceId: Schema.optional(Schema.String),
+  model: Schema.optional(Schema.String),
+});
+export type OrchestrationV2WorkflowReviewTarget = typeof OrchestrationV2WorkflowReviewTarget.Type;
+
+/** One task of a reviewed graph, as the approval card lists it: no prompt, input or schema. */
+export const OrchestrationV2WorkflowReviewTask = Schema.Struct({
+  key: Schema.String,
+  label: Schema.String,
+  /** Dependency step, 0 for a task with no dependencies. */
+  wave: NonNegativeInt,
+  /** At most `WORKFLOW_REVIEW_MAX_DEPENDENCIES` keys; `dependsOnMore` counts the rest. */
+  dependsOn: Schema.Array(Schema.String),
+  dependsOnMore: Schema.optional(PositiveInt),
+  worker: Schema.optional(OrchestrationV2WorkflowReviewTarget),
+  /** The judge, when the task has a judgment check. */
+  judge: Schema.optional(OrchestrationV2WorkflowReviewTarget),
+  check: Schema.optional(Schema.Literals(["process", "structured", "judgment"])),
+});
+export type OrchestrationV2WorkflowReviewTask = typeof OrchestrationV2WorkflowReviewTask.Type;
+
+/** The server's fan-out and cost advice for the card. Informational: never part of the digest. */
+export const OrchestrationV2WorkflowReviewAdvice = Schema.Struct({
+  fanOut: Schema.Literals(["ok", "consider_single"]),
+  reasons: Schema.Array(Schema.String),
+  nodeCount: NonNegativeInt,
+  widestWave: NonNegativeInt,
+  depth: NonNegativeInt,
+  verifierCount: NonNegativeInt,
+  estimatedTokens: Schema.Struct({
+    low: NonNegativeInt,
+    high: NonNegativeInt,
+    /** How the server derived the figures, including which drivers are not measured. */
+    basis: Schema.String,
+  }),
+  suggestedBudgetTokens: NonNegativeInt,
+});
+export type OrchestrationV2WorkflowReviewAdvice = typeof OrchestrationV2WorkflowReviewAdvice.Type;
+
+/** What one review record lists at most; the rest is counted, never dropped silently. */
+export const WORKFLOW_REVIEW_MAX_TASKS = 120;
+export const WORKFLOW_REVIEW_MAX_DEPENDENCIES = 24;
+export const WORKFLOW_REVIEW_MAX_BLOCKERS = 20;
+export const WORKFLOW_REVIEW_MAX_TEXT_LENGTH = 400;
+
+/**
+ * The approval record of a `graph_review`: the one thing a client decides from. The server writes
+ * it beside the review's tool call, independent of the tool's own output, so a review whose full
+ * result is too large to store or show still carries its id, its digest and a plan to read. The
+ * id and digest are the ones the approval gate issued; it refuses a decision that names others.
+ */
+const OrchestrationV2WorkflowReviewFields = {
+  type: Schema.Literal("workflow_review"),
+  reviewId: TrimmedNonEmptyString,
+  /** Null when the server could not digest the graph. */
+  digest: Schema.NullOr(OrchestrationV2WorkflowReviewDigest),
+  ready: Schema.Boolean,
+  /** True while the person's request for a workflow waits for this review's decision. */
+  approvalRequired: Schema.Boolean,
+  name: Schema.NullOr(Schema.String),
+  blockers: Schema.Array(Schema.String),
+  /** Blockers beyond `WORKFLOW_REVIEW_MAX_BLOCKERS`. */
+  blockersMore: Schema.optional(PositiveInt),
+  /** In dependency order; at most `WORKFLOW_REVIEW_MAX_TASKS`. */
+  tasks: Schema.Array(OrchestrationV2WorkflowReviewTask),
+  /** Tasks in the reviewed graph, listed or not. */
+  taskCount: NonNegativeInt,
+  writeConflictCount: NonNegativeInt,
+  advice: Schema.optional(OrchestrationV2WorkflowReviewAdvice),
+} as const;
+export const OrchestrationV2WorkflowReviewRecord = Schema.Struct(
+  OrchestrationV2WorkflowReviewFields,
+);
+export type OrchestrationV2WorkflowReviewRecord = typeof OrchestrationV2WorkflowReviewRecord.Type;
+
 const OrchestrationV2SecretRequestFields = {
   type: Schema.Literal("secret_request"),
   label: TrimmedNonEmptyString,
@@ -1811,6 +1893,10 @@ export const OrchestrationV2TurnItem = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
     ...OrchestrationV2SecretRequestFields,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemBaseFields,
+    ...OrchestrationV2WorkflowReviewFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemBaseFields,
@@ -2656,6 +2742,10 @@ export const OrchestrationV2TurnItemJson = Schema.Union([
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
     ...OrchestrationV2SecretRequestFields,
+  }),
+  Schema.Struct({
+    ...OrchestrationV2TurnItemJsonBaseFields,
+    ...OrchestrationV2WorkflowReviewFields,
   }),
   Schema.Struct({
     ...OrchestrationV2TurnItemJsonBaseFields,
@@ -3526,6 +3616,19 @@ const OrchestrationV2InternalCommand = Schema.Union([
     workflowId: NodeId,
     reason: Schema.optional(Schema.String),
   }),
+  /**
+   * Records the approval record of a `graph_review` as a turn item of the run that made it.
+   * Internal: only the server that produced the review (and issued its id and digest) writes it.
+   */
+  Schema.Struct({
+    type: Schema.Literal("workflow.review.record"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+    nodeId: NodeId,
+    turnItemId: TurnItemId,
+    review: OrchestrationV2WorkflowReviewRecord,
+  }),
   Schema.Struct({
     type: Schema.Literal("secret_request.record"),
     commandId: CommandId,
@@ -3965,11 +4068,6 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
     }
   }
 }
-
-/** The digest `graph_review` returns: `sha256:` and 64 lowercase hex digits. */
-export const OrchestrationV2WorkflowReviewDigest = Schema.String.check(
-  Schema.isPattern(/^sha256:[a-f0-9]{64}$/),
-);
 
 /**
  * A decision on one graph review. The review id and digest come from the review the server

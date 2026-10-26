@@ -4943,6 +4943,147 @@ describe("workflow approval", () => {
       }).pipe(Effect.provide(layerTest)),
   );
 
+  /** 150 tasks with long descriptions: a graph_review result well over the 256 KiB a client can read. */
+  const largeGraph = {
+    schemaVersion: 1,
+    name: "Port every package",
+    nodes: Object.fromEntries(
+      Array.from({ length: 150 }, (_, index) => [
+        `task-${String(index + 1).padStart(3, "0")}`,
+        {
+          subject: `Check area ${index + 1}`,
+          description: "Read only: report one finding for this area. ".repeat(40),
+          dependsOn: index < 15 ? [] : [`task-${String(index - 14).padStart(3, "0")}`],
+          scopes: { read: ["."] },
+        },
+      ]),
+    ),
+  };
+
+  const reviewRecords = Effect.gen(function* () {
+    return (yield* parentProjection).turnItems.flatMap((item) =>
+      item.type === "workflow_review" ? [item] : [],
+    );
+  });
+
+  it.effect(
+    "records the review's approval data beside a result too large for a client to read",
+    () =>
+      Effect.gen(function* () {
+        yield* askForWorkflow;
+        const approvals = yield* WorkflowApprovalService.WorkflowApprovalService;
+        const reviewed = yield* reviewGraph(largeGraph);
+        // Sol's repro size: the full result is over what getTurnItem returns, so a client reading it
+        // gets a cut string, not a review.
+        expect(JSON.stringify(reviewed).length).toBeGreaterThan(271_647);
+        const [record, ...rest] = yield* reviewRecords;
+        expect(rest).toEqual([]);
+        expect(record).toMatchObject({
+          type: "workflow_review",
+          reviewId: reviewed.reviewId,
+          digest: reviewed.digest,
+          ready: true,
+          approvalRequired: true,
+          name: "Port every package",
+          blockers: [],
+          taskCount: 150,
+          writeConflictCount: reviewed.writeConflicts.length,
+        });
+        // Bounded: 120 of the 150 tasks, in step order, and far smaller than the result.
+        expect(record?.tasks).toHaveLength(120);
+        expect(record?.tasks[0]).toMatchObject({
+          key: "task-001",
+          label: "Check area 1",
+          wave: 0,
+          dependsOn: [],
+          worker: { providerInstanceId: instanceId },
+        });
+        expect(record?.tasks[15]).toMatchObject({
+          key: "task-016",
+          wave: 1,
+          dependsOn: ["task-001"],
+        });
+        expect(record?.advice?.nodeCount).toBe(150);
+        expect(JSON.stringify(record).length).toBeLessThan(60_000);
+        // The record's id and digest are the ones the gate issued: approving by them works.
+        yield* approvals.approve({
+          environmentId: invocation.environmentId,
+          threadId: parentThreadId,
+          reviewId: record!.reviewId,
+          digest: record!.digest!,
+        });
+        expect(yield* cannedMessages).toHaveLength(1);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("records a review that cannot be approved, with its blockers and no digest", () =>
+    Effect.gen(function* () {
+      yield* askForWorkflow;
+      const reviewed = yield* reviewGraph({
+        schemaVersion: 1,
+        nodes: { a: { subject: "loop", description: "x", dependsOn: ["a"] } },
+      });
+      expect(reviewed.digest).toBeNull();
+      const [record] = yield* reviewRecords;
+      expect(record).toMatchObject({
+        reviewId: reviewed.reviewId,
+        digest: null,
+        ready: false,
+        approvalRequired: true,
+        tasks: [],
+        taskCount: 0,
+      });
+      expect(record?.blockers.length).toBeGreaterThan(0);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("records a review that needs no approval, and one record for each review", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const first = yield* reviewGraph(oneNode);
+      const second = yield* reviewGraph(twoNodes);
+      const records = yield* reviewRecords;
+      expect(records.map((record) => [record.reviewId, record.approvalRequired])).toEqual([
+        [first.reviewId, false],
+        [second.reviewId, false],
+      ]);
+      expect(records[1]?.tasks.map((task) => [task.key, task.dependsOn])).toEqual([
+        ["a", []],
+        ["b", ["a"]],
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "refuses a review the user must approve when its record cannot be written, and keeps any other",
+    () =>
+      Effect.gen(function* () {
+        const threads = yield* ThreadManagementService.ThreadManagementService;
+        const real = threads.dispatch;
+        const spy = vi
+          .spyOn(threads, "dispatch")
+          .mockImplementation(((command: { readonly type: string }) =>
+            command.type === "workflow.review.record"
+              ? Effect.fail("the record was not written")
+              : real(command as never)) as never);
+        yield* Effect.addFinalizer(() => Effect.sync(() => spy.mockRestore()));
+        yield* askForWorkflow;
+        const refused = yield* invoke("graph_review", { graph: oneNode });
+        expect(refusal(refused)).toMatchObject({ code: "orchestration_error" });
+        expect(refusal(refused).message).toContain("Could not record the review");
+        expect(refusal(refused).message).toContain("Call graph_review again");
+        // A plain message lifts the request: the next review needs no approval and still returns.
+        const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+        yield* gate.observeTurn({
+          ...(yield* personTurn("Thanks")),
+          messageId: MessageId.make("message:plain"),
+        });
+        const plain = yield* invoke("graph_review", { graph: oneNode });
+        expect(plain.isError).not.toBe(true);
+        expect(yield* reviewRecords).toEqual([]);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("starts the approved digest under the approval's key, and that start settles", () =>
     Effect.gen(function* () {
       yield* askForWorkflow;

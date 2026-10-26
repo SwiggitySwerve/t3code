@@ -6,8 +6,8 @@ import {
 } from "@t3tools/contracts";
 import {
   WORKFLOW_REVIEW_FIXTURE_DIGEST,
-  workflowReviewFixtureResult,
-  workflowReviewStoredByCodex,
+  workflowReviewFixtureLargeRecord,
+  workflowReviewFixtureRecord,
 } from "@t3tools/shared/testing/workflowReviewFixture";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
@@ -28,7 +28,6 @@ const harness = vi.hoisted(() => ({
   permission: { kind: "permission" },
   thread: { kind: "thread" },
   canDecide: true,
-  output: undefined as unknown,
   items: [] as ReadonlyArray<unknown>,
   approve: undefined as unknown as ReturnType<typeof vi.fn>,
   dismiss: undefined as unknown as ReturnType<typeof vi.fn>,
@@ -97,11 +96,6 @@ vi.mock("../../state/use-atom-command", async () => {
         : harness.dismiss,
   };
 });
-vi.mock("../../state/queries", () => ({
-  useTurnItemDetail: () => ({
-    data: { item: { type: "dynamic_tool", output: harness.output } },
-  }),
-}));
 vi.mock("../../state/entities", () => ({
   useEnvironmentServerConfig: () => ({
     providers: [
@@ -122,19 +116,25 @@ import { ThreadWorkflowReview } from "./thread-workflow-review";
 const ENVIRONMENT = EnvironmentId.make("environment-a");
 const THREAD = ThreadId.make("thread-a");
 
-function projectedReview(id = "review-item") {
+const SECOND = (n: number) => DateTime.makeUnsafe(Date.UTC(2026, 9, 26, 12, 0, n));
+
+/** The review record the server wrote for a graph_review, as the thread's feed holds it. */
+function projectedReview(
+  id = "review-item",
+  record: Parameters<typeof workflowReviewFixtureRecord>[0] = {},
+  visibility = "local",
+) {
   return {
     position: 1,
-    visibility: "local",
+    visibility,
     sourceThreadId: THREAD,
     sourceItemId: TurnItemId.make(id),
     item: {
       id: TurnItemId.make(id),
       threadId: THREAD,
-      type: "dynamic_tool",
-      toolName: "t3-code.graph_review",
-      input: {},
-      outputOmitted: true,
+      startedAt: SECOND(1),
+      updatedAt: SECOND(1),
+      ...workflowReviewFixtureRecord(record),
     },
   };
 }
@@ -142,14 +142,15 @@ function projectedReview(id = "review-item") {
 let root: Root;
 let container: HTMLElement;
 
-function show(result: Record<string, unknown>) {
-  harness.output = workflowReviewStoredByCodex(result);
+function show(
+  record: Parameters<typeof workflowReviewFixtureRecord>[0] = {},
+  visibility = "local",
+) {
   act(() =>
     root.render(
       <ThreadWorkflowReview
         environmentId={ENVIRONMENT}
-        projectedItem={projectedReview() as never}
-        fallback={<span>generic tool row</span>}
+        projectedItem={projectedReview("review-item", record, visibility) as never}
       />,
     ),
   );
@@ -188,7 +189,7 @@ afterEach(() => {
 
 describe("ThreadWorkflowReview", () => {
   it("shows the reviewed graph: tasks by step, who runs each, and the cost", () => {
-    show(workflowReviewFixtureResult({ reviewId: "review-shows" }));
+    show({ reviewId: "review-shows" });
     for (const expected of [
       "Fix the sync bug",
       "4 tasks in 3 steps",
@@ -201,7 +202,6 @@ describe("ThreadWorkflowReview", () => {
     ]) {
       expect(text()).toContain(expected);
     }
-    expect(text()).not.toContain("generic tool row");
   });
 
   it("approves with the review id and digest the server issued, once, and shows it approved", async () => {
@@ -212,7 +212,7 @@ describe("ThreadWorkflowReview", () => {
           answer = resolve;
         }),
     );
-    show(workflowReviewFixtureResult({ reviewId: "review-approve" }));
+    show({ reviewId: "review-approve" });
     const approve = button("Approve & run");
     await press(approve);
     await press(approve);
@@ -235,7 +235,7 @@ describe("ThreadWorkflowReview", () => {
   });
 
   it("dismisses with the same id and digest", async () => {
-    show(workflowReviewFixtureResult({ reviewId: "review-dismiss" }));
+    show({ reviewId: "review-dismiss" });
     await press(button("Dismiss"));
     expect(harness.dismiss).toHaveBeenCalledExactlyOnceWith({
       environmentId: ENVIRONMENT,
@@ -251,14 +251,12 @@ describe("ThreadWorkflowReview", () => {
   });
 
   it("cannot approve a review with blockers, and dismisses it by id with no digest", async () => {
-    show(
-      workflowReviewFixtureResult({
-        reviewId: "review-blocked",
-        ready: false,
-        digest: null,
-        blockers: ["Task tests depends on itself"],
-      }),
-    );
+    show({
+      reviewId: "review-blocked",
+      ready: false,
+      digest: null,
+      blockers: ["Task tests depends on itself"],
+    });
     expect(text()).toContain("Task tests depends on itself");
     expect(button("Approve & run").disabled).toBe(true);
     await press(button("Approve & run"));
@@ -288,7 +286,7 @@ describe("ThreadWorkflowReview", () => {
           }),
         ),
       );
-    show(workflowReviewFixtureResult({ reviewId: "review-error" }));
+    show({ reviewId: "review-error" });
     await press(button("Approve & run"));
     expect(text()).toContain("Could not send your decision. Try again.");
     expect(button("Approve & run").disabled).toBe(false);
@@ -302,28 +300,61 @@ describe("ThreadWorkflowReview", () => {
   });
 
   it("offers no decision on a replaced review or to someone who may not decide", () => {
-    harness.items = [projectedReview("review-item").item, { ...projectedReview("newer").item }].map(
-      (item, index) => ({
-        ...item,
-        startedAt: DateTime.makeUnsafe(Date.UTC(2026, 9, 26, 12, index)),
-        updatedAt: DateTime.makeUnsafe(Date.UTC(2026, 9, 26, 12, index)),
-      }),
-    );
+    harness.items = [
+      projectedReview("review-item").item,
+      { ...projectedReview("newer").item, startedAt: SECOND(30), updatedAt: SECOND(30) },
+    ];
     // A newer review exists, so this one is replaced.
-    show(workflowReviewFixtureResult({ reviewId: "review-old" }));
+    show({ reviewId: "review-old" });
     expect(text()).toContain("Replaced");
     expect(container.querySelector("button")).toBeNull();
     act(() => root.unmount());
     root = createRoot(container);
     harness.items = [];
     harness.canDecide = false;
-    show(workflowReviewFixtureResult({ reviewId: "review-readonly" }));
+    show({ reviewId: "review-readonly" });
     expect(text()).toContain("You cannot approve workflows in this environment.");
     expect(container.querySelector("button")).toBeNull();
   });
 
-  it("keeps the generic tool row when the stored result cannot be read", () => {
-    show({ error: "the tool failed" });
-    expect(text()).toBe("generic tool row");
+  it("keeps Approve and Dismiss on a review whose tool result is too large to store", async () => {
+    // 400 tasks with long labels: the record lists 120 and says how many it left out.
+    harness.items = [];
+    act(() =>
+      root.render(
+        <ThreadWorkflowReview
+          environmentId={ENVIRONMENT}
+          projectedItem={
+            {
+              ...projectedReview("review-item"),
+              item: {
+                ...projectedReview("review-item").item,
+                ...workflowReviewFixtureLargeRecord(400),
+                reviewId: "review-large",
+              },
+            } as never
+          }
+        />,
+      ),
+    );
+    expect(text()).toContain("400 tasks in 1 step");
+    expect(text()).toContain("280 more tasks not listed here.");
+    expect(button("Approve & run").disabled).toBe(false);
+    await press(button("Approve & run"));
+    expect(harness.approve).toHaveBeenCalledExactlyOnceWith({
+      environmentId: ENVIRONMENT,
+      input: {
+        environmentId: ENVIRONMENT,
+        threadId: THREAD,
+        reviewId: "review-large",
+        digest: WORKFLOW_REVIEW_FIXTURE_DIGEST,
+      },
+    });
+  });
+
+  it("shows a review inherited from a forked thread without buttons", () => {
+    show({}, "inherited");
+    expect(text()).toContain("Fix the sync bug");
+    expect(container.querySelector("button")).toBeNull();
   });
 });

@@ -17,6 +17,7 @@ import {
   type OrchestrationV2ProjectedTurnItem,
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
+import { workflowReviewFixtureRecord } from "@t3tools/shared/testing/workflowReviewFixture";
 import { deriveThreadCheckpointSummaries } from "@t3tools/client-runtime/state/thread-checkpoints";
 import { getReviewSectionIdForCheckpoint } from "../features/review/reviewModel";
 import * as DateTime from "effect/DateTime";
@@ -35,7 +36,7 @@ import {
   setPendingUserInputCustomAnswer,
   isPendingUserInputOptionSelected,
   buildPendingUserInputAnswers,
-  isWorkflowReviewActivityGroup,
+  workflowReviewOfActivityGroup,
 } from "./threadActivity";
 
 const threadId = ThreadId.make("thread-1");
@@ -757,10 +758,7 @@ describe("buildThreadFeed", () => {
   it("keeps the coordinator's reviewed graph out of the folded work, as a card of its own", () => {
     const review = {
       ...base("item-review", "2026-06-20T00:00:02.500Z", 3),
-      type: "dynamic_tool" as const,
-      toolName: "t3-code.graph_review",
-      input: {},
-      outputOmitted: true,
+      ...workflowReviewFixtureRecord(),
     };
     const feed = buildThreadFeed([
       projected(userMessage(), 0),
@@ -789,17 +787,17 @@ describe("buildThreadFeed", () => {
     expect(groups[0]!.activities.map((activity) => activity.projectedItem.item.id)).toEqual([
       review.id,
     ]);
-    expect(isWorkflowReviewActivityGroup(groups[0]!)).toBe(true);
+    expect(workflowReviewOfActivityGroup(groups[0]!)?.item.reviewId).toBe("review-1");
     // The ordinary command beside it folds, and is no review.
     const [, fold] = collapsed;
     expect(fold).toMatchObject({ type: "run-fold" });
     expect(
-      isWorkflowReviewActivityGroup(
+      workflowReviewOfActivityGroup(
         buildThreadFeed([projected(command(), 0)]).find(
           (entry) => entry.type === "activity-group",
         )!,
       ),
-    ).toBe(false);
+    ).toBeNull();
   });
 
   // regression: #21393 show plans and fold settled progress notes

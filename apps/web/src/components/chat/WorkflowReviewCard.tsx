@@ -1,8 +1,8 @@
 import type { ServerProvider } from "@t3tools/contracts";
 import {
+  workflowReviewNodeLines,
   workflowReviewSteps,
   workflowReviewSummary,
-  workflowReviewTargetLabel,
   type WorkflowReviewNodeView,
   type WorkflowReviewPresentation,
   type WorkflowReviewStatus,
@@ -90,6 +90,7 @@ export function WorkflowReviewCard(props: {
               {blocker}
             </li>
           ))}
+          {summary.moreBlockers ? <li>{summary.moreBlockers}</li> : null}
         </ul>
       ) : null}
       {summary.cost || summary.fanOutReasons.length > 0 || summary.writeConflicts ? (
@@ -120,6 +121,11 @@ export function WorkflowReviewCard(props: {
             </li>
           ))}
         </ol>
+      ) : null}
+      {summary.moreTasks ? (
+        <p className="text-xs text-muted-foreground" data-workflow-more-tasks>
+          {summary.moreTasks}
+        </p>
       ) : null}
       {presentation.approve.visible || presentation.dismiss.visible ? (
         <div role="group" aria-label="Your decision" className="flex flex-wrap items-center gap-2">
@@ -157,22 +163,16 @@ function ReviewNodeRow(props: {
   readonly providers: ReadonlyArray<ServerProvider> | undefined;
 }) {
   const { node } = props;
+  const lines = workflowReviewNodeLines(node, props.providers);
   return (
     <li className="flex min-w-0 flex-col gap-0.5 rounded-md px-2 py-1.5">
       <span className="min-w-0 break-words text-xs font-medium text-foreground">
         {node.subject}
       </span>
-      <span className="min-w-0 break-words text-2xs text-muted-foreground">
-        {workflowReviewTargetLabel(node.worker, props.providers)}
-        {node.judge
-          ? ` \u00b7 checked by ${workflowReviewTargetLabel(node.judge, props.providers)}`
-          : ""}
-      </span>
-      {node.dependsOn.length > 0 ? (
-        <span className="min-w-0 break-words text-2xs text-muted-foreground">
-          After {node.dependsOn.join(", ")}
-        </span>
-      ) : null}
+      <span className="min-w-0 break-words text-2xs text-muted-foreground">{lines.runs}</span>
+      {lines.after === null ? null : (
+        <span className="min-w-0 break-words text-2xs text-muted-foreground">{lines.after}</span>
+      )}
     </li>
   );
 }

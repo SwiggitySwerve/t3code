@@ -53,7 +53,7 @@ interface GraphNode {
   readonly stallTimeoutMs?: number;
 }
 
-interface WorkflowGraph {
+export interface WorkflowGraph {
   readonly schemaVersion: 1;
   readonly name?: string;
   readonly nodes: Readonly<Record<string, GraphNode>>;

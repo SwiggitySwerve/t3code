@@ -1,25 +1,22 @@
-﻿import { RegistryContext, useAtomValue } from "@effect/atom-react";
+import { RegistryContext, useAtomValue } from "@effect/atom-react";
 import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   latestWorkflowReviewItemId,
   presentWorkflowReview,
-  readWorkflowReviewOutput,
   runWorkflowReviewDecision,
   workflowReviewDecisionAtom,
   workflowReviewDecisionKey,
+  workflowReviewNodeLines,
+  workflowReviewOf,
   workflowReviewSteps,
   workflowReviewSummary,
-  workflowReviewTargetLabel,
+  type ProjectedWorkflowReviewItem,
   type WorkflowReviewNodeView,
   type WorkflowReviewPresentation,
   type WorkflowReviewView,
 } from "@t3tools/client-runtime/state/workflowReview";
-import type {
-  EnvironmentId,
-  OrchestrationV2ProjectedTurnItem,
-  ServerProvider,
-} from "@t3tools/contracts";
-import { useContext, type ReactNode } from "react";
+import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
+import { useContext } from "react";
 import { View } from "react-native";
 
 import { AppText as Text } from "../../components/ui/AppText";
@@ -27,23 +24,22 @@ import { Button } from "../../components/ui/Button";
 import { Notice } from "../../components/ui/Notice";
 import { useEnvironmentServerConfig } from "../../state/entities";
 import { orchestrationEnvironment } from "../../state/orchestration";
-import { useTurnItemDetail } from "../../state/queries";
 import { environmentThreadDetails } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
 
 /**
- * The coordinator's `graph_review` call, drawn as the card the person approves from. The decision
- * goes to the thread that made the review, named by the review id and digest in its result; a review
- * this thread did not make (a fork's inherited history), or one whose result cannot be read, keeps
- * the generic tool row passed as `fallback`.
+ * The review record the server wrote for a `graph_review`, drawn as the card the person approves
+ * from. The decision goes to the thread that made the review, named by the review id and digest in
+ * the record. A review this thread inherited from the one it was forked from is shown without
+ * buttons.
  */
 export function ThreadWorkflowReview(props: {
   readonly environmentId: EnvironmentId;
-  readonly projectedItem: OrchestrationV2ProjectedTurnItem;
-  readonly fallback: ReactNode;
+  readonly projectedItem: ProjectedWorkflowReviewItem;
 }) {
   const { environmentId, projectedItem } = props;
-  const item = projectedItem.item;
+  const { item } = projectedItem;
+  const review = workflowReviewOf(item);
   const registry = useContext(RegistryContext);
   const approve = useAtomCommand(orchestrationEnvironment.approveWorkflowReview, {
     reportFailure: false,
@@ -55,20 +51,12 @@ export function ThreadWorkflowReview(props: {
     orchestrationEnvironment.approveWorkflowReview.permissionAtom(environmentId),
   );
   const providers = useEnvironmentServerConfig(environmentId)?.providers;
-  const own = projectedItem.visibility === "local" && item.type === "dynamic_tool";
   const latestReviewId = useAtomValue(
     environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, item.threadId)),
     (thread) => (thread === null ? null : latestWorkflowReviewItemId(thread.projection.turnItems)),
   );
-  // The wire item never carries the review; its stored output is read on demand.
-  const detail = useTurnItemDetail(own ? { environmentId, row: projectedItem } : null);
-  const stored = detail.data?.item;
-  const output = stored?.type === "dynamic_tool" ? stored.output : undefined;
-  const review = own ? readWorkflowReviewOutput(output ?? item.output) : null;
-  const decisionKey =
-    review === null ? "" : workflowReviewDecisionKey(environmentId, item.threadId, review.reviewId);
+  const decisionKey = workflowReviewDecisionKey(environmentId, item.threadId, review.reviewId);
   const decision = useAtomValue(workflowReviewDecisionAtom(decisionKey));
-  if (review === null) return props.fallback;
   const decide = (action: "approve" | "dismiss") => {
     const base = { environmentId, threadId: item.threadId, reviewId: review.reviewId };
     const digest = review.digest;
@@ -90,6 +78,7 @@ export function ThreadWorkflowReview(props: {
         decision,
         canDecide,
         superseded: latestReviewId !== null && latestReviewId !== item.id,
+        local: projectedItem.visibility === "local",
       })}
       providers={providers}
       onApprove={() => decide("approve")}
@@ -138,6 +127,9 @@ function WorkflowReviewCard(props: {
           {`\u2022 ${blocker}`}
         </Text>
       ))}
+      {summary.moreBlockers ? (
+        <Text className="font-sans text-sm text-foreground-muted">{summary.moreBlockers}</Text>
+      ) : null}
       {summary.cost ? (
         <Text className="font-sans text-sm text-foreground-muted">{summary.cost}</Text>
       ) : null}
@@ -160,6 +152,9 @@ function WorkflowReviewCard(props: {
           ))}
         </View>
       ))}
+      {summary.moreTasks ? (
+        <Text className="font-sans text-xs text-foreground-muted">{summary.moreTasks}</Text>
+      ) : null}
       {presentation.approve.visible || presentation.dismiss.visible ? (
         <View className="flex-row flex-wrap items-center gap-2">
           {presentation.approve.visible ? (
@@ -190,20 +185,14 @@ function ReviewNode(props: {
   readonly providers: ReadonlyArray<ServerProvider> | undefined;
 }) {
   const { node } = props;
-  const worker = workflowReviewTargetLabel(node.worker, props.providers);
+  const lines = workflowReviewNodeLines(node, props.providers);
   return (
     <View className="gap-0.5 rounded-lg px-1 py-1">
       <Text className="font-t3-medium text-sm text-foreground">{node.subject}</Text>
-      <Text className="font-sans text-xs text-foreground-muted">
-        {node.judge
-          ? `${worker} \u00b7 checked by ${workflowReviewTargetLabel(node.judge, props.providers)}`
-          : worker}
-      </Text>
-      {node.dependsOn.length > 0 ? (
-        <Text className="font-sans text-xs text-foreground-muted">
-          {`After ${node.dependsOn.join(", ")}`}
-        </Text>
-      ) : null}
+      <Text className="font-sans text-xs text-foreground-muted">{lines.runs}</Text>
+      {lines.after === null ? null : (
+        <Text className="font-sans text-xs text-foreground-muted">{lines.after}</Text>
+      )}
     </View>
   );
 }

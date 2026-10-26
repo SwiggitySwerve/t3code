@@ -23,6 +23,7 @@ import type { TurnDiffSummary } from "../../types";
 import { describe, expect, it } from "vite-plus/test";
 import { EnvironmentId, MessageId, RunId } from "@t3tools/contracts";
 import { serializeAssistantCitation } from "@t3tools/shared/assistantCitations";
+import { workflowReviewFixtureRecord } from "@t3tools/shared/testing/workflowReviewFixture";
 import {
   appWorkflowLookupThreadKey,
   computeStableMessagesTimelineRows,
@@ -1030,14 +1031,25 @@ describe("deriveMessagesTimelineRows", () => {
   it("keeps the coordinator's reviewed graph out of the turn fold, so it can be approved", () => {
     const fixture = makeStreamingTimelineFixture();
     const tool = fixture.visibleTurnItems.find((row) => row.item.type === "dynamic_tool")!;
-    if (tool.item.type !== "dynamic_tool") throw new Error("Expected tool fixture");
+    const { id, threadId, runId, nodeId, providerThreadId, providerTurnId, ordinal } = tool.item;
     const review = {
       ...tool,
       item: {
-        ...tool.item,
-        toolName: "t3-code.graph_review",
-        output: undefined,
-        outputOmitted: true,
+        id,
+        threadId,
+        runId: runId ?? null,
+        nodeId: nodeId ?? null,
+        providerThreadId: providerThreadId ?? null,
+        providerTurnId: providerTurnId ?? null,
+        nativeItemRef: null,
+        parentItemId: null,
+        ordinal,
+        status: "completed" as const,
+        title: null,
+        startedAt: tool.item.startedAt,
+        completedAt: tool.item.completedAt,
+        updatedAt: tool.item.updatedAt,
+        ...workflowReviewFixtureRecord(),
       },
     };
     const entry = (id: string, at: string, extra: object) => ({
@@ -1071,11 +1083,12 @@ describe("deriveMessagesTimelineRows", () => {
       timelineEntries: [
         message("user", "user", "2026-01-01T00:00:00Z"),
         entry("read", "2026-01-01T00:00:05Z", {}),
-        entry("review", "2026-01-01T00:00:08Z", {
-          itemType: "dynamic_tool",
-          toolLifecycleStatus: "completed",
+        {
+          id: "review-entry",
+          kind: "event" as const,
+          createdAt: "2026-01-01T00:00:08Z",
           projectedItem: review,
-        }),
+        },
         message("assistant-final", "assistant", "2026-01-01T00:00:20Z"),
       ],
       isWorking: false,
@@ -1089,11 +1102,7 @@ describe("deriveMessagesTimelineRows", () => {
       "review-entry",
       "assistant-final-entry",
     ]);
-    expect(rows.find((row) => row.id === "review-entry")).toMatchObject({
-      kind: "work",
-      groupedEntries: [{ id: "review" }],
-      isExpandedToolGroup: false,
-    });
+    expect(rows.find((row) => row.id === "review-entry")).toMatchObject({ kind: "event" });
   });
 
   it.each([1, 2, 3])("folds %i completed activities after the terminal response", (count) => {
