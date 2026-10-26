@@ -553,6 +553,7 @@ function driver(
 ) {
   const calls: Array<{ prompt: string; options: Readonly<Record<string, unknown>> }> = [];
   const phases: string[] = [];
+  const logs: string[] = [];
   const outcomes: Array<[string, unknown]> = [];
   const result = runWorkflowScript({
     source: GRAPH_DRIVER_SCRIPT,
@@ -572,7 +573,9 @@ function driver(
               reason: null,
             };
       },
-      log: () => {},
+      log: (message) => {
+        logs.push(message);
+      },
       phase: (title) => {
         phases.push(title);
       },
@@ -583,7 +586,7 @@ function driver(
         : {}),
     } satisfies WorkflowScriptHost,
   });
-  return { calls, phases, outcomes, result };
+  return { calls, phases, logs, outcomes, result };
 }
 
 /** A graph with a node that did not pass fails with a readable summary. */
@@ -645,6 +648,30 @@ describe("graph driver in QuickJS", () => {
     const resume = driver(value);
     expect(await resume.result).toEqual(await run.result);
     expect(resume.calls).toEqual(run.calls);
+  });
+
+  it("names a finished node by its label, not its key, in the progress text", async () => {
+    const run = driver(
+      graph({
+        n1: node({ subject: "Scan the sources", description: "scan" }),
+        n2: node({ subject: "Summarize the scan", description: "summarize", dependsOn: ["n1"] }),
+      }),
+      {
+        summarize: {
+          ok: false,
+          result: null,
+          attempts: 3,
+          outputs: {},
+          verification: null,
+          reason: "x",
+        },
+      },
+    );
+    await run.result.catch(() => undefined);
+    expect(run.logs).toEqual([
+      "1/2 nodes finished; Scan the sources passed.",
+      "2/2 nodes finished; Summarize the scan failed.",
+    ]);
   });
 
   it("starts independent nodes concurrently and waits for both at fan-in", async () => {

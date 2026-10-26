@@ -580,7 +580,8 @@ const run = (key) =>
       node(key, recorded);
     }
     settled += 1;
-    log(settled + "/" + total + " nodes finished; " + key + " " + results[key].status + ".");
+    // The label the app shows for the node, never its key, which only the graph author chose.
+    log(settled + "/" + total + " nodes finished; " + graph.nodes[key].subject + " " + results[key].status + ".");
   }));
 await Promise.all(Object.keys(graph.nodes).sort().map(run));
 const record = { ok: Object.values(results).every((node) => node.status === "passed"), nodes: results };
