@@ -364,7 +364,7 @@ describe("CodexAdapterV2 rollback mapping", () => {
         nativeTurnRef: null,
       };
 
-      const numTurns = yield* CodexAdapterV2.resolveCodexRollbackTurnCount({
+      const plan = yield* CodexAdapterV2.resolveCodexRollbackPlan({
         providerThread,
         target: {
           type: "provider_turn",
@@ -375,7 +375,15 @@ describe("CodexAdapterV2 rollback mapping", () => {
         providerThreadTurns: [goalCommandTurn, interruptedTurn, runningTurn, secondTurn, firstTurn],
       });
 
-      assert.equal(numTurns, 2);
+      assert.deepEqual(plan, {
+        turnCount: 2,
+        boundary: {
+          type: "from_turn",
+          firstRemovedTurnId: "native-provider-turn-second",
+          removedTurnIds: ["native-provider-turn-interrupted", "native-provider-turn-second"],
+          kept: { type: "turn", turnId: "native-provider-turn-first" },
+        },
+      });
     }),
   );
 });
@@ -5732,6 +5740,363 @@ describe("CodexAdapterV2 post-settle continuation", () => {
     ),
   );
 
+  describe("rolling back to a native turn boundary", () => {
+    const nativeThreadId = "rollback-boundary-thread";
+    const replayServices = Layer.mergeAll(
+      IdAllocator.layer,
+      McpProviderSessions.layer,
+      NodeServices.layer,
+    );
+    const exchange = (
+      id: number,
+      method: string,
+      params: unknown,
+      result: unknown,
+    ): ReadonlyArray<CodexReplay.CodexAppServerReplayEntry> => [
+      { type: "expect_outbound", label: method, frame: { id, method, params } },
+      { type: "emit_inbound", label: method, frame: { id, result } },
+    ];
+    const probeHistoryMode = (id: number) =>
+      exchange(
+        id,
+        "thread/read",
+        { threadId: nativeThreadId, includeTurns: false },
+        { thread: { id: nativeThreadId, historyMode: "paginated" } },
+      );
+    const listTurns = (
+      id: number,
+      limit: number,
+      turnIds: ReadonlyArray<string>,
+      nextCursor: string | null = null,
+      cursor: string | null = null,
+    ) =>
+      exchange(
+        id,
+        "thread/turns/list",
+        {
+          threadId: nativeThreadId,
+          cursor,
+          limit,
+          sortDirection: "desc",
+          itemsView: "summary",
+        },
+        {
+          data: turnIds.map((turnId) => ({
+            id: turnId,
+            items: [],
+            status: "completed",
+            error: null,
+          })),
+          nextCursor,
+        },
+      );
+    const revertBefore = (id: number, beforeTurnId: string) =>
+      exchange(
+        id,
+        "thread/revert",
+        { threadId: nativeThreadId, beforeTurnId },
+        codexReplayThreadResult({ nativeThreadId, forkedFromId: null }),
+      );
+    const readThread = (id: number) =>
+      exchange(
+        id,
+        "thread/read",
+        { threadId: nativeThreadId, includeTurns: false },
+        codexReplayThreadResult({ nativeThreadId, forkedFromId: null }),
+      );
+
+    const openRollbackHarness = (
+      scenario: string,
+      entries: ReadonlyArray<CodexReplay.CodexAppServerReplayEntry>,
+    ) =>
+      Effect.gen(function* () {
+        const preamble = codexReplayPreamble({
+          nativeThreadId,
+          nativeTurnId: "rollback-boundary-unused",
+          prompt: "unused",
+        });
+        const outbound: Array<string> = [];
+        const harness = yield* makeCodexReplayHarness(
+          makeCodexReplayTranscript({
+            scenario,
+            entries: [...preamble.slice(0, 5), ...entries],
+          }),
+          () => Effect.void,
+          (method) =>
+            Effect.sync(() => {
+              outbound.push(method);
+            }),
+        );
+        const now = yield* DateTime.now;
+        const sourceTurn = (name: string, ordinal: number, nativeId = `native-turn-${name}`) =>
+          codexReplaySourceTurn({
+            id: `provider-turn-${name}`,
+            ordinal,
+            nativeId,
+            providerThreadId: harness.providerThread.id,
+            now,
+          });
+        const turns = {
+          first: sourceTurn("first", 1),
+          second: sourceTurn("second", 2),
+          third: sourceTurn("third", 3),
+          // Same turns as above, but with no native turn id recorded.
+          unidentifiedFirst: codexReplaySourceTurn({
+            id: "provider-turn-first",
+            ordinal: 1,
+            nativeId: null,
+            providerThreadId: harness.providerThread.id,
+            now,
+          }),
+          unidentifiedSecond: codexReplaySourceTurn({
+            id: "provider-turn-second",
+            ordinal: 2,
+            nativeId: null,
+            providerThreadId: harness.providerThread.id,
+            now,
+          }),
+        };
+        const rollback = (
+          target: "thread_start" | OrchestrationV2ProviderTurn,
+          providerThreadTurns: ReadonlyArray<OrchestrationV2ProviderTurn>,
+        ) =>
+          harness.runtime.rollbackThread({
+            providerThread: harness.providerThread,
+            target:
+              target === "thread_start"
+                ? {
+                    type: "thread_start",
+                    checkpointId: CheckpointId.make("checkpoint-rollback-boundary"),
+                    appRunOrdinal: 0,
+                  }
+                : {
+                    type: "provider_turn",
+                    checkpointId: CheckpointId.make("checkpoint-rollback-boundary"),
+                    appRunOrdinal: target.ordinal,
+                    providerTurn: target,
+                  },
+            providerThreadTurns,
+          });
+        return {
+          turns,
+          rollback,
+          reverts: () => outbound.filter((method) => method === "thread/revert").length,
+          threadRequests: () =>
+            outbound.filter((method) => method.startsWith("thread/") && method !== "thread/start"),
+        };
+      });
+
+    it.effect(
+      "rewinds once when the same rollback is retried after the provider already moved",
+      () =>
+        Effect.gen(function* () {
+          const { turns, rollback, reverts } = yield* openRollbackHarness("codex-rollback-retry", [
+            ...probeHistoryMode(3),
+            ...listTurns(4, 2, ["native-turn-third", "native-turn-second"], "older"),
+            ...revertBefore(5, "native-turn-second"),
+            ...probeHistoryMode(6),
+            ...listTurns(7, 2, ["native-turn-first"]),
+            ...readThread(8),
+          ]);
+          const durableTurns = [turns.first, turns.second, turns.third];
+
+          const firstAttempt = yield* rollback(turns.first, durableTurns);
+          const retry = yield* rollback(turns.first, durableTurns);
+
+          assert.equal(reverts(), 1);
+          assert.deepEqual(
+            retry.providerThread.nativeConversationHeadRef,
+            turns.first.nativeTurnRef,
+          );
+          assert.equal(retry.providerThread.nativeThreadRef?.nativeId, nativeThreadId);
+          assert.deepEqual(
+            retry.providerThread.nativeConversationHeadRef,
+            firstAttempt.providerThread.nativeConversationHeadRef,
+          );
+        }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("leaves a thread already at its start alone when a start rollback is retried", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-start-retry",
+          [...probeHistoryMode(3), ...listTurns(4, 2, ["native-turn-inherited"]), ...readThread(5)],
+        );
+
+        const result = yield* rollback("thread_start", [turns.first, turns.second]);
+
+        assert.equal(reverts(), 0);
+        assert.equal(result.providerThread.nativeConversationHeadRef, null);
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("refuses to guess when the live history no longer holds the rollback target", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-unknown-head",
+          [...probeHistoryMode(3), ...listTurns(4, 2, ["native-turn-unrelated"])],
+        );
+
+        const error = yield* Effect.flip(
+          rollback(turns.first, [turns.first, turns.second, turns.third]),
+        );
+
+        assert.instanceOf(error, ProviderAdapter.ProviderAdapterRollbackThreadError);
+        assert.include(errorCauseChainText(error), "native-turn-first");
+        assert.equal(reverts(), 0);
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("leaves the thread alone when a retry cannot name the oldest removed turn", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-unidentified-retry",
+          [...probeHistoryMode(3), ...listTurns(4, 2, ["native-turn-first"]), ...readThread(5)],
+        );
+
+        const result = yield* rollback(turns.first, [
+          turns.first,
+          turns.unidentifiedSecond,
+          turns.third,
+        ]);
+
+        assert.equal(reverts(), 0);
+        assert.deepEqual(
+          result.providerThread.nativeConversationHeadRef,
+          turns.first.nativeTurnRef,
+        );
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("rewinds to the target turn when the oldest removed turn has no native id", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-unidentified-first",
+          [
+            ...probeHistoryMode(3),
+            ...listTurns(4, 2, ["native-turn-third", "native-turn-second"], "older"),
+            ...listTurns(5, 100, ["native-turn-first"], null, "older"),
+            ...revertBefore(6, "native-turn-second"),
+          ],
+        );
+
+        yield* rollback(turns.first, [turns.first, turns.unidentifiedSecond, turns.third]);
+
+        assert.equal(reverts(), 1);
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("does not accept unrelated history when the rollback target has no native id", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-unidentified-target",
+          [...probeHistoryMode(3), ...listTurns(4, 2, ["native-turn-unrelated"])],
+        );
+
+        const error = yield* Effect.flip(
+          rollback(turns.unidentifiedFirst, [turns.unidentifiedFirst, turns.second, turns.third]),
+        );
+
+        assert.instanceOf(error, ProviderAdapter.ProviderAdapterRollbackThreadError);
+        assert.include(errorCauseChainText(error), "no native turn id");
+        assert.equal(reverts(), 0);
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("refuses before touching the provider when no native turn marks the boundary", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, threadRequests } = yield* openRollbackHarness(
+          "codex-rollback-no-boundary",
+          [],
+        );
+
+        const error = yield* Effect.flip(
+          rollback("thread_start", [turns.unidentifiedFirst, turns.second]),
+        );
+
+        assert.instanceOf(error, ProviderAdapter.ProviderAdapterRollbackThreadError);
+        assert.include(errorCauseChainText(error), "no native turn id");
+        assert.deepEqual(threadRequests(), []);
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+    it.effect(
+      "removes a turn started after a failed start rollback instead of accepting the retry",
+      () =>
+        Effect.gen(function* () {
+          const { turns, rollback, reverts } = yield* openRollbackHarness(
+            "codex-rollback-start-new-turn",
+            [
+              ...probeHistoryMode(3),
+              ...listTurns(4, 3, ["native-turn-third", "native-turn-inherited"]),
+              ...revertBefore(5, "native-turn-third"),
+            ],
+          );
+
+          const result = yield* rollback("thread_start", [turns.first, turns.second, turns.third]);
+
+          assert.equal(reverts(), 1);
+          assert.equal(result.providerThread.nativeConversationHeadRef, null);
+        }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("converges on the remaining recorded turn when a target rollback is retried", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-target-new-turn",
+          [
+            ...probeHistoryMode(3),
+            ...listTurns(4, 2, ["native-turn-third", "native-turn-first"]),
+            ...revertBefore(5, "native-turn-third"),
+          ],
+        );
+
+        const result = yield* rollback(turns.first, [turns.first, turns.second, turns.third]);
+
+        assert.equal(reverts(), 1);
+        assert.deepEqual(
+          result.providerThread.nativeConversationHeadRef,
+          turns.first.nativeTurnRef,
+        );
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+
+    it.effect("refuses to remove an unrecorded turn that sits above the rollback target", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-target-foreign-turn",
+          [
+            ...probeHistoryMode(3),
+            ...listTurns(4, 2, ["native-turn-foreign", "native-turn-first"]),
+          ],
+        );
+
+        const error = yield* Effect.flip(
+          rollback(turns.first, [turns.first, turns.second, turns.third]),
+        );
+
+        assert.instanceOf(error, ProviderAdapter.ProviderAdapterRollbackThreadError);
+        assert.include(errorCauseChainText(error), "native-turn-foreign");
+        assert.equal(reverts(), 0);
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+    it.effect("keeps history inherited from a fork source when rolling back to the start", () =>
+      Effect.gen(function* () {
+        const { turns, rollback, reverts } = yield* openRollbackHarness(
+          "codex-rollback-fork-prefix",
+          [
+            ...probeHistoryMode(3),
+            ...listTurns(4, 2, ["native-turn-second", "native-turn-first"], "older"),
+            ...revertBefore(5, "native-turn-first"),
+          ],
+        );
+
+        const result = yield* rollback("thread_start", [turns.first, turns.second]);
+
+        assert.equal(reverts(), 1);
+        assert.equal(result.providerThread.nativeConversationHeadRef, null);
+      }).pipe(Effect.scoped, Effect.provide(replayServices)),
+    );
+  });
   it.effect(
     "falls back to fork-local thread/revert on paginated history when the source turn lacks a native reference",
     () =>

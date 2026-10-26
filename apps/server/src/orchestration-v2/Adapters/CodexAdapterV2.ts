@@ -1,5 +1,10 @@
 import * as DocumentText from "../../provider/DocumentText.ts";
-import { revertCodexThread } from "../../provider/CodexThreadRevert.ts";
+import {
+  revertCodexThread,
+  revertCodexThreadAfterTurn,
+  revertCodexThreadFromTurn,
+  type CodexKeptTurn,
+} from "../../provider/CodexThreadRevert.ts";
 import { historyResponseItems } from "@t3tools/provider-core/server/handoffBudget";
 import { makeProviderTextDeltaCoalescer } from "./ProviderTextDeltaCoalescer.ts";
 import {
@@ -922,10 +927,10 @@ const providerTurnsForThread = (
 ): ReadonlyArray<OrchestrationV2ProviderTurn> =>
   providerTurns.filter((turn) => turn.providerThreadId === providerThread.id);
 
-const countTerminalTurnsAfterBoundary = (
+const terminalTurnsAfterBoundary = (
   providerTurns: ReadonlyArray<OrchestrationV2ProviderTurn>,
   providerTurnId: ProviderTurnId,
-): number | null => {
+): ReadonlyArray<OrchestrationV2ProviderTurn> | null => {
   const boundaryTurn = providerTurns.find((turn) => turn.id === providerTurnId);
   if (boundaryTurn === undefined) {
     return null;
@@ -933,8 +938,13 @@ const countTerminalTurnsAfterBoundary = (
 
   return providerTurns.filter(
     (turn) => turn.ordinal > boundaryTurn.ordinal && isTerminalProviderTurn(turn),
-  ).length;
+  );
 };
+
+const countTerminalTurnsAfterBoundary = (
+  providerTurns: ReadonlyArray<OrchestrationV2ProviderTurn>,
+  providerTurnId: ProviderTurnId,
+): number | null => terminalTurnsAfterBoundary(providerTurns, providerTurnId)?.length ?? null;
 
 const resolveCodexForkRollbackTurnCount = Effect.fn("CodexAdapterV2.resolveForkRollbackTurnCount")(
   function* (input: ProviderAdapter.ProviderAdapterV2ForkThreadInput) {
@@ -1010,38 +1020,79 @@ const readCodexThreadHistoryMetadata = Effect.fn("CodexAdapterV2.readThreadHisto
   },
 );
 
-export const resolveCodexRollbackTurnCount = Effect.fn("CodexAdapterV2.resolveRollbackTurnCount")(
-  function* (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) {
-    const providerTurns = input.providerThreadTurns;
-    switch (input.target.type) {
-      case "thread_start":
-        return providerTurns.filter(isTerminalProviderTurn).length;
-      case "provider_turn": {
-        if (input.target.providerTurn.providerThreadId !== input.providerThread.id) {
-          return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
-            driver: CODEX_PROVIDER,
-            providerThreadId: input.providerThread.id,
-            cause: `Cannot roll back Codex thread ${input.providerThread.id} to provider turn ${input.target.providerTurn.id}: target turn belongs to provider thread ${input.target.providerTurn.providerThreadId}.`,
-          });
-        }
-
-        const rollbackTurnCount = countTerminalTurnsAfterBoundary(
-          providerTurns,
-          input.target.providerTurn.id,
-        );
-        if (rollbackTurnCount === null) {
-          return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
-            driver: CODEX_PROVIDER,
-            providerThreadId: input.providerThread.id,
-            cause: `Cannot roll back Codex thread ${input.providerThread.id} to provider turn ${input.target.providerTurn.id}: target turn was not found in durable provider turn history.`,
-          });
-        }
-
-        return rollbackTurnCount;
+const resolveCodexRolledBackTurns = Effect.fn("CodexAdapterV2.resolveRolledBackTurns")(function* (
+  input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput,
+) {
+  const providerTurns = input.providerThreadTurns;
+  switch (input.target.type) {
+    case "thread_start":
+      return providerTurns.filter(isTerminalProviderTurn);
+    case "provider_turn": {
+      if (input.target.providerTurn.providerThreadId !== input.providerThread.id) {
+        return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+          driver: CODEX_PROVIDER,
+          providerThreadId: input.providerThread.id,
+          cause: `Cannot roll back Codex thread ${input.providerThread.id} to provider turn ${input.target.providerTurn.id}: target turn belongs to provider thread ${input.target.providerTurn.providerThreadId}.`,
+        });
       }
+
+      const rolledBackTurns = terminalTurnsAfterBoundary(
+        providerTurns,
+        input.target.providerTurn.id,
+      );
+      if (rolledBackTurns === null) {
+        return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+          driver: CODEX_PROVIDER,
+          providerThreadId: input.providerThread.id,
+          cause: `Cannot roll back Codex thread ${input.providerThread.id} to provider turn ${input.target.providerTurn.id}: target turn was not found in durable provider turn history.`,
+        });
+      }
+
+      return rolledBackTurns;
     }
-  },
-);
+  }
+});
+
+const nativeTurnId = (turn: OrchestrationV2ProviderTurn): string | undefined =>
+  turn.nativeTurnRef?.nativeId ?? undefined;
+
+/**
+ * Anchors the rewind on native turn ids so a retry can see the provider already
+ * rewound; a count is relative to a head that a rewind moves. With no native id
+ * on the oldest removed turn or the target, it fails before changing anything.
+ */
+export const resolveCodexRollbackPlan = Effect.fn("CodexAdapterV2.resolveRollbackPlan")(function* (
+  input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput,
+) {
+  const rolledBackTurns = yield* resolveCodexRolledBackTurns(input);
+  const turnCount = rolledBackTurns.length;
+  const [oldestTurn] = rolledBackTurns.toSorted((left, right) => left.ordinal - right.ordinal);
+  const firstRemovedTurnId = oldestTurn === undefined ? undefined : nativeTurnId(oldestTurn);
+  const keptTurnId =
+    input.target.type === "provider_turn" ? nativeTurnId(input.target.providerTurn) : undefined;
+  const kept: CodexKeptTurn =
+    input.target.type === "thread_start"
+      ? { type: "start" }
+      : keptTurnId === undefined
+        ? { type: "unknown" }
+        : { type: "turn", turnId: keptTurnId };
+  if (turnCount === 0) return { turnCount, boundary: undefined };
+  if (firstRemovedTurnId !== undefined) {
+    const removedTurnIds = rolledBackTurns.flatMap((turn) => nativeTurnId(turn) ?? []);
+    return {
+      turnCount,
+      boundary: { type: "from_turn" as const, firstRemovedTurnId, removedTurnIds, kept },
+    };
+  }
+  if (kept.type === "turn") {
+    return { turnCount, boundary: { type: "after_turn" as const, keptTurnId: kept.turnId } };
+  }
+  return yield* new ProviderAdapter.ProviderAdapterRollbackThreadError({
+    driver: CODEX_PROVIDER,
+    providerThreadId: input.providerThread.id,
+    cause: `Cannot roll back Codex thread ${input.providerThread.id}: no native turn id marks where to roll back, because the oldest turn to remove and the rollback target both have no native turn id.`,
+  });
+});
 
 function parseCodexRetryProgress(
   message: string,
@@ -7319,12 +7370,12 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
           rollbackThread: Effect.fn("CodexAdapterV2.rollbackThread")(
             function* (threadInput) {
               const threadId = yield* getNativeThreadId(threadInput.providerThread);
-              const numTurns = yield* resolveCodexRollbackTurnCount(threadInput);
+              const { turnCount, boundary } = yield* resolveCodexRollbackPlan(threadInput);
               const nativeConversationHeadRef =
                 threadInput.target.type === "provider_turn"
                   ? threadInput.target.providerTurn.nativeTurnRef
                   : null;
-              if (numTurns === 0) {
+              if (boundary === undefined) {
                 return {
                   providerThread: {
                     ...threadInput.providerThread,
@@ -7359,7 +7410,11 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
                 });
               }
               const response = yield* ensureInitialized.pipe(
-                Effect.andThen(revertCodexThread(client, threadId, numTurns)),
+                Effect.andThen(
+                  boundary.type === "from_turn"
+                    ? revertCodexThreadFromTurn(client, threadId, boundary, turnCount)
+                    : revertCodexThreadAfterTurn(client, threadId, boundary.keptTurnId, turnCount),
+                ),
               );
               turnTokenUsageByThread.delete(threadId);
               return {

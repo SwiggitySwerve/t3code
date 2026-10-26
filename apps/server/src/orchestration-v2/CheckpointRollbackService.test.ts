@@ -34,7 +34,7 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as GitWorkflow from "../git/GitWorkflowService.ts";
 import { withWorkspaceLease } from "../workspace/workspaceLease.ts";
 import { ProviderWorkspaceMissingError } from "../provider/Errors.ts";
-import { resolveCodexRollbackTurnCount } from "./Adapters/CodexAdapterV2.ts";
+import { resolveCodexRollbackPlan } from "./Adapters/CodexAdapterV2.ts";
 import * as CheckpointService from "./CheckpointService.ts";
 import * as CheckpointRollbackService from "./CheckpointRollbackService.ts";
 import * as ThreadCommandExecutor from "./ThreadCommandExecutor.ts";
@@ -558,6 +558,8 @@ const seedRollbackHistory = Effect.gen(function* () {
   }
 
   const rollbackCounts: number[] = [];
+  const rollbackBoundaries: unknown[] = [];
+  const restoreFailures = { remaining: 0 };
   const restored: CheckpointId[] = [];
   const deletedRefs: CheckpointId[] = [];
   const committed: OrchestrationV2DomainEvent[] = [];
@@ -567,9 +569,20 @@ const seedRollbackHistory = Effect.gen(function* () {
         ThreadCommandExecutor.layer,
         IdAllocator.layer,
         Layer.mock(CheckpointService.CheckpointServiceV2)({
-          restore: ({ checkpoint }) =>
-            Effect.sync(() => {
+          restore: ({ scope, checkpoint }) =>
+            Effect.suspend(() => {
+              if (restoreFailures.remaining > 0) {
+                restoreFailures.remaining -= 1;
+                return Effect.fail(
+                  new CheckpointService.CheckpointRestoreError({
+                    scopeId: scope.id,
+                    checkpointId: checkpoint.id,
+                    cause: "disk full",
+                  }),
+                );
+              }
               restored.push(checkpoint.id);
+              return Effect.void;
             }),
           deleteStaleRefs: ({ checkpoints }) =>
             Effect.sync(() => {
@@ -597,7 +610,9 @@ const seedRollbackHistory = Effect.gen(function* () {
             Effect.succeed({
               rollbackThread: (input: ProviderAdapter.ProviderAdapterV2RollbackThreadInput) =>
                 Effect.gen(function* () {
-                  rollbackCounts.push(yield* resolveCodexRollbackTurnCount(input));
+                  const plan = yield* resolveCodexRollbackPlan(input);
+                  rollbackCounts.push(plan.turnCount);
+                  rollbackBoundaries.push(plan.boundary);
                   return { providerThread: input.providerThread };
                 }),
             } as never),
@@ -626,6 +641,8 @@ const seedRollbackHistory = Effect.gen(function* () {
     checkpointId,
     rollback,
     rollbackCounts,
+    rollbackBoundaries,
+    restoreFailures,
     restored,
     deletedRefs,
     committed,
@@ -693,6 +710,30 @@ it.layer(ProjectionStore.layer.pipe(Layer.provideMerge(SqlitePersistence.layerMe
           checkpoints.map((checkpoint) => checkpoint.status),
           ["ready", "ready", "ready", "stale", "stale", "stale", "stale", "stale", "ready"],
         );
+      }),
+    );
+
+    it.effect("offers the provider the same native boundary when a failed restore is retried", () =>
+      Effect.gen(function* () {
+        const history = yield* seedRollbackHistory;
+        history.restoreFailures.remaining = 1;
+
+        const failure = yield* Effect.flip(history.rollback(2));
+        assert.instanceOf(failure, CheckpointRollbackService.CheckpointRollbackExecutionError);
+        assert.equal(failure.reason, "unexpected-failure");
+        assert.deepEqual(history.committed, []);
+
+        yield* history.rollback(2);
+
+        const boundary = {
+          type: "from_turn",
+          firstRemovedTurnId: "native-turn-3",
+          removedTurnIds: ["native-turn-3", "native-turn-4", "native-turn-5", "native-turn-6"],
+          kept: { type: "turn", turnId: "native-turn-2-continuation" },
+        };
+        assert.deepEqual(history.rollbackBoundaries, [boundary, boundary]);
+        assert.deepEqual(history.restored, [history.checkpointId(2)]);
+        assert.isAbove(history.committed.length, 0);
       }),
     );
 
