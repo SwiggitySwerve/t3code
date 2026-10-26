@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { OrchestratorMcpGraphReviewInput } from "@t3tools/contracts";
 
 import { attemptBudgetMs, GRAPH_DRIVER_SCRIPT, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
@@ -247,6 +248,85 @@ describe("graph parsing", () => {
       }),
     );
     expect(parsed.ok ? [] : parsed.problems).toHaveLength(3);
+  });
+
+  it("reports every problem of a graph in one pass, so one review shows what to fix", () => {
+    const parsed = parseGraph(
+      graph(
+        {
+          a: node({ subject: "", description: 1, dependsOn: "a", attemptBudget: "forever" }),
+          b: node({
+            inputs: [
+              { id: "i1", kind: "bogus", path: "x" },
+              { kind: "workspace_snapshot", path: "y" },
+              { id: "i3", kind: "workspace_snapshot", path: "z", maxBytes: -1 },
+            ],
+            outputs: [{ id: "o1" }, { id: "o2", path: "out/o2.json" }],
+          }),
+          c: node({ dependsOn: ["absent"] }),
+          d: node({
+            outputs: [{ id: "o", path: "out/d.json" }],
+            verify: { type: "structured", outputId: "missing" },
+          }),
+        },
+        { schemaVersion: 2, name: "" },
+      ),
+    );
+    expect(parsed.ok).toBe(false);
+    const found = parsed.ok ? [] : parsed.problems;
+    for (const expected of [
+      "schemaVersion must be 1",
+      "name must be a non-empty string",
+      "a: dependsOn must be an array",
+      "a: subject must be a non-empty string",
+      "a: description must be a non-empty string",
+      "a: attemptBudget must be",
+      "b: inputs[0]",
+      "b: inputs[1]",
+      "b: inputs.i3.maxBytes",
+      "b: outputs.o1 needs a path",
+      "d: verify.outputId names an undeclared output: missing",
+      "c: unknown dependsOn node absent",
+    ]) {
+      expect(
+        found.some((problem) => problem.includes(expected)),
+        `${expected}\n${found.join("\n")}`,
+      ).toBe(true);
+    }
+  });
+
+  it("does not blame a node for an output of a node that failed to parse", () => {
+    const parsed = parseGraph(
+      graph({
+        producer: node({ subject: "" }),
+        consumer: node({
+          dependsOn: ["producer"],
+          inputs: [{ id: "in", kind: "task_output", nodeId: "producer", outputId: "report" }],
+        }),
+      }),
+    );
+    expect(parsed.ok ? [] : parsed.problems).toEqual([
+      "producer: subject must be a non-empty string.",
+    ]);
+  });
+
+  it("carries one complete valid example in the graph description", () => {
+    const description = String(
+      OrchestratorMcpGraphReviewInput.fields.graph.ast.annotations?.description ?? "",
+    );
+    const marker = "Complete valid example: ";
+    const at = description.indexOf(marker);
+    expect(at).toBeGreaterThan(-1);
+    const sample = description.slice(at + marker.length).split("\n")[0]!;
+    // Small: the example is about 0.6 KB on top of the description.
+    expect(Buffer.byteLength(sample, "utf8")).toBeLessThanOrEqual(700);
+    const example: unknown = JSON.parse(sample);
+    const review = reviewGraph(example, {
+      "src/index.ts": { sha256: HASH, sizeBytes: 1200 },
+    });
+    expect(review.blockers).toEqual([]);
+    expect(review.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(review.layers).toEqual([["scan"], ["summary"]]);
   });
 });
 

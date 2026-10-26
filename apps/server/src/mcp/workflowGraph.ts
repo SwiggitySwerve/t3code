@@ -115,58 +115,142 @@ function parseInputs(value: unknown): ReadonlyArray<GraphInput> {
   });
 }
 
-function parseNode(value: unknown): GraphNode {
+type NodeParse = { readonly node: GraphNode } | { readonly problems: ReadonlyArray<string> };
+
+const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/** Runs one field's parser. A problem is recorded and the node's other fields are still read. */
+function field<T>(problems: string[], parse: () => T): T | undefined {
+  try {
+    return parse();
+  } catch (error) {
+    problems.push(messageOf(error));
+    return undefined;
+  }
+}
+
+/**
+ * A file list the way `parseAll` reads it. When it fails, each bad entry gets its own problem
+ * where the list parser would name only the first.
+ */
+function fileList<T>(
+  problems: string[],
+  value: unknown,
+  what: "inputs" | "outputs",
+  parseAll: () => T,
+  parseOne: (entry: unknown) => unknown,
+): T | undefined {
+  try {
+    return parseAll();
+  } catch (error) {
+    const found = (Array.isArray(value) ? value : []).flatMap((entry, index) => {
+      try {
+        parseOne(entry);
+        return [];
+      } catch (cause) {
+        const message = messageOf(cause);
+        if (message.startsWith(`${what}[0]`))
+          return [message.replace(`${what}[0]`, `${what}[${index}]`)];
+        return [message.startsWith(`${what}.`) ? message : `${what}[${index}]: ${message}`];
+      }
+    });
+    problems.push(...(found.length > 0 ? found : [messageOf(error)]));
+    return undefined;
+  }
+}
+
+/** Reads every field of a node, so one review reports all its problems. */
+function parseNode(value: unknown): NodeParse {
   const node = record(value);
-  if (node === undefined) throw new Error("node must be an object.");
-  if (!Array.isArray(node.dependsOn)) throw new Error("dependsOn must be an array of node ids.");
-  const dependsOn = [...new Set(node.dependsOn.map((entry) => id(entry, "dependsOn")))].sort();
-  const attemptBudget = node.attemptBudget ?? "standard";
-  if (attemptBudget !== "short" && attemptBudget !== "standard" && attemptBudget !== "long")
-    throw new Error('attemptBudget must be "short", "standard" or "long".');
-  if (node.longBudgetApproved !== undefined && node.longBudgetApproved !== true)
-    throw new Error("longBudgetApproved must be true when supplied.");
-  if (attemptBudget === "long" && node.longBudgetApproved !== true)
-    throw new Error('attemptBudget "long" requires longBudgetApproved: true.');
-  const stallTimeoutMs = node.stallTimeoutMs;
+  if (node === undefined) return { problems: ["node must be an object."] };
+  const problems: string[] = [];
+  const optional = <T>(raw: unknown, parse: (raw: unknown) => T): T | undefined =>
+    raw === undefined ? undefined : field(problems, () => parse(raw));
+  const dependsOn = field(problems, () => {
+    if (!Array.isArray(node.dependsOn)) throw new Error("dependsOn must be an array of node ids.");
+    return [...new Set(node.dependsOn.map((entry) => id(entry, "dependsOn")))].sort();
+  });
+  const attemptBudget = field(problems, (): AttemptBudget => {
+    const budget = node.attemptBudget ?? "standard";
+    if (budget !== "short" && budget !== "standard" && budget !== "long")
+      throw new Error('attemptBudget must be "short", "standard" or "long".');
+    if (node.longBudgetApproved !== undefined && node.longBudgetApproved !== true)
+      throw new Error("longBudgetApproved must be true when supplied.");
+    if (budget === "long" && node.longBudgetApproved !== true)
+      throw new Error('attemptBudget "long" requires longBudgetApproved: true.');
+    return budget;
+  });
+  const stallTimeoutMs = optional(node.stallTimeoutMs, (raw) => {
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1)
+      throw new Error("stallTimeoutMs must be a positive whole number.");
+    return raw;
+  });
+  const outputs = fileList(
+    problems,
+    node.outputs ?? [],
+    "outputs",
+    () =>
+      parseFileRefs(node.outputs ?? [], "outputs").map(({ id, path, maxBytes }) => ({
+        id,
+        path,
+        maxBytes,
+      })),
+    (entry) => parseFileRefs([entry], "outputs"),
+  );
+  const verify = optional(node.verify, parseCheck);
   if (
-    stallTimeoutMs !== undefined &&
-    (typeof stallTimeoutMs !== "number" ||
-      !Number.isSafeInteger(stallTimeoutMs) ||
-      stallTimeoutMs < 1)
-  )
-    throw new Error("stallTimeoutMs must be a positive whole number.");
-  const outputs = parseFileRefs(node.outputs ?? [], "outputs").map(({ id, path, maxBytes }) => ({
-    id,
-    path,
-    maxBytes,
-  }));
-  const verify = node.verify === undefined ? undefined : parseCheck(node.verify);
-  if (
+    outputs !== undefined &&
     verify?.type === "structured" &&
     verify.outputId !== undefined &&
     !outputs.some((output) => output.id === verify.outputId)
   )
-    throw new Error("verify.outputId names an undeclared output: " + verify.outputId);
+    problems.push("verify.outputId names an undeclared output: " + verify.outputId);
+  const subject = field(problems, () => text(node.subject, "subject"));
+  const description = field(problems, () => text(node.description, "description"));
+  const phase = optional(node.phase, (raw) => text(raw, "phase"));
+  const model = optional(node.model, (raw) => text(raw, "model"));
+  const preset = optional(node.preset, (raw) => text(raw, "preset"));
+  const role = optional(node.role, (raw) => text(raw, "role"));
+  const scopes = optional(node.scopes, parseScopes);
+  const inputs = fileList(
+    problems,
+    node.inputs ?? [],
+    "inputs",
+    () => parseInputs(node.inputs ?? []),
+    (entry) => parseInputs([entry]),
+  );
+  if (
+    problems.length > 0 ||
+    dependsOn === undefined ||
+    attemptBudget === undefined ||
+    outputs === undefined ||
+    inputs === undefined ||
+    subject === undefined ||
+    description === undefined
+  )
+    return { problems };
   return {
-    subject: text(node.subject, "subject"),
-    description: text(node.description, "description"),
-    dependsOn,
-    ...(node.phase === undefined ? {} : { phase: text(node.phase, "phase") }),
-    ...(node.target === undefined ? {} : { target: node.target }),
-    ...(node.model === undefined ? {} : { model: text(node.model, "model") }),
-    ...(node.preset === undefined ? {} : { preset: text(node.preset, "preset") }),
-    ...(node.role === undefined ? {} : { role: text(node.role, "role") }),
-    ...(node.schema === undefined ? {} : { schema: node.schema }),
-    ...(node.scopes === undefined ? {} : { scopes: parseScopes(node.scopes) }),
-    inputs: parseInputs(node.inputs ?? []),
-    outputs,
-    ...(verify === undefined ? {} : { verify }),
-    attemptBudget,
-    ...(node.longBudgetApproved === true ? { longBudgetApproved: true } : {}),
-    ...(stallTimeoutMs === undefined ? {} : { stallTimeoutMs }),
+    node: {
+      subject,
+      description,
+      dependsOn,
+      ...(phase === undefined ? {} : { phase }),
+      ...(node.target === undefined ? {} : { target: node.target }),
+      ...(model === undefined ? {} : { model }),
+      ...(preset === undefined ? {} : { preset }),
+      ...(role === undefined ? {} : { role }),
+      ...(node.schema === undefined ? {} : { schema: node.schema }),
+      ...(scopes === undefined ? {} : { scopes }),
+      inputs,
+      outputs,
+      ...(verify === undefined ? {} : { verify }),
+      attemptBudget,
+      ...(node.longBudgetApproved === true ? { longBudgetApproved: true } : {}),
+      ...(stallTimeoutMs === undefined ? {} : { stallTimeoutMs }),
+    },
   };
 }
-
 function graphLayers(graph: WorkflowGraph): string[][] {
   const remaining = new Set(Object.keys(graph.nodes).sort());
   const done = new Set<string>();
@@ -222,17 +306,20 @@ export function parseGraph(value: unknown): ParseResult {
   for (const key of nodeKeys.sort()) {
     try {
       id(key, "node");
-      nodes[key] = parseNode(rawNodes[key]);
     } catch (error) {
-      problems.push(key + ": " + (error instanceof Error ? error.message : String(error)));
+      problems.push(key + ": " + messageOf(error));
+      continue;
     }
+    const parsedNode = parseNode(rawNodes[key]);
+    if ("node" in parsedNode) nodes[key] = parsedNode.node;
+    else problems.push(...parsedNode.problems.map((problem) => key + ": " + problem));
   }
   let name: string | undefined;
   if (source.name !== undefined) {
     try {
       name = text(source.name, "name");
     } catch (error) {
-      problems.push(error instanceof Error ? error.message : String(error));
+      problems.push(messageOf(error));
     }
   }
   // Judgment checks add judge agents, so the nodes' worst case is known once they are read.
@@ -258,7 +345,12 @@ export function parseGraph(value: unknown): ParseResult {
         problems.push(
           key + ": task_output " + input.id + " producer " + input.nodeId + " is not in dependsOn.",
         );
-      if (!nodes[input.nodeId]?.outputs.some((output) => output.id === input.outputId))
+      // A producer that failed to parse has its own problems; its outputs are not known to be missing.
+      const producer = nodes[input.nodeId];
+      if (
+        (producer !== undefined || !Object.hasOwn(rawNodes, input.nodeId)) &&
+        !producer?.outputs.some((output) => output.id === input.outputId)
+      )
         problems.push(
           key +
             ": task_output " +

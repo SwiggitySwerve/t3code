@@ -350,11 +350,36 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
 });
 export type OrchestratorMcpWorkflowStartInput = typeof OrchestratorMcpWorkflowStartInput.Type;
 
+/**
+ * One complete valid graph, shown in the graph description so a coordinator does not learn the
+ * format from a string of rejected reviews: two nodes, a pinned input, a declared output and a
+ * task_output input that carries it to the next node.
+ */
+const GRAPH_EXAMPLE = JSON.stringify({
+  schemaVersion: 1,
+  nodes: {
+    scan: {
+      subject: "Scan the sources",
+      description: "List the risky calls in src/index.ts into out/scan.md.",
+      dependsOn: [],
+      inputs: [{ id: "src", kind: "workspace_snapshot", path: "src/index.ts" }],
+      outputs: [{ id: "report", path: "out/scan.md" }],
+    },
+    summary: {
+      subject: "Summarize the scan",
+      description: "Summarize out/scan.md into out/summary.md.",
+      dependsOn: ["scan"],
+      inputs: [{ id: "scan", kind: "task_output", nodeId: "scan", outputId: "report" }],
+      outputs: [{ id: "summary", path: "out/summary.md" }],
+    },
+  },
+});
 export const OrchestratorMcpGraphReviewInput = Schema.Struct({
   workerTarget: OrchestratorMcpWorkflowStartInput.fields.workerTarget,
   graph: Schema.Unknown.annotate({
     description:
-      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to keep the reviewed targets after preset edits. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result).",
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to keep the reviewed targets after preset edits. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result). Complete valid example: " +
+      GRAPH_EXAMPLE,
   }),
 });
 export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
