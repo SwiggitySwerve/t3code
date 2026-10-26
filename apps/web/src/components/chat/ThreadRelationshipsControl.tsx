@@ -69,7 +69,7 @@ import { orchestrationEnvironment } from "../../state/orchestration";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
-import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
+import { ThreadLineageWorkflowRow, workflowLineageLabel } from "./ThreadLineageWorkflowRow";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
@@ -508,11 +508,9 @@ export function ThreadRelationshipsPanel(props: {
                 agent.startedAt &&
                 ["pending", "running", "waiting"].includes(agent.status);
               const threadTitle = relationshipThreadTitle({
-                title:
-                  workflowGroup?.workflow.workflowName ??
-                  node?.thread?.title ??
-                  agent?.title ??
-                  threadId,
+                title: workflowGroup
+                  ? workflowLineageLabel(workflowGroup.workflow)
+                  : (node?.thread?.title ?? agent?.title ?? threadId),
                 isSubagent,
               });
               const provider = providers?.find(

@@ -6,7 +6,10 @@
  */
 import { AgentElapsed } from "../../src/components/chat/AgentElapsed";
 import { ThreadDetailsControl } from "../../src/components/chat/ThreadDetailsControl";
-import { ThreadLineageWorkflowRow } from "../../src/components/chat/ThreadLineageWorkflowRow";
+import {
+  ThreadLineageWorkflowRow,
+  workflowLineageLabel,
+} from "../../src/components/chat/ThreadLineageWorkflowRow";
 import { ThreadLineageRowList } from "../../src/components/chat/ThreadRelationshipsControl";
 import {
   ThreadRelationshipIcon,
@@ -108,7 +111,7 @@ export function LineageRowSurface(props: {
       <ThreadRelationshipIcon status={workflow.status} />
       <span className="min-w-0 flex-1">
         <span className="block truncate text-left text-sm font-medium leading-4 text-foreground/85">
-          {workflow.workflowName ?? workflow.title}
+          {workflowLineageLabel(workflow)}
         </span>
       </span>
       {failed ? null : (

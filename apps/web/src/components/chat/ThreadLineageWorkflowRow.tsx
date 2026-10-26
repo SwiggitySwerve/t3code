@@ -109,6 +109,18 @@ function WorkflowMemberRow({
   );
 }
 
+/**
+ * What a workflow is called in the Lineage list: its own name, otherwise the title it was started
+ * with. The row's header and its Stop and Expand labels all read it, so they never disagree; the
+ * first agent's thread title is another name for the work and is never a label for the workflow.
+ */
+export function workflowLineageLabel(workflow: {
+  readonly workflowName: string | null;
+  readonly title: string;
+}): string {
+  return workflow.workflowName ?? workflow.title;
+}
+
 export function ThreadLineageWorkflowRow({
   group,
   header,
@@ -136,7 +148,7 @@ export function ThreadLineageWorkflowRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [phaseOpen, setPhaseOpen] = useState<ReadonlyMap<number, boolean>>(() => new Map());
-  const label = group.workflow.workflowName ?? group.workflow.title;
+  const label = workflowLineageLabel(group.workflow);
   const phases = group.phases.filter((phase) => phase.members.length > 0);
   // T3-run workflows record each agent's own provider; Claude's run on the workflow's.
   const memberProvider = (member: RuntimeSubagent) =>
