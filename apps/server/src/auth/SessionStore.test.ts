@@ -1,6 +1,7 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { EnvironmentId } from "@t3tools/contracts";
 import { expect, it } from "@effect/vitest";
+import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -56,14 +57,19 @@ const relaySessionInput = {
   client: { label: "Relay desktop", deviceType: "desktop" },
 } as const;
 
-const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(function* (
-  baseDir: string,
-  token?: string,
-) {
+const deriveDiskServerPaths = Effect.fn("deriveDiskServerPaths")(function* (baseDir: string) {
   const devUrl = new URL("http://127.0.0.1:5173");
   const paths = yield* ServerConfig.deriveServerPaths(baseDir, devUrl, {
     baseDirIsExplicit: true,
   });
+  return { devUrl, paths };
+});
+
+const makeDiskSessionStoreLayer = Effect.fn("makeDiskSessionStoreLayer")(function* (
+  baseDir: string,
+  token?: string,
+) {
+  const { devUrl, paths } = yield* deriveDiskServerPaths(baseDir);
   yield* ServerConfig.ensureServerDirectories(paths);
   const layerPersistence = SqlitePersistence.layerFromPath(paths.dbPath);
   return SessionStore.layer.pipe(
@@ -131,6 +137,118 @@ it.layer(NodeServices.layer)("SessionStore.layer", (it) => {
       yield* Fiber.join(watcher);
       yield* sessions.awaitInvalidation(client.sessionId);
     }).pipe(Effect.scoped, Effect.provide(Layer.merge(layerSessionStore(), TestClock.layer()))),
+  );
+
+  // Stand-in for the server process and a separate `t3 auth session revoke` process: same
+  // database, independently built stores, so nothing is shared except the SQLite file.
+  const makeServerAndCliStores = Effect.fn("makeServerAndCliStores")(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-session-revocation-" });
+    const buildStore = Effect.fn("buildStore")(function* () {
+      const context = yield* Layer.build(yield* makeDiskSessionStoreLayer(baseDir));
+      return Context.get(context, SessionStore.SessionStore);
+    });
+    const server = yield* buildStore();
+    const cli = yield* buildStore();
+    expect(cli).not.toBe(server);
+    const { paths } = yield* deriveDiskServerPaths(baseDir);
+    const sqlContext = yield* Layer.build(SqlitePersistence.layerFromPath(paths.dbPath));
+    return { server, cli, sql: Context.get(sqlContext, SqlClient.SqlClient) };
+  });
+
+  // The reader connection answers in order, so once this resolves, every read the watchers started
+  // before it (initial or periodic) has been answered and handled.
+  const settleRechecks = (server: SessionStore.SessionStore["Service"]) =>
+    server.listActive().pipe(Effect.asVoid);
+
+  const REVOCATION_PROPAGATION_BOUND = Duration.seconds(15);
+
+  it.effect.each(["revoke", "revokeAllExcept", "replace"] as const)(
+    "invalidates open connections when another store performs %s and leaves other sessions active",
+    (operation) =>
+      Effect.gen(function* () {
+        const { server, cli } = yield* makeServerAndCliStores();
+        const owner = yield* server.issue({ subject: "owner" });
+        const client = yield* server.issue(relaySessionInput);
+        const ownerInvalidated = yield* Deferred.make<void>();
+        yield* server
+          .awaitInvalidation(owner.sessionId)
+          .pipe(
+            Effect.andThen(Deferred.succeed(ownerInvalidated, undefined)),
+            Effect.forkScoped({ startImmediately: true }),
+          );
+        const first = yield* server
+          .awaitInvalidation(client.sessionId)
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+        const second = yield* server
+          .awaitInvalidation(client.sessionId)
+          .pipe(Effect.forkScoped({ startImmediately: true }));
+
+        yield* settleRechecks(server);
+        if (operation === "revoke") yield* cli.revoke(client.sessionId);
+        else if (operation === "revokeAllExcept") yield* cli.revokeAllExcept(owner.sessionId);
+        else yield* cli.issue({ ...relaySessionInput, replaceSessionId: client.sessionId });
+
+        yield* TestClock.adjust(REVOCATION_PROPAGATION_BOUND);
+        yield* Fiber.join(first);
+        yield* Fiber.join(second);
+        yield* settleRechecks(server);
+        expect(yield* Deferred.isDone(ownerInvalidated)).toBe(false);
+      }),
+  );
+
+  it.effect("does not recheck the database on every tick", () =>
+    Effect.gen(function* () {
+      const { server, cli } = yield* makeServerAndCliStores();
+      const client = yield* server.issue(relaySessionInput);
+      const invalidated = yield* Deferred.make<void>();
+      const watcher = yield* server
+        .awaitInvalidation(client.sessionId)
+        .pipe(
+          Effect.andThen(Deferred.succeed(invalidated, undefined)),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+      yield* settleRechecks(server);
+      yield* cli.revoke(client.sessionId);
+
+      yield* TestClock.adjust(Duration.seconds(1));
+      yield* settleRechecks(server);
+      expect(yield* Deferred.isDone(invalidated)).toBe(false);
+
+      yield* TestClock.adjust(REVOCATION_PROPAGATION_BOUND);
+      yield* Fiber.join(watcher);
+    }),
+  );
+
+  it.effect("invalidates open connections whose session row was deleted by another store", () =>
+    Effect.gen(function* () {
+      const { server, sql } = yield* makeServerAndCliStores();
+      const client = yield* server.issue(relaySessionInput);
+      const watcher = yield* server
+        .awaitInvalidation(client.sessionId)
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* settleRechecks(server);
+      yield* sql`DELETE FROM auth_sessions WHERE session_id = ${client.sessionId}`;
+
+      yield* TestClock.adjust(REVOCATION_PROPAGATION_BOUND);
+      yield* Fiber.join(watcher);
+    }),
+  );
+
+  it.effect("fails closed when the periodic recheck cannot read the session", () =>
+    Effect.gen(function* () {
+      const { server, sql } = yield* makeServerAndCliStores();
+      const client = yield* server.issue(relaySessionInput);
+      const watcher = yield* server
+        .awaitInvalidation(client.sessionId)
+        .pipe(Effect.forkScoped({ startImmediately: true }));
+      yield* settleRechecks(server);
+      yield* sql`ALTER TABLE auth_sessions RENAME TO auth_sessions_unavailable`;
+
+      yield* TestClock.adjust(REVOCATION_PROPAGATION_BOUND);
+      const error = yield* Effect.flip(Fiber.join(watcher));
+      expect(error._tag).toBe("SessionCredentialVerificationError");
+    }),
   );
 
   it.effect("keys remote cookies by environment identity instead of state directory", () =>

@@ -430,6 +430,7 @@ export class SessionStore extends Context.Service<
 
 const SIGNING_SECRET_NAME = "server-signing-key";
 const DEFAULT_SESSION_TTL = Duration.days(30);
+const SESSION_REVOCATION_RECHECK_INTERVAL = Duration.seconds(10);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
 
 const SessionClaims = Schema.Struct({
@@ -1056,23 +1057,36 @@ const make = Effect.gen(function* () {
     return revokedSessionIds.length;
   });
 
+  const readUnrevokedSession = (sessionId: AuthSessionId) =>
+    authSessions.getById({ sessionId }).pipe(
+      Effect.map(Option.filter((record) => record.revokedAt === null)),
+      Effect.mapError((cause) => new SessionCredentialVerificationError({ sessionId, cause })),
+    );
+
+  // Another process (`t3 auth session revoke`) only reaches this store through the database, so
+  // open connections re-read their session on a slow cadence. A failed read ends the wait with an
+  // error rather than leaving a connection open on an unknown session state.
+  const awaitPersistedRevocation = (
+    sessionId: AuthSessionId,
+  ): Effect.Effect<void, SessionCredentialVerificationError> =>
+    Effect.sleep(SESSION_REVOCATION_RECHECK_INTERVAL).pipe(
+      Effect.andThen(readUnrevokedSession(sessionId)),
+      Effect.flatMap((session) =>
+        Option.isNone(session) ? Effect.void : awaitPersistedRevocation(sessionId),
+      ),
+    );
+
   const awaitInvalidation = Effect.fn(function* (sessionId: AuthSessionId) {
     return yield* Effect.scoped(
       Effect.gen(function* () {
         // Subscribe before reading: revocation can race with the WebSocket upgrade.
         const subscription = yield* PubSub.subscribe(changesPubSub);
-        const row = yield* authSessions
-          .getById({ sessionId })
-          .pipe(
-            Effect.mapError(
-              (cause) => new SessionCredentialVerificationError({ sessionId, cause }),
-            ),
-          );
-        if (Option.isNone(row) || row.value.revokedAt !== null) return;
+        const session = yield* readUnrevokedSession(sessionId);
+        if (Option.isNone(session)) return;
         const now = yield* DateTime.now;
-        const remaining = row.value.expiresAt.epochMilliseconds - now.epochMilliseconds;
+        const remaining = session.value.expiresAt.epochMilliseconds - now.epochMilliseconds;
         if (remaining <= 0) return;
-        yield* Effect.raceFirst(
+        yield* Effect.raceAllFirst([
           Stream.fromSubscription(subscription).pipe(
             Stream.filter(
               (change) => change.type === "clientRemoved" && change.sessionId === sessionId,
@@ -1080,7 +1094,8 @@ const make = Effect.gen(function* () {
             Stream.runHead,
           ),
           Effect.sleep(Duration.millis(remaining)),
-        );
+          awaitPersistedRevocation(sessionId),
+        ]);
       }),
     );
   });
