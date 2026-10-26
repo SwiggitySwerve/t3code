@@ -12,10 +12,12 @@ import {
 import type { LegendListRef } from "@legendapp/list/react";
 import { createRef, Profiler, StrictMode, type ComponentProps, type ReactElement } from "react";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 
 import { act, render } from "../../../test/render";
+import { workflowFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 import { MessagesTimeline } from "./MessagesTimeline";
 import { makeStreamingTimelineFixture } from "../../test-fixtures";
 import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
@@ -519,6 +521,27 @@ describe("MessagesTimeline workflow coordinator opening", () => {
     await vi.waitFor(() => expect(painted("t3-thread-find-active")).toEqual(["Quarterly"]));
     expect(screen.text()).not.toContain("zebra");
     expect(collectThreadFindRanges(screen.container, "zebra")).toEqual([]);
+  });
+
+  it("is in the page's tab order: the keyboard reaches its graph and cards inside the timeline", async () => {
+    setup();
+    const { opening } = workflowFixture("graph", "running");
+    await using screen = await renderTimeline([message("script", {}, "script-message")], {
+      workflowOpening: { ...opening, messageId: "script-message" },
+    });
+    // The timeline is virtualized: the block is mounted only when its row is in the list.
+    const block = screen.container.querySelector("[data-workflow-opening]");
+    expect(block).not.toBeNull();
+    const reached: Array<string> = [];
+    for (let press = 0; press < 40 && reached.length < 3; press += 1) {
+      await userEvent.tab();
+      const active = document.activeElement;
+      if (active !== null && block!.contains(active)) {
+        reached.push(active.getAttribute("aria-label") ?? active.tagName);
+      }
+    }
+    expect(reached).toContain("Workflow graph");
+    expect(reached).toContain("Open Count source files, passed");
   });
 });
 
