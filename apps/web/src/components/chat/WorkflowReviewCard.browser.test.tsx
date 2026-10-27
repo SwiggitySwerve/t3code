@@ -109,7 +109,6 @@ function timelineProps(): Omit<TimelineProps, "timelineEntries"> {
     emptyPlaceholderInset: 0,
     liveFollowEnabled: true,
     onIsAtEndChange: () => {},
-    onManualNavigation: () => {},
   };
 }
 

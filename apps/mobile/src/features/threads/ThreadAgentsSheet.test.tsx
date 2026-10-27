@@ -1,5 +1,7 @@
+import { deriveThreadTurnSubagents } from "@t3tools/client-runtime/state/thread-subagents";
 import { EnvironmentId, ThreadId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
+import * as DateTime from "effect/DateTime";
 import { AsyncResult } from "effect/reactivity";
 import type { ComponentProps, ReactNode } from "react";
 import { act } from "react";
@@ -24,6 +26,10 @@ const harness = vi.hoisted(() => ({
 
 vi.mock("react-native", () => ({
   Platform: { OS: "ios", Version: 26 },
+  AppState: {
+    currentState: "active",
+    addEventListener: () => ({ remove: () => {} }),
+  },
   AccessibilityInfo: { announceForAccessibility: harness.announce },
   View: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
   ScrollView: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
@@ -59,6 +65,7 @@ vi.mock("react-native-safe-area-context", () => ({ useSafeAreaInsets: () => ({ b
 vi.mock("expo-haptics", () => ({ selectionAsync: () => {} }));
 vi.mock("@react-navigation/native", () => ({
   StackActions: { replace: (name: string, params: unknown) => ({ type: "REPLACE", name, params }) },
+  useIsFocused: () => true,
   useNavigation: () => ({ dispatch: () => {}, goBack: () => {} }),
 }));
 vi.mock("../../components/ui/AndroidScreenHeader", () => ({ AndroidSheetHeader: () => null }));
@@ -270,6 +277,36 @@ describe("ThreadAgentsSheet workflow Stop", () => {
       environmentId: ENVIRONMENT,
       input: { threadId: PARENT, subagentId: "workflow-row" },
     });
+  });
+
+  it("offers no Stop on a finished workflow kept reachable after a later turn", () => {
+    const at = (second: number) => DateTime.makeUnsafe(Date.UTC(2026, 9, 27, 12, 0, second));
+    const workflow = agent({ runId: "run-1", status: "completed", updatedAt: at(10) });
+    const reviewer = agent({
+      id: "reviewer",
+      runId: "run-2",
+      title: "Reviewer",
+      status: "completed",
+      origin: "provider_native",
+      workflow: undefined,
+      updatedAt: at(30),
+    });
+    const turn = deriveThreadTurnSubagents({
+      runs: [
+        { id: "run-1", ordinal: 1, status: "completed", startedAt: at(0) },
+        { id: "run-2", ordinal: 2, status: "completed", startedAt: at(20) },
+      ],
+      subagents: [workflow, reviewer],
+    } as never);
+    // Upstream keeps workflows reachable once a later turn has replaced theirs.
+    expect(turn).toMatchObject({ runId: "run-2", turnActive: false, latestTurn: true });
+    harness.turn = turn;
+    harness.threadSubagents = [workflow, reviewer];
+
+    show();
+
+    expect(container.textContent).toContain("Ship the release completed");
+    expect(stopButton()).toBeNull();
   });
 
   it("offers no Stop on a stopped workflow whose members still run, unless a stop was asked for here", () => {

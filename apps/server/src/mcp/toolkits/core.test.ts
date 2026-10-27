@@ -48,6 +48,8 @@ import * as SecretRequests from "../../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
+import { advertisedJsonSchema } from "../advertisedJsonSchema.ts";
+import { OrchestratorToolkit } from "./orchestrator/tools.ts";
 import * as WorkflowApprovalGateTestkit from "../../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
@@ -755,6 +757,45 @@ it.effect.each(["t3_thread_interrupt", "t3_workflow_stop"])(
               interruptThread: () => Effect.die("interrupt must not dispatch above the ceiling"),
             }),
           ),
+          Layer.provide(ServerSettings.layerTest()),
+          Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
+          Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
+          Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+          Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
+          Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
+        ),
+      ),
+    ),
+);
+
+it.effect(
+  "registers workflow tools compact and hides them from a member without orchestration",
+  () =>
+    Effect.gen(function* () {
+      const server = yield* McpServer.McpServer;
+      const registered = server.tools.find(({ tool }) => tool.name === "workflow_start");
+      expect(registered?.tool.inputSchema).toEqual(
+        advertisedJsonSchema(OrchestratorToolkit.tools.workflow_start),
+      );
+      const member = yield* server
+        .callTool({ name: "workflow_start", arguments: { script: "await agent('x')" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, {
+            ...scope,
+            capabilities: new Set<McpInvocationContext.McpCapability>(["worktree"]),
+          }),
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.flip,
+        );
+      expect(String((member as { readonly message?: unknown }).message ?? member)).toContain(
+        "not found",
+      );
+    }).pipe(
+      Effect.provide(
+        layerOrchestratorToolkit.pipe(
+          Layer.provideMerge(McpServer.McpServer.layer),
+          Layer.provide(NodeCrypto.layer),
+          Layer.provide(Layer.mock(ThreadManagement.ThreadManagementService)({})),
           Layer.provide(ServerSettings.layerTest()),
           Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
           Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
