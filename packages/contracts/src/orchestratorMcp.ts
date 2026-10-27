@@ -37,30 +37,24 @@ import {
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
+  OrchestrationV2WorkflowNodeOutcome,
+  OrchestrationV2WorkflowReviewDigest,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
+import { WorkflowPresets } from "./settings.ts";
 
-const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000)).annotate({
-  description: "Complete task or message text for the target agent.",
-});
-const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512)).annotate({
-  description: "Optional concise display title.",
-});
+const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
+const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
 const OrchestratorMcpClientRequestId = TrimmedNonEmptyString.check(
   Schema.isMaxLength(256),
-).annotate({ description: "Stable idempotency key to reuse when retrying this mutation." });
+).annotate({ description: "Reuse it to retry the same call. A new call gets a new key." });
 
-/**
- * OpenCode 1.15 has been observed serializing nested MCP union objects as JSON
- * strings. Keep the structured object as the documented form while accepting
- * that compatibility shape at the tool boundary and decoding it immediately.
- */
+// OpenCode 1.15 serializes nested MCP union objects as JSON strings; decode that form at the boundary.
 const OrchestratorMcpScheduleFromJsonString = Schema.fromJsonString(
   ScheduledTaskUpsertSchedule,
 ).annotate({
-  description:
-    "Compatibility-only JSON encoding of the schedule object. Prefer a structured object.",
+  description: "JSON-text schedule. Prefer the object form.",
 });
 
 const OrchestratorMcpSchedule = Schema.Union([
@@ -68,7 +62,7 @@ const OrchestratorMcpSchedule = Schema.Union([
   OrchestratorMcpScheduleFromJsonString,
 ]).annotate({
   description:
-    "Trigger object: {type:'interval', everyMs}, {type:'fixed_time', timeOfDay, weekdays?}, or {type:'webhook'} to run on each request to a generated URL. Never stringify it unless the provider requires the compatibility form.",
+    "Trigger: {type:'interval',everyMs}, {type:'fixed_time',timeOfDay,weekdays?}, or {type:'webhook'}.",
 });
 
 const OrchestratorMcpTargetOptionsFromRecord = Schema.Record(
@@ -97,23 +91,25 @@ export type OrchestratorMcpTargetOptions = typeof OrchestratorMcpTargetOptions.T
 export const OrchestratorMcpTarget = Schema.Struct({
   providerInstanceId: Schema.optional(
     ProviderInstanceId.annotate({
-      description: "Configured provider instance id from orchestrator_capabilities.",
+      description: "Provider instance id from `orchestrator_capabilities`.",
     }),
   ),
   driverKind: Schema.optional(
     ProviderDriverKind.annotate({
-      description: "Provider driver kind; prefer providerInstanceId when available.",
+      description: "Prefer `providerInstanceId`.",
     }),
   ),
-  model: Schema.optional(
-    TrimmedNonEmptyString.annotate({
-      description: "Model id advertised for the selected provider instance.",
-    }),
-  ),
+  model: Schema.optional(TrimmedNonEmptyString),
   options: Schema.optional(
     OrchestratorMcpTargetOptions.annotate({
       description:
-        "Model options from orchestrator_capabilities. For the same provider instance and model, overrides individual inherited values; [] or {} clears them. Claude: {effort: 'max', fastMode: true}; Codex: {reasoningEffort: 'max', serviceTier: 'priority'}. Only use options advertised by the selected model.",
+        "Options from `orchestrator_capabilities`, such as {effort:'max'}. Given values override inherited. [] or {} clears.",
+    }),
+  ),
+  inheritOptions: Schema.optional(
+    Schema.Literal(false).annotate({
+      description:
+        "false: use exactly these options, without inheriting the caller's. Targets T3 resolves for review and restart carry it, so caller changes cannot alter a reviewed assignment.",
     }),
   ),
 });
@@ -159,27 +155,24 @@ export type OrchestratorMcpTerminalDelegatedTaskStatus =
   typeof OrchestratorMcpTerminalDelegatedTaskStatus.Type;
 
 export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
-  task: OrchestratorMcpPrompt.annotate({
-    description: "Self-contained task for one delegated child agent/subagent.",
-  }),
+  task: OrchestratorMcpPrompt,
   target: Schema.optional(OrchestratorMcpTarget),
   title: Schema.optional(OrchestratorMcpTitle),
   role: Schema.optional(OrchestratorMcpTaskRole),
   isolation: Schema.optional(
     Schema.Literals(["shared", "worktree"]).annotate({
       description:
-        "Defaults to shared: use the parent's checkout. Worktree creates a separate checkout from the parent's current local commit before starting the child. Uncommitted edits are not copied.",
+        "'shared' (default): parent checkout. 'worktree': new prepared checkout from the parent commit, for a separate checkout or PR per child. Uncommitted edits stay out.",
     }),
   ),
   mode: Schema.optional(
     Schema.Literals(["async", "wait"]).annotate({
       description:
-        "Defaults to async. Use wait only when this turn needs the child's result before you can continue. A blocking question or a pending approval in the child ends the wait early with the task still running.",
+        "Default 'async'. 'wait' only if this turn needs the result. A question or approval ends the wait.",
     }),
   ),
   timeoutMs: Schema.optional(Schema.Finite).annotate({
-    description:
-      "Wait budget for mode=wait only. Default 10 minutes. Elapsing it returns waitTimedOut=true on that call and does not cancel the child.",
+    description: "Mode 'wait' only. Default 10 min. A timeout does not cancel the child.",
   }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
   resultSchema: Schema.optional(
@@ -191,16 +184,22 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   runtimeMode: Schema.optional(
     OrchestratorMcpRuntimeMode.annotate({
       description:
-        "Defaults to inherit; omit it unless the user asks for a supervised child. A narrower mode is not a read-only switch: on most providers, approval-required and auto-accept-edits pause the child at each action that needs approval until a person approves it in the child's thread, which this thread cannot do. To limit what the child does, say so in the task. A mode ranked above this thread's is rejected; that ranking does not promise the child's provider permissions are narrower than this thread's.",
+        "Omit unless the user asks for a supervised child. Narrow modes pause for human approval, not read-only. Above yours is rejected.",
     }),
   ),
   interactionMode: Schema.optional(OrchestratorMcpInteractionMode),
 });
 export type OrchestratorMcpDelegateTaskInput = typeof OrchestratorMcpDelegateTaskInput.Type;
 
+// Set only on results for still-running tasks whose completion will wake the parent.
+export const ORCHESTRATOR_MCP_RUNNING_TASK_NEXT =
+  "Completion wakes this thread, so end your turn. Do not wait on it or poll it.";
+const OrchestratorMcpRunningTaskNext = Schema.Literal(ORCHESTRATOR_MCP_RUNNING_TASK_NEXT);
+
 export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   taskId: NodeId,
   childThreadId: ThreadId,
+  link: Schema.optional(Schema.String),
   childRunId: Schema.NullOr(RunId),
   childNodeId: NodeId,
   status: OrchestratorMcpDelegatedTaskStatus,
@@ -212,12 +211,7 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   latestTerminalResultContextTransferId: Schema.NullOr(ContextTransferId),
   providerInstanceId: ProviderInstanceId,
   model: Schema.NullOr(Schema.String),
-  options: Schema.optional(
-    Schema.Array(ProviderOptionSelection).annotate({
-      description:
-        "Stored model option selections for the child run, or its thread before a run starts. Omitted selections use provider defaults.",
-    }),
-  ),
+  options: Schema.optional(Schema.Array(ProviderOptionSelection)),
   summary: Schema.NullOr(Schema.String),
   structuredResult: Schema.optional(Schema.Unknown).annotate({
     description:
@@ -230,18 +224,17 @@ export const OrchestratorMcpDelegateTaskResult = Schema.Struct({
   resultContextTransferId: Schema.NullOr(ContextTransferId),
   hasPendingQuestion: Schema.Boolean.annotate({
     description:
-      "Blocking question ends mode=wait. Pass threadId=childThreadId to t3_pending_request_list, t3_pending_request_read (with requestId) and t3_pending_request_respond, or ask the user; the task's completion still wakes this thread.",
+      "A question blocks the child and ends a wait. Answer via `t3_pending_request_*` on `childThreadId`, or the user does.",
   }),
   pendingApproval: Schema.NullOr(
     Schema.Struct({ requestId: RuntimeRequestId, kind: ProviderRequestKind, runId: RunId }),
   ).annotate({
-    description:
-      "Identity of the oldest pending live approval for this task's own unfinished work, or null. Ends mode=wait without cancelling the child; completion still wakes this thread. This grants no approval authority. Read the fresh full request in childThreadId before responding: the record can outlive its provider callback. Decisions remain with the child's existing approval holder; pending request tools answer questions only.",
+    description: "Oldest pending approval, or null. Ends a wait. Grants no approval rights.",
   }),
   waitTimedOut: Schema.Boolean.annotate({
-    description:
-      "True only on that mode=wait call when timeoutMs elapsed. The timeout does not cancel the child. Later task_status reads return false and use status for liveness.",
+    description: "True only on the timed-out wait call. The child keeps running.",
   }),
+  next: Schema.optional(OrchestratorMcpRunningTaskNext),
 });
 export type OrchestratorMcpDelegateTaskResult = typeof OrchestratorMcpDelegateTaskResult.Type;
 
@@ -337,36 +330,178 @@ export const OrchestratorMcpTaskWaitResult = Schema.Struct({
 export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult.Type;
 
 export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
+  workerTarget: Schema.optional(OrchestratorMcpTarget).annotate({
+    description:
+      "Default worker target. An agent's own target or legacy model replaces it as a whole, followed by its preset, this worker target, the configured workflow worker default preset, then the caller. The selected target uses the usual option inheritance rules.",
+  }),
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, preset (a saved agent preset id), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
   }),
   budgetTokens: Schema.optional(PositiveInt).annotate({
     description:
-      "Token budget, counted from the usage providers report for finished agents. Once spent, starting another agent throws in the script; agents already running finish. The script reads it as budget.total, budget.spent and budget.remaining().",
+      "Token budget, counted from the usage providers report for finished agents, judges and retries included. It does not count your own tokens as coordinator. Once spent, starting another agent throws in the script; agents already running finish, so a wide wave can overshoot it. graph_review returns suggestedBudgetTokens and overshootBoundTokens as a starting point. The script reads it as budget.total, budget.spent and budget.remaining().",
   }),
   title: Schema.optional(OrchestratorMcpTitle),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
 });
 export type OrchestratorMcpWorkflowStartInput = typeof OrchestratorMcpWorkflowStartInput.Type;
 
+/**
+ * One complete valid graph, shown in the graph description so a coordinator does not learn the
+ * format from a string of rejected reviews: two nodes, a pinned input, a declared output and a
+ * task_output input that carries it to the next node.
+ */
+const GRAPH_EXAMPLE = JSON.stringify({
+  schemaVersion: 1,
+  nodes: {
+    scan: {
+      subject: "Scan the sources",
+      description: "List the risky calls in src/index.ts into out/scan.md.",
+      dependsOn: [],
+      inputs: [{ id: "src", kind: "workspace_snapshot", path: "src/index.ts" }],
+      outputs: [{ id: "report", path: "out/scan.md" }],
+    },
+    summary: {
+      subject: "Summarize the scan",
+      description: "Summarize out/scan.md into out/summary.md.",
+      dependsOn: ["scan"],
+      inputs: [{ id: "scan", kind: "task_output", nodeId: "scan", outputId: "report" }],
+      outputs: [{ id: "summary", path: "out/summary.md" }],
+    },
+  },
+});
 export const OrchestratorMcpGraphReviewInput = Schema.Struct({
+  workerTarget: OrchestratorMcpWorkflowStartInput.fields.workerTarget,
   graph: Schema.Unknown.annotate({
     description:
-      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass the same graph and acceptedDigest to graph_start.",
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to keep the reviewed targets after preset edits. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result). Complete valid example: " +
+      GRAPH_EXAMPLE,
   }),
 });
 export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
 
+/**
+ * How a profile chose a worker: the first entry in its model preference order that is enabled,
+ * serves the exact model and supports the options. The chosen target is part of the digest;
+ * this record only explains it.
+ */
+export const OrchestratorMcpProfileChoice = Schema.Struct({
+  presetId: Schema.String,
+  presetName: Schema.String,
+  chosenIndex: NonNegativeInt.annotate({
+    description:
+      "Position of the chosen entry in the model preference order; 0 is the first choice.",
+  }),
+  skipped: Schema.Array(
+    Schema.Struct({
+      index: NonNegativeInt,
+      providerInstanceId: ProviderInstanceId,
+      model: Schema.String,
+      reason: Schema.String,
+    }),
+  ).annotate({ description: "Entries tried before the chosen one, each with why it was skipped." }),
+});
+export type OrchestratorMcpProfileChoice = typeof OrchestratorMcpProfileChoice.Type;
+
+const LowHighRange = Schema.Struct({ low: NonNegativeInt, high: NonNegativeInt });
+
+/**
+ * A cost and fan-out estimate for the coordinator and the user. It is advice: it is not part of the
+ * digest and never blocks a review or a start, including when the user asked for a workflow.
+ */
+export const OrchestratorMcpGraphAdvisory = Schema.Struct({
+  fanOut: Schema.Literals(["ok", "consider_single"]).annotate({
+    description:
+      "consider_single when one agent would likely do the same work for less: a chain, a lone node, or two unchecked nodes. Say so to the user in one sentence; do not drop a requested workflow because of it.",
+  }),
+  reasons: Schema.Array(Schema.String).annotate({
+    description: "At most 3 short reasons for consider_single; empty for ok.",
+  }),
+  nodeCount: NonNegativeInt,
+  widestWave: NonNegativeInt.annotate({
+    description: "Most nodes in one dependency layer, which may run at once.",
+  }),
+  depth: NonNegativeInt.annotate({ description: "Number of dependency layers." }),
+  verifierCount: NonNegativeInt.annotate({ description: "Nodes that carry a verify check." }),
+  estimatedModelCalls: LowHighRange.annotate({
+    description:
+      "Model calls of all agents, judges and the coordinator, as a low and high estimate.",
+  }),
+  estimatedTokens: Schema.Struct({
+    low: NonNegativeInt,
+    high: NonNegativeInt,
+    coordinator: LowHighRange.annotate({
+      description: "The part of low and high that is your own, as coordinator.",
+    }),
+    basis: Schema.String,
+  }).annotate({
+    description:
+      "Estimated tokens of the run, your own included. budgetTokens does not count the coordinator's part.",
+  }),
+  suggestedBudgetTokens: NonNegativeInt.annotate({
+    description:
+      "A starting budgetTokens, an estimate: 1.4 times the agents' high estimate plus one retry of the costliest agent, plus your own high estimate as reserve so the last node can still start. The budget does not count your tokens.",
+  }),
+  overshootBoundTokens: NonNegativeInt.annotate({
+    description:
+      "About how far past budgetTokens one wave of running agents can go before it stops.",
+  }),
+});
+export type OrchestratorMcpGraphAdvisory = typeof OrchestratorMcpGraphAdvisory.Type;
+
 export const OrchestratorMcpGraphReviewResult = Schema.Struct({
+  reviewId: Schema.String.annotate({
+    description:
+      "Identifies this review. T3 Code shows the review to the user, who approves or dismisses it by this id and digest.",
+  }),
+  approvalRequired: Schema.Boolean.annotate({
+    description:
+      "true when the user asked for a workflow and must approve this review in T3 Code before graph_start runs it: end your turn, and T3 Code sends you a message with the approved digest. false when no approval is pending.",
+  }),
   digest: Schema.NullOr(Schema.String).annotate({
     description:
-      "Covers the normalized graph and its input hashes; null when the graph cannot be read.",
+      "Covers the graph with concrete worker and judgment targets and its input hashes; null when parsing or target resolution fails.",
   }),
   ready: Schema.Boolean,
+  expandedGraph: Schema.NullOr(Schema.Unknown).annotate({
+    description:
+      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to keep the reviewed assignments after preset edits.",
+  }),
+  targets: Schema.Array(
+    Schema.Struct({
+      nodeId: Schema.String,
+      source: Schema.Literals([
+        "target",
+        "model",
+        "preset",
+        "workerTarget",
+        "defaultPreset",
+        "caller",
+      ]),
+      target: OrchestratorMcpTarget,
+      judgmentTarget: Schema.optional(OrchestratorMcpTarget),
+      presetId: Schema.optional(Schema.String).annotate({
+        description: "The profile that chose this worker; its choice is listed once in profiles.",
+      }),
+    }),
+  ).annotate({
+    description:
+      "Concrete worker and judgment assignments included in the digest; source describes only how the worker was selected. presetId appears when a profile chose the worker.",
+  }),
+  profiles: Schema.optional(Schema.Array(OrchestratorMcpProfileChoice)).annotate({
+    description:
+      "One entry per profile that chose a worker in this review, with the entry chosen and why earlier ones were skipped. Look a node's profile up by its targets[].presetId.",
+  }),
+  availableProfiles: Schema.optional(
+    Schema.Array(Schema.Struct({ presetId: Schema.String, presetName: Schema.String })),
+  ).annotate({
+    description:
+      "Profiles the user saved in Settings, which nodes may use as their preset; absent when the user saved none. Read a profile's models from orchestrator_capabilities workflowPresets, for example to pick a verifier's target.",
+  }),
   layers: Schema.Array(Schema.Array(Schema.String)),
   writeConflicts: Schema.Array(
     Schema.Struct({
@@ -383,13 +518,19 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
     }),
   ),
   blockers: Schema.Array(Schema.String),
+  advisory: Schema.optional(OrchestratorMcpGraphAdvisory).annotate({
+    description:
+      "Fan-out and cost advice for the reviewed graph. Informational only: it never changes ready, blockers, approvalRequired or the digest. Absent when the graph does not parse.",
+  }),
 });
 export type OrchestratorMcpGraphReviewResult = typeof OrchestratorMcpGraphReviewResult.Type;
 
 export const OrchestratorMcpGraphStartInput = Schema.Struct({
+  workerTarget: OrchestratorMcpGraphReviewInput.fields.workerTarget,
   graph: OrchestratorMcpGraphReviewInput.fields.graph,
-  acceptedDigest: Schema.String.check(Schema.isPattern(/^sha256:[a-f0-9]{64}$/)).annotate({
-    description: "Digest returned by graph_review for the exact graph and input files to run.",
+  acceptedDigest: OrchestrationV2WorkflowReviewDigest.annotate({
+    description:
+      "Digest returned by graph_review for the exact graph and input files to run. While the user's request for a workflow waits for their decision, graph_start accepts only a digest the user approved in T3 Code and refuses any other. The reviewed model of each profile-assigned node is fixed by the digest: graph_start checks it is still served and refuses (review again) if not; it never moves to the next model in a profile.",
   }),
   budgetTokens: OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
   title: Schema.optional(OrchestratorMcpTitle),
@@ -469,6 +610,12 @@ export const OrchestratorMcpWorkflowResult = Schema.Struct({
   result: Schema.NullOr(Schema.String).annotate({
     description: "The script's return value as JSON, or why it failed or stopped.",
   }),
+  nodes: Schema.optional(
+    Schema.Record(Schema.String, OrchestrationV2WorkflowNodeOutcome).annotate({
+      description:
+        "A workflow started from a graph: each node's status, attempts and reason, the sha256 of each input it was given, and the path, size and sha256 of each file it wrote. The result may leave these out when it is large; this is where they are kept, for failed graphs too.",
+    }),
+  ),
 });
 export type OrchestratorMcpWorkflowResult = typeof OrchestratorMcpWorkflowResult.Type;
 
@@ -519,6 +666,7 @@ export type OrchestratorMcpCreatedThreadStatus = typeof OrchestratorMcpCreatedTh
 
 export const OrchestratorMcpCreatedThread = Schema.Struct({
   threadId: ThreadId,
+  link: Schema.optional(Schema.String),
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpCreatedThreadStatus,
   title: Schema.String,
@@ -542,8 +690,7 @@ export type OrchestratorMcpThreadStatus = typeof OrchestratorMcpThreadStatus.Typ
 
 const OrchestratorMcpProjectTarget = Schema.optional(
   ProjectId.annotate({
-    description:
-      "Project to act on. Omit for the calling thread's project; required when the caller is not a T3 thread.",
+    description: "Project to use. Default: your thread's project. Required outside a thread.",
   }),
 );
 
@@ -561,7 +708,7 @@ export const OrchestratorMcpThreadListInput = Schema.Struct({
 });
 export type OrchestratorMcpThreadListInput = typeof OrchestratorMcpThreadListInput.Type;
 
-/** A pull request linked to a thread; `state` is null until the host has been read. */
+/** state is null until the host is read. */
 export const OrchestratorMcpThreadPullRequest = Schema.Struct({
   ...ThreadPullRequestKey.fields,
   url: TrimmedNonEmptyString,
@@ -573,6 +720,7 @@ export type OrchestratorMcpThreadPullRequest = typeof OrchestratorMcpThreadPullR
 export const OrchestratorMcpThreadListItem = Schema.Struct({
   threadId: ThreadId,
   title: Schema.String,
+  link: Schema.optional(Schema.String),
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
@@ -582,7 +730,6 @@ export const OrchestratorMcpThreadListItem = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
-  /** Missing on older servers. */
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
   settled: Schema.Boolean,
   settledAt: Schema.NullOr(IsoDateTime),
@@ -626,13 +773,13 @@ export const OrchestratorMcpThreadReadInput = Schema.Struct({
   view: Schema.optional(Schema.Literals(["messages", "activity"])),
   afterPosition: Schema.optional(NonNegativeInt),
   limit: Schema.optional(clampedPositiveInt(100)).annotate({
-    description: "Maximum timeline items to return, from 1 to 100.",
+    description: "Max items, 1 to 100.",
   }),
   runLimit: Schema.optional(clampedPositiveInt(50)).annotate({
-    description: "Maximum recent runs to return, from 1 to 50.",
+    description: "Max recent runs, 1 to 50.",
   }),
   maxCharsPerItem: Schema.optional(clampedPositiveInt(50_000)).annotate({
-    description: "Maximum text characters per item, from 1 to 50000.",
+    description: "Max chars per item, 1 to 50000.",
   }),
 });
 export type OrchestratorMcpThreadReadInput = typeof OrchestratorMcpThreadReadInput.Type;
@@ -641,6 +788,7 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   threadId: ThreadId,
   projectId: ProjectId,
   title: Schema.String,
+  link: Schema.optional(Schema.String),
   createdBy: OrchestrationV2Actor,
   creationSource: OrchestrationV2CreationSource,
   status: OrchestratorMcpThreadStatus,
@@ -651,7 +799,6 @@ export const OrchestratorMcpThreadDetail = Schema.Struct({
   runtimeMode: RuntimeMode,
   interactionMode: ProviderInteractionMode,
   linkedPullRequest: Schema.NullOr(ThreadLinkedPullRequest),
-  /** Missing on older servers. */
   pullRequests: Schema.optional(Schema.Array(OrchestratorMcpThreadPullRequest)),
   titleRegeneration: Schema.NullOr(ThreadTitleRegeneration),
   branch: Schema.NullOr(Schema.String),
@@ -723,6 +870,7 @@ export type OrchestratorMcpThreadSendInput = typeof OrchestratorMcpThreadSendInp
 
 export const OrchestratorMcpThreadSendResult = Schema.Struct({
   threadId: ThreadId,
+  link: Schema.optional(Schema.String),
   messageId: MessageId,
   runId: RunId,
   taskId: Schema.optional(NodeId),
@@ -743,6 +891,7 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   runId: Schema.NullOr(RunId),
   status: OrchestratorMcpThreadStatus,
   timedOut: Schema.Boolean,
+  next: Schema.optional(OrchestratorMcpRunningTaskNext),
 });
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
@@ -768,8 +917,7 @@ export type OrchestratorMcpThreadInterruptResult = typeof OrchestratorMcpThreadI
 export const OrchestratorMcpCapabilitiesInput = Schema.Struct({
   search: Schema.optional(
     TrimmedNonEmptyString.check(Schema.isMaxLength(200)).annotate({
-      description:
-        "Words to match against model ids and labels. Lists matching models instead of the default short list.",
+      description: "Match model ids and labels. Replaces the short list.",
     }),
   ),
 });
@@ -804,6 +952,10 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
 export type OrchestratorMcpProviderCapability = typeof OrchestratorMcpProviderCapability.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
+  workflowPresets: Schema.optional(WorkflowPresets).annotate({
+    description:
+      "Named worker presets and the configured workflow worker default in this environment. Use a preset id in workflow agent options or graph nodes. A preset lists its model preference order as target, then fallbacks; T3 picks the first entry that is available when the graph is reviewed or the script starts, and keeps it for the run. Presets do not affect delegate_task.",
+  }),
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),
@@ -826,18 +978,13 @@ export type OrchestratorMcpCapabilitiesResult = typeof OrchestratorMcpCapabiliti
 
 export const OrchestratorMcpScheduleTaskInput = Schema.Struct({
   projectId: OrchestratorMcpProjectTarget,
-  prompt: OrchestratorMcpPrompt.annotate({
-    description: "Prompt executed on every scheduled run.",
-  }),
+  prompt: OrchestratorMcpPrompt,
   schedule: OrchestratorMcpSchedule,
   title: Schema.optional(OrchestratorMcpTitle),
-  enabled: Schema.optional(
-    Schema.Boolean.annotate({ description: "Whether the schedule starts enabled; defaults true." }),
-  ),
+  enabled: Schema.optional(Schema.Boolean.annotate({ description: "Default true." })),
   bindToCurrentThread: Schema.optional(
     Schema.Boolean.annotate({
-      description:
-        "True (default) posts each run into this thread; false creates a fresh top-level thread per run.",
+      description: "Default true: runs post in this thread. False: new thread per run.",
     }),
   ),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
@@ -856,11 +1003,9 @@ export const OrchestratorMcpScheduledTask = Schema.Struct({
   lastRunStatus: ScheduledTaskRunStatus,
   webhookUrl: Schema.optional(Schema.String).annotate({
     description:
-      "Public URL to give the sender. Absent when this environment has no T3 Connect managed tunnel; the user must enable T3 Connect remote access first.",
+      "Public URL for the sender. Absent: no T3 Connect tunnel. The user must enable T3 Connect remote access.",
   }),
-  webhookSignature: Schema.optional(Schema.Literals(["none", "set"])).annotate({
-    description: "Whether requests must carry a valid signature.",
-  }),
+  webhookSignature: Schema.optional(Schema.Literals(["none", "set"])),
 });
 export type OrchestratorMcpScheduledTask = typeof OrchestratorMcpScheduledTask.Type;
 
@@ -870,8 +1015,7 @@ export type OrchestratorMcpScheduleTaskResult = typeof OrchestratorMcpScheduleTa
 export const OrchestratorMcpListScheduledTasksInput = Schema.Struct({
   projectId: Schema.optional(
     ProjectId.annotate({
-      description:
-        "Only list this project's tasks. Omit for the calling thread's project, or for every project when the caller is not a T3 thread.",
+      description: "Default: your thread's project, or all outside a thread.",
     }),
   ),
 });
@@ -897,37 +1041,43 @@ export type OrchestratorMcpUpdateScheduledTaskInput =
 
 export const OrchestratorMcpRequestSecretInput = Schema.Struct({
   label: TrimmedNonEmptyString.annotate({
-    description: "What you need, shown as the card's title, e.g. 'GitHub webhook secret'.",
+    description: "Card title, such as 'GitHub webhook secret'.",
   }),
   reason: TrimmedNonEmptyString.annotate({
-    description:
-      "One or two sentences on what it is for and where the user gets or also enters it.",
+    description: "What it is for and where to get it.",
   }),
-  placeholder: Schema.optional(TrimmedNonEmptyString).annotate({
-    description: "Hint inside the input, e.g. 'Paste your GitHub token'.",
+  placeholder: Schema.optional(TrimmedNonEmptyString),
+  delivery: Schema.optional(Schema.Literals(["secretRef", "file"])).annotate({
+    description:
+      'secretRef (default) for a T3 tool. file for a shell CLI: read the path in your command, e.g. TOKEN="$(cat <file>)" wrangler whoami.',
   }),
   timeoutMs: Schema.optional(
     Schema.Int.check(Schema.isBetween({ minimum: 1_000, maximum: 60 * 60 * 1_000 })),
-  ).annotate({ description: "How long to wait for the user. Default 10 minutes." }),
+  ).annotate({ description: "Default 10 min." }),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId).annotate({
-    description:
-      "Reuse when retrying a call that lost its result, so the user sees one card and its answer is returned again. Use a new id to ask again after timed_out or cancelled.",
+    description: "Retry key for this ask. New key after a timeout or cancel.",
   }),
 });
 export type OrchestratorMcpRequestSecretInput = typeof OrchestratorMcpRequestSecretInput.Type;
 
 export const OrchestratorMcpRequestSecretResult = Schema.Union([
   Schema.Struct({
-    status: Schema.Literal("saved").annotate({ description: "secretRef holds the value." }),
+    status: Schema.Literal("saved"),
     secretRef: SecretRef.annotate({
+      description: "One-use. Pass to a tool that accepts a secretRef. You never see the value.",
+    }),
+  }),
+  Schema.Struct({
+    status: Schema.Literal("saved").annotate({ description: "file holds the value." }),
+    file: Schema.String.annotate({
       description:
-        "Pass it to a tool that accepts a secretRef; it works once, and you never see the value.",
+        "Owner-only file with the value. Read it inside commands and never print it. Deleted after 24 hours.",
     }),
   }),
   Schema.Struct({
     status: Schema.Literals(["declined", "cancelled", "timed_out"]).annotate({
       description:
-        "declined: the user chose not to. cancelled: the request ended with the run. timed_out: the user did not answer in time; the card is closed, so ask again with a new clientRequestId if still needed.",
+        "declined: user chose not to. cancelled: ended with the run. timed_out: no answer in time. Ask again with a new `clientRequestId` if still needed.",
     }),
   }),
 ]);
@@ -951,6 +1101,7 @@ export class OrchestratorMcpFailure extends Schema.TaggedError<OrchestratorMcpFa
   {
     code: Schema.Literals([
       "capability_denied",
+      "approval_required",
       "parent_not_active",
       "provider_unavailable",
       "model_unavailable",

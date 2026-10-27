@@ -8,10 +8,22 @@ import type {
   OrchestrationV2WorkflowNodeOutcome,
   OrchestrationV2WorkflowPlan,
 } from "@t3tools/contracts";
-import { isOrchestrationV2WorkActive, isProviderNativeSubagentThread } from "@t3tools/contracts";
+import {
+  isOrchestrationV2ActiveWorkflowMember,
+  isOrchestrationV2WorkActive,
+  isProviderNativeSubagentThread,
+} from "@t3tools/contracts";
 import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript";
+import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
 import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
+import { workflowBudget } from "@t3tools/shared/workflowBudget";
+import {
+  isWorkflowScriptMessage,
+  workflowOpeningParentThreadId,
+  workflowOpeningTitles,
+  workflowPhaseTitles,
+} from "@t3tools/shared/workflowOpeningText";
 
 export {
   WORKFLOW_GRAPH_STATE_LABEL,
@@ -21,6 +33,7 @@ export {
   type WorkflowGraphNodeView,
   type WorkflowGraphView,
 } from "./workflowGraphView.ts";
+export { workflowNodeAccounting } from "./workflowAttempts.ts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -96,6 +109,11 @@ export interface RuntimeSubagent {
     | undefined;
   /** The graph node a workflow member runs. */
   readonly graphNodeKey?: string | undefined;
+  readonly judgmentFor?: OrchestrationV2SubagentWorkflow["agents"][number]["judgmentFor"];
+  readonly judgmentOutcome?: OrchestrationV2SubagentWorkflow["agents"][number]["judgmentOutcome"];
+  readonly attemptHistory?: OrchestrationV2SubagentWorkflow["agents"][number]["attemptHistory"];
+  readonly attemptTaskIds?: ReadonlyArray<string> | undefined;
+  readonly taskId?: string | undefined;
   readonly firstSeenAt: string;
   readonly startedAt: string | null;
   readonly completedAt: string | null;
@@ -119,6 +137,104 @@ export function isActiveSubagentStatus(status: RuntimeSubagentStatus): boolean {
 
 export function isLiveSubagentTurnItem(item: OrchestrationV2TurnItem): boolean {
   return item.type === "subagent" && isOrchestrationV2WorkActive(item.status);
+}
+
+/**
+ * A subagent item that may be a workflow T3 runs: app-owned with no thread of its own.
+ * Only the parent's subagent row can confirm it (see isAppWorkflow).
+ */
+export function isAppWorkflowCandidateTurnItem(item: OrchestrationV2TurnItem): boolean {
+  return item.type === "subagent" && item.origin === "app_owned" && item.childThreadId === null;
+}
+
+/** Matches the app-owned workflow entry point, never a completed child thread. */
+export function isAppWorkflowTurnItem(
+  item: OrchestrationV2TurnItem,
+  workflowIds?: ReadonlySet<string>,
+): boolean {
+  return (
+    item.type === "subagent" &&
+    item.origin === "app_owned" &&
+    workflowIds?.has(item.subagentId) === true
+  );
+}
+
+/** Identity recorded on the member after dispatch, never the plan or coordinator's target. */
+export function workflowMemberIdentity(member: RuntimeSubagent | null): string {
+  if (member === null) return "Not started";
+  if (member.childThreadId === null && member.startedAt === null && member.model === null)
+    return "Not started";
+  return `${member.providerInstanceId ?? "Unknown provider"} / ${member.model ?? "Unknown model"}`;
+}
+
+/** Old graph errors embedded the full outcome record; arbitrary script text stays intact. */
+export function workflowProgressText(row: {
+  readonly status: OrchestrationV2Subagent["status"];
+  readonly progress?: string | undefined;
+  readonly result: string | null;
+  readonly workflow?: OrchestrationV2SubagentWorkflow | undefined;
+}): string | null {
+  if (row.status === "running") return row.progress ?? null;
+  const plan = row.workflow?.plan;
+  if (plan === undefined || row.result === null) return row.result;
+  const prefix = "The workflow failed: Graph failed: ";
+  if (row.result.startsWith(prefix)) {
+    const recorded = plan.nodes.flatMap((node) => {
+      const outcome = row.workflow?.nodeOutcomes?.[node.key];
+      return outcome === undefined ? [] : [{ ...outcome, label: node.label }];
+    });
+    if (recorded.some((node) => node.status === "failed"))
+      return workflowGraphFailureSummary(recorded);
+  }
+  const raw = row.result.startsWith(prefix) ? row.result.slice(prefix.length) : row.result;
+  let record: unknown;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    // QuickJS appends the source location to thrown errors, outside their JSON record.
+    const location = raw.lastIndexOf(" (at ");
+    if (!row.result.startsWith(prefix) || location < 0) return row.result;
+    try {
+      record = JSON.parse(raw.slice(0, location));
+    } catch {
+      return row.result;
+    }
+  }
+  if (typeof record !== "object" || record === null || !("ok" in record) || !("nodes" in record))
+    return row.result;
+  const outcomes = record.nodes;
+  if (
+    typeof record.ok !== "boolean" ||
+    typeof outcomes !== "object" ||
+    outcomes === null ||
+    Array.isArray(outcomes)
+  )
+    return row.result;
+  const nodes: Array<{ label: string; status: string; reason?: string }> = [];
+  for (const node of plan.nodes) {
+    const outcome: unknown = Object.getOwnPropertyDescriptor(outcomes, node.key)?.value;
+    if (
+      typeof outcome !== "object" ||
+      outcome === null ||
+      !("status" in outcome) ||
+      !["passed", "failed", "skipped"].includes(String(outcome.status))
+    )
+      return row.result;
+    const recorded = row.workflow?.nodeOutcomes?.[node.key];
+    nodes.push({
+      label: node.label,
+      status: recorded?.status ?? String(outcome.status),
+      ...(recorded?.reason !== undefined
+        ? { reason: recorded.reason }
+        : "reason" in outcome && typeof outcome.reason === "string"
+          ? { reason: outcome.reason }
+          : {}),
+    });
+  }
+  if (record.ok && nodes.every((node) => node.status === "passed")) return null;
+  return record.ok === false && nodes.some((node) => node.status === "failed")
+    ? workflowGraphFailureSummary(nodes)
+    : row.result;
 }
 
 export interface SubagentWorkflowGroup {
@@ -196,6 +312,11 @@ function workflowMembersToRuntime(
       recentActivity: [],
       graph: undefined,
       graphNodeKey: agent.graphNodeKey,
+      judgmentFor: agent.judgmentFor,
+      judgmentOutcome: agent.judgmentOutcome,
+      attemptHistory: agent.attemptHistory,
+      attemptTaskIds: agent.attemptTaskIds,
+      taskId: agent.agentId,
       firstSeenAt: isoFromEpochMillis(agent.queuedAt) ?? startedAt ?? coordinator.firstSeenAt,
       startedAt,
       completedAt,
@@ -281,21 +402,10 @@ export function deriveWorkflowGroups(
 
   return workflows.map((workflow) => {
     const workflowMembers = Object.hasOwn(members, workflow.id) ? members[workflow.id]! : [];
-    // Union, not either/or: the declared plan lags the members, because the
-    // provider only admits a phase once something in it starts. Members seed
-    // the map; the declared titles then overwrite whatever they guessed.
-    const phaseTitles = new Map<number, string>();
-    for (const member of workflowMembers) {
-      if (member.phaseIndex === null) continue;
-      phaseTitles.set(
-        member.phaseIndex,
-        member.phaseTitle ?? phaseTitles.get(member.phaseIndex) ?? `Phase ${member.phaseIndex + 1}`,
-      );
-    }
-    for (const phase of workflow.phases) phaseTitles.set(phase.index, phase.title);
-    const knownPhases = Array.from(phaseTitles.entries())
-      .map(([index, title]) => ({ index, title }))
-      .sort((a, b) => a.index - b.index);
+    const knownPhases = workflowPhaseTitles({
+      declared: workflow.phases,
+      members: workflowMembers,
+    });
 
     const phases = knownPhases.map((phase) => {
       const phaseMembers = workflowMembers
@@ -338,27 +448,15 @@ export function deriveWorkflowGroups(
   });
 }
 
-// Workflow scripts open with their `meta` export, after any leading comments.
-const WORKFLOW_SCRIPT_START = /^\s*(?:(?:\/\/[^\n]*|\/\*[\s\S]*?\*\/)\s*)*export\s+const\s+meta\b/;
-
-/**
- * Whether a user message is the script a provider-native workflow runs. Servers mark every
- * subagent prompt either way; only threads recorded before the mark fall back to the text.
- */
-export function isWorkflowScriptMessage(message: {
-  readonly role: string;
-  readonly text: string;
-  readonly workflowScript?: boolean | undefined;
-}): boolean {
-  return (
-    message.role === "user" && (message.workflowScript ?? WORKFLOW_SCRIPT_START.test(message.text))
-  );
-}
+// The rules for what a workflow opening is, and the text it draws, live in one shared module so the
+// server counts find matches from the same strings.
+export { workflowOpeningParentThreadId };
 
 type ProjectedSubagent = Parameters<typeof projectedSubagentsToRuntime>[0][number] &
   Pick<OrchestrationV2Subagent, "driver" | "providerInstanceId">;
 
 export interface WorkflowOpening {
+  readonly budget?: ReturnType<typeof workflowBudget>;
   readonly messageId: string;
   readonly script: string;
   readonly name: string | null;
@@ -406,29 +504,16 @@ export function resolveWorkflowOpening(input: {
   };
 }
 
-/**
- * The parent thread whose subagent rows describe this thread's workflow, or null when the thread
- * does not open with a workflow script. Gates loading the parent so ordinary subagent threads
- * never subscribe to their parent's detail.
- */
-export function workflowOpeningParentThreadId(input: {
-  readonly thread: Pick<OrchestrationV2AppThread, "lineage" | "creationSource">;
-  readonly messages: ReadonlyArray<Parameters<typeof isWorkflowScriptMessage>[0]>;
-}): OrchestrationV2AppThread["id"] | null {
-  if (!isProviderNativeSubagentThread(input.thread)) return null;
-  const first = input.messages.find((message) => message.role === "user");
-  return first !== undefined && isWorkflowScriptMessage(first)
-    ? input.thread.lineage.parentThreadId
-    : null;
-}
-
 /** The opening block's heading: the workflow, what it does, and how its agents stand. */
 export function workflowOpeningHeadline(opening: WorkflowOpening): {
   readonly title: string;
   readonly description: string | null;
   readonly agents: string | null;
 } {
-  const title = opening.name ?? opening.description ?? "Workflow";
+  const { title, description } = workflowOpeningTitles({
+    name: opening.name,
+    description: opening.description,
+  });
   const members =
     opening.group === null
       ? []
@@ -459,12 +544,7 @@ export function workflowOpeningHeadline(opening: WorkflowOpening): {
           .filter((key) => counts.has(key))
           .map((key) => `${counts.get(key)} ${key}`)
           .join(" · ")}`;
-  return {
-    title,
-    description:
-      opening.description !== null && opening.description !== title ? opening.description : null,
-    agents,
-  };
+  return { title, description, agents };
 }
 
 type AppWorkflowCandidate = ProjectedSubagent &
@@ -510,10 +590,71 @@ export function appWorkflowMemberThreads(
   return members;
 }
 
-/** A T3-run workflow drawn like a workflow opening: its plan, agents and script. */
+/** The heading of a T3-run workflow's timeline block for each run status. */
+export function appWorkflowHeading(status: OrchestrationV2Subagent["status"]): string {
+  switch (status) {
+    case "running":
+      return "Workflow running";
+    case "completed":
+      return "Workflow finished";
+    case "failed":
+      return "Workflow failed";
+    case "cancelled":
+    case "interrupted":
+      return "Workflow stopped";
+    default:
+      return "Workflow";
+  }
+}
+
+/**
+ * Whether Stop applies to a workflow: it is running, and it is one T3 runs or a Claude workflow T3
+ * can ask the provider to stop. The row must already be known to be a workflow; the server stays
+ * the authority and refuses the rest.
+ */
+export function canStopWorkflow(workflow: {
+  readonly status: OrchestrationV2Subagent["status"];
+  readonly origin: OrchestrationV2Subagent["origin"];
+  readonly driver: OrchestrationV2Subagent["driver"] | null;
+}): boolean {
+  return (
+    workflow.status === "running" &&
+    (workflow.origin === "app_owned" ||
+      (workflow.origin === "provider_native" && workflow.driver === "claudeAgent"))
+  );
+}
+
+/**
+ * Whether Stop is on offer for a workflow row: it is running, or a T3-run workflow still has an
+ * active member. A stop cancels the row before its members, so a failed member stop leaves the row
+ * cancelled with members running, and Stop stays so the whole stop can be repeated.
+ */
+export function canStopWorkflowWork(
+  workflow: Pick<OrchestrationV2Subagent, "id" | "status" | "origin"> & {
+    readonly driver: OrchestrationV2Subagent["driver"] | null;
+  },
+  subagents: ReadonlyArray<
+    Pick<OrchestrationV2Subagent, "origin" | "parentNodeId" | "childThreadId" | "status">
+  >,
+): boolean {
+  return (
+    canStopWorkflow(workflow) ||
+    (workflow.origin === "app_owned" &&
+      subagents.some((member) => isOrchestrationV2ActiveWorkflowMember(member, workflow.id)))
+  );
+}
+
+/**
+ * A T3-run workflow described as a workflow opening: its plan and agents.
+ * The opening also carries the workflow script as data; this view does not
+ * decide whether or where a client displays it.
+ */
 export function resolveAppWorkflowView(subagent: AppWorkflowCandidate): WorkflowOpening | null {
   if (!isAppWorkflow(subagent)) return null;
   return {
+    ...(subagent.workflow?.budget === undefined
+      ? {}
+      : { budget: workflowBudget(subagent.workflow) }),
     messageId: subagent.id,
     script: storedWorkflowScriptSource(subagent.prompt),
     name: subagent.workflow?.name ?? null,

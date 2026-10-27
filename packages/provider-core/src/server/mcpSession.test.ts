@@ -1,5 +1,24 @@
 import { describe, expect, it } from "vite-plus/test";
-import { withAgentDeviceEnvironment } from "./mcpSession.ts";
+import {
+  hasMemberToolset,
+  isWorkflowMemberSession,
+  withAgentDeviceEnvironment,
+} from "./mcpSession.ts";
+
+describe("workflow member credentials", () => {
+  it("treats a thread credential without orchestration as a member's", () => {
+    expect(hasMemberToolset(new Set(["worktree", "pull-requests"]))).toBe(true);
+    expect(hasMemberToolset(new Set())).toBe(true);
+    expect(hasMemberToolset(new Set(["orchestration", "worktree"]))).toBe(false);
+  });
+
+  it("leaves sessions that record no capabilities unchanged", () => {
+    expect(hasMemberToolset(undefined)).toBe(false);
+    expect(isWorkflowMemberSession(undefined)).toBe(false);
+    expect(isWorkflowMemberSession({})).toBe(false);
+    expect(isWorkflowMemberSession({ capabilities: new Set(["worktree"]) })).toBe(true);
+  });
+});
 
 describe("device CLI environment", () => {
   it("preserves provider credentials and commands while routing devices to the owned daemon", () => {

@@ -17,10 +17,12 @@ const COLLISION_PADDING = 5;
 
 const TooltipProvider = TooltipPrimitive.Provider;
 
+/** Lets many triggers share one tooltip, so a long list mounts one root instead of one each. */
+const TooltipCreateHandle = TooltipPrimitive.createHandle;
+
 type TooltipActionsRef = RefObject<TooltipPrimitive.Root.Actions | null>;
 
-// Context values are frozen to the compiler, so consumers update the hovered
-// tooltip through these calls rather than by writing to a shared ref.
+// The compiler freezes context values; update hovered tooltips through calls instead of shared ref writes.
 function createTooltipHoverTracker() {
   let hovered: { trigger: HTMLElement; actionsRef: TooltipActionsRef } | null = null;
   return {
@@ -162,4 +164,11 @@ function TooltipPopup({
   );
 }
 
-export { TooltipProvider, Tooltip, TooltipTrigger, TooltipPopup, TooltipScrollDismissArea };
+export {
+  TooltipProvider,
+  TooltipCreateHandle,
+  Tooltip,
+  TooltipTrigger,
+  TooltipPopup,
+  TooltipScrollDismissArea,
+};

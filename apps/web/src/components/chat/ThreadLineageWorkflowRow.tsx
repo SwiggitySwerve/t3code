@@ -3,7 +3,7 @@ import type {
   RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ProviderDriverKind, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
-import { ChevronDownIcon, LoaderCircleIcon, SquareIcon } from "lucide-react";
+import { ChevronDownIcon, SquareIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { AgentElapsed } from "./AgentElapsed";
@@ -13,6 +13,7 @@ import { ThreadRelationshipIcon } from "./ThreadRelationshipIcon";
 import { cn } from "../../lib/utils";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { CollapsibleSectionHeader, SectionHeaderStatus } from "../ui/collapsible-section-header";
+import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
   THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS,
@@ -108,6 +109,18 @@ function WorkflowMemberRow({
   );
 }
 
+/**
+ * What a workflow is called in the Lineage list: its own name, otherwise the title it was started
+ * with. The row's header and its Stop and Expand labels all read it, so they never disagree; the
+ * first agent's thread title is another name for the work and is never a label for the workflow.
+ */
+export function workflowLineageLabel(workflow: {
+  readonly workflowName: string | null;
+  readonly title: string;
+}): string {
+  return workflow.workflowName ?? workflow.title;
+}
+
 export function ThreadLineageWorkflowRow({
   group,
   header,
@@ -135,7 +148,7 @@ export function ThreadLineageWorkflowRow({
 }) {
   const [expanded, setExpanded] = useState(false);
   const [phaseOpen, setPhaseOpen] = useState<ReadonlyMap<number, boolean>>(() => new Map());
-  const label = group.workflow.workflowName ?? group.workflow.title;
+  const label = workflowLineageLabel(group.workflow);
   const phases = group.phases.filter((phase) => phase.members.length > 0);
   // T3-run workflows record each agent's own provider; Claude's run on the workflow's.
   const memberProvider = (member: RuntimeSubagent) =>
@@ -167,7 +180,7 @@ export function ThreadLineageWorkflowRow({
                 }
               >
                 {stopping ? (
-                  <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+                  <Spinner size="xs" aria-hidden />
                 ) : (
                   <SquareIcon aria-hidden className="size-3 fill-current" />
                 )}

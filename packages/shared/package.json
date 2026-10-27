@@ -3,13 +3,29 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./workflowUpdate": {
+      "types": "./src/workflowUpdate.ts",
+      "import": "./src/workflowUpdate.ts"
+    },
+    "./workflowBudget": {
+      "types": "./src/workflowBudget.ts",
+      "import": "./src/workflowBudget.ts"
+    },
+    "./workflowGraphResult": {
+      "types": "./src/workflowGraphResult.ts",
+      "import": "./src/workflowGraphResult.ts"
+    },
+    "./workflowOpeningText": {
+      "types": "./src/workflowOpeningText.ts",
+      "import": "./src/workflowOpeningText.ts"
+    },
+    "./workflowIntent": {
+      "types": "./src/workflowIntent.ts",
+      "import": "./src/workflowIntent.ts"
+    },
     "./changedFileKind": {
       "types": "./src/changedFileKind.ts",
       "import": "./src/changedFileKind.ts"
-    },
-    "./githubMarkdownLinks": {
-      "types": "./src/githubMarkdownLinks.ts",
-      "import": "./src/githubMarkdownLinks.ts"
     },
     "./authScopeOptions": {
       "types": "./src/authScopeOptions.ts",
@@ -55,10 +71,6 @@
       "types": "./src/git.ts",
       "import": "./src/git.ts"
     },
-    "./githubMedia": {
-      "types": "./src/githubMedia.ts",
-      "import": "./src/githubMedia.ts"
-    },
     "./sourceControl": {
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"
@@ -66,6 +78,10 @@
     "./logging": {
       "types": "./src/logging.ts",
       "import": "./src/logging.ts"
+    },
+    "./releaseResource": {
+      "types": "./src/releaseResource.ts",
+      "import": "./src/releaseResource.ts"
     },
     "./observability": {
       "types": "./src/observability.ts",
@@ -239,17 +255,13 @@
       "types": "./src/threadTranscript.ts",
       "import": "./src/threadTranscript.ts"
     },
-    "./threadReference": {
-      "types": "./src/threadReference.ts",
-      "import": "./src/threadReference.ts"
+    "./paletteSearch": {
+      "types": "./src/paletteSearch.ts",
+      "import": "./src/paletteSearch.ts"
     },
     "./threadPullRequests": {
       "types": "./src/threadPullRequests.ts",
       "import": "./src/threadPullRequests.ts"
-    },
-    "./changeRequestUrl": {
-      "types": "./src/changeRequestUrl.ts",
-      "import": "./src/changeRequestUrl.ts"
     },
     "./composerTrigger": {
       "types": "./src/composerTrigger.ts",
@@ -307,6 +319,10 @@
       "types": "./src/previewViewport.ts",
       "import": "./src/previewViewport.ts"
     },
+    "./mediaPreview": {
+      "types": "./src/mediaPreview.ts",
+      "import": "./src/mediaPreview.ts"
+    },
     "./filePreview": {
       "types": "./src/filePreview.ts",
       "import": "./src/filePreview.ts"
@@ -342,6 +358,14 @@
     "./testing/longTempDir": {
       "types": "./src/testing/longTempDir.ts",
       "import": "./src/testing/longTempDir.ts"
+    },
+    "./testing/workflowReviewFixture": {
+      "types": "./src/testing/workflowReviewFixture.ts",
+      "import": "./src/testing/workflowReviewFixture.ts"
+    },
+    "./testing/workflowQa": {
+      "types": "./src/testing/workflowQa.ts",
+      "import": "./src/testing/workflowQa.ts"
     },
     "./testing/symlinks": {
       "types": "./src/testing/symlinks.ts",
@@ -390,6 +414,10 @@
     "./orchestrationV2BoundedSnapshot": {
       "types": "./src/orchestrationV2BoundedSnapshot.ts",
       "import": "./src/orchestrationV2BoundedSnapshot.ts"
+    },
+    "./orchestrationV2DedupedBodies": {
+      "types": "./src/orchestrationV2DedupedBodies.ts",
+      "import": "./src/orchestrationV2DedupedBodies.ts"
     },
     "./orchestrationV2Timeline": {
       "types": "./src/orchestrationV2Timeline.ts",

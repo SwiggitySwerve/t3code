@@ -8,7 +8,7 @@ import * as Effect from "effect/Effect";
 import * as McpInvocationContext from "../../McpInvocationContext.ts";
 import * as McpToolAccess from "../../McpToolAccess.ts";
 import * as WorktreeMcpService from "../../WorktreeMcpService.ts";
-import { WorktreeToolkit } from "./tools.ts";
+import { WorktreeRemovalToolkit, WorktreeToolkit } from "./tools.ts";
 
 const handlers = {
   t3_worktree_list: McpToolAccess.reads((input) =>
@@ -52,4 +52,18 @@ const handlers = {
   ),
 } satisfies McpToolAccess.Handlers<typeof WorktreeToolkit.tools>;
 
+const removalHandlers = {
+  t3_worktree_remove: McpToolAccess.writesThreads(
+    (input) => [input.threadId],
+    (input) =>
+      Effect.gen(function* () {
+        const scope = yield* McpInvocationContext.McpInvocationContext;
+        const service = yield* WorktreeMcpService.WorktreeMcpService;
+        return yield* service.remove(scope, input);
+      }),
+  ),
+} satisfies McpToolAccess.Handlers<typeof WorktreeRemovalToolkit.tools>;
+
 export const layer = McpToolAccess.toLayer(WorktreeToolkit, handlers);
+
+export const layerRemoval = McpToolAccess.toLayer(WorktreeRemovalToolkit, removalHandlers);

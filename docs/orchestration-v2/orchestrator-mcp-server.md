@@ -47,7 +47,8 @@ Before `ProviderSessionManager` opens a new V2 provider session, it asks
 
 Workflow members (including judges) receive no `orchestration` capability, so they
 cannot delegate or start workflows. Ordinary delegated children retain orchestration
-access. Browser, device, worktree and pull-request access follow their existing settings. Credentials
+access. A member also gets no preview or device capability. Worktree and pull-request access follow
+their existing settings. Credentials
 expire after a maximum lifetime, expire when idle, and are revoked when the
 provider session is released. The raw token is not persisted in orchestration
 state.
@@ -55,6 +56,22 @@ state.
 The MCP HTTP server resolves the bearer token and supplies the resulting
 `McpInvocationScope` to tool handlers. Orchestration handlers additionally
 check the `orchestration` capability before reading or mutating state.
+
+**Member toolset.** A thread credential without `orchestration` belongs to a workflow member
+(`hasMemberToolset` in `@t3tools/provider-core/server/mcpSession` owns the test). One filter at
+`McpHttpServer` (`TOOLKIT_REQUIRED_CAPABILITY`, applied where toolkits and image tools register)
+lists and calls only the tools of toolkits whose capability the member holds: the orchestrator,
+thread, project, environment and attachment tools need `orchestration`, the preview tools need
+`preview` and the device tools need `device`. A member sees the worktree, pull-request and html
+tools; in the test registration that is 9 tools and 21,637 bytes of `tools/list` against 88 tools
+and 283,106 bytes for a coordinator. A hidden tool is not listed and a call to it returns "Tool
+'<name>' not found". Coordinators, ordinary threads and OAuth clients keep every tool, and
+handlers still check their capability. The same test sets the instructions a member gets: Codex
+members send `skills.include_instructions=false` on `thread/start` and `thread/resume` (Codex
+reads it per thread and restores the catalog on a resume that omits it) and no
+`t3_code_orchestration_*` context; Claude members get no orchestration or background-wait text and
+keep every settings source (user and local settings hold permission rules, hooks and env that T3
+also reads). Built-in Claude tools, skills and the system prompt preset are not restricted.
 
 ## Provider Injection
 
@@ -254,13 +271,14 @@ omits it for a provider that offers all of them. When the target lists
 `runtimeModes`, an explicit `runtimeMode` outside that list is refused, and an
 inherited mode steps down to the broadest mode the target offers.
 
-Each delegated review round uses a new `delegate_task` call with the original brief,
-prior findings, responses, and unresolved objections. Track each round by its own `taskId` and use
-a distinct `clientRequestId` per round, stable across retries of that round.
-`childThreadId` is backing storage, not a target for another review round through
-`t3_thread_send`. Ordinary thread messaging remains available for user-requested
-conversations; it does not reopen a completed task. There is no task-level follow-up
-API for preserving the same reviewer session.
+Each independent delegated review round uses a new `delegate_task` call with the
+original brief, prior findings, responses, and unresolved objections. Track each
+round by its own `taskId` and use a distinct `clientRequestId` per round, stable
+across retries of that round.
+A follow-up that needs the same child's conversation goes through `t3_thread_send`
+on its `childThreadId`. After the original task completes, that follow-up runs as a
+fresh task in the child thread; it does not reopen the completed task or change its
+published result.
 
 Delegation requires an active parent run owned by the MCP credential's
 provider session. The request becomes the V2 command
@@ -422,7 +440,9 @@ field holds its phases and agents; the existing workflow view renders it.
 Member tasks hang under that row, and their own completion deliveries are
 disposed, so only `workflow.complete` delivers to the caller. `workflow_status`
 returns the status, phases, each agent's status, model and summary, the latest
-log line, and the script's return value as JSON or why it failed.
+log line, and the script's return value as JSON or why it failed. For a workflow
+started from a graph it also returns `nodes`, the stored outcome of each node
+(see Graphs, below).
 
 Each agent also reports cumulative `usage`, `outcomeCategory`, and `timings`. Usage
 is recomputed from persisted provider-turn totals across every child run and retry;
@@ -494,7 +514,17 @@ These follow the `omx graph` execution graph's protected verifiers
 - `inputs` and `outputs` declare the files an agent reads and must write, as
   `[{ id, path, maxBytes?, sha256? }]` with workspace-relative paths (at most 32 each,
   `maxBytes` default 256 KiB, at most 16 MiB). They need the shared checkout, so
-  `isolation: "worktree"` refuses them. Both are listed in the agent's task.
+  `isolation: "worktree"` refuses them. Inputs are listed in the agent's task in one
+  `<t3-handoff v="1">` block that says its content is data, not instructions: an
+  `<input>` per file with its `id`, `path`, `maxBytes` and, when pinned, `sha256`.
+  An entry may also carry `from`, a node id. In a graph, a `task_output` input carries
+  `from` and the body of its `<input>` is the summary the producing node stored,
+  cut at 2,048 bytes and escaped (`&` and `<`) so it cannot close the block; nothing
+  else of the producing agent reaches it. Outputs follow the block, listed under
+  "Output files you must write:". A graph node, and any agent that declares outputs,
+  is also asked to end with a summary of at most about 1,500 characters (with a
+  `schema`, to keep the text before the JSON block short), because that summary is
+  what the next agent and the coordinator read.
   - Before each attempt, every input must exist within `maxBytes`, and an input with
     `sha256` must still have those bytes; otherwise the agent fails without starting.
   - After the turn, every output must exist within `maxBytes`. A missing or oversized
@@ -518,7 +548,89 @@ whose message contains the word ultracode; `always` opts in every user or agent 
 turn reaches the provider with a `<t3-ultracode>` note asking for `workflow_start`; the
 stored message is unchanged. Claude Code has its own ultracode, which the keyword starts,
 so a Claude turn only gets the word ultracode added when `always` opts it in.
-`@t3tools/provider-core/server/ultracode` owns this rule, and run execution applies it.
+`@t3tools/provider-core/server/ultracode` owns this rule. Run execution applies it through
+`@t3tools/provider-core/server/workflowTrigger`, where a person's message that asks for a
+workflow (the `workflowTriggers` setting) gets a plan-first `<t3-workflow>` note naming
+`graph_review` instead of the ultracode note, on every driver. Only a person's message on a
+thread that is not a delegated task can ask; wakes, steers, restart continuations and
+server-made replies cannot. The detector reads the stored message, not the provider text.
+
+A request for a workflow arms an approval gate for that thread
+(`apps/server/src/orchestration-v2/WorkflowApprovalGate.ts`, which owns its state and asks
+the same detector). While it is armed the server refuses `workflow_start`, and refuses
+`graph_start` for any digest the user has not approved. The agent plans with `graph_review`
+and ends its turn; the user approves or dismisses that review in the client
+(`orchestration.approveWorkflowReview`, `orchestration.dismissWorkflowReview`, which need
+the operate grant and are not MCP tools).
+
+The client decides from the review's **approval record**, never from the `graph_review` tool
+output. When `graph_review` finishes, the server writes a `workflow_review` turn item (command
+`workflow.review.record`, built by `apps/server/src/mcp/workflowReviewRecord.ts`) next to the
+tool call: the review id and digest the gate issued, whether it is ready and needs approval,
+blockers, and a compact plan (each task's name, step, dependencies, worker and judge target,
+and check type) with the cost advice. It is bounded: at most 120 tasks, 24 dependencies per
+task and 20 blockers, each text clipped at 400 characters, and the item says how many it left
+out, so a review whose full result is too large to store still carries its decision data. If a
+review the user must approve cannot be recorded, `graph_review` fails with an error that tells
+the agent to call it again; any other review loses only its card. A thread from before the
+record existed has the tool call alone, which shows as an ordinary tool row with no approval
+controls.
+
+A request is armed until it is settled. Armed refuses; settled does not.
+
+- **Approve** records the digest and sends the agent a message, from the server on the
+  user's behalf, that carries it. The request stays armed: only that digest may start, and
+  any other graph or script is still refused.
+- **A successful start of the approved digest** settles the request. Later starts on the
+  thread, including scripts and other graphs, follow the ordinary rules for a thread nobody
+  asked a workflow on. A start that fails or is interrupted settles nothing.
+- **Dismiss** settles the request at once and tells the agent not to start a workflow for it.
+  Starts are not refused afterwards; the instruction is all that stops the agent. A repeated
+  Dismiss succeeds and sends nothing new. Approve after Dismiss is refused with
+  `no-pending-request`, which the client shows as an expired review.
+- **The user's next message** that asks for no workflow lifts the gate, and a new request
+  replaces it with a fresh one.
+
+One request and one graph are one run. Two identities are kept apart.
+
+- **Launch identity: thread, request and digest.** The gate derives a start key,
+  `approval:<thread>:<request message>:<digest>`, and uses it as the `clientRequestId` of the
+  `workflow.start` command, replacing whatever key the agent sent. If the start commits its
+  workflow and then fails or is interrupted, a retry of the same digest, with any key or none,
+  finds that workflow instead of starting a second one. The key does not depend on the
+  decision, so it is the same after a restart: a fresh review and approval of the same request
+  and digest returns the workflow the first approval began, whether it is still running or
+  has finished. It does not start another. To run the same graph again, the person sends a new
+  message that asks for a workflow, which is a new request with a new key. A different digest
+  is a separate review and a separate start. The command id is made in an `approval`
+  namespace rather than from the agent's provider session, so a retry from a new provider
+  session finds the same workflow. A stable key is not an approval: after a restart the
+  approval is gone, and no start runs until the person approves a fresh review. A start
+  refused before it reaches `workflow.start`, for example because the reviewed model is no
+  longer served, leaves the approval in place; the same digest can start once the target is
+  served again, and T3 never moves to another entry.
+- **Delivery identity: thread, request and decision.** The messages the gate sends are named
+  by the thread, the request and a decision id the gate makes in this process. Repeated and
+  concurrent clicks share the decision id, so they share one message. A review made and
+  approved after a restart gets a new decision id, so the agent is told again and its message
+  is not mistaken for the earlier one, which a command receipt would otherwise answer. Every
+  call returns the same ids, so a call that repeats after a failed send reaches the receipt or
+  sends the missing message.
+
+State is in memory only. After a restart (or an upgrade, which restarts) the gate is armed
+again from the thread's latest started person-typed message, whether its request was pending,
+dismissed or already started, so every review and approval must be made again, even when the
+agent sends back the expanded graph with the old digest. "Started" means the message began a
+run: a message still waiting in the queue, and steers, do not count. The trigger settings in
+force now decide whether the message asks for a workflow. Delegation (`delegate_task`,
+`delegate_tasks`) is not gated.
+
+Two limits of an approved start are accepted. The orchestrator stores a `workflow.start` that it
+rejected, under the start key. Retrying that approved digest repeats the rejection, even after
+a restart, until the person sends a new message that asks for a workflow (a new request, so a
+new key). And when a committed workflow's agents have changed an input file of the reviewed
+graph, a retry fails the input check instead of returning the workflow; that failure is
+closed, and no second run starts.
 
 #### In the app
 
@@ -550,8 +662,15 @@ own threads. The row stores the script with a settings line for its args and bud
   The same sweep stops an attempt past its deadline; that counts as a failed
   attempt and retries with a note asking the agent to finish within the budget.
   It is separate from `stallTimeoutMs`, which measures inactivity.
+- **Approved starts.** A start rejected inside `workflow.start` is remembered under the
+  approval's start key and repeats its rejection on every retry, across restarts, until the
+  person sends a new message that asks for a workflow. A retry after the committed workflow
+  changed a reviewed input file fails closed rather than returning the workflow.
 - **Budget.** `budgetTokens` counts cumulative input plus output for finished
-  attempts, including cached reads and writes, retries and judges. It is an estimate
+  attempts, including cached reads and writes, retries and judges. It does not count the
+  coordinator's own tokens, which were 20-26% of the total in the C1 baseline and 58-63% after
+  the C3 member trim (C4, Codex members). `graph_review`
+  suggests a value (`advisory.suggestedBudgetTokens`). It is an estimate
   rather than a bill. Once it is spent, `agent()` throws for any agent that has not
   already started; agents already running finish. `workflow_status` reports
   `tokensUsed`, `usage`, and `budgetTokens`. The script's `budget.spent` and remaining
@@ -559,6 +678,26 @@ own threads. The row stores the script with a settings line for its args and bud
   attempts are counted again from persisted records when the script resumes.
 - **Caps.** 1,000 agents per workflow and 4,096 items per `parallel` or
   `pipeline` call. The environment-wide running limit applies to every agent.
+- **Bounded text.** `apps/server/src/mcp/workflowHandoff.ts` owns the byte caps and the
+  marker `...truncated (<shown> of <total> bytes)`, which counts toward the cap and
+  may end with where the whole is: an agent's stored result 2,048 bytes (with
+  `full output at task_status taskId=<id>`), the inline summary of a declared input
+  2,048 after escaping (a summary that escapes to more is cut to a shorter start, never
+  to nothing), a check's recorded detail 2,048, the check detail an agent sees when it
+  retries 4,000, a graph's result 4,096, a failed workflow's 4,096, and a script's
+  return value 16,000 (`return a file path for large results`). A judgment checker is shown
+  at most 24,000 bytes of the answer it judges, escaped, inside one `<t3-result>` block. A
+  longer answer is also written, up to 256 KiB, to a new file `checker-<id>.txt` in the
+  server's own `workflow-results` folder under its state directory, never in the user's
+  checkout, because a checker is a sibling of the agent it judges and cannot read that
+  agent's `task_status`. The cut marker names the file by absolute path. Each check has its own
+  file, and the check removes only that file when it ends; the folder is shared and is never
+  removed. A file left by a server that stopped mid-check is cleared by the next write once it is a
+  day old, and only files with that name are ever cleared; a file whose check is still running in
+  this server process is never cleared, however long that check waits in a queue. Codex members can read the path under
+  every runtime mode (their sandbox limits writes, not reads); Claude members get the folder as an
+  added directory. If the file cannot be written, the checker sees the cut marker without a
+  pointer.
 - **Worktrees.** `agent(prompt, { isolation: "worktree" })` gives that agent its
   own checkout of the calling thread's commit, like `delegate_task`.
 
@@ -611,21 +750,54 @@ when every node passed its checks.
 - **Inputs.** A `workspace_snapshot` names a file in the caller's checkout. A
   `task_output` names an output another node declares; that node must be in
   `dependsOn`.
-- **`graph_review({ graph })`** validates the graph and reports every problem as a
-  blocker: bad or duplicate ids, unknown or cyclic dependencies, unsafe paths, a
+- **`graph_review({ graph })`** validates the graph and reports its problems as
+  blockers: bad or duplicate ids, unknown or cyclic dependencies, unsafe paths, a
   `task_output` naming an undeclared output or a node outside `dependsOn`, two
   nodes declaring one output path, `long` without approval, a structured `outputId`
-  the node does not declare, and a missing or oversized input. It hashes every
+  the node does not declare, a missing or oversized input, and a graph over capacity.
+  Review first refuses a graph with more than 1,000 nodes, or one whose worst case
+  exceeds the 1,000-agent workflow cap (see **Caps**): one agent per node, plus up to
+  three judges for each node with a `judgment` check. A capacity refusal can omit the
+  remaining per-node problems; reduce the graph and review again. It hashes every
   `workspace_snapshot` input and returns the run order as `layers`, `writeConflicts`
   between nodes with no path between them (the runner runs those one at a time), the
   inputs it found, `ready`, and a `digest` over the normalized graph and the input
-  hashes. It starts and records nothing; Claude's read-only tool list includes it.
+  hashes. It starts nothing; Claude's read-only tool list includes it. A graph that parses also
+  gets an `advisory` with `fanOut` (`consider_single` for a lone node, a chain, or two nodes
+  with no check), up to three short `reasons`, the node count, widest wave, depth and verifier
+  count, `estimatedModelCalls` and `estimatedTokens` (low and high, with the coordinator's part
+  and a `basis`), `suggestedBudgetTokens` (1.4 times the agents' high estimate, without the
+  coordinator) and `overshootBoundTokens` (the widest wave times three calls at each node's
+  high figure). Calls are 2-3 per agent and 3-4 for the coordinator. The token figures per call
+  depend on the provider driver that runs the agent, which `graph_review` resolves for each
+  node, each judge and the coordinator. Codex-driver agents use the C4 re-bench of 2026-10-26
+  (Sonnet 5.5 through cliproxy): 17k-26k tokens per member call and 96k-106k per coordinator
+  call. Every other driver, Claude included, was not measured and keeps the earlier estimate of
+  37k-96k per call until it is; a Claude coordinator is therefore also unmeasured. An agent whose
+  driver is unknown is priced as unmeasured, so a graph with Codex and Claude members is priced
+  agent by agent. The `basis` says which figures were used. Tasks that read more than the
+  benchmark's one or two small files will exceed the member high figure; the headroom and the
+  thresholds are opinion. The advisory counts one judge agent per judgment check. It is not in the
+  digest and never changes `ready`, `blockers` or `approvalRequired`, and it never blocks a start,
+  including when the user asked for a workflow. It also returns
+  a `reviewId` the server made for this review, and `approvalRequired`, true while a
+  user's request for a workflow waits for approval (above). The server keeps the review
+  in memory so the user's decision can be bound to it; the client decides by `reviewId`
+  and `digest`, never by what the agent echoed. The server notes which request is armed
+  before the review reads anything. If the request was replaced, lifted or settled while the
+  review ran, the call fails as stale and records nothing, so a slow review never becomes
+  approvable under a newer request.
 - **`graph_start({ graph, acceptedDigest, budgetTokens?, title?, clientRequestId? })`**
-  reviews again and refuses blockers, a digest mismatch, or an input file that
-  changed since the review (naming the files, for reviews this server process
-  made). Reviews are kept in memory, so after a restart a mismatched digest is
-  refused as "Review not found"; run `graph_review` again. A digest that still
-  matches starts without the record. It then runs the graph as a workflow, so `workflow_status`,
+  reviews again, which revalidates the capacity bound, and refuses blockers, a
+  digest mismatch, or an input file that changed since the review (naming the files,
+  for reviews this server process made). Reviews are kept in memory, so after a
+  restart a mismatched digest is refused as "Review not found"; run `graph_review` again. A digest that still
+  matches starts without the record, unless the user's request for a workflow waits: then
+  the approval gate refuses first, before the graph is rebuilt, and only a digest the
+  user approved starts. It starts under the key of the thread, request and digest, which replaces
+  the `clientRequestId` you send, so a repeat of that start, in this process or after a
+  restart, returns the same workflow. It then
+  runs the graph as a workflow, so `workflow_status`,
   `workflow_stop`, resume after a restart, the budget, the app's display and the one
   completion wake work as for a script.
 - **Running.** The stored script is one fixed driver with the graph as its args.
@@ -634,10 +806,29 @@ when every node passed its checks.
   producer published, so a node never reads bytes other than those reviewed or
   produced. Each node runs with `report: true` and its attempt deadline. A node
   whose predecessor did not pass is skipped, naming that predecessor.
-- **Result.** Per node: `status` (`passed`, `failed` or `skipped`), `attempts`,
-  `inputs` (id to sha256), `outputs` (id to path, sha256 and size), `verification`
-  and, unless it passed, `reason`. If every node passed the workflow completes with
-  `{ ok: true, nodes }`; otherwise it fails with `Graph failed: ` and the same record.
+- **Result.** If every node passed the workflow completes with `{ ok: true, nodes,
+  omitted }`. Otherwise the script throws and the workflow fails with
+  `The workflow failed: Graph failed: ` and a summary: how many nodes failed and were
+  skipped, and up to three reasons. Only a workflow started from a graph gets the
+  compact record (graphs started before this change keep their full record; see
+  Provenance); a script that returns graph-shaped data keeps its own result. The
+  record holds, per node, `status` (`passed`, `failed` or `skipped`), `attempts`, a
+  `reason` (at most 240 bytes) when it did not pass, and `outputs` (id to `path` and
+  `sizeBytes`), as many of these as fit in 4,096 bytes: every status first, then
+  reasons, then output paths. A graph too large for one status each (between 70 and 90 nodes, by id length)
+  becomes `{ ok, counts, reasons, omitted }`. Input digests, output sha256 and check
+  details are never in it. `omitted` always names where they are:
+  `workflow_status` with the `workflowId`, field `nodes`. A failed graph run's text, when
+  it is cut at 4,096 bytes, ends with a pointer to the same place.
+- **Provenance.** As each node ends, its outcome is stored on the workflow row with its
+  `status`, `attempts` and `reason`, `inputs` (input id to the sha256 of the bytes the
+  node was given) and `outputs` (output id to `path`, `sha256` and `sizeBytes`). Nothing
+  but hashes, paths and sizes is stored. This holds for failed graphs too, where only
+  the summary above is the result, and `workflow_status` returns it as `nodes` for any
+  size of graph. A check's `verification` is not in `nodes`; it stays on
+  `workflow_status.agents[]` (detail up to 2,048 bytes). A graph started before this
+  change has no `inputs` or `outputs` on its nodes, so when it finishes it keeps its full
+  record, cut at 16,000 bytes like a script result, instead of the compact one.
 - **Mapping to omx.** Field names are the omx `ProtectedExecutionContractV1` names in
   camelCase: `depends_on` → `dependsOn`, `node_id` → `nodeId`, `output_id` →
   `outputId`, `max_bytes` → `maxBytes`, `attempt_policy.budget` → `attemptBudget`,
@@ -715,7 +906,8 @@ and `creationSource: "mcp"`; provider output uses `creationSource: "provider"`.
 Actor and ingress are separate so agent-authored user-role messages remain
 distinguishable from human-authored messages.
 
-Agents mention another thread as `[title](t3-thread://v1/<threadId>)`. The
+Agents mention another thread as `[title](t3-thread://v1/<threadId>)`. Thread
+results carry this ready-made as `link`, so agents never format the id. The
 link carries only the id. Clients first resolve it in the message's environment,
 then use a unique match in another enabled environment. Ambiguous matches stay
 unresolved. Web and desktop show the resolved thread’s current title. Mobile

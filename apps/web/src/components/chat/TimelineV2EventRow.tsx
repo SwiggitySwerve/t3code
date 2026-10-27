@@ -19,6 +19,8 @@ import {
   V2LifecycleRow,
 } from "./V2LifecycleRow";
 import { SecretRequestCard } from "./SecretRequestCard";
+import { isProjectedWorkflowReview } from "@t3tools/client-runtime/state/workflowReview";
+import { WorkflowReviewTimelineBlock } from "./WorkflowReviewTimelineBlock";
 import { TimelineRowCtx, type TimelineRow } from "./timelineRowContext";
 import { v2EventPresentation, subagentGroupTiming } from "./TimelineV2EventRow.logic";
 
@@ -34,6 +36,14 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
         environmentId={ctx.activeThreadEnvironmentId}
         item={item}
         visibility={visibility}
+      />
+    );
+  }
+  if (isProjectedWorkflowReview(row.projectedItem)) {
+    return (
+      <WorkflowReviewTimelineBlock
+        environmentId={ctx.activeThreadEnvironmentId}
+        projectedItem={row.projectedItem}
       />
     );
   }
@@ -126,6 +136,7 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
               onImageExpand={ctx.onImageExpand}
+              source={ctx.turnItemSource}
             />
           </div>
         </div>
@@ -201,6 +212,7 @@ export function V2EventTimelineRow({ row }: { row: Extract<TimelineRow, { kind: 
               onOpenTurnDiff={ctx.onOpenTurnDiff}
               onRollbackCheckpoint={ctx.onRollbackCheckpoint}
               onImageExpand={ctx.onImageExpand}
+              source={ctx.turnItemSource}
             />
           </div>
         </div>
@@ -249,11 +261,12 @@ const V2SubagentGroup = memo(function V2SubagentGroup({
   return (
     <WorkLogBlock continues={row.continuesWorkLog}>
       <Collapsible open={expanded} onOpenChange={toggleExpanded} data-subagent-group>
+        {/* pr-3.25 matches the panel border, padding, and row inset so the times line up. */}
         <CollapsibleTrigger
           aria-label={label}
           aria-description={statusSummary}
           className={cn(
-            "flex w-full min-w-0 items-center gap-3 py-2 text-left transition-opacity hover:opacity-100",
+            "flex w-full min-w-0 items-center gap-2.5 py-2 pr-3.25 text-left transition-opacity hover:opacity-100",
             expanded || summary.active
               ? "text-foreground opacity-100"
               : "text-muted-foreground opacity-55",

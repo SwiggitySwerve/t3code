@@ -6,7 +6,10 @@
  */
 // @effect-diagnostics-next-line nodeBuiltinImport:off -- agent keys are hashed synchronously inside QuickJS host callbacks.
 import * as NodeCrypto from "node:crypto";
+import { mergeWorkflowPatch, workflowPatches } from "@t3tools/shared/workflowUpdate";
+import { workflowRecordedUsage } from "@t3tools/shared/workflowBudget";
 
+import type { workflowExecutionTiming } from "./workflowUsage.ts";
 import {
   CommandId,
   type NodeId,
@@ -22,70 +25,173 @@ import {
   type ThreadId,
   type WorkflowAgentOutcomeCategory,
   type OrchestratorMcpWorkflowUsage,
+  type ModelSelection,
+  type WorkflowPresets,
+  type WorkflowPresetTarget,
+  type OrchestratorMcpTarget,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
+import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import { freshCommandId, isCommandIdSpent } from "../orchestration-v2/WorkflowCommandRetry.ts";
 import {
   type CheckOutcome,
-  checkFeedback,
   type FileRef,
   fileInstructions,
-  inputProblem,
-  outputFiles,
   type ProducedFile,
   type WorkspaceFile,
   type FileScopes,
-  JUDGMENT_RESULT_SCHEMA,
-  judgmentOutcome,
-  judgmentPrompt,
   parseCheck,
   parseFileRefs,
   parseScopes,
   type ProcessCheck,
-  runStructuredCheck,
-  structuredOutputCheck,
   scopeInstructions,
   scopesOverlap,
   type WorkflowCheck,
+  withoutProducer,
 } from "./workflowChecks.ts";
+import {
+  boundText,
+  completionResult,
+  taskOutputAt,
+  HANDOFF_SUMMARY_BYTES,
+  resultContract,
+  type HandoffInput,
+} from "./workflowHandoff.ts";
+import {
+  type AgentAttemptHost,
+  type MutableAgent,
+  runAttempts,
+  TERMINAL_TASK_STATUSES,
+} from "./workflowAgentAttempts.ts";
+import { GRAPH_DRIVER_SCRIPT } from "./workflowGraph.ts";
+import { MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
 
-/** Claude Code's documented per-run ceiling. */
-const MAX_AGENTS_PER_WORKFLOW = 1000;
-/** A failed agent, or one a server restart cancelled, runs again up to this many times in all. */
-const MAX_AGENT_ATTEMPTS = 3;
-/**
- * An agent whose thread records nothing for this long is stopped and started again.
- * Generous, because a long tool call can be silent; `stallTimeoutMs` overrides it.
- */
-const DEFAULT_STALL_MS = 20 * 60_000;
-const MIN_STALL_MS = 60_000;
 /** Per-attempt deadlines: at least a minute, at most the omx graph's "long" budget of 6 h. */
 const MIN_ATTEMPT_TIMEOUT_MS = 60_000;
 const MAX_ATTEMPT_TIMEOUT_MS = 6 * 60 * 60_000;
 const STALL_SWEEP_INTERVAL = "30 seconds";
-const RESULT_TEXT_LIMIT = 2_000;
-const WORKFLOW_RESULT_LIMIT = 16_000;
 const PREVIEW_LIMIT = 500;
+/** A failed workflow.complete is sent again after a pause that doubles from 1 s up to 30 s. */
+const COMPLETION_RETRY_MIN_MS = 1_000;
+const COMPLETION_RETRY_MAX_MS = 30_000;
 
 export interface WorkflowContext {
   readonly workflowId: NodeId;
   readonly threadId: ThreadId;
   readonly source: string;
   readonly args: unknown;
-  /** New agents stop starting once finished agents used this many tokens. */
+  readonly workerTarget?: unknown;
+  readonly workerTargetError?: string;
+  readonly workflowPresets?: WorkflowPresets;
+  readonly presetTargets?: Readonly<
+    Record<string, { readonly target: OrchestratorMcpTarget } | { readonly error: string }>
+  >;
+  readonly callerSelection?: ModelSelection;
+  /** New agents stop starting once recorded child usage reaches this limit. */
   readonly budgetTokens?: number;
   /** Stored event sequence before the workflow row was created. */
   readonly afterSequence: number;
   /** The reviewed graph's plan; only then may the script tag agents and record node outcomes. */
   readonly plan?: OrchestrationV2WorkflowPlan;
+  readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
+}
+
+export interface WorkflowPreference {
+  readonly presetId: string;
+  readonly presetName: string;
+  readonly entries: ReadonlyArray<WorkflowPresetTarget>;
+}
+
+/**
+ * Whether two profile entries are the same choice: provider instance, model and options. An
+ * entry without `options` inherits the caller's, so it is not the same as one with `options: []`.
+ */
+export function sameWorkflowPresetTarget(
+  a: WorkflowPresetTarget,
+  b: WorkflowPresetTarget,
+): boolean {
+  if (a.providerInstanceId !== b.providerInstanceId || a.model !== b.model) return false;
+  const left = a.options;
+  const right = b.options;
+  if (left === undefined || right === undefined) return left === right;
+  return (
+    left.length === right.length &&
+    left.every(
+      (option, index) => option.id === right[index]!.id && option.value === right[index]!.value,
+    )
+  );
+}
+
+/** A profile's model preference order: its primary target, then its fallbacks. */
+export function presetPreference(preset: WorkflowPresets["presets"][number]): WorkflowPreference {
+  return {
+    presetId: preset.id,
+    presetName: preset.name,
+    entries: [preset.target, ...(preset.fallbacks ?? [])],
+  };
+}
+
+/**
+ * Select one whole request before the provider resolver applies caller inheritance. A preset
+ * chosen without a frozen snapshot also reports its `preference` order (review, workflow start);
+ * `target` is always its first entry, all a script with no snapshot uses. A snapshot is the
+ * resolved choice with no order, so a resume never re-reads a preset.
+ */
+export function selectWorkflowTarget(
+  own: {
+    readonly target?: unknown;
+    readonly model?: string | undefined;
+    readonly preset?: unknown;
+  },
+  workerTarget?: unknown,
+  presets?: WorkflowPresets,
+  snapshots?: WorkflowContext["presetTargets"],
+): {
+  readonly target: unknown;
+  readonly source: "target" | "model" | "preset" | "workerTarget" | "defaultPreset" | "caller";
+  readonly error?: string;
+  readonly preference?: WorkflowPreference;
+} {
+  if (own.target !== undefined) return { target: own.target, source: "target" };
+  if (own.model !== undefined) return { target: { model: own.model }, source: "model" };
+  if (own.preset !== undefined && (typeof own.preset !== "string" || !own.preset.trim())) {
+    return {
+      target: undefined,
+      source: "preset",
+      error: "Workflow preset must be a non-empty id.",
+    };
+  }
+  const presetId =
+    own.preset ?? (workerTarget === undefined ? presets?.defaultPresetId : undefined);
+  if (presetId !== undefined && presetId !== null) {
+    const source = own.preset !== undefined ? "preset" : "defaultPreset";
+    const preset = presets?.presets.find((preset) => preset.id === presetId);
+    if (preset === undefined)
+      return {
+        target: undefined,
+        source,
+        error: `Workflow preset ${String(presetId)} was not found.`,
+      };
+    const snapshot = snapshots?.[preset.id];
+    if (snapshot !== undefined)
+      return {
+        target: "target" in snapshot ? snapshot.target : undefined,
+        source,
+        ...("error" in snapshot ? { error: snapshot.error } : {}),
+      };
+    return { target: preset.target, source, preference: presetPreference(preset) };
+  }
+  if (workerTarget !== undefined) return { target: workerTarget, source: "workerTarget" };
+  return { target: undefined, source: "caller" };
 }
 
 export interface WorkflowAgentStart {
@@ -97,6 +203,7 @@ export interface WorkflowAgentStart {
 }
 
 export interface WorkflowAgentOutcome {
+  readonly timing?: ReturnType<typeof workflowExecutionTiming> | undefined;
   readonly status: string;
   readonly summary: string | null;
   readonly structuredResult?: unknown;
@@ -144,9 +251,10 @@ export interface WorkflowRunnerDeps {
     item: OrchestratorMcpDelegateTasksItem,
     requestKey: string,
   ) => Effect.Effect<WorkflowAgentStart, OrchestratorMcpFailure>;
-  readonly readAgent: (
+  readonly awaitAgent: (
     workflow: WorkflowContext,
     taskId: NodeId,
+    onUpdate: (outcome: WorkflowAgentOutcome) => void,
   ) => Effect.Effect<WorkflowAgentOutcome, OrchestratorMcpFailure>;
   /** Whether an agent with this retry key was already started, by this run or an earlier one. */
   readonly agentStarted: (
@@ -174,6 +282,21 @@ export interface WorkflowRunnerDeps {
     path: string,
     maxBytes: number,
   ) => Effect.Effect<WorkspaceFile, OrchestratorMcpFailure>;
+  /**
+   * Stores an agent's answer as a new file in a folder the server owns, outside every checkout, and
+   * returns its absolute path. A checker is a sibling of the agent it judges and cannot read that
+   * agent's task, so a cut copy of the answer points here instead. Each call makes its own file.
+   */
+  readonly writeCheckerResult: (
+    workflow: WorkflowContext,
+    taskId: NodeId,
+    text: string,
+  ) => Effect.Effect<string, OrchestratorMcpFailure>;
+  /** Removes the one file `writeCheckerResult` made at `path`; never a folder or another file. */
+  readonly removeCheckerResult: (
+    workflow: WorkflowContext,
+    path: string,
+  ) => Effect.Effect<void, OrchestratorMcpFailure>;
   readonly stopAgent: (
     workflow: WorkflowContext,
     taskId: NodeId,
@@ -183,8 +306,6 @@ export interface WorkflowRunnerDeps {
 }
 
 const decodeItem = Schema.decodeUnknownExit(OrchestratorMcpDelegateTasksItem);
-
-const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 const runnerTimeMillis = () => Effect.runSync(Clock.currentTimeMillis);
 
@@ -203,21 +324,13 @@ function stringOption(options: Readonly<Record<string, unknown>>, key: string) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-function numberOption(options: Readonly<Record<string, unknown>>, key: string) {
-  const value = options[key];
-  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
-}
-
-function failureMessage<A>(exit: Exit.Exit<A, OrchestratorMcpFailure>, fallback: string): string {
-  const failure = Exit.isFailure(exit) ? Exit.findErrorOption(exit) : undefined;
-  return failure?._tag === "Some" ? failure.value.message : fallback;
-}
-
 const decodeNodeOutcome = Schema.decodeUnknownExit(OrchestrationV2WorkflowNodeOutcome);
 
-type MutableAgent = {
-  -readonly [Key in keyof OrchestrationV2WorkflowAgent]: OrchestrationV2WorkflowAgent[Key];
-};
+/** The command that settles the workflow row with the script's outcome. */
+type WorkflowCompletion = Extract<
+  Parameters<WorkflowRunnerDeps["threads"]["dispatch"]>[0],
+  { readonly type: "workflow.complete" }
+>;
 
 /** One script run. Plain promises, because QuickJS host calls are callback based. */
 class WorkflowSession {
@@ -229,22 +342,43 @@ class WorkflowSession {
   private progress: string | undefined;
   private readonly occurrences = new Map<string, number>();
   private readonly nodeOutcomes: Record<string, OrchestrationV2WorkflowNodeOutcome> = {};
-  private readonly terminal = new Set<string>();
   private readonly waiting = new Map<string, WaitingAgent>();
   private readonly stalled = new Set<string>();
   private readonly timedOut = new Set<string>();
-  private spentTokens = 0;
+  private budgetExhausted = false;
+  private sent: OrchestrationV2SubagentWorkflow = { phases: [], agents: [] };
+  private sentProgress: string | undefined;
+  private updateError: unknown;
   private readonly writeHolds = new Map<number, ReadonlyArray<string>>();
   private readonly scopeWaiters = new Set<() => void>();
-  private readonly waiters = new Map<string, () => void>();
   private updating: Promise<void> | undefined;
   private updatePending = false;
   private readonly workflow: WorkflowContext;
   private readonly deps: WorkflowRunnerDeps;
+  private readonly attempts: AgentAttemptHost;
 
   constructor(workflow: WorkflowContext, deps: WorkflowRunnerDeps) {
     this.workflow = workflow;
     this.deps = deps;
+    this.sent = workflow.previousWorkflow ?? this.sent;
+    this.budgetExhausted = workflow.previousWorkflow?.budget?.exhausted ?? false;
+    this.attempts = {
+      workflow,
+      deps,
+      signal: this.abort.signal,
+      waiting: this.waiting,
+      stalled: this.stalled,
+      timedOut: this.timedOut,
+      spentTokens: () => this.recordedUsage().spent ?? 0,
+      markBudgetExhausted: () => {
+        this.budgetExhausted = true;
+      },
+      setProgress: (message) => {
+        this.progress = truncate(message, PREVIEW_LIMIT);
+      },
+      scheduleUpdate: () => this.scheduleUpdate(),
+      runAgent: (request) => this.runAgent(request),
+    };
   }
 
   /** Agents being waited on, for the stall sweep. */
@@ -260,20 +394,31 @@ class WorkflowSession {
     this.timedOut.add(taskId);
   }
 
-  /** Members and the row itself report through the thread's subagent updates. */
+  /** Finishes once the workflow is stopped or the server detaches this runner. */
+  readonly stopped = Effect.callback<void>((resume) => {
+    const signal = this.abort.signal;
+    if (signal.aborted) return resume(Effect.void);
+    const onAbort = () => resume(Effect.void);
+    signal.addEventListener("abort", onAbort, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", onAbort));
+  });
+
+  /** Stopping the coordinator also releases every child settlement subscription. */
   observe(task: OrchestrationV2Subagent): void {
-    if (task.id === this.workflow.workflowId) {
-      if (task.status !== "running") this.abort.abort();
-      return;
-    }
-    if (!TERMINAL_TASK_STATUSES.has(task.status) || task.result === null) return;
-    this.terminal.add(task.id);
-    this.waiters.get(task.id)?.();
-    this.waiters.delete(task.id);
+    if (task.id === this.workflow.workflowId && task.status !== "running") this.abort.abort();
   }
 
-  async run(): Promise<void> {
-    const outcome = await runWorkflowScript({
+  observeWorkflowStatus(id: NodeId, status: OrchestrationV2Subagent["status"] | undefined): void {
+    if (id === this.workflow.workflowId && status !== undefined && status !== "running")
+      this.abort.abort();
+  }
+
+  /**
+   * Runs the script once and returns the command that settles its row, or nothing when the row
+   * is already final. Sending the command is the caller's job, so a failed send never reruns it.
+   */
+  async run(): Promise<WorkflowCompletion | undefined> {
+    let outcome = await runWorkflowScript({
       source: this.workflow.source,
       args: this.workflow.args,
       signal: this.abort.signal,
@@ -286,18 +431,25 @@ class WorkflowSession {
       }),
     );
     // Stopped by Stop or the thread's own stop: the row is already final.
-    if (this.abort.signal.aborted) return;
-    await this.flush();
-    await this.dispatch({
+    if (this.abort.signal.aborted) return undefined;
+    try {
+      await this.flush();
+    } catch (error) {
+      outcome = { ok: false, message: error instanceof Error ? error.message : String(error) };
+    }
+    return {
       type: "workflow.complete",
       commandId: CommandId.make(`command:workflow-complete:${this.workflow.workflowId}`),
       threadId: this.workflow.threadId,
       workflowId: this.workflow.workflowId,
       status: outcome.ok ? "completed" : "failed",
-      result: outcome.ok
-        ? truncate(JSON.stringify(outcome.value ?? null, null, 2), WORKFLOW_RESULT_LIMIT)
-        : truncate(`The workflow failed: ${outcome.message}`, WORKFLOW_RESULT_LIMIT),
-    });
+      result: completionResult(outcome, {
+        workflowId: this.workflow.workflowId,
+        // Only the current graph driver stores per-node provenance, so only its record is
+        // compacted. A graph started under an older driver keeps its full record on resume.
+        graph: this.workflow.plan !== undefined && this.workflow.source === GRAPH_DRIVER_SCRIPT,
+      }),
+    };
   }
 
   private host(): WorkflowScriptHost {
@@ -312,7 +464,10 @@ class WorkflowSession {
         this.addPhase(title);
         this.scheduleUpdate();
       },
-      budget: () => ({ total: this.workflow.budgetTokens ?? null, spent: this.spentTokens }),
+      budget: () => ({
+        total: this.workflow.budgetTokens ?? null,
+        spent: this.recordedUsage().spent ?? 0,
+      }),
       meta: (meta) => {
         const record = asRecord(meta);
         if (typeof record.name === "string") this.name = record.name;
@@ -328,6 +483,13 @@ class WorkflowSession {
         ? {}
         : { node: (key: string, outcome: unknown) => this.recordNode(key, outcome) }),
     };
+  }
+
+  private recordedUsage() {
+    return workflowRecordedUsage([
+      ...(this.workflow.previousWorkflow?.agents ?? []),
+      ...this.agents,
+    ]);
   }
 
   /** The plan node a script names, refusing names outside a reviewed graph's plan. */
@@ -366,6 +528,7 @@ class WorkflowSession {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
     readonly keyLabel?: string | null;
+    readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
   }): Promise<unknown> {
     const ran = await this.runAgent(request);
     if (request.options.report !== true) return ran.value;
@@ -394,6 +557,7 @@ class WorkflowSession {
     readonly options: Readonly<Record<string, unknown>>;
     /** The label its retry key uses, when not the script's own; null keys it by content alone. */
     readonly keyLabel?: string | null;
+    readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
   }): Promise<{
     readonly value: unknown;
     readonly entry: MutableAgent;
@@ -410,13 +574,19 @@ class WorkflowSession {
     if (phase !== undefined) this.addPhase(phase);
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
-    const target = options.target ?? (model === undefined ? undefined : { model });
+    const { target, source, error } = selectWorkflowTarget(
+      { target: options.target, model, preset: options.preset },
+      this.workflow.workerTarget,
+      this.workflow.workflowPresets,
+      this.workflow.presetTargets,
+    );
     let check: WorkflowCheck | undefined;
     let scopes: FileScopes | undefined;
     let inputs: ReadonlyArray<FileRef> = [];
     let outputs: ReadonlyArray<FileRef> = [];
     let attemptTimeoutMs: number | undefined;
-    let invalid: string | undefined;
+    let invalid: string | undefined =
+      error ?? (source === "workerTarget" ? this.workflow.workerTargetError : undefined);
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);
@@ -464,7 +634,7 @@ class WorkflowSession {
           // Only present when used, so scripts without them keep their keys.
           ...(check === undefined ? [] : [{ verify: check }]),
           ...(scopes === undefined ? [] : [{ scopes }]),
-          ...(inputs.length === 0 ? [] : [{ inputs }]),
+          ...(inputs.length === 0 ? [] : [{ inputs: inputs.map(withoutProducer) }]),
           ...(outputs.length === 0 ? [] : [{ outputs }]),
           ...(attemptTimeoutMs === undefined ? [] : [{ attemptTimeoutMs }]),
         ]),
@@ -477,6 +647,7 @@ class WorkflowSession {
       index: this.agents.length,
       label,
       ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
+      ...(request.judgmentFor === undefined ? {} : { judgmentFor: request.judgmentFor }),
       state: "queued",
       ...(phase === undefined ? {} : { phaseIndex: this.phases.indexOf(phase), phaseTitle: phase }),
       prompt: truncate(request.prompt, PREVIEW_LIMIT),
@@ -493,14 +664,26 @@ class WorkflowSession {
       });
       if (category !== null) entry.outcomeCategory ??= category;
       if (result !== null && result.trim().length > 0) {
-        entry.result = truncate(result, RESULT_TEXT_LIMIT);
+        entry.result = boundText(
+          result,
+          HANDOFF_SUMMARY_BYTES,
+          entry.agentId === undefined ? undefined : taskOutputAt(entry.agentId),
+        );
       }
       this.scheduleUpdate();
     };
 
+    // A graph node's final message becomes the summary the next agent and the coordinator read.
+    const contract =
+      graphNodeKey !== undefined || outputs.length > 0
+        ? resultContract({
+            hasSchema: options.schema !== undefined,
+            hasOutputs: outputs.length > 0,
+          })
+        : "";
     const itemFor = (feedback: string) =>
       decodeItem({
-        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(inputs, outputs)}${feedback}`,
+        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${feedback}`,
         title: truncate(label, 500),
         ...(target === undefined ? {} : { target }),
         ...(options.isolation === undefined ? {} : { isolation: options.isolation }),
@@ -540,7 +723,7 @@ class WorkflowSession {
     if (holdsWrites) await this.acquireWrites(entry.index, writes, label);
     try {
       return done(
-        await this.runAttempts({
+        await runAttempts(this.attempts, {
           request,
           options,
           entry,
@@ -562,6 +745,19 @@ class WorkflowSession {
     }
   }
 
+  /** Each input from a graph node with the stored result of the agent that ran it. */
+  private withSummaries(inputs: ReadonlyArray<FileRef>): ReadonlyArray<HandoffInput> {
+    return inputs.map((ref) => ({
+      ...ref,
+      summary:
+        ref.from === undefined
+          ? undefined
+          : this.agents.find(
+              (agent) => agent.graphNodeKey === ref.from && agent.judgmentFor === undefined,
+            )?.result,
+    }));
+  }
+
   private async acquireWrites(index: number, paths: ReadonlyArray<string>, label: string) {
     while ([...this.writeHolds.values()].some((held) => scopesOverlap(held, paths))) {
       this.progress = truncate(
@@ -581,297 +777,6 @@ class WorkflowSession {
     for (const wake of waiters) wake();
   }
 
-  private async runAttempts(input: {
-    readonly request: {
-      readonly prompt: string;
-      readonly options: Readonly<Record<string, unknown>>;
-    };
-    readonly options: Readonly<Record<string, unknown>>;
-    readonly entry: MutableAgent;
-    readonly label: string;
-    readonly phase: string | undefined;
-    readonly target: unknown;
-    readonly digest: string;
-    readonly occurrence: number;
-    readonly check: WorkflowCheck | undefined;
-    readonly inputs: ReadonlyArray<FileRef>;
-    readonly outputs: ReadonlyArray<FileRef>;
-    readonly attemptTimeoutMs: number | undefined;
-    readonly itemFor: (feedback: string) => ReturnType<typeof decodeItem>;
-    readonly settle: (status: "completed" | "failed", result: string | null) => void;
-  }): Promise<unknown> {
-    const {
-      request,
-      options,
-      entry,
-      label,
-      phase,
-      target,
-      digest,
-      occurrence,
-      check,
-      inputs,
-      outputs,
-      attemptTimeoutMs,
-      itemFor,
-      settle,
-    } = input;
-    const files = Object.fromEntries([
-      ...inputs.map((ref) => [`input:${ref.id}`, ref.path] as const),
-      ...outputs.map((ref) => [`output:${ref.id}`, ref.path] as const),
-    ]);
-    let feedback = "";
-    for (let attempt = 0; ; attempt += 1) {
-      const item = itemFor(feedback);
-      if (Exit.isFailure(item)) {
-        settle("failed", `agent "${label}" has invalid options.`);
-        return null;
-      }
-      const key = `wf-${digest}-${occurrence}${attempt === 0 ? "" : `-r${attempt}`}`;
-      const budget = this.workflow.budgetTokens;
-      // An agent the budget allowed before a restart is re-attached, not refused.
-      if (
-        budget !== undefined &&
-        this.spentTokens >= budget &&
-        !(await Effect.runPromise(
-          this.deps.agentStarted(this.workflow, key).pipe(Effect.orElseSucceed(() => false)),
-        ))
-      ) {
-        const message = `The workflow's budget of ${budget} tokens is spent (${this.spentTokens} used).`;
-        settle("failed", message);
-        throw new Error(message);
-      }
-      // An input that changed since the script pinned it would make the work answer another question.
-      const inputIssue = await inputProblem(inputs, (ref) => this.readFile(ref));
-      if (inputIssue !== undefined) {
-        settle("failed", `agent "${label}": ${inputIssue}`);
-        return null;
-      }
-      const started = await Effect.runPromiseExit(
-        this.deps.spawnAgent(this.workflow, item.value, key),
-      );
-      if (Exit.isFailure(started)) {
-        settle("failed", failureMessage(started, "The agent could not start."));
-        return null;
-      }
-      entry.agentId = started.value.taskId;
-      entry.attemptTaskIds = [...(entry.attemptTaskIds ?? []), started.value.taskId];
-      delete entry.outcomeCategory;
-      entry.childThreadId = started.value.childThreadId;
-      if (started.value.model !== null) entry.model = started.value.model;
-      entry.providerInstanceId = started.value.providerInstanceId;
-      entry.driver = started.value.driver;
-      if (attempt > 0) entry.attempt = attempt;
-      entry.state = "running";
-      this.scheduleUpdate();
-      this.waiting.set(started.value.taskId, {
-        childThreadId: started.value.childThreadId,
-        stallMs: Math.max(
-          MIN_STALL_MS,
-          numberOption(options, "stallTimeoutMs") ?? DEFAULT_STALL_MS,
-        ),
-        ...(attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs }),
-      });
-      await this.waitForTask(started.value.taskId);
-      this.waiting.delete(started.value.taskId);
-      const outcome = await Effect.runPromiseExit(
-        this.deps.readAgent(this.workflow, started.value.taskId),
-      );
-      if (Exit.isFailure(outcome)) {
-        settle("failed", failureMessage(outcome, "The agent's result could not be read."));
-        return null;
-      }
-      const { status, summary, structuredResult, structuredResultError } = outcome.value;
-      this.spentTokens += outcome.value.usage.totalTokens ?? 0;
-      if (outcome.value.usage.totalTokens !== null) {
-        entry.totalTokens = (entry.totalTokens ?? 0) + outcome.value.usage.totalTokens;
-      }
-      if (outcome.value.outcomeCategory !== null)
-        entry.outcomeCategory = outcome.value.outcomeCategory;
-      if (status !== "completed" && this.timedOut.has(started.value.taskId)) {
-        const passed = `passed its time budget of ${attemptTimeoutMs} ms and was stopped`;
-        if (attempt + 1 < MAX_AGENT_ATTEMPTS) {
-          feedback = `\n\nYour previous attempt ${passed}. Work more directly and finish within the budget.`;
-          this.progress = truncate(`agent "${label}" ${passed}; starting it again.`, PREVIEW_LIMIT);
-          continue;
-        }
-        entry.outcomeCategory = "timed_out";
-        settle("failed", `Every attempt ${passed}.`);
-        return null;
-      }
-      if (status !== "completed") {
-        const retry =
-          attempt + 1 < MAX_AGENT_ATTEMPTS &&
-          (status === "failed" ||
-            ((status === "cancelled" || status === "interrupted") &&
-              (outcome.value.cancelledByServerRestart || this.stalled.has(started.value.taskId))));
-        if (retry) {
-          this.progress = truncate(
-            `agent "${label}" ended ${status}; starting it again.`,
-            PREVIEW_LIMIT,
-          );
-          continue;
-        }
-        settle("failed", summary ?? `The agent ended ${status}.`);
-        return null;
-      }
-      const value = options.schema === undefined ? summary : (structuredResult ?? null);
-      // Missing or oversized outputs fail before any other check, which would read them.
-      let produced: Readonly<Record<string, ProducedFile>> | undefined;
-      let checkType: WorkflowCheck["type"] | "outputs" | undefined;
-      let checked: CheckOutcome | undefined;
-      // A result asked to match a schema that does not is a failed structured check, so
-      // passing another check cannot hand the script a missing result.
-      if (options.schema !== undefined && structuredResultError !== undefined) {
-        checkType = "structured";
-        checked = { outcome: "failed", detail: structuredResultError };
-      } else if (outputs.length > 0) {
-        const found = await outputFiles(outputs, (ref) => this.readFile(ref));
-        if ("files" in found) produced = found.files;
-        checkType = "outputs";
-        checked = found.outcome;
-      }
-      if (check !== undefined && (checked === undefined || checked.outcome === "passed")) {
-        checkType = check.type;
-        checked = await this.runCheck({
-          check,
-          prompt: request.prompt,
-          label,
-          phase,
-          target,
-          childThreadId: started.value.childThreadId,
-          summary,
-          structuredResult,
-          structuredResultError,
-          files,
-          outputs,
-          isolation: options.isolation,
-        });
-      }
-      const returned = (result: unknown) =>
-        produced === undefined ? result : { result, outputs: produced };
-      if (checked === undefined || checkType === undefined) {
-        settle("completed", summary);
-        return returned(value);
-      }
-      entry.verification = {
-        type: checkType,
-        outcome: checked.outcome,
-        attempts: attempt + 1,
-        ...(checked.detail.trim().length === 0
-          ? {}
-          : { detail: truncate(checked.detail, RESULT_TEXT_LIMIT) }),
-      };
-      if (checked.outcome === "passed") {
-        settle("completed", summary);
-        return returned(value);
-      }
-      // A failed check is a judgment on the work, so the agent tries again with what the
-      // check saw. A check that could not run is not, and retrying the agent would not fix it.
-      if (checked.outcome === "failed" && attempt + 1 < MAX_AGENT_ATTEMPTS) {
-        feedback = checkFeedback(checkType, checked);
-        this.progress = truncate(
-          `agent "${label}" failed its ${checkType} check; starting it again.`,
-          PREVIEW_LIMIT,
-        );
-        entry.state = "running";
-        this.scheduleUpdate();
-        continue;
-      }
-      entry.outcomeCategory = "check_failed";
-      settle(
-        "failed",
-        `Its ${checkType} check ${checked.outcome === "error" ? "could not run" : "failed"}: ${checked.detail}`,
-      );
-      return null;
-    }
-  }
-
-  private readFile(ref: FileRef): Promise<WorkspaceFile | string> {
-    return Effect.runPromise(
-      this.deps
-        .readWorkspaceFile(this.workflow, ref.path, ref.maxBytes)
-        .pipe(
-          Effect.catch((failure) =>
-            Effect.succeed(`${ref.path} could not be read: ${failure.message}`),
-          ),
-        ),
-    );
-  }
-
-  private async runCheck(input: {
-    readonly check: WorkflowCheck;
-    readonly prompt: string;
-    readonly label: string;
-    readonly phase: string | undefined;
-    readonly target: unknown;
-    readonly childThreadId: ThreadId;
-    readonly summary: string | null;
-    readonly structuredResult: unknown;
-    readonly structuredResultError: string | undefined;
-    readonly files: Readonly<Record<string, string>>;
-    readonly outputs: ReadonlyArray<FileRef>;
-    readonly isolation: unknown;
-  }): Promise<CheckOutcome> {
-    const { check } = input;
-    const output =
-      check.type === "structured" && check.outputId !== undefined
-        ? input.outputs.find((ref) => ref.id === check.outputId)
-        : undefined;
-    if (check.type === "structured" && output !== undefined) {
-      return structuredOutputCheck(check, output, (ref) => this.readFile(ref));
-    }
-    if (check.type === "structured") {
-      return input.structuredResultError !== undefined
-        ? { outcome: "failed", detail: input.structuredResultError }
-        : runStructuredCheck(check, input.structuredResult);
-    }
-    const resultText =
-      input.summary ??
-      (input.structuredResult === undefined ? "" : JSON.stringify(input.structuredResult));
-    if (check.type === "process") {
-      // Stopping the workflow interrupts the check, which ends its process.
-      const ran = await Effect.runPromiseExit(
-        this.deps.runCommandCheck(
-          this.workflow,
-          input.childThreadId,
-          check,
-          resultText,
-          input.files,
-        ),
-        { signal: this.abort.signal },
-      );
-      return Exit.isFailure(ran)
-        ? { outcome: "error", detail: failureMessage(ran, "The check could not run.") }
-        : ran.value;
-    }
-    // An agent of its own, so it is independent of the work it judges and shows in the workflow.
-    const target = check.target ?? input.target;
-    const verdict = await this.agent({
-      prompt: judgmentPrompt({
-        task: input.prompt,
-        result: resultText,
-        rubric: check.rubric,
-        workspaceVisible: input.isolation !== "worktree",
-      }),
-      // Its prompt already pins the work it judges; a generated worker label would not.
-      keyLabel: null,
-      options: {
-        label: `check ${input.label}`,
-        ...(input.phase === undefined ? {} : { phase: input.phase }),
-        ...(target === undefined ? {} : { target }),
-        schema: JUDGMENT_RESULT_SCHEMA,
-      },
-    });
-    return judgmentOutcome(verdict);
-  }
-
-  private waitForTask(taskId: string): Promise<void> {
-    return this.terminal.has(taskId)
-      ? Promise.resolve()
-      : new Promise((resolve) => this.waiters.set(taskId, resolve));
-  }
-
   private addPhase(title: string): void {
     if (!this.phases.includes(title)) this.phases.push(title);
   }
@@ -881,6 +786,9 @@ class WorkflowSession {
       ...(this.name === undefined ? {} : { name: this.name }),
       phases: this.phases.map((title, index) => ({ index, title })),
       agents: this.agents.map((agent) => ({ ...agent })),
+      ...(this.workflow.budgetTokens === undefined
+        ? {}
+        : { budget: { limit: this.workflow.budgetTokens, exhausted: this.budgetExhausted } }),
       ...(this.workflow.plan === undefined
         ? {}
         : { plan: this.workflow.plan, nodeOutcomes: { ...this.nodeOutcomes } }),
@@ -890,50 +798,52 @@ class WorkflowSession {
   private dispatch(
     command: Parameters<WorkflowRunnerDeps["threads"]["dispatch"]>[0],
   ): Promise<void> {
-    return Effect.runPromise(
-      this.deps.threads.dispatch(command).pipe(
-        Effect.asVoid,
-        Effect.catchCause((cause) =>
-          Effect.logDebug("A workflow row update was refused", {
-            workflowId: this.workflow.workflowId,
-            commandType: command.type,
-            cause,
-          }),
-        ),
-      ),
-    );
+    return Effect.runPromise(this.deps.threads.dispatch(command).pipe(Effect.asVoid));
   }
 
-  private update(): Promise<void> {
-    return this.dispatch({
-      type: "workflow.update",
-      commandId: CommandId.make(`command:workflow-update:${NodeCrypto.randomUUID()}`),
-      threadId: this.workflow.threadId,
-      workflowId: this.workflow.workflowId,
-      workflow: this.snapshot(),
-      ...(this.progress === undefined ? {} : { progress: this.progress }),
-    });
+  private async update(): Promise<void> {
+    const patches = workflowPatches(this.sent, this.snapshot());
+    if (patches.length === 0 && this.progress !== this.sentProgress)
+      patches.push({ kind: "patch" });
+    for (const patch of patches) {
+      const progress = this.progress;
+      await this.dispatch({
+        type: "workflow.update",
+        commandId: CommandId.make(`command:workflow-update:${NodeCrypto.randomUUID()}`),
+        threadId: this.workflow.threadId,
+        workflowId: this.workflow.workflowId,
+        workflow: patch,
+        ...(progress === undefined ? {} : { progress }),
+      });
+      this.sent = mergeWorkflowPatch(this.sent, patch);
+      this.sentProgress = progress;
+    }
   }
 
   // One row update in flight at a time; changes made meanwhile ride the next one,
   // so a burst of agent state changes costs one or two writes.
   private scheduleUpdate(): void {
-    if (this.abort.signal.aborted) return;
+    if (this.abort.signal.aborted || this.updateError !== undefined) return;
     if (this.updating !== undefined) {
       this.updatePending = true;
       return;
     }
-    this.updating = this.update().finally(() => {
-      this.updating = undefined;
-      if (this.updatePending) {
-        this.updatePending = false;
-        this.scheduleUpdate();
-      }
-    });
+    this.updating = this.update()
+      .catch((error: unknown) => {
+        this.updateError = error;
+      })
+      .finally(() => {
+        this.updating = undefined;
+        if (this.updatePending) {
+          this.updatePending = false;
+          this.scheduleUpdate();
+        }
+      });
   }
 
   private async flush(): Promise<void> {
     while (this.updating !== undefined) await this.updating;
+    if (this.updateError !== undefined) throw this.updateError;
     await this.update();
   }
 }
@@ -941,31 +851,90 @@ class WorkflowSession {
 export const makeWorkflowRunner = (deps: WorkflowRunnerDeps) => {
   const running = new Map<NodeId, WorkflowSession>();
 
+  // Whether the workflow's row still needs its completion. A failed read says nothing either way.
+  const completionRowState = (completion: WorkflowCompletion) =>
+    deps.threads.getThreadRecords(completion.threadId, ["subagents"]).pipe(
+      Effect.map(({ subagents }) =>
+        subagents.find((row) => row.id === completion.workflowId)?.status === "running"
+          ? ("running" as const)
+          : ("settled" as const),
+      ),
+      Effect.catchCause(() => Effect.succeed("unknown" as const)),
+    );
+
+  // Sends the script's outcome until the row is settled, stopped or detached; only the send is
+  // repeated, never the script. The runner stays registered meanwhile, so nothing resumes the row.
+  // Domain-wise the command is safe to send again: a row takes one completion, and its single
+  // commit plans the one parent wake.
+  const complete = Effect.fn("WorkflowRunner.complete")(function* (
+    session: WorkflowSession,
+    completion: WorkflowCompletion,
+  ) {
+    let commandId = completion.commandId;
+    let pauses = 0;
+    // Checked before every try: a try that wakes as the runner is detached or the row stopped
+    // must not send a completion.
+    while (!session.abort.signal.aborted) {
+      // A started try is never interrupted. Its own commit publishes the row's final event, which
+      // stops this runner, and cutting the dispatcher off after the commit would lose the wake.
+      const exit = yield* deps.threads
+        .dispatch({ ...completion, commandId })
+        .pipe(Effect.asVoid, Effect.uninterruptible, Effect.exit);
+      if (Exit.isSuccess(exit)) return;
+      yield* Effect.logWarning("Unable to record a workflow's completion", {
+        workflowId: completion.workflowId,
+        commandId,
+        cause: exit.cause,
+      });
+      const row = yield* completionRowState(completion);
+      if (row === "settled") return;
+      const refusal = Exit.findErrorOption(exit);
+      // A stored rejection answers its id for good. The row is known to be running, so a fresh id
+      // cannot complete it twice, and nothing else is waiting on the old id.
+      if (row === "running" && refusal._tag === "Some" && isCommandIdSpent(refusal.value)) {
+        commandId = yield* freshCommandId(completion.commandId);
+        continue;
+      }
+      pauses += 1;
+      const pause = Math.min(COMPLETION_RETRY_MIN_MS * 2 ** (pauses - 1), COMPLETION_RETRY_MAX_MS);
+      const jitter = yield* Random.nextBetween(0.8, 1.2);
+      yield* Effect.sleep(Math.round(pause * jitter)).pipe(Effect.raceFirst(session.stopped));
+    }
+  });
+
   const run = Effect.fn("WorkflowRunner.run")(function* (
     session: WorkflowSession,
     workflow: WorkflowContext,
   ) {
-    const watcher = yield* deps.threads
-      .streamStoredEventsFrom({
+    // Member tasks report through subagent rows; the workflow row's own status changes (a stop)
+    // arrive as workflow patches. One filtered stream each keeps transcript events out.
+    const events = (eventType: "subagent.updated" | "workflow.updated") =>
+      deps.threads.streamStoredEventsFrom({
         threadId: workflow.threadId,
         afterSequence: workflow.afterSequence,
-        eventType: "subagent.updated",
-      })
-      .pipe(
-        Stream.runForEach((stored) =>
-          Effect.sync(() => {
-            if (stored.event.type === "subagent.updated") session.observe(stored.event.payload);
-          }),
-        ),
-        Effect.ignore,
-        Effect.forkChild,
-      );
+        eventType,
+      });
+    const watcher = yield* Stream.merge(
+      events("subagent.updated"),
+      events("workflow.updated"),
+    ).pipe(
+      Stream.runForEach((stored) =>
+        Effect.sync(() => {
+          if (stored.event.type === "subagent.updated") session.observe(stored.event.payload);
+          if (stored.event.type === "workflow.updated")
+            session.observeWorkflowStatus(stored.event.payload.id, stored.event.payload.status);
+        }),
+      ),
+      Effect.ignore,
+      Effect.forkChild,
+    );
     const sweep = yield* Effect.sleep(STALL_SWEEP_INTERVAL).pipe(
       Effect.andThen(stopStalledAgents(deps, session, workflow)),
       Effect.forever,
       Effect.forkChild,
     );
-    yield* Effect.promise(() => session.run());
+    const completion = yield* Effect.promise(() => session.run());
+    if (completion !== undefined) yield* complete(session, completion);
     yield* Fiber.interrupt(sweep);
     yield* Fiber.interrupt(watcher);
   });

@@ -7,6 +7,7 @@ import {
   OrchestratorMcpGraphReviewInput,
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpGraphStartInput,
+  OrchestratorMcpWorkflowStartInput,
 } from "./orchestratorMcp.ts";
 
 const decodeDelegateTaskInput = Schema.decodeUnknownSync(OrchestratorMcpDelegateTaskInput);
@@ -14,8 +15,82 @@ const decodeDelegateTaskResult = Schema.decodeUnknownSync(OrchestratorMcpDelegat
 const decodeGraphReviewInput = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewInput);
 const decodeGraphReviewResult = Schema.decodeUnknownSync(OrchestratorMcpGraphReviewResult);
 const decodeGraphStartInput = Schema.decodeUnknownSync(OrchestratorMcpGraphStartInput);
+const decodeWorkflowStartInput = Schema.decodeUnknownSync(OrchestratorMcpWorkflowStartInput);
 
 describe("orchestrator MCP contracts", () => {
+  it("states what budgetTokens counts and points at the suggested budget", () => {
+    const description = String(
+      OrchestratorMcpWorkflowStartInput.fields.budgetTokens.ast.annotations?.description ?? "",
+    );
+    expect(description).toContain("does not count your own tokens");
+    expect(description).toContain("suggestedBudgetTokens");
+    expect(OrchestratorMcpGraphStartInput.fields.budgetTokens).toBe(
+      OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
+    );
+  });
+
+  it("decodes a graph review with and without the advisory", () => {
+    const base = {
+      reviewId: "review-1",
+      approvalRequired: false,
+      digest: `sha256:${"a".repeat(64)}`,
+      ready: true,
+      expandedGraph: null,
+      targets: [],
+      layers: [["a"]],
+      writeConflicts: [],
+      inputs: [],
+      blockers: [],
+    };
+    const advisory = {
+      fanOut: "consider_single",
+      reasons: ["One chain."],
+      nodeCount: 1,
+      widestWave: 1,
+      depth: 1,
+      verifierCount: 0,
+      estimatedModelCalls: { low: 5, high: 7 },
+      estimatedTokens: {
+        low: 185_000,
+        high: 672_000,
+        coordinator: { low: 111_000, high: 384_000 },
+        basis: "test",
+      },
+      suggestedBudgetTokens: 403_200,
+      overshootBoundTokens: 288_000,
+    };
+    expect(decodeGraphReviewResult(base).advisory).toBeUndefined();
+    expect(decodeGraphReviewResult({ ...base, advisory }).advisory).toEqual(advisory);
+    expect(() =>
+      decodeGraphReviewResult({ ...base, advisory: { ...advisory, fanOut: "stop" } }),
+    ).toThrow();
+  });
+
+  it("decodes worker defaults consistently on scripts, graph review and graph start", () => {
+    for (const options of [{ reasoningEffort: "high" }, [], {}]) {
+      const workerTarget = { model: "sol", options };
+      const expected = {
+        model: "sol",
+        options: Array.isArray(options)
+          ? options
+          : Object.entries(options).map(([id, value]) => ({ id, value })),
+      };
+      expect(
+        decodeWorkflowStartInput({
+          script: "return 1",
+          workerTarget,
+        }).workerTarget,
+      ).toEqual(expected);
+      expect(decodeGraphReviewInput({ graph: {}, workerTarget }).workerTarget).toEqual(expected);
+      expect(
+        decodeGraphStartInput({
+          graph: {},
+          workerTarget,
+          acceptedDigest: `sha256:${"a".repeat(64)}`,
+        }).workerTarget,
+      ).toEqual(expected);
+    }
+  });
   it("leaves graph validation to the server while requiring a review digest to start", () => {
     const graph = { schemaVersion: 999, nodes: { invalid: { unknownField: true } } };
     const acceptedDigest = `sha256:${"a".repeat(64)}`;
@@ -48,8 +123,12 @@ describe("orchestrator MCP contracts", () => {
 
   it("preserves graph review blockers and partial input facts", () => {
     const review = {
+      reviewId: "review-1",
+      approvalRequired: false,
       digest: `sha256:${"a".repeat(64)}`,
       ready: false,
+      expandedGraph: null,
+      targets: [],
       layers: [["first", "second"], ["last"]],
       writeConflicts: [{ nodes: ["first", "second"], paths: ["src/shared.ts"] }],
       inputs: [
@@ -63,8 +142,56 @@ describe("orchestrator MCP contracts", () => {
     expect(() =>
       decodeGraphReviewResult({ ...review, inputs: [{ ...review.inputs[0], status: "unknown" }] }),
     ).toThrow();
+    // The server names every review, and says whether the user must approve it.
+    const { reviewId: _id, ...unnamed } = review;
+    expect(() => decodeGraphReviewResult(unnamed)).toThrow();
+    const { approvalRequired: _required, ...undecided } = review;
+    expect(() => decodeGraphReviewResult(undecided)).toThrow();
   });
 
+  it("decodes a review with and without the profile choices listed beside its targets", () => {
+    const base = {
+      reviewId: "review-2",
+      approvalRequired: true,
+      digest: `sha256:${"b".repeat(64)}`,
+      ready: true,
+      expandedGraph: null,
+      layers: [["a"]],
+      writeConflicts: [],
+      inputs: [],
+      blockers: [],
+    };
+    const target = { providerInstanceId: "codex", model: "gpt-5.4", options: [] };
+    const legacy = { ...base, targets: [{ nodeId: "a", source: "preset", target }] };
+    expect(decodeGraphReviewResult(legacy)).toEqual(legacy);
+    const profile = {
+      presetId: "worker",
+      presetName: "Worker",
+      chosenIndex: 1,
+      skipped: [
+        {
+          index: 0,
+          providerInstanceId: "claude",
+          model: "sonnet",
+          reason: "Provider is disabled.",
+        },
+      ],
+    };
+    const chosen = {
+      ...base,
+      targets: [
+        { nodeId: "a", source: "preset", target, presetId: "worker" },
+        { nodeId: "b", source: "preset", target, presetId: "worker" },
+      ],
+      profiles: [profile],
+    };
+    expect(decodeGraphReviewResult(chosen)).toEqual(chosen);
+    expect(() =>
+      decodeGraphReviewResult({ ...chosen, profiles: [{ ...profile, chosenIndex: -1 }] }),
+    ).toThrow();
+    // A profile's skipped list is not repeated per node.
+    expect(JSON.stringify(chosen).split("Provider is disabled.").length - 1).toBe(1);
+  });
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({
       task: "Inspect the workspace and report the result.",

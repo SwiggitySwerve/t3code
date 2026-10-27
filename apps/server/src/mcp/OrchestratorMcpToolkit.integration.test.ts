@@ -47,11 +47,15 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
+import * as WorkflowApprovalGateTestkit from "../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as ServerConfig from "../config.ts";
 
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-toolkit-test-" })),
 );
 
 // Effect returns a declared tool failure as `isError` with its encoded payload
@@ -491,6 +495,14 @@ describe("orchestrator MCP toolkit", () => {
           expect(finalProjection.runs.find((run) => run.id === queuedFollowup.runId)?.status).toBe(
             "completed",
           );
+          expect(
+            finalProjection.turnItems.find(
+              (item) =>
+                item.runId === runningFollowup.runId && item.type === "run_interrupt_result",
+            ),
+          ).toMatchObject({
+            message: "Stopped by an agent: Allow the queued replay follow-up to run.",
+          });
           yield* orchestrator
             .streamStoredEventsFrom({
               threadId: parentThreadId,

@@ -1,6 +1,7 @@
 import {
   CommandId,
   type OrchestrationV2Run,
+  type OrchestrationV2Subagent,
   OrchestrationV2DomainEvent,
   type OrchestrationV2ProviderThread,
   OrchestrationV2StoredEvent,
@@ -22,6 +23,7 @@ import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as SqlClient from "effect/sql/SqlClient";
+import { applyWorkflowUpdate, workflowLifecycleUpdate } from "@t3tools/shared/workflowUpdate";
 
 import { replayAndBufferProjectedLiveEvents } from "./LiveStreamBudget.ts";
 import type { UnsequencedProjectEvent } from "../persistence/OrchestrationEventStore.ts";
@@ -108,12 +110,7 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
-  /**
-   * Atomically commit only when the provider thread is still owned by the
-   * expected run attempt and ordinal. Used for late post-terminal
-   * provider_thread updates so a completed or superseded attempt cannot clobber
-   * a newer attempt that already claimed the thread.
-   */
+  /** Commits only if the expected attempt and ordinal still own the provider thread, protecting newer attempts. */
   readonly writeIfProviderThreadOwner: (input: {
     readonly guardPendingUserInputCancellations?: boolean;
     readonly commandId?: CommandId;
@@ -129,12 +126,7 @@ export interface EventSinkV2Shape {
     },
     EventSinkV2Error
   >;
-  /**
-   * Atomically commit only while the stored provider thread still equals
-   * `expected`, the row its writer read, so a read-modify-write of the row
-   * cannot overwrite an update published in between. The whole row is
-   * compared because not every writer moves `updatedAt`.
-   */
+  /** Commits only if the full provider row equals expected; some writers do not advance updatedAt. */
   readonly writeIfProviderThreadUnchanged: (input: {
     readonly expected: OrchestrationV2ProviderThread;
     readonly events: ReadonlyArray<OrchestrationV2DomainEvent>;
@@ -262,16 +254,13 @@ const layerBase: Layer.Layer<
           Effect.andThen(publishLiveEvents(events)),
         );
 
-    // Transactions commit one at a time, but each writer publishes after its
-    // commit. If a writer is descheduled in between, a later commit reaches
-    // subscribers first, and clients drop any event at or below the newest
-    // sequence they have applied.
+    // Serialize commit and publish; reordered publication makes clients drop earlier sequences.
     const publishLane = yield* Semaphore.make(1);
     const commitThenPublish = <A, E, R>(
       transaction: Effect.Effect<A, E, R>,
       publish: (committed: A) => Effect.Effect<void>,
     ) =>
-      Effect.suspend(() => {
+      Effect.uninterruptibleMask((restore) => {
         let holdsLane = false;
         const takeLane = publishLane.take(1).pipe(
           Effect.andThen(
@@ -281,8 +270,11 @@ const layerBase: Layer.Layer<
           ),
           Effect.uninterruptible,
         );
+        // Cancellation may roll back the transaction's work. Once it commits,
+        // every subscriber must hear about it before this writer can exit.
+        // Otherwise a failed child run can leave its parent's task running.
         return sql
-          .withTransaction(Effect.tap(transaction, () => takeLane))
+          .withTransaction(Effect.tap(restore(transaction), () => takeLane))
           .pipe(
             Effect.tap(publish),
             Effect.ensuring(
@@ -338,6 +330,7 @@ const layerBase: Layer.Layer<
       });
 
     const normalizeEvents = (events: ReadonlyArray<OrchestrationV2DomainEvent>) => {
+      const workflows = new Map<NodeId, OrchestrationV2Subagent>();
       const runOrdinals = new Map(
         events.flatMap((event) =>
           event.type === "run.created" || event.type === "run.updated"
@@ -347,15 +340,51 @@ const layerBase: Layer.Layer<
       );
       return Effect.forEach(
         events,
-        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> =>
-          event.type === "turn-item.updated"
+        (event): Effect.Effect<OrchestrationV2DomainEvent, unknown> => {
+          if (
+            event.type === "workflow.updated" ||
+            (event.type === "subagent.updated" && event.payload.workflow !== undefined)
+          ) {
+            return Effect.gen(function* () {
+              const inBatch = workflows.get(event.payload.id);
+              const previous =
+                inBatch ??
+                (event.type === "workflow.updated" || event.payload.workflow?.revision !== undefined
+                  ? (yield* projectionStore.getThreadRecords(event.threadId, [
+                      "subagents",
+                    ])).subagents.find((task) => task.id === event.payload.id)
+                  : undefined);
+              const change =
+                event.type === "workflow.updated"
+                  ? event.payload
+                  : previous === undefined
+                    ? undefined
+                    : workflowLifecycleUpdate(previous, event.payload);
+              if (change === undefined) {
+                if (event.type === "subagent.updated")
+                  workflows.set(event.payload.id, event.payload);
+                return event;
+              }
+              // The sink sequences revisions: rebase every update on the latest row it knows, from this
+              // batch or the store. A producer that read an older row (for example two commands
+              // racing on one thread) would otherwise commit an event every projection ignores.
+              // Patches carry whole member entries and outcomes, so rebasing keeps the later value.
+              const revision = previous?.workflow?.revision ?? 0;
+              const payload = { ...change, previousRevision: revision, revision: revision + 1 };
+              const task = yield* Effect.try(() => applyWorkflowUpdate(previous, payload));
+              workflows.set(task.id, task);
+              return { ...event, type: "workflow.updated" as const, payload };
+            });
+          }
+          return event.type === "turn-item.updated"
             ? turnItemPositions
                 .normalize(
                   event.payload,
                   event.payload.runId === null ? undefined : runOrdinals.get(event.payload.runId),
                 )
                 .pipe(Effect.map((payload) => ({ ...event, payload })))
-            : Effect.succeed(event),
+            : Effect.succeed(event);
+        },
         { concurrency: 1 },
       );
     };
@@ -1000,10 +1029,7 @@ const layerBase: Layer.Layer<
   }),
 );
 
-/**
- * Keeping the outbox instance shared with the worker is important because enqueue notifications
- * are in-memory wakeups backed by the durable SQL queue.
- */
+/** Share the worker's outbox instance: enqueue wakeups are in-memory. */
 export const layerFromStores = layerBase;
 
 export const layer: Layer.Layer<

@@ -5,6 +5,8 @@ import {
   VcsListRefsResult,
   WorktreeMcpHandoffInput,
   WorktreeMcpHandoffResult,
+  WorktreeMcpRemoveInput,
+  WorktreeMcpRemoveResult,
   WorktreeMcpStatusResult,
   ThreadId,
 } from "@t3tools/contracts";
@@ -27,7 +29,7 @@ const WorktreeToolFailure = Schema.Union([WorktreeMcpFailure, OrchestratorMcpFai
 
 const WorktreeHandoffTool = Tool.make("t3_worktree_handoff", {
   description:
-    "Needs an agent running inside a T3 thread. Move this agent thread into a new git worktree. To launch a separate agent already bound to a new or existing worktree, use t3_thread_launch with workspaceStrategy instead. Creates the worktree branch (optionally from the base branch's remote), re-points the thread at the worktree, and by default runs the project's setup script there. Changing the workspace detaches the live provider session, so the current turn ends shortly after the handoff is recorded; call this as the last action of the turn. To keep working after the handoff, pass continuationPrompt with the remaining work: it is queued as the thread's next message and starts a new turn inside the worktree with the conversation preserved. Without it the thread stays idle until the next message. The worktree is not removed automatically when the thread is deleted. Fails if the thread is already attached to a worktree.",
+    "Move THIS thread into a new git worktree on a new branch. Runs the setup script by default. A separate agent in a worktree: `t3_thread_launch` with `workspaceStrategy`. Call last in your turn. The move ends the live session. `continuationPrompt` resumes work there next turn. Without it, the thread waits. The worktree stays after the thread is deleted. Fails if this thread has a worktree.",
   parameters: WorktreeMcpHandoffInput,
   success: WorktreeMcpHandoffResult,
   failure: WorktreeToolFailure,
@@ -42,7 +44,7 @@ const WorktreeHandoffTool = Tool.make("t3_worktree_handoff", {
 
 const WorktreeStatusTool = Tool.make("t3_worktree_status", {
   description:
-    "Needs an agent running inside a T3 thread. Report this agent thread's worktree binding: whether it is attached to a git worktree, the worktree path and branch, the project's main workspace root, and the server default for t3_worktree_handoff's startFromOrigin. Call this before t3_worktree_handoff to check whether a handoff is possible or has already happened.",
+    "Report this thread's worktree: attached or not, path, branch, project root, and the `startFromOrigin` default. Check before `t3_worktree_handoff`.",
   // No `parameters`: Tool.make defaults to Tool.EmptyParams, which serializes
   // to a top-level `type: "object"` JSON Schema. An explicit empty
   // Schema.Struct({}) serializes to `anyOf: [object, array]`, which is not a
@@ -58,9 +60,24 @@ const WorktreeStatusTool = Tool.make("t3_worktree_status", {
   .annotate(Tool.Idempotent, true)
   .annotate(Tool.OpenWorld, false);
 
+const WorktreeRemoveTool = Tool.make("t3_worktree_remove", {
+  description:
+    "Needs a coordinator thread. Remove the isolated checkout of a finished workflow member you started with isolation 'worktree'. It removes the checkout only when nothing in it would be lost: no modified, staged, untracked, or ignored files (an ignored node_modules/ folder is allowed), no open terminal, no live provider session, no pending thread work, and no other thread using it. It never deletes a branch, never cleans files, never forces, and nothing runs it automatically. The thread keeps its path and branch, and its next turn or a rollback recreates the checkout at the same path if the branch still exists and is not checked out elsewhere; dependencies and setup are not recreated. A member's provider session stays open for about 30 minutes after it finishes (up to 4 hours while background work runs). If removal is refused for an open session or a recent settle, settle or archive the member thread, wait about a minute, and retry. This tool never closes sessions. Fails for any thread that is not a finished member of a workflow you started.",
+  parameters: WorktreeMcpRemoveInput,
+  success: WorktreeMcpRemoveResult,
+  failure: WorktreeToolFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Remove a finished workflow member's worktree")
+  .annotate(Tool.Readonly, false)
+  .annotate(Tool.Destructive, true)
+  .annotate(Tool.Idempotent, true)
+  .annotate(Tool.OpenWorld, false);
+
 const WorktreeListTool = Tool.make("t3_worktree_list", {
   description:
-    "List branch refs and their associated checkout paths for a thread's workspace (omit threadId for this thread) using the app's ref inventory. Detached worktrees without a branch are not included. Use t3_worktree_status for the thread binding and t3_worktree_handoff to create a new worktree.",
+    "List branch refs and checkout paths for a thread's workspace. Omit `threadId` for this thread. Detached worktrees with no branch are left out.",
   parameters: Schema.Struct({
     threadId: Schema.optional(ThreadId),
     query: VcsListRefsInput.fields.query,
@@ -86,3 +103,6 @@ export const WorktreeToolkit = Toolkit.make(
   WorktreeStatusTool,
   WorktreeListTool,
 );
+
+/** Registered apart from `WorktreeToolkit` so workflow members, who lack orchestration, never list it. */
+export const WorktreeRemovalToolkit = Toolkit.make(WorktreeRemoveTool);

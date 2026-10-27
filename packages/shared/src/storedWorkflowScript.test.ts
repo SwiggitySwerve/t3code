@@ -7,6 +7,13 @@ import {
 } from "./storedWorkflowScript.ts";
 
 describe("stored workflow scripts", () => {
+  it("retains a partial worker default including explicit option clearing", () => {
+    const workerTarget = { options: [] };
+    expect(
+      parseStoredWorkflowScript(storedWorkflowScript("return 1", { workerTarget })).workerTarget,
+    ).toEqual(workerTarget);
+    expect(parseStoredWorkflowScript("return 1").workerTarget).toBeUndefined();
+  });
   it("round-trips the script, args and budget", () => {
     const stored = storedWorkflowScript("return args", { args: { n: 1 }, budgetTokens: 500 });
     expect(parseStoredWorkflowScript(stored)).toEqual({

@@ -39,19 +39,20 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
+import * as ServerConfig from "../config.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as WorkflowApprovalGateTestkit from "../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-task-cancel-native-test-" })),
 );
 
 const driver = ProviderDriverKind.make("claudeAgent");
 const instanceId = ProviderInstanceId.make("claudeAgent");
 const modelSelection = { instanceId, model: "claude-test" };
-
-// A delegated Claude child ends its turn while a background native subagent it
-// started keeps running (#17154).
 
 it.effect("task_cancel ends a delegated child's background native subagent", () =>
   Effect.scoped(

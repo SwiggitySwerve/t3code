@@ -377,6 +377,8 @@ const STANDALONE_V2_ITEM_TYPES = new Set<OrchestrationV2ProjectedTurnItem["item"
   "run_interrupt_request",
   "run_interrupt_result",
   "secret_request",
+  // The person's decision on a reviewed workflow graph: a card of its own, never folded.
+  "workflow_review",
   "subagent",
 ]);
 
@@ -385,6 +387,7 @@ const PERSISTENT_RESOURCE_V2_ITEM_TYPES = new Set<OrchestrationV2TurnItem["type"
   "thread_created",
   // Still answerable after a steer supersedes the attempt that asked.
   "secret_request",
+  "workflow_review",
 ]);
 
 export function timelineEntryIsPersistentResourceCard(entry: TimelineEntry): boolean {
@@ -612,10 +615,7 @@ function projectedWorkEntry(row: OrchestrationV2ProjectedTurnItem): WorkLogEntry
   }
 }
 
-/**
- * Builds the web timeline in the exact order committed by `visibleTurnItems`. Persistent
- * client-owned messages are inserted by timestamp without sorting the canonical sequence.
- */
+/** Preserve visibleTurnItems' committed order; interleave client messages by timestamp. */
 export interface TimelineEntriesInput {
   readonly visibleTurnItems: ReadonlyArray<OrchestrationV2ProjectedTurnItem>;
   readonly optimisticMessages: ReadonlyArray<ChatMessage>;
@@ -714,6 +714,7 @@ export function deriveTimelineEntriesFromVisibleTurnItems(
               createdBy: item.createdBy,
               creationSource: item.creationSource,
               ...(item.senderThreadId !== undefined ? { senderThreadId: item.senderThreadId } : {}),
+              ...(item.idleCompaction !== undefined ? { idleCompaction: item.idleCompaction } : {}),
               ...(item.scheduledTaskId !== undefined
                 ? { scheduledTaskId: item.scheduledTaskId }
                 : {}),
@@ -959,8 +960,7 @@ export function isStreamingTurnItemTextUpdate(
   }
   const { text: _previousText, updatedAt: _previousUpdatedAt, ...previousMetadata } = previousItem;
   const { text: _nextText, updatedAt: _nextUpdatedAt, ...nextMetadata } = nextItem;
-  // Wire decoding can recreate timestamps and attachments on each update.
-  // Compare only the changed item's metadata, never the entire transcript.
+  // Wire decoding recreates timestamps and attachments; compare only the changed item's metadata.
   return Equal.equals(previousMetadata, nextMetadata);
 }
 
@@ -981,8 +981,7 @@ function reuseTimelineEntries(
     return null;
   }
   const appended = input.visibleTurnItems.length > before.visibleTurnItems.length;
-  // Anchored and optimistic messages need to be interleaved/deduplicated when
-  // committed items arrive. Keep the full projection for that transition.
+  // Keep full projection until committed items interleave and deduplicate anchored/optimistic messages.
   if (
     appended &&
     (input.optimisticMessages.length > 0 || (input.anchoredMessages?.length ?? 0) > 0)
@@ -1146,10 +1145,7 @@ export function derivePhase(runtime: ThreadStructureRuntime | null): SessionPhas
   return "ready";
 }
 
-/**
- * The server settles a preparing or starting run on `run.interrupt`
- * (Orchestrator.dispatchRunInterrupt), so Stop must not wait for the phase to reach "running".
- */
+/** Preparing and starting runs can be interrupted; Stop need not wait for running. */
 export function deriveCanInterruptRunningThread(
   hasActiveThread: boolean,
   runtime: ThreadStructureRuntime | null,

@@ -12,32 +12,26 @@ import type {
   ProviderInstanceId,
   ServerProvider,
 } from "@t3tools/contracts";
-import { ChevronRightIcon, LoaderCircleIcon, SquareIcon, WorkflowIcon } from "lucide-react";
-import { useState } from "react";
+import { ChevronRightIcon, SquareIcon, WorkflowIcon } from "lucide-react";
+import { formatTokens } from "@t3tools/shared/usageFormat";
+import { useEffect, useId, useRef, useState } from "react";
 
+import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
-import ChatMarkdown from "../ChatMarkdown";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { Button } from "../ui/button";
+import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipTrigger } from "../ui/tooltip";
 import { AgentElapsed } from "./AgentElapsed";
-import { findRevealRef } from "./markdownFindContext";
-import { shouldCollapseUserMessage } from "./MessagesTimeline.logic";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
 
-const FOLDED_SCRIPT_MASK = "linear-gradient(to bottom, black calc(100% - 1.75rem), transparent)";
-
-/** The script as a fenced block, so it renders like any other code in the thread. */
-function scriptMarkdown(script: string) {
-  const longestRun = Math.max(2, ...(script.match(/`+/g) ?? []).map((run) => run.length));
-  const fence = "`".repeat(longestRun + 1);
-  return `${fence}javascript\n${script.trimEnd()}\n${fence}`;
-}
-
-/** Opens a workflow coordinator's thread in place of its script: the plan, its agents, then the script. */
+/**
+ * A workflow's plan and agents in the timeline. The script, or a graph's generated runner, is debug
+ * detail: it stays on `opening.script` and is never drawn here.
+ */
 export function WorkflowOpeningBlock(props: {
   readonly opening: WorkflowOpening;
   readonly environmentId: EnvironmentId;
@@ -46,6 +40,12 @@ export function WorkflowOpeningBlock(props: {
   readonly heading?: string;
   /** The script's latest log line, for a workflow T3 runs. */
   readonly progress?: string | null;
+  /**
+   * Whether find-in-thread reads this block's declaration (title, description, phase titles, node
+   * labels), as for a coordinator thread, where the server counts the same text from the same
+   * row. Other blocks are not searchable, so find never paints text it cannot count.
+   */
+  readonly findable?: boolean;
   readonly stop?: {
     readonly onStop: () => void;
     readonly stopping: boolean;
@@ -53,6 +53,7 @@ export function WorkflowOpeningBlock(props: {
   };
 }) {
   const { opening } = props;
+  const find = props.findable === true ? "true" : undefined;
   const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const headline = workflowOpeningHeadline(opening);
   // A graph shows node by node; a script, which declares no dependencies, keeps its phases.
@@ -87,11 +88,11 @@ export function WorkflowOpeningBlock(props: {
           <p className="text-2xs font-medium text-muted-foreground">
             {props.heading ?? "Workflow started"}
           </p>
-          <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text="true">
+          <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text={find}>
             {headline.title}
           </h3>
           {headline.description ? (
-            <p className="text-xs text-muted-foreground" data-thread-find-text="true">
+            <p className="text-xs text-muted-foreground" data-thread-find-text={find}>
               {headline.description}
             </p>
           ) : null}
@@ -111,7 +112,7 @@ export function WorkflowOpeningBlock(props: {
             onClick={props.stop.onStop}
           >
             {props.stop.stopping ? (
-              <LoaderCircleIcon aria-hidden className="size-3 animate-spin" />
+              <Spinner size="xs" aria-hidden />
             ) : (
               <SquareIcon aria-hidden className="size-3 fill-current" />
             )}
@@ -119,32 +120,31 @@ export function WorkflowOpeningBlock(props: {
           </Button>
         ) : null}
       </header>
-      {props.progress ? (
-        <p className="truncate px-2 text-2xs text-muted-foreground" data-thread-find-text="true">
-          {props.progress}
-        </p>
-      ) : null}
+      {opening.budget === undefined ? null : <WorkflowBudgetMeter budget={opening.budget} />}
+      {props.progress ? <WorkflowProgress text={props.progress} /> : null}
       {graphHeadline?.waitingOn ? (
-        <p className="truncate px-2 text-2xs text-foreground" data-thread-find-text="true">
-          {graphHeadline.waitingOn}
-        </p>
+        <p className="truncate px-2 text-2xs text-foreground">{graphHeadline.waitingOn}</p>
       ) : null}
       {graph !== null ? (
         <WorkflowWaveCanvas
           graph={graph}
           environmentId={props.environmentId}
-          providerInstanceId={opening.providerInstanceId}
-          driver={opening.driver ?? undefined}
+          findable={props.findable === true}
           onOpenThread={props.onOpenThread}
         />
       ) : null}
       {graph !== null && graph.otherMembers.length > 0 ? (
-        <ul className="m-0 list-none p-0">{graph.otherMembers.map(memberRow)}</ul>
+        <section aria-label="Other workflow agents">
+          <p className="px-2 text-2xs text-muted-foreground">
+            Other agents · node association unavailable
+          </p>
+          <ul className="m-0 list-none p-0">{graph.otherMembers.map(memberRow)}</ul>
+        </section>
       ) : null}
       {phases.map((phase) => (
         <section key={phase.index} aria-label={`${phase.title} phase`}>
           <h4 className="flex items-baseline gap-2 px-2 pb-0.5 text-2xs font-medium text-muted-foreground">
-            <span className="min-w-0 truncate" data-thread-find-text="true">
+            <span className="min-w-0 truncate" data-thread-find-text={find}>
               {phase.title}
             </span>
             <span className="shrink-0 font-normal tabular-nums">
@@ -157,8 +157,80 @@ export function WorkflowOpeningBlock(props: {
       {graph === null && opening.group && opening.group.unphasedMembers.length > 0 ? (
         <ul className="m-0 list-none p-0">{opening.group.unphasedMembers.map(memberRow)}</ul>
       ) : null}
-      <WorkflowScript script={opening.script} />
     </section>
+  );
+}
+
+function WorkflowBudgetMeter({
+  budget,
+}: {
+  readonly budget: NonNullable<WorkflowOpening["budget"]>;
+}) {
+  const spent =
+    budget.spent === null
+      ? "Unknown usage"
+      : `${budget.complete ? "" : "At least "}${formatTokens(budget.spent)} tokens recorded`;
+  return (
+    <div className="px-2 text-2xs text-muted-foreground" data-workflow-budget>
+      <p>
+        {spent} / {budget.limit === null ? "no" : formatTokens(budget.limit)} token budget
+      </p>
+      {budget.limit !== null && budget.limit > 0 && budget.spent !== null ? (
+        <progress
+          className="h-1 w-full"
+          aria-label="Recorded workflow token usage"
+          value={Math.min(budget.spent, budget.limit)}
+          max={budget.limit}
+        />
+      ) : null}
+      <p className={budget.exhausted ? "text-warning" : undefined}>
+        {budget.overshot ? "Budget exceeded. " : budget.exhausted ? "Budget exhausted. " : ""}
+        The budget stops new starts. Already-running agents may exceed it.
+        {budget.complete ? "" : " Usage is incomplete."}
+      </p>
+    </div>
+  );
+}
+
+function WorkflowProgress(props: { readonly text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const [overflows, setOverflows] = useState(false);
+  const textRef = useRef<HTMLParagraphElement>(null);
+  const contentId = useId();
+  // oxlint-disable-next-line t3code/react-effect-budget -- measures the clamped text and re-measures when its box resizes: layout read from the DOM, not state derivable in render.
+  useEffect(() => {
+    const element = textRef.current;
+    if (element === null || expanded) return;
+    const measure = () => setOverflows(element.scrollHeight > element.clientHeight);
+    measure();
+    return observeResize(element, measure);
+  });
+  return (
+    <div>
+      <p
+        ref={textRef}
+        id={contentId}
+        className={cn(
+          "break-words whitespace-pre-wrap px-2 text-2xs text-muted-foreground",
+          !expanded && "line-clamp-3",
+        )}
+      >
+        {props.text}
+      </p>
+      {overflows || expanded ? (
+        <Button
+          type="button"
+          size="xs"
+          variant="ghost-muted"
+          aria-expanded={expanded}
+          aria-controls={contentId}
+          data-scroll-anchor-ignore
+          onClick={() => setExpanded((value) => !value)}
+        >
+          {expanded ? "Show less" : "Show full result"}
+        </Button>
+      ) : null}
+    </div>
   );
 }
 
@@ -258,44 +330,5 @@ function WorkflowMemberRow(props: {
         </ThreadHoverCardPopup>
       </Tooltip>
     </li>
-  );
-}
-
-/** The script as highlighted code, folded like a long message until opened or found. */
-function WorkflowScript(props: { readonly script: string }) {
-  const [expanded, setExpanded] = useState(false);
-  const revealRef = findRevealRef(() => setExpanded(true));
-  const canFold = shouldCollapseUserMessage(props.script);
-  const folded = canFold && !expanded;
-  return (
-    <div>
-      <div
-        ref={revealRef}
-        className={cn("relative", folded && "max-h-44 overflow-hidden")}
-        data-thread-find-text="true"
-        data-thread-find-fold={folded ? "" : undefined}
-        style={
-          folded
-            ? { WebkitMaskImage: FOLDED_SCRIPT_MASK, maskImage: FOLDED_SCRIPT_MASK }
-            : undefined
-        }
-      >
-        <ChatMarkdown text={scriptMarkdown(props.script)} cwd={undefined} />
-      </div>
-      {canFold ? (
-        <div className="-ms-1">
-          <Button
-            type="button"
-            size="xs"
-            variant="ghost-muted"
-            aria-expanded={expanded}
-            data-scroll-anchor-ignore
-            onClick={() => setExpanded((value) => !value)}
-          >
-            {expanded ? "Show less" : "Show full script"}
-          </Button>
-        </div>
-      ) : null}
-    </div>
   );
 }

@@ -5,6 +5,8 @@ import {
   AuthProvidersManageScope,
   AuthSettingsWriteScope,
   DEFAULT_SERVER_SETTINGS,
+  EnvironmentId,
+  ORCHESTRATION_V2_WS_METHODS,
   ProviderInstanceId,
   ThreadId,
   AuthOrchestrationOperateScope,
@@ -371,3 +373,65 @@ it.effect("denies manual cleanup before the handler without settings permission"
     expect(handled).toBe(false);
   }).pipe(Effect.scoped),
 );
+
+describe("workflow review decision authorization", () => {
+  const decided = [
+    ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview,
+    ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview,
+  ] as const;
+  const group = WsRpcGroup.omit(
+    ...[...WsRpcGroup.requests.keys()].filter(
+      (tag): tag is Exclude<keyof typeof RPC_REQUIRED_SCOPES, (typeof decided)[number]> =>
+        !(decided as ReadonlyArray<string>).includes(tag),
+    ),
+  );
+  const review = {
+    environmentId: EnvironmentId.make("environment"),
+    threadId: ThreadId.make("thread"),
+    reviewId: "review",
+    digest: `sha256:${"a".repeat(64)}`,
+  };
+
+  it("needs the operate grant for both decisions", () => {
+    for (const method of decided) {
+      expect(requiredScopeForRpcMethod(method)).toBe(AuthOrchestrationOperateScope);
+    }
+  });
+
+  it.effect("refuses an approval or dismissal without that grant, before any handler runs", () =>
+    Effect.gen(function* () {
+      const handled: Array<string> = [];
+      const handlers = Layer.mergeAll(
+        group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview, () =>
+          Effect.sync(() => void handled.push("approve")),
+        ),
+        group.toLayerHandler(ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview, () =>
+          Effect.sync(() => void handled.push("dismiss")),
+        ),
+      );
+      // A connection that can read the thread but not operate it. An agent's MCP credential is not
+      // such a connection: it cannot open the socket at all (see the EnvironmentAuth tests).
+      const reader = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(Layer.merge(handlers, RpcAuthorization.layer([AuthOrchestrationReadScope]))),
+      );
+      for (const call of [
+        () => reader[ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview](review),
+        () => reader[ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview](review),
+      ]) {
+        expect(yield* call().pipe(Effect.flip)).toMatchObject({
+          _tag: "EnvironmentAuthorizationError",
+          requiredPermission: AuthOrchestrationOperateScope,
+        });
+      }
+      expect(handled).toEqual([]);
+      const operator = yield* RpcTest.makeClient(group).pipe(
+        Effect.provide(
+          Layer.merge(handlers, RpcAuthorization.layer([AuthOrchestrationOperateScope])),
+        ),
+      );
+      yield* operator[ORCHESTRATION_V2_WS_METHODS.approveWorkflowReview](review);
+      yield* operator[ORCHESTRATION_V2_WS_METHODS.dismissWorkflowReview](review);
+      expect(handled).toEqual(["approve", "dismiss"]);
+    }).pipe(Effect.scoped),
+  );
+});

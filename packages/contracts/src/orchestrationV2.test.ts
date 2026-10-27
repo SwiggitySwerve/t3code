@@ -2,18 +2,25 @@ import { describe, expect, it } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
 
-import { NodeId, RunAttemptId, TrimmedNonEmptyString } from "./index.ts";
+import { EnvironmentId, NodeId, RunAttemptId, ThreadId, TrimmedNonEmptyString } from "./index.ts";
 import {
+  isOrchestrationV2ActiveWorkflowMember,
+  isOrchestrationV2WorkActive,
+  isOrchestrationV2WorkflowMember,
   latestProviderTurnForAttempt,
   OrchestrationV2ProviderCapabilities,
   OrchestrationV2ProviderThread,
   OrchestrationV2ProviderThreadJson,
   OrchestrationV2RpcSchemas,
   OrchestrationV2Subagent,
+  OrchestrationV2ThreadShellJson,
   OrchestrationV2SubagentJson,
   OrchestrationV2ThreadHistoryPage,
   OrchestrationV2TurnItem,
   OrchestrationV2TurnItemJson,
+  OrchestrationV2WorkflowAgent,
+  OrchestrationV2WorkflowApprovalError,
+  OrchestrationV2WorkflowUpdateCommand,
 } from "./orchestrationV2.ts";
 
 const now = DateTime.makeUnsafe("2026-04-20T00:00:00.000Z");
@@ -32,8 +39,63 @@ const decodeOrchestrationV2ProviderThread = Schema.decodeUnknownSync(Orchestrati
 const decodeOrchestrationV2ProviderCapabilities = Schema.decodeUnknownSync(
   OrchestrationV2ProviderCapabilities,
 );
+const workflowAgentCodec = Schema.toCodecJson(OrchestrationV2WorkflowAgent);
+const decodeWorkflowAgent = Schema.decodeUnknownSync(OrchestrationV2WorkflowAgent);
+const encodeWorkflowAgent = Schema.encodeSync(workflowAgentCodec);
+const decodeWorkflowAgentJson = Schema.decodeUnknownSync(workflowAgentCodec);
+const decodeOrchestrationV2SubagentJson = Schema.decodeUnknownSync(OrchestrationV2SubagentJson);
 
 describe("orchestration V2 contracts", () => {
+  it("keeps patch identity when phases and agents also match the legacy snapshot shape", () => {
+    const decode = Schema.decodeUnknownSync(OrchestrationV2WorkflowUpdateCommand);
+    const encode = Schema.encodeSync(OrchestrationV2WorkflowUpdateCommand);
+    const base = {
+      type: "workflow.update",
+      commandId: "command",
+      threadId: "thread",
+      workflowId: "workflow",
+    };
+    const fields = {
+      phases: [{ index: 0, title: "Audit" }],
+      agents: [{ index: 0, label: "Worker", state: "queued" }],
+    };
+    const patch = { ...base, workflow: { kind: "patch", ...fields } };
+    expect(encode(decode(patch))).toEqual(patch);
+    const legacy = { ...base, workflow: fields };
+    expect(encode(decode(legacy))).toEqual(legacy);
+  });
+  it("round-trips attempt history and accepts legacy workflow members without it", () => {
+    const roundTrip = (value: unknown) =>
+      decodeWorkflowAgentJson(encodeWorkflowAgent(decodeWorkflowAgent(value)));
+    const legacy = {
+      index: 0,
+      label: "Worker",
+      state: "completed",
+      totalTokens: 55561,
+      attempt: 1,
+    };
+    expect(roundTrip(legacy)).toEqual(legacy);
+    const current = {
+      ...legacy,
+      attemptHistory: [
+        {
+          taskId: "task-1",
+          childThreadId: "child-1",
+          attempt: 0,
+          state: "failed",
+          providerInstanceId: "provider-1",
+          model: "model-1",
+          totalTokens: 12,
+          usageStatus: "partial",
+          durationMs: 2000,
+          timingComplete: true,
+          startedAt: 1000,
+        },
+      ],
+      judgmentOutcome: "failed",
+    };
+    expect(roundTrip(current)).toEqual(current);
+  });
   it("decodes thread event types from a newer server as skippable items", () => {
     const decodeWireItems = Schema.decodeUnknownSync(
       Schema.toCodecJson(Schema.Array(OrchestrationV2RpcSchemas.subscribeThread.output)),
@@ -174,6 +236,24 @@ describe("orchestration V2 contracts", () => {
     if (snapshot?.kind !== "snapshot") throw new Error("expected a snapshot");
     expect(snapshot.projection.turnItems.map((turnItem) => turnItem.id)).toEqual(["item-known"]);
     expect(snapshot.projection.visibleTurnItems.map((row) => row.item.id)).toEqual(["item-known"]);
+    // The same snapshot with an ID table: refs resolve before unknown items are skipped.
+    const tabled = (turnItem: { readonly id: string }, ref: number) => ({ ...turnItem, id: ref });
+    const [tabledSnapshot] = decodeWireItems([
+      {
+        kind: "snapshot",
+        snapshotSequence: 1,
+        projection: {
+          ...projection,
+          turnItems: [tabled(future, 0), tabled(known, 1)],
+          visibleTurnItems: [
+            { ...projected(0, future), sourceItemId: 0, item: tabled(future, 0) },
+            { ...projected(1, known), sourceItemId: 1, item: tabled(known, 1) },
+          ],
+        },
+        ids: ["item-future", "item-known"],
+      },
+    ]);
+    expect(tabledSnapshot).toEqual(snapshot);
     expect(futureEvent).toEqual({
       kind: "unknown-event",
       sequence: 2,
@@ -394,7 +474,15 @@ describe("orchestration V2 contracts", () => {
       });
     const planned = {
       phases: [{ index: 0, title: "Layer 1" }],
-      agents: [{ index: 0, label: "Build", state: "failed" as const, graphNodeKey: "build" }],
+      agents: [
+        { index: 0, label: "Build", state: "failed" as const, graphNodeKey: "build" },
+        {
+          index: 1,
+          label: "Check",
+          state: "completed" as const,
+          judgmentFor: { agentIndex: 0, attempt: 2, graphNodeKey: "build" },
+        },
+      ],
       plan: {
         nodes: [
           { key: "build", label: "Build", wave: 0, dependsOn: [] },
@@ -402,7 +490,13 @@ describe("orchestration V2 contracts", () => {
         ],
       },
       nodeOutcomes: {
-        build: { status: "failed" as const, reason: "exit code 2", attempts: 3 },
+        build: {
+          status: "failed" as const,
+          reason: "exit code 2",
+          attempts: 3,
+          inputs: { source: "a".repeat(64) },
+          outputs: { log: { path: "out/build.log", sha256: "b".repeat(64), sizeBytes: 12 } },
+        },
         test: { status: "skipped" as const, reason: "build did not pass" },
       },
     };
@@ -423,7 +517,7 @@ describe("orchestration V2 contracts", () => {
         ...encodeOrchestrationV2SubagentJson(coordinator()),
         workflow: { phases: [], agents: [{ index: 0, label: "Member", state: "completed" }] },
       };
-      const decoded = Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(legacy).workflow;
+      const decoded = decodeOrchestrationV2SubagentJson(legacy).workflow;
       expect(decoded?.plan).toBeUndefined();
       expect(decoded?.nodeOutcomes).toBeUndefined();
       expect(decoded?.agents[0]?.graphNodeKey).toBeUndefined();
@@ -431,13 +525,32 @@ describe("orchestration V2 contracts", () => {
 
     it.each([
       ["an unknown outcome", { nodeOutcomes: { build: { status: "done" } } }],
+      [
+        "an output without a sha256",
+        {
+          nodeOutcomes: {
+            build: { status: "passed", outputs: { log: { path: "p", sizeBytes: 1 } } },
+          },
+        },
+      ],
+      [
+        "an output with a negative size",
+        {
+          nodeOutcomes: {
+            build: {
+              status: "passed",
+              outputs: { log: { path: "p", sha256: "b".repeat(64), sizeBytes: -1 } },
+            },
+          },
+        },
+      ],
       ["a negative wave", { plan: { nodes: [{ key: "a", label: "A", wave: -1, dependsOn: [] }] } }],
     ])("refuses %s", (_name, patch) => {
       const subagent = {
         ...encodeOrchestrationV2SubagentJson(coordinator()),
         workflow: { ...planned, ...patch },
       };
-      expect(() => Schema.decodeUnknownSync(OrchestrationV2SubagentJson)(subagent)).toThrow();
+      expect(() => decodeOrchestrationV2SubagentJson(subagent)).toThrow();
     });
   });
 
@@ -488,6 +601,46 @@ describe("orchestration V2 contracts", () => {
     expect(runtimeThread.pendingBackgroundTasks).toEqual([]);
     expect(runtimeThread.contextUsage).toBeNull();
     expect(runtimeThread.nativeMetadata).toBeNull();
+  });
+});
+
+describe("thread open stats", () => {
+  it("reads a thread whose open stats this build cannot read, without them", () => {
+    const shell = {
+      id: "thread-test",
+      projectId: "project-test",
+      title: "Thread",
+      providerInstanceId: "codex",
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      branch: null,
+      worktreePath: null,
+      activeProviderThreadId: null,
+      lineage: { rootThreadId: "thread-test", parentThreadId: null, relationshipToParent: null },
+      forkedFrom: null,
+      createdBy: "user",
+      creationSource: "mobile",
+      latestRunId: null,
+      activeRunId: null,
+      status: "idle",
+      pendingRuntimeRequest: null,
+      latestVisibleMessage: null,
+      latestUserMessageAt: null,
+      hasActionableProposedPlan: false,
+      itemCount: 0,
+      visibleItemCount: 0,
+      createdAt: "2026-10-01T00:00:00.000Z",
+      updatedAt: "2026-10-01T00:00:00.000Z",
+      archivedAt: null,
+      settledOverride: null,
+      settledAt: null,
+      deletedAt: null,
+    };
+    const decode = Schema.decodeUnknownSync(OrchestrationV2ThreadShellJson);
+    const opens = { openedAt: 1, score: 1, picks: [{ query: "upl", at: 1 }] };
+    expect(decode({ ...shell, opens }).opens).toEqual(opens);
+    expect(decode({ ...shell, opens: { openedAt: "2026-10-01", score: 1 } }).opens).toBeNull();
   });
 });
 
@@ -641,5 +794,151 @@ describe("latestProviderTurnForAttempt", () => {
     ];
     expect(latestProviderTurnForAttempt(turns, RunAttemptId.make("goal-attempt"))?.id).toBe("last");
     expect(latestProviderTurnForAttempt(turns, null)).toBeUndefined();
+  });
+});
+
+const decodeApprove = Schema.decodeUnknownSync(
+  OrchestrationV2RpcSchemas.approveWorkflowReview.input,
+);
+const decodeDismiss = Schema.decodeUnknownSync(
+  OrchestrationV2RpcSchemas.dismissWorkflowReview.input,
+);
+const workflowApprovalErrorCodec = Schema.toCodecJson(OrchestrationV2WorkflowApprovalError);
+const decodeWorkflowApprovalError = Schema.decodeUnknownSync(workflowApprovalErrorCodec);
+const encodeWorkflowApprovalError = Schema.encodeSync(workflowApprovalErrorCodec);
+
+describe("workflow review decisions", () => {
+  const digest = `sha256:${"a".repeat(64)}`;
+  const review = {
+    environmentId: EnvironmentId.make("environment-1"),
+    threadId: ThreadId.make("thread-1"),
+    reviewId: "review-1",
+  };
+  it("names the environment, thread, review and digest, and nothing about who decides", () => {
+    expect(decodeApprove({ ...review, digest })).toEqual({ ...review, digest });
+    // A review with blockers has no digest, and can only be dismissed.
+    expect(decodeDismiss({ ...review, digest: null })).toEqual({ ...review, digest: null });
+    expect(() => decodeApprove({ ...review, digest: null })).toThrow();
+    expect(() => decodeApprove({ ...review, digest: "sha256:abc" })).toThrow();
+    for (const missing of ["environmentId", "threadId", "reviewId"] as const) {
+      const { [missing]: _removed, ...rest } = review;
+      expect(() => decodeApprove({ ...rest, digest })).toThrow();
+    }
+    // The connection's grant says who is deciding; a claimed actor is not part of the input.
+    expect(
+      decodeApprove({ ...review, digest, createdBy: "agent", creationSource: "mcp" }),
+    ).not.toHaveProperty("createdBy");
+  });
+
+  it("keeps its reason across the wire and says each one plainly", () => {
+    const reasons = [
+      "environment-mismatch",
+      "no-pending-request",
+      "review-not-found",
+      "review-blocked",
+      "unavailable",
+    ] as const;
+    const messages = reasons.map((reason) => {
+      const error = new OrchestrationV2WorkflowApprovalError({
+        threadId: review.threadId,
+        reviewId: review.reviewId,
+        reason,
+      });
+      const decoded = decodeWorkflowApprovalError(encodeWorkflowApprovalError(error));
+      expect(decoded.reason).toBe(reason);
+      return decoded.message;
+    });
+    expect(new Set(messages).size).toBe(reasons.length);
+  });
+});
+
+describe("isOrchestrationV2ActiveWorkflowMember", () => {
+  const workflowId = NodeId.make("node:workflow");
+  const memberThread = ThreadId.make("thread:member");
+  const member = (
+    overrides: Partial<{
+      origin: "app_owned" | "provider_native";
+      parentNodeId: NodeId;
+      childThreadId: ThreadId | null;
+      status: OrchestrationV2Subagent["status"];
+    }> = {},
+  ) => ({
+    origin: "app_owned" as const,
+    parentNodeId: workflowId,
+    childThreadId: memberThread as ThreadId | null,
+    status: "running" as OrchestrationV2Subagent["status"],
+    ...overrides,
+  });
+
+  it.each([
+    ["idle", false],
+    ["pending", true],
+    ["running", true],
+    ["waiting", true],
+    ["completed", false],
+    ["failed", false],
+    ["cancelled", false],
+    ["interrupted", false],
+  ] as const)("treats a %s app-owned member of the workflow as active: %s", (status, active) => {
+    expect(isOrchestrationV2ActiveWorkflowMember(member({ status }), workflowId)).toBe(active);
+    // One rule: membership adds to the shared work-active status, never redefines it.
+    expect(isOrchestrationV2WorkActive(status)).toBe(active);
+  });
+
+  it("is not a member of the workflow unless it is app-owned, parented to it, and has a thread", () => {
+    expect(
+      isOrchestrationV2ActiveWorkflowMember(member({ origin: "provider_native" }), workflowId),
+    ).toBe(false);
+    expect(
+      isOrchestrationV2ActiveWorkflowMember(
+        member({ parentNodeId: NodeId.make("node:other-workflow") }),
+        workflowId,
+      ),
+    ).toBe(false);
+    expect(isOrchestrationV2ActiveWorkflowMember(member({ childThreadId: null }), workflowId)).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    ["idle", true],
+    ["running", true],
+    ["completed", true],
+    ["failed", true],
+    ["cancelled", true],
+  ] as const)("is a member of the workflow whatever its status (%s)", (status, expected) => {
+    expect(isOrchestrationV2WorkflowMember(member({ status }), workflowId)).toBe(expected);
+  });
+
+  it("is a workflow member only when app-owned, parented to the workflow, and given a thread", () => {
+    expect(isOrchestrationV2WorkflowMember(member(), workflowId)).toBe(true);
+    expect(isOrchestrationV2WorkflowMember(member({ origin: "provider_native" }), workflowId)).toBe(
+      false,
+    );
+    expect(
+      isOrchestrationV2WorkflowMember(
+        member({ parentNodeId: NodeId.make("node:other-workflow") }),
+        workflowId,
+      ),
+    ).toBe(false);
+    expect(isOrchestrationV2WorkflowMember(member({ childThreadId: null }), workflowId)).toBe(
+      false,
+    );
+  });
+
+  it("narrows a member to the thread it runs in without needing a status", () => {
+    const { origin, parentNodeId, childThreadId } = member();
+    const memberOnly = { origin, parentNodeId, childThreadId };
+    const threads = [memberOnly, { ...memberOnly, childThreadId: null }]
+      .filter((candidate) => isOrchestrationV2WorkflowMember(candidate, workflowId))
+      .map((candidate) => candidate.childThreadId);
+    expect(threads).toEqual([memberThread]);
+  });
+
+  it("narrows an active member to the thread the stop must reach", () => {
+    const threads = [member(), member({ childThreadId: null }), member({ status: "completed" })]
+      .filter((candidate) => isOrchestrationV2ActiveWorkflowMember(candidate, workflowId))
+      .map((active) => active.childThreadId);
+    expect(threads).toEqual([memberThread]);
   });
 });

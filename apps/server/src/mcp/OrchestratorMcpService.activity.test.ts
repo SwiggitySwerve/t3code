@@ -27,12 +27,18 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
+import * as ServerConfig from "../config.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as WorkflowApprovalGateTestkit from "../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+  Layer.provide(
+    ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestrator-mcp-activity-test-" }),
+  ),
   Layer.provide(NodeServices.layer),
 );
 
@@ -475,7 +481,6 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       .pipe(Effect.flip);
     expect(staleDelete.code).toBe("parent_not_active");
 
-    // A background item keeps only its owning instance live, even after a switch.
     const backgroundTasks = [
       {
         taskId: "background-subagent",
@@ -519,7 +524,6 @@ it("readThread and sendToThread reach threads in other projects", async () => {
       .pipe(Effect.flip);
     expect(mismatched.code).toBe("parent_not_active");
 
-    // A fresh active run wins over the earlier inactive projection and empty roster.
     parentShell = liveThreadShell(parentThreadId);
     const restarted = yield* service.sendToThread(makeScope(), {
       threadId: foreignThreadId,

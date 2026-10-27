@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 import {
+  NodeId,
   ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
@@ -9,14 +10,18 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
+  appWorkflowHeading,
   appWorkflowMemberThreads,
+  canStopWorkflow,
+  canStopWorkflowWork,
   workflowGraphHeadline,
   workflowGraphNodeDetail,
   deriveWorkflowGroups,
   resolveAppWorkflowView,
-  isWorkflowScriptMessage,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
+  workflowProgressText,
+  workflowMemberIdentity,
 } from "./subagentRuntime.ts";
 
 const at = (iso: string) => DateTime.makeUnsafe(iso);
@@ -261,10 +266,6 @@ describe("resolveWorkflowOpening", () => {
         parentSubagents: null,
       }),
     ).toBeNull();
-    expect(isWorkflowScriptMessage({ role: "user", text: "Explain `export const meta`." })).toBe(
-      false,
-    );
-    expect(isWorkflowScriptMessage({ role: "assistant", text: SCRIPT })).toBe(false);
   });
 });
 
@@ -482,6 +483,69 @@ describe("graph workflows", () => {
     expect(a?.member?.title).toBe("second try");
   });
 
+  it("associates checkers by explicit node identity across duplicate labels and retries", () => {
+    const graph = graphOf("failed", {
+      plan: { nodes: plan.nodes.map((node) => ({ ...node, label: "Same label" })) },
+      agents: [
+        member({ index: 0, graphNodeKey: "a", childThreadId: ThreadId.make("old-worker") }),
+        member({
+          index: 1,
+          label: "check Same label",
+          judgmentFor: { agentIndex: 0, attempt: 0, graphNodeKey: "a" },
+          childThreadId: ThreadId.make("first-check"),
+        }),
+        member({ index: 2, graphNodeKey: "b", childThreadId: ThreadId.make("other-worker") }),
+        member({
+          index: 3,
+          label: "check Same label",
+          state: "failed",
+          judgmentFor: { agentIndex: 0, attempt: 1, graphNodeKey: "a" },
+          childThreadId: ThreadId.make("retry-check"),
+        }),
+        member({
+          index: 4,
+          label: "check Same label",
+          judgmentFor: { agentIndex: 2, attempt: 0, graphNodeKey: "b" },
+          childThreadId: ThreadId.make("other-check"),
+        }),
+        member({ index: 5, graphNodeKey: "a", childThreadId: ThreadId.make("new-worker") }),
+        member({ index: 6, label: "check Same label" }),
+      ],
+    })!;
+    const [a, b] = graph.waves.flat();
+    expect(a?.member?.childThreadId).toBe("new-worker");
+    expect(a?.checkers.map((checker) => checker.childThreadId)).toEqual([
+      "first-check",
+      "retry-check",
+    ]);
+    expect(b?.checkers.map((checker) => checker.childThreadId)).toEqual(["other-check"]);
+    expect(graph.otherMembers.map((checker) => checker.agentIndex)).toEqual([6]);
+  });
+
+  it("uses actual member provider and model, leaving never-started nodes neutral", () => {
+    const graph = graphOf("failed", {
+      plan,
+      agents: [
+        member({
+          index: 0,
+          graphNodeKey: "a",
+          model: "actual-model",
+          providerInstanceId: ProviderInstanceId.make("other-provider"),
+          childThreadId: ThreadId.make("actual-thread"),
+        }),
+        member({ index: 1, graphNodeKey: "b", state: "failed" }),
+      ],
+    })!;
+    const nodes = graph.waves.flat();
+    expect(nodes.map((node) => workflowMemberIdentity(node.member))).toEqual([
+      "other-provider / actual-model",
+      "Not started",
+      "Not started",
+      "Not started",
+    ]);
+    expect(nodes[0]?.member?.model).not.toBe(subagent().model);
+  });
+
   it("words the status line and each node's detail", () => {
     const graph = graphOf("running", {
       plan,
@@ -501,5 +565,247 @@ describe("graph workflows", () => {
       { detail: "after Schema", retries: null },
       { detail: "after Build API, Build UI", retries: null },
     ]);
+  });
+});
+
+describe("workflow progress text", () => {
+  const plan = {
+    nodes: [
+      { key: "build", label: "Build API", wave: 0, dependsOn: [] },
+      { key: "test", label: "Test", wave: 1, dependsOn: ["build"] },
+    ],
+  };
+  const legacy =
+    "The workflow failed: Graph failed: " +
+    JSON.stringify({
+      ok: false,
+      nodes: {
+        build: {
+          status: "failed",
+          reason: "Provider unavailable",
+          outputs: { huge: "x".repeat(10000) },
+        },
+        test: { status: "skipped" },
+      },
+    }) +
+    " (at eval_script:25)";
+  const row = {
+    status: "failed" as const,
+    result: legacy,
+    workflow: { plan, phases: [], agents: [] },
+  };
+
+  it("summarizes old graph errors with labels, reasons and skipped context", () => {
+    expect(workflowProgressText(row)).toBe(
+      "Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable",
+    );
+    expect(
+      workflowProgressText({
+        ...row,
+        workflow: {
+          ...row.workflow,
+          nodeOutcomes: { build: { status: "failed", reason: "Recorded reason" } },
+        },
+      }),
+    ).toContain("Build API: Recorded reason");
+    expect(
+      workflowProgressText({
+        ...row,
+        result: legacy.slice(0, 100),
+        workflow: {
+          ...row.workflow,
+          nodeOutcomes: {
+            build: { status: "failed", reason: "Provider unavailable" },
+            test: { status: "skipped" },
+          },
+        },
+      }),
+    ).toBe("Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable");
+  });
+
+  it("preserves unknown errors and script results and hides only graph success records", () => {
+    for (const result of ["Permission denied", "{bad JSON}", '{"ok":false,"nodes":{}}']) {
+      expect(workflowProgressText({ ...row, result })).toBe(result);
+    }
+    expect(workflowProgressText({ ...row, workflow: undefined })).toBe(legacy);
+    const result = JSON.stringify({
+      ok: true,
+      nodes: { build: { status: "passed" }, test: { status: "passed" } },
+    });
+    expect(workflowProgressText({ ...row, status: "completed", result })).toBeNull();
+    expect(workflowProgressText({ ...row, status: "completed", result, workflow: undefined })).toBe(
+      result,
+    );
+    expect(workflowProgressText({ ...row, status: "running", progress: "Working" })).toBe(
+      "Working",
+    );
+  });
+
+  it("reads the server's compact record, its counts form, and nodes that carry provenance", () => {
+    const sha = "a".repeat(64);
+    const omitted =
+      "input and output sha256 and any cut detail: workflow_status workflowId=workflow:w1, field nodes";
+    const nodeOutcomes = {
+      build: {
+        status: "passed" as const,
+        attempts: 1,
+        inputs: { source: sha },
+        outputs: { out: { path: "out/build.md", sha256: sha, sizeBytes: 3 } },
+      },
+      test: { status: "passed" as const, attempts: 1 },
+    };
+    const compact = JSON.stringify({
+      ok: true,
+      nodes: {
+        build: {
+          status: "passed",
+          attempts: 1,
+          outputs: { out: { path: "out/build.md", sizeBytes: 3 } },
+        },
+        test: { status: "passed", attempts: 1 },
+      },
+      omitted,
+    });
+    const workflow = { ...row.workflow, nodeOutcomes };
+    expect(
+      workflowProgressText({ ...row, status: "completed", result: compact, workflow }),
+    ).toBeNull();
+    // A graph too large for one status each has no nodes: the text is shown as it is.
+    const counts = JSON.stringify({
+      ok: false,
+      counts: { passed: 1, failed: 1, skipped: 0 },
+      reasons: [{ node: "build", reason: "Provider unavailable" }],
+      omitted,
+    });
+    expect(workflowProgressText({ ...row, result: counts, workflow })).toBe(counts);
+    // A failed graph's text cut at 4,096 bytes still reads from the stored outcomes.
+    const cut = `The workflow failed: Graph failed: 1 node failed, 1 skipped. Build API: Provid...truncated (60 of 9000 bytes), per-node detail at workflow_status workflowId=workflow:w1, field nodes`;
+    expect(
+      workflowProgressText({
+        ...row,
+        result: cut,
+        workflow: {
+          ...row.workflow,
+          nodeOutcomes: {
+            build: { status: "failed", reason: "Provider unavailable", inputs: { source: sha } },
+            test: { status: "skipped" },
+          },
+        },
+      }),
+    ).toBe("Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable");
+  });
+});
+
+describe("appWorkflowHeading", () => {
+  it("names each run state, and stays generic before the run has one", () => {
+    expect(
+      (["running", "completed", "failed", "cancelled", "interrupted", "pending"] as const).map(
+        appWorkflowHeading,
+      ),
+    ).toEqual([
+      "Workflow running",
+      "Workflow finished",
+      "Workflow failed",
+      "Workflow stopped",
+      "Workflow stopped",
+      "Workflow",
+    ]);
+  });
+});
+
+describe("canStopWorkflow", () => {
+  const driver = (value: string) => ProviderDriverKind.make(value);
+
+  it("offers Stop only while a workflow T3 can stop is running", () => {
+    const statuses = [
+      "pending",
+      "running",
+      "waiting",
+      "idle",
+      "completed",
+      "failed",
+      "cancelled",
+      "interrupted",
+    ] as const;
+    expect(
+      statuses.filter((status) =>
+        canStopWorkflow({ status, origin: "app_owned", driver: driver("codex") }),
+      ),
+    ).toEqual(["running"]);
+    expect(
+      statuses.filter((status) =>
+        canStopWorkflow({ status, origin: "provider_native", driver: driver("claudeAgent") }),
+      ),
+    ).toEqual(["running"]);
+  });
+
+  it("leaves a provider-native workflow only Claude can stop to the provider", () => {
+    expect(
+      canStopWorkflow({
+        status: "running",
+        origin: "provider_native",
+        driver: driver("codex"),
+      }),
+    ).toBe(false);
+    expect(canStopWorkflow({ status: "running", origin: "provider_native", driver: null })).toBe(
+      false,
+    );
+  });
+});
+
+describe("canStopWorkflowWork", () => {
+  const driver = ProviderDriverKind.make("codex");
+  const workflow = (
+    status: OrchestrationV2Subagent["status"],
+    origin: "app_owned" | "provider_native" = "app_owned",
+  ) => ({
+    id: NodeId.make("workflow-1"),
+    status,
+    origin,
+    driver,
+  });
+  const member = (
+    status: OrchestrationV2Subagent["status"],
+    overrides: Partial<
+      Pick<OrchestrationV2Subagent, "origin" | "parentNodeId" | "childThreadId">
+    > = {},
+  ) => ({
+    origin: "app_owned" as const,
+    parentNodeId: NodeId.make("workflow-1"),
+    childThreadId: ThreadId.make("thread-member"),
+    status,
+    ...overrides,
+  });
+
+  it("keeps Stop for a cancelled workflow while a member it started is still active", () => {
+    // A stop cancels the row first; when a member stop then fails, the member keeps running.
+    expect(canStopWorkflowWork(workflow("cancelled"), [member("running")])).toBe(true);
+    expect(canStopWorkflowWork(workflow("failed"), [member("waiting")])).toBe(true);
+    expect(canStopWorkflowWork(workflow("interrupted"), [member("pending")])).toBe(true);
+  });
+
+  it("drops Stop once the row and every member have settled", () => {
+    expect(
+      canStopWorkflowWork(workflow("cancelled"), [member("cancelled"), member("completed")]),
+    ).toBe(false);
+    expect(canStopWorkflowWork(workflow("completed"), [])).toBe(false);
+  });
+
+  it("offers Stop for a running workflow whatever its members do", () => {
+    expect(canStopWorkflowWork(workflow("running"), [])).toBe(true);
+    expect(canStopWorkflowWork(workflow("running"), [member("completed")])).toBe(true);
+  });
+
+  it("looks only at members this workflow started", () => {
+    const stranger = member("running", { parentNodeId: NodeId.make("another-workflow") });
+    const native = member("running", { origin: "provider_native" });
+    const noThread = member("running", { childThreadId: null });
+    expect(canStopWorkflowWork(workflow("cancelled"), [stranger, native, noThread])).toBe(false);
+  });
+
+  it("does not extend a provider-native workflow, whose members T3 does not own", () => {
+    expect(canStopWorkflowWork(workflow("cancelled", "provider_native"), [member("running")])).toBe(
+      false,
+    );
   });
 });

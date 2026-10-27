@@ -8,12 +8,18 @@ import {
   type OrchestrationV2TurnItem,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
+import { it as effectIt } from "@effect/vitest";
 import * as DateTime from "effect/DateTime";
 import * as Schema from "effect/Schema";
+import * as Effect from "effect/Effect";
+import * as Stream from "effect/Stream";
+import { NodeId } from "@t3tools/contracts";
 import { boundedSnapshotProjection } from "@t3tools/shared/orchestrationV2BoundedSnapshot";
 
 import {
+  asFullWorkflowRow,
   buildBoundedThreadStreamSnapshot,
+  boundWorkflowUpdateBatches,
   decideThreadResume,
   isThreadReplayRawPayloadSafe,
   threadReplayEncodedBytes,
@@ -28,6 +34,75 @@ const THREAD_ID = ThreadId.make("thread-stream-test");
 const LARGE_PROJECTABLE_OUTPUT_BYTES = 10 * 1_048_576;
 const LARGE_PROJECTABLE_RAW_PAYLOAD_BYTES = 10_486_214;
 const MAX_PROJECTED_DYNAMIC_REPLAY_BYTES = 2_048;
+
+effectIt.effect("keeps a burst of bounded workflow patches in separate RPC batches", () =>
+  Effect.gen(function* () {
+    const items = Array.from({ length: 8 }, (_, index) => ({
+      kind: "event" as const,
+      sequence: index + 1,
+      event: {
+        id: EventId.make(`patch-${index}`),
+        threadId: THREAD_ID,
+        occurredAt: NOW,
+        type: "workflow.updated" as const,
+        payload: {
+          id: NodeId.make("workflow"),
+          previousRevision: index,
+          revision: index + 1,
+          progress: "日本語".repeat(3000),
+          updatedAt: NOW,
+        },
+      },
+    }));
+    const batches = yield* Stream.fromArray(items).pipe(
+      boundWorkflowUpdateBatches,
+      Stream.chunks,
+      Stream.runCollect,
+    );
+    expect(batches.flat()).toEqual(items);
+    expect(batches).toHaveLength(8);
+    expect(
+      Math.max(...batches.map((batch) => Buffer.byteLength(JSON.stringify(batch), "utf8"))),
+    ).toBeLessThan(65536);
+  }),
+);
+
+describe("asFullWorkflowRow", () => {
+  const row = { id: NodeId.make("workflow"), status: "completed" } as unknown as Parameters<
+    typeof asFullWorkflowRow
+  >[1][number];
+  const patch = {
+    kind: "event" as const,
+    sequence: 9,
+    event: {
+      id: EventId.make("patch"),
+      threadId: THREAD_ID,
+      occurredAt: NOW,
+      type: "workflow.updated" as const,
+      payload: { id: NodeId.make("workflow"), previousRevision: 3, revision: 4, updatedAt: NOW },
+    },
+  };
+
+  it("sends a client without patch support the workflow's full row, keeping the event identity", () => {
+    expect(asFullWorkflowRow(patch, [row])).toEqual({
+      kind: "event",
+      sequence: 9,
+      event: {
+        id: EventId.make("patch"),
+        threadId: THREAD_ID,
+        occurredAt: NOW,
+        type: "subagent.updated",
+        payload: row,
+      },
+    });
+  });
+
+  it("leaves other items, and a patch whose row is gone, unchanged", () => {
+    expect(asFullWorkflowRow(patch, [])).toBe(patch);
+    const other = { kind: "synchronized" as const };
+    expect(asFullWorkflowRow(other, [row])).toBe(other);
+  });
+});
 
 function timelineProjection(itemCount: number): OrchestrationV2ThreadProjection {
   const visibleTurnItems: OrchestrationV2ProjectedTurnItem[] = Array.from(
@@ -161,7 +236,6 @@ describe("decideThreadResume", () => {
     expect(snapshot.historyCursor).not.toBeNull();
     expect(snapshot.hasMoreHistory).toBe(true);
     expect(snapshot.latestLocalTurnOrdinal).toBe(80);
-    expect(snapshot.payloadBudgetExceeded).toBe(false);
   });
 
   it("rejects a 10 MiB raw replay even when its projected form fits the wire budget", () => {

@@ -34,6 +34,166 @@ import { resolveProviderInstanceTerminalEnvironment } from "./terminal/Manager.t
 const decodeServerSettings = Schema.decodeUnknownEffect(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings));
 
+it.effect("C4 persists preset CRUD and refuses invalid settings without changing disk", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const target = {
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-5.4",
+      options: [],
+    };
+    const preset = { id: "worker", name: "Worker", target };
+    yield* service.updateSettings({
+      workflowPresets: { presets: [preset], defaultPresetId: preset.id },
+    });
+    const before = yield* fs.readFileString(config.settingsPath);
+    assert.deepEqual((yield* decodeServerSettingsJson(before)).workflowPresets, {
+      presets: [preset],
+      defaultPresetId: preset.id,
+    });
+    for (const invalid of [
+      { presets: [preset, preset], defaultPresetId: null },
+      { presets: [], defaultPresetId: "missing" },
+      { presets: [{ ...preset, id: " " }], defaultPresetId: null },
+    ]) {
+      const refused = yield* service.updateSettings({ workflowPresets: invalid }).pipe(Effect.flip);
+      assert.equal(refused._tag, "ServerSettingsError");
+      assert.equal(yield* fs.readFileString(config.settingsPath), before);
+    }
+    const renamed = {
+      ...preset,
+      name: "Reviewer",
+      target: { ...target, model: "other", options: [{ id: "effort", value: "high" }] },
+    };
+    yield* service.updateSettings({
+      workflowPresets: { presets: [renamed], defaultPresetId: null },
+    });
+    assert.deepEqual(
+      (yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath)))
+        .workflowPresets,
+      { presets: [renamed], defaultPresetId: null },
+    );
+    yield* service.updateSettings({ workflowPresets: { presets: [], defaultPresetId: null } });
+    assert.deepEqual(
+      (yield* decodeServerSettingsJson(yield* fs.readFileString(config.settingsPath)))
+        .workflowPresets,
+      DEFAULT_SERVER_SETTINGS.workflowPresets,
+    );
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect(
+  "refuses a profile name that is too long or taken, and a bad trigger, without touching disk",
+  () =>
+    Effect.gen(function* () {
+      const service = yield* ServerSettingsModule.ServerSettingsService;
+      const config = yield* ServerConfig.ServerConfig;
+      const fs = yield* FileSystem.FileSystem;
+      const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+      const worker = { id: "worker", name: "Worker", target };
+      yield* service.updateSettings({
+        workflowPresets: { presets: [worker], defaultPresetId: null },
+        workflowTriggers: { extras: ["fan out"] },
+      });
+      const before = yield* fs.readFileString(config.settingsPath);
+      for (const [patch, reason] of [
+        [
+          {
+            workflowPresets: {
+              presets: [{ ...worker, name: "x".repeat(81) }],
+              defaultPresetId: null,
+            },
+          },
+          "A profile name can be at most 80 characters.",
+        ],
+        [
+          {
+            workflowPresets: {
+              presets: [worker, { ...worker, id: "other", name: "worker" }],
+              defaultPresetId: null,
+            },
+          },
+          'Another profile is already named "worker".',
+        ],
+        [{ workflowTriggers: { extras: ["fan out", "Fan  Out"] } }, "is listed twice."],
+        [{ workflowTriggers: { extras: ["workflow"] } }, "is always a trigger."],
+        [{ workflowTriggers: { extras: ["x".repeat(65)] } }, "is longer than 64 characters."],
+      ] as const) {
+        const refused = yield* service.updateSettings(patch).pipe(Effect.flip);
+        assert.equal(refused._tag, "ServerSettingsError");
+        // Refused with the operation every client already decodes, and the reason in the message.
+        assert.equal(refused.operation, "normalize");
+        assert.include(refused.message, reason);
+        assert.equal(refused.message.startsWith("Server settings normalize failed at "), true);
+        assert.equal(yield* fs.readFileString(config.settingsPath), before);
+      }
+      const saved = yield* service.updateSettings({
+        workflowPresets: {
+          presets: [{ ...worker, fallbacks: [{ ...target, model: "gpt-5.5" }] }],
+          defaultPresetId: "worker",
+        },
+        workflowTriggers: { enabled: false, extras: ["orchestrate", "fan out"] },
+      });
+      assert.deepEqual(saved.workflowTriggers, {
+        enabled: false,
+        extras: ["orchestrate", "fan out"],
+      });
+      const persisted = yield* decodeServerSettingsJson(
+        yield* fs.readFileString(config.settingsPath),
+      );
+      assert.deepEqual(persisted.workflowPresets.presets[0]?.fallbacks, [
+        { ...target, model: "gpt-5.5" },
+      ]);
+      assert.deepEqual(persisted.workflowTriggers, saved.workflowTriggers);
+      yield* service.updateSettings({ workflowTriggers: { enabled: true, extras: [] } });
+      assert.equal(
+        "workflowTriggers" in JSON.parse(yield* fs.readFileString(config.settingsPath)),
+        false,
+      );
+    }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("keeps profiles saved before name rules and lets unrelated settings change", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    const legacy = {
+      presets: [
+        { id: "a", name: "Same", target },
+        { id: "b", name: "Same", target },
+        { id: "c", name: "N".repeat(400), target },
+      ],
+      defaultPresetId: "a",
+    };
+    yield* fs.writeFileString(config.settingsPath, JSON.stringify({ workflowPresets: legacy }));
+    const loaded = yield* service.getSettings;
+    assert.deepEqual(loaded.workflowPresets, legacy);
+    assert.deepEqual(loaded.workflowTriggers, { enabled: true, extras: [] });
+    yield* service.updateSettings({ ultracode: "off" });
+    yield* service.updateSettings({ workflowTriggers: { extras: ["fan out"] } });
+    const persisted = yield* decodeServerSettingsJson(
+      yield* fs.readFileString(config.settingsPath),
+    );
+    assert.deepEqual(persisted.workflowPresets, legacy);
+    assert.equal(persisted.ultracode, "off");
+    // Writing the same profiles back is not a new violation; adding another "same" is.
+    yield* service.updateSettings({ workflowPresets: legacy });
+    const refused = yield* service
+      .updateSettings({
+        workflowPresets: {
+          ...legacy,
+          presets: [...legacy.presets, { id: "d", name: "same", target }],
+        },
+      })
+      .pipe(Effect.flip);
+    assert.equal(refused._tag, "ServerSettingsError");
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
 const layerServerSettings = () =>
   ServerSettingsModule.layer.pipe(
     Layer.provide(ServerSecretStore.layer),
@@ -410,8 +570,9 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
       const instanceId = ProviderInstanceId.make("acpRegistry_shared");
-      const results = yield* Effect.all(
-        ["First", "Second"].map((displayName) =>
+      const results = yield* Effect.forEach(
+        ["First", "Second"],
+        (displayName) =>
           serverSettings
             .updateProviderInstance({
               operation: "create",
@@ -423,7 +584,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
               },
             })
             .pipe(Effect.result),
-        ),
         { concurrency: "unbounded" },
       );
 
@@ -695,7 +855,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(layerServerSettings())),
   );
 
-  // A backend behind a custom model may refuse the built-in default (#12651).
+  // A backend behind a custom model may refuse the built-in default.
   it.effect("falls back to the thread default when it is a custom model on that instance", () =>
     Effect.gen(function* () {
       const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
@@ -1324,7 +1484,6 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         assert.notInclude(yield* fs.readFileString(config.settingsPath), value);
         assert.notInclude(JSON.stringify(client), value);
       }
-      // Editing another field from the client's copy keeps the saved password.
       const clientConfig = client.providerInstances[opencode]?.config as Record<string, unknown>;
       const edited = yield* service.updateProviderInstance({
         operation: "upsert",
@@ -1738,10 +1897,14 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         runOnWorktreeCreate: false,
       };
       const model = createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.5");
-      const modelJson = yield* Schema.encodeEffect(Schema.fromJsonString(ModelSelection))(model);
-      const scriptsJson = yield* Schema.encodeEffect(
+      const encodeModelSelection = Schema.encodeEffect(Schema.fromJsonString(ModelSelection));
+
+      const modelJson = yield* encodeModelSelection(model);
+      const encodeProjectScripts = Schema.encodeEffect(
         Schema.fromJsonString(Schema.Array(ProjectScript)),
-      )([script]);
+      );
+
+      const scriptsJson = yield* encodeProjectScripts([script]);
       for (const [projectId, modelColumn, envMode, autoPull, scripts] of [
         [legacyProject, modelJson, "worktree", 1, scriptsJson],
         [scriptedProject, null, null, 0, scriptsJson],

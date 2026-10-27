@@ -48,7 +48,9 @@ import * as ProviderTurnControlService from "../ProviderTurnControlService.ts";
 import * as ProviderTurnStartService from "../ProviderTurnStartService.ts";
 import * as ProviderTurnStartServiceTestkit from "../ProviderTurnStartService.testkit.ts";
 import * as McpAppModelContext from "../../mcpApps/McpAppModelContext.ts";
+import * as PreviewAgentActivity from "../../preview/PreviewAgentActivity.ts";
 import * as RunExecutionService from "../RunExecutionService.ts";
+import * as WorkflowApprovalGate from "../WorkflowApprovalGate.ts";
 import * as RunFinalizationService from "../RunFinalizationService.ts";
 import * as ThreadTitleRegenerationService from "../ThreadTitleRegenerationService.ts";
 import * as RuntimePolicy from "../RuntimePolicy.ts";
@@ -140,6 +142,7 @@ export function makeReplayServerConfig(
       worktreesDir,
       attachmentsDir,
       browserArtifactsDir: path.join(stateDir, "browser-artifacts"),
+      workflowResultsDir: path.join(stateDir, "workflow-results"),
       environmentThemesDir,
       logsDir,
       serverLogPath: path.join(logsDir, "server.log"),
@@ -154,6 +157,9 @@ export function makeReplayServerConfig(
     };
   });
 }
+
+/** Settings a replay run starts with, over the harness defaults. */
+export type ReplayServerSettings = Parameters<typeof ServerSettings.layerTest>[0];
 
 export interface OrchestratorV2ProviderReplayScenario<
   Transcript extends ProviderReplayTranscript = ProviderReplayTranscript,
@@ -195,6 +201,8 @@ export function runOrchestratorV2ProviderReplayScenario<
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
+    /** Server settings for the run, over the replay defaults. */
+    readonly serverSettings?: ReplayServerSettings;
   } = {},
 ): Effect.Effect<
   OrchestratorV2ScenarioResult,
@@ -237,10 +245,13 @@ export function layerProviderReplay<Transcript extends ProviderReplayTranscript,
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
+    /** Server settings for the run, over the replay defaults. */
+    readonly serverSettings?: ReplayServerSettings;
     readonly replayGate?: ProviderReplayGate;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
+  | WorkflowApprovalGate.WorkflowApprovalGate
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | CommandOutputRecorder.CommandOutputRecorder
@@ -270,10 +281,13 @@ export function layerWithRegistry<Error>(
     readonly runContinuationWorker?: boolean;
     readonly recoverOnStartup?: boolean;
     readonly continueThreadsAfterServerUpdate?: boolean;
+    /** Server settings for the run, over the replay defaults. */
+    readonly serverSettings?: ReplayServerSettings;
     readonly maxRunningDelegatedTasks?: number;
   } = {},
 ): Layer.Layer<
   | Orchestrator.OrchestratorV2
+  | WorkflowApprovalGate.WorkflowApprovalGate
   | EffectWorker.OrchestrationEffectWorkerV2
   | EventSink.EventSinkV2
   | ProviderSessionManager.ProviderSessionManagerV2
@@ -291,8 +305,7 @@ export function layerWithRegistry<Error>(
           Layer.provide(RuntimePolicy.layer),
         );
   const layerDatabase = options.databaseLayer ?? SqlitePersistence.layerMemory;
-  // One queue shared by the adapters, the orchestrator, and the worker, like
-  // runtimeLayer.ts; layer memoization keeps it a single instance.
+  // Share one continuation queue across adapters, orchestrator, and worker through layer memoization.
   const layerContinuationRequests =
     options.runContinuationWorker === true ? ProviderContinuationRequests.layer : Layer.empty;
   const layerProvidedRegistry = registryLayer.pipe(
@@ -306,6 +319,7 @@ export function layerWithRegistry<Error>(
     ...(options.maxRunningDelegatedTasks === undefined
       ? {}
       : { maxRunningDelegatedTasks: options.maxRunningDelegatedTasks }),
+    ...options.serverSettings,
   }).pipe(Layer.orDie);
   const layerStores = Layer.mergeAll(
     EventStore.layer,
@@ -357,7 +371,6 @@ export function layerWithRegistry<Error>(
     IdAllocator.layer,
     layerProviderEventIngestorProvided,
   );
-  // The real hub, recording what each command streamed so fixtures can assert it.
   const layerCommandOutputHubProvided = CommandOutputRecorder.layer.pipe(
     Layer.provide(Layer.merge(layerEventSinkProvided, layerStores)),
   );
@@ -380,16 +393,21 @@ export function layerWithRegistry<Error>(
   const layerProviderSwitchServiceProvided = ProviderSwitchService.layer.pipe(
     Layer.provide(layerProvidedRegistry),
   );
+  const layerWorkflowApprovalGateProvided = WorkflowApprovalGate.layer.pipe(
+    Layer.provide(Layer.merge(layerStores, layerServerSettings)),
+  );
   const layerRunExecutionServiceProvided = RunExecutionService.layer.pipe(
     Layer.provide(
       Layer.mergeAll(
         McpAppModelContext.layerEmpty,
+        PreviewAgentActivity.layer,
         layerCheckpointServiceProvided,
         layerEventSinkProvided,
         IdAllocator.layer,
         layerProviderEventIngestorProvided,
         layerServerSettings,
         layerStores,
+        layerWorkflowApprovalGateProvided,
       ),
     ),
   );
@@ -412,7 +430,13 @@ export function layerWithRegistry<Error>(
     ),
   );
   const layerProviderTurnControlServiceProvided = ProviderTurnControlService.layer.pipe(
-    Layer.provide(Layer.merge(layerStores, layerProviderSessionManagerProvided)),
+    Layer.provide(
+      Layer.mergeAll(
+        layerStores,
+        layerProviderSessionManagerProvided,
+        layerWorkflowApprovalGateProvided,
+      ),
+    ),
   );
   const layerRuntimeRequestServiceProvided = RuntimeRequestService.layer.pipe(
     Layer.provide(Layer.merge(layerStores, layerProviderSessionManagerProvided)),
@@ -448,7 +472,9 @@ export function layerWithRegistry<Error>(
   const layerThreadTitleRegenerationTest = Layer.succeed(
     ThreadTitleRegenerationService.ThreadTitleRegenerationService,
     ThreadTitleRegenerationService.ThreadTitleRegenerationService.of({
-      execute: () => Effect.void,
+      execute: Effect.fn("ThreadTitleRegenerationService.execute")(function () {
+        return Effect.void;
+      }),
     }),
   );
   const layerOrchestratorProvided = Orchestrator.layer.pipe(
@@ -513,6 +539,7 @@ export function layerWithRegistry<Error>(
   );
   const layerReplayRuntime = Layer.mergeAll(
     layerOrchestratorProvided,
+    layerWorkflowApprovalGateProvided,
     layerProviderSessionManagerProvided,
     layerEffectWorkerProvided,
     layerEventSinkProvided,
@@ -523,8 +550,7 @@ export function layerWithRegistry<Error>(
   if (options.runEffectWorker === false) {
     return layerReplayRuntime;
   }
-  // Built before the runtime it shares stores with, so recovery commits before
-  // the effect worker claims anything, as in serverRuntimeStartup.
+  // Build recovery before runtime so it commits before the effect worker claims work.
   const layerStartupRecovery: Layer.Layer<
     never,
     MigrationError | PlatformError.PlatformError | SqlError

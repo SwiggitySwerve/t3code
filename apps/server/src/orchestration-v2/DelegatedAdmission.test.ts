@@ -69,7 +69,7 @@ const startParent = Effect.gen(function* () {
   });
 });
 
-const delegate = (task: string) =>
+const delegate = (task: string, workspaceStrategy?: { readonly type: "root" }) =>
   Effect.gen(function* () {
     const orchestrator = yield* Orchestrator.OrchestratorV2;
     const parentRun = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.at(-1)!;
@@ -84,6 +84,7 @@ const delegate = (task: string) =>
       runtimeMode: "full-access",
       interactionMode: "default",
       completionWake: "always",
+      ...(workspaceStrategy === undefined ? {} : { workspaceStrategy }),
       createdBy: "agent",
       creationSource: "mcp",
     });
@@ -100,6 +101,19 @@ const firstRun = (threadId: ThreadId) =>
       (item) => item.runId === run.id && item.type === "command_execution",
     );
     return { run, preparationTitle: preparation?.title ?? null };
+  });
+
+/** What the workspace preparer does once a checkout is ready. */
+const releasePrepared = (threadId: ThreadId) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const { run } = yield* firstRun(threadId);
+    yield* orchestrator.dispatch({
+      type: "prepared-run.release",
+      commandId: CommandId.make(`release:${threadId}`),
+      threadId,
+      runId: run.id,
+    });
   });
 
 const stop = (threadId: ThreadId) =>
@@ -156,5 +170,52 @@ it.effect("stopping a waiting task ends it without taking a slot", () =>
     const stillWaiting = yield* firstRun(third);
     assert.equal(stillWaiting.run.status, "preparing");
     assert.equal(stillWaiting.run.admission, "waiting");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a delegate with a prepared workspace waits for a slot when the limit is reached", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* startParent;
+    const first = yield* delegate("first task");
+    const prepared = yield* delegate("prepared task", { type: "root" });
+
+    // Its checkout is not ready yet, so it only holds its place.
+    assert.equal((yield* firstRun(prepared)).run.status, "preparing");
+    yield* releasePrepared(prepared);
+    const waiting = yield* firstRun(prepared);
+    assert.equal(waiting.run.status, "preparing");
+    assert.equal(waiting.run.admission, "waiting");
+    assert.equal(waiting.preparationTitle, "Waiting for a free agent slot");
+
+    const afterSequence = yield* orchestrator.getThreadEventSequence(prepared);
+    yield* stop(first);
+    yield* orchestrator.streamStoredEventsFrom({ threadId: prepared, afterSequence }).pipe(
+      Stream.filter(
+        (stored) =>
+          stored.event.type === "run.updated" && stored.event.payload.status === "starting",
+      ),
+      Stream.runHead,
+      Effect.flatMap(
+        Option.match({ onNone: () => Effect.die("never started"), onSome: () => Effect.void }),
+      ),
+    );
+    const admitted = yield* firstRun(prepared);
+    assert.equal(admitted.run.admission, "admitted");
+    assert.equal(admitted.preparationTitle, "Agent slot free");
+  }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect("a delegate with a prepared workspace starts at once when a slot freed meanwhile", () =>
+  Effect.gen(function* () {
+    yield* startParent;
+    const first = yield* delegate("first task");
+    const prepared = yield* delegate("prepared task", { type: "root" });
+    yield* stop(first);
+    yield* releasePrepared(prepared);
+    const started = yield* firstRun(prepared);
+    assert.equal(started.run.status, "starting");
+    assert.equal(started.run.admission, "admitted");
+    assert.equal(started.preparationTitle, "Workspace ready");
   }).pipe(Effect.provide(layerTest)),
 );

@@ -6,7 +6,11 @@ import {
   makeCodexTurnTokenUsageState,
 } from "../provider/CodexTurnTokenUsage.ts";
 import { normalizeClaudeTurnTokenUsage } from "../provider/ClaudeTurnTokenUsage.ts";
-import { aggregateWorkflowUsage } from "./workflowUsage.ts";
+import {
+  aggregateWorkflowUsage,
+  workflowExecutionTiming,
+  workflowTurnUsage,
+} from "./workflowUsage.ts";
 
 const complete: TurnTokenUsage = {
   usageStatus: "complete",
@@ -19,6 +23,54 @@ const complete: TurnTokenUsage = {
 };
 
 describe("workflow usage", () => {
+  it("preserves open-turn lower bounds without claiming complete usage", () => {
+    for (const status of ["pending", "running"] as const) {
+      const usage = workflowTurnUsage({ status, turnTokenUsage: complete });
+      expect(aggregateWorkflowUsage([usage])).toMatchObject({
+        status: "partial",
+        totalTokens: 120,
+      });
+      expect(aggregateWorkflowUsage([workflowTurnUsage({ status })])).toMatchObject({
+        status: "unavailable",
+        totalTokens: null,
+      });
+    }
+    expect(workflowTurnUsage({ status: "completed", turnTokenUsage: complete })).toBe(complete);
+    expect(complete.usageStatus).toBe("complete");
+  });
+  it("sums execution intervals without queue or retry gaps and retains unknown timing", () => {
+    expect(
+      workflowExecutionTiming([
+        { startedAt: 1000, completedAt: 3000 },
+        { startedAt: 10000, completedAt: 13000 },
+      ]),
+    ).toEqual({ startedAt: 1000, durationMs: 5000, timingComplete: true });
+    expect(
+      workflowExecutionTiming([
+        { startedAt: 1000, completedAt: 3000 },
+        { startedAt: null, completedAt: null },
+      ]),
+    ).toEqual({ startedAt: 1000, durationMs: 2000, timingComplete: false });
+    expect(workflowExecutionTiming([{ startedAt: null, completedAt: null }], 10000)).toEqual({
+      timingComplete: false,
+    });
+    expect(
+      workflowExecutionTiming(
+        [
+          { startedAt: 1000, completedAt: 3000 },
+          { startedAt: 10000, completedAt: null },
+        ],
+        12000,
+      ),
+    ).toEqual({
+      startedAt: 1000,
+      durationMs: 4000,
+      activeStartedAt: 10000,
+      completedDurationMs: 2000,
+      timingComplete: false,
+    });
+    expect(workflowExecutionTiming([])).toEqual({ timingComplete: false });
+  });
   it("sums all turns and retry attempts, with caches included in input", () => {
     expect(aggregateWorkflowUsage([complete, complete, complete])).toEqual({
       status: "complete",

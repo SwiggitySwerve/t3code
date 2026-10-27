@@ -9,7 +9,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as Option from "effect/Option";
 import { McpSchema, McpServer } from "effect/ai";
 
 import * as ServerConfig from "../config.ts";
@@ -102,7 +101,7 @@ const readiness = {
   agentDevice: null,
 };
 const layerProjectsMock = Layer.mock(ProjectService.ProjectService)({
-  getById: () => Effect.succeed(Option.none()),
+  getById: () => Effect.succeedNone,
 });
 
 const layerDeviceServiceMock = Layer.mock(DeviceService.DeviceService)({
@@ -185,10 +184,25 @@ it.effect("registers the device tools and returns the screenshot as image conten
       expect(foreign.isError).toBe(true);
       expect(foreign.content.map((entry) => entry.type)).toEqual(["text"]);
 
+      // A coordinator thread without device access is refused by the handler.
       const denied = yield* server
         .callTool({ name: "device_list", arguments: {} })
-        .pipe(callWith(["preview"]), Effect.provideService(McpSchema.McpServerClient, client));
+        .pipe(
+          callWith(["orchestration", "preview"]),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
       expect(denied.isError).toBe(true);
+      // A workflow member without device access cannot see or call the tool.
+      const hidden = yield* server
+        .callTool({ name: "device_list", arguments: {} })
+        .pipe(
+          callWith(["worktree"]),
+          Effect.provideService(McpSchema.McpServerClient, client),
+          Effect.flip,
+        );
+      expect(String((hidden as { readonly message?: unknown }).message ?? hidden)).toContain(
+        "not found",
+      );
     }),
   ).pipe(Effect.provide(layerTest)),
 );

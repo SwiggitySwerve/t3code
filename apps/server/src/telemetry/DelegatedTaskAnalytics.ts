@@ -1,8 +1,5 @@
 /**
- * Records one anonymous `mcp.delegated_task.finished` event when an app-owned
- * delegated task reaches a final status, so we can see whether delegation
- * between providers actually completes. The event carries the parent and child
- * provider and model, the final status, and the child's runtime in seconds.
+ * Record one anonymous `mcp.delegated_task.finished` event per app-owned task reaching final status.
  *
  * @module DelegatedTaskAnalytics
  */
@@ -14,12 +11,17 @@ import * as Layer from "effect/Layer";
 import * as Stream from "effect/Stream";
 
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
+import { fullWorkflowRowEvent } from "../orchestration-v2/ThreadStream.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import { forkParked } from "../serverActivation.ts";
 import * as AnalyticsService from "./AnalyticsService.ts";
 import { crossProvider, providerDimensions } from "./ProviderDimensions.ts";
 
 type SubagentEvent = Extract<OrchestrationV2DomainEvent, { readonly type: "subagent.updated" }>;
+type WorkflowUpdateEvent = Extract<
+  OrchestrationV2DomainEvent,
+  { readonly type: "workflow.updated" }
+>;
 
 const FINAL_STATUSES: ReadonlySet<string> = new Set([
   "completed",
@@ -30,7 +32,11 @@ const FINAL_STATUSES: ReadonlySet<string> = new Set([
 
 export class DelegatedTaskAnalytics extends Context.Service<
   DelegatedTaskAnalytics,
-  { readonly onSubagent: (event: SubagentEvent) => Effect.Effect<void> }
+  {
+    readonly onSubagent: (event: SubagentEvent) => Effect.Effect<void>;
+    /** Workflow rows finish through patches; report them like any other delegated task. */
+    readonly onWorkflowUpdate: (event: WorkflowUpdateEvent) => Effect.Effect<void>;
+  }
 >()("t3/telemetry/DelegatedTaskAnalytics") {}
 
 const make = Effect.gen(function* () {
@@ -84,13 +90,28 @@ const make = Effect.gen(function* () {
     (effect) => effect.pipe(Effect.ignoreCause),
   );
 
+  const onWorkflowUpdate = Effect.fnUntraced(
+    function* (event: WorkflowUpdateEvent) {
+      const status = event.payload.status;
+      if (status === undefined || !FINAL_STATUSES.has(status)) return;
+      const { subagents } = yield* orchestrator.getThreadRecords(event.threadId, ["subagents"]);
+      const full = fullWorkflowRowEvent(event, subagents);
+      if (full !== undefined) yield* onSubagent(full);
+    },
+    (effect) => effect.pipe(Effect.ignoreCause),
+  );
+
   yield* forkParked(
     Stream.runForEach(orchestrator.streamDomainEvents, (event) =>
-      event.type === "subagent.updated" ? onSubagent(event) : Effect.void,
+      event.type === "subagent.updated"
+        ? onSubagent(event)
+        : event.type === "workflow.updated"
+          ? onWorkflowUpdate(event)
+          : Effect.void,
     ),
   );
 
-  return DelegatedTaskAnalytics.of({ onSubagent });
+  return DelegatedTaskAnalytics.of({ onSubagent, onWorkflowUpdate });
 });
 
 export const layer = Layer.effect(DelegatedTaskAnalytics, make);

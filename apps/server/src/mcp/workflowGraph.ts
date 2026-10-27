@@ -3,7 +3,9 @@ import * as NodeCrypto from "node:crypto";
 
 import type { OrchestrationV2WorkflowPlan } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
+import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
+import { type AdvisoryDrivers, graphAdvisory } from "./workflowAdvisory.ts";
 import {
   FILE_ID,
   type FileRef,
@@ -14,6 +16,7 @@ import {
   scopesOverlap,
   type WorkflowCheck,
 } from "./workflowChecks.ts";
+import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW, maxAgentsPerCall } from "./workflowLimits.ts";
 
 type AttemptBudget = "short" | "standard" | "long";
 const ATTEMPT_BUDGETS = { short: 30 * 60_000, standard: 2 * 60 * 60_000, long: 6 * 60 * 60_000 };
@@ -37,6 +40,8 @@ interface GraphNode {
   readonly dependsOn: ReadonlyArray<string>;
   readonly phase?: string;
   readonly target?: unknown;
+  readonly model?: string;
+  readonly preset?: string;
   readonly role?: string;
   readonly schema?: unknown;
   readonly scopes?: FileScopes;
@@ -48,7 +53,7 @@ interface GraphNode {
   readonly stallTimeoutMs?: number;
 }
 
-interface WorkflowGraph {
+export interface WorkflowGraph {
   readonly schemaVersion: 1;
   readonly name?: string;
   readonly nodes: Readonly<Record<string, GraphNode>>;
@@ -110,56 +115,142 @@ function parseInputs(value: unknown): ReadonlyArray<GraphInput> {
   });
 }
 
-function parseNode(value: unknown): GraphNode {
+type NodeParse = { readonly node: GraphNode } | { readonly problems: ReadonlyArray<string> };
+
+const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
+/** Runs one field's parser. A problem is recorded and the node's other fields are still read. */
+function field<T>(problems: string[], parse: () => T): T | undefined {
+  try {
+    return parse();
+  } catch (error) {
+    problems.push(messageOf(error));
+    return undefined;
+  }
+}
+
+/**
+ * A file list the way `parseAll` reads it. When it fails, each bad entry gets its own problem
+ * where the list parser would name only the first.
+ */
+function fileList<T>(
+  problems: string[],
+  value: unknown,
+  what: "inputs" | "outputs",
+  parseAll: () => T,
+  parseOne: (entry: unknown) => unknown,
+): T | undefined {
+  try {
+    return parseAll();
+  } catch (error) {
+    const found = (Array.isArray(value) ? value : []).flatMap((entry, index) => {
+      try {
+        parseOne(entry);
+        return [];
+      } catch (cause) {
+        const message = messageOf(cause);
+        if (message.startsWith(`${what}[0]`))
+          return [message.replace(`${what}[0]`, `${what}[${index}]`)];
+        return [message.startsWith(`${what}.`) ? message : `${what}[${index}]: ${message}`];
+      }
+    });
+    problems.push(...(found.length > 0 ? found : [messageOf(error)]));
+    return undefined;
+  }
+}
+
+/** Reads every field of a node, so one review reports all its problems. */
+function parseNode(value: unknown): NodeParse {
   const node = record(value);
-  if (node === undefined) throw new Error("node must be an object.");
-  if (!Array.isArray(node.dependsOn)) throw new Error("dependsOn must be an array of node ids.");
-  const dependsOn = [...new Set(node.dependsOn.map((entry) => id(entry, "dependsOn")))].sort();
-  const attemptBudget = node.attemptBudget ?? "standard";
-  if (attemptBudget !== "short" && attemptBudget !== "standard" && attemptBudget !== "long")
-    throw new Error('attemptBudget must be "short", "standard" or "long".');
-  if (node.longBudgetApproved !== undefined && node.longBudgetApproved !== true)
-    throw new Error("longBudgetApproved must be true when supplied.");
-  if (attemptBudget === "long" && node.longBudgetApproved !== true)
-    throw new Error('attemptBudget "long" requires longBudgetApproved: true.');
-  const stallTimeoutMs = node.stallTimeoutMs;
+  if (node === undefined) return { problems: ["node must be an object."] };
+  const problems: string[] = [];
+  const optional = <T>(raw: unknown, parse: (raw: unknown) => T): T | undefined =>
+    raw === undefined ? undefined : field(problems, () => parse(raw));
+  const dependsOn = field(problems, () => {
+    if (!Array.isArray(node.dependsOn)) throw new Error("dependsOn must be an array of node ids.");
+    return [...new Set(node.dependsOn.map((entry) => id(entry, "dependsOn")))].sort();
+  });
+  const attemptBudget = field(problems, (): AttemptBudget => {
+    const budget = node.attemptBudget ?? "standard";
+    if (budget !== "short" && budget !== "standard" && budget !== "long")
+      throw new Error('attemptBudget must be "short", "standard" or "long".');
+    if (node.longBudgetApproved !== undefined && node.longBudgetApproved !== true)
+      throw new Error("longBudgetApproved must be true when supplied.");
+    if (budget === "long" && node.longBudgetApproved !== true)
+      throw new Error('attemptBudget "long" requires longBudgetApproved: true.');
+    return budget;
+  });
+  const stallTimeoutMs = optional(node.stallTimeoutMs, (raw) => {
+    if (typeof raw !== "number" || !Number.isSafeInteger(raw) || raw < 1)
+      throw new Error("stallTimeoutMs must be a positive whole number.");
+    return raw;
+  });
+  const outputs = fileList(
+    problems,
+    node.outputs ?? [],
+    "outputs",
+    () =>
+      parseFileRefs(node.outputs ?? [], "outputs").map(({ id, path, maxBytes }) => ({
+        id,
+        path,
+        maxBytes,
+      })),
+    (entry) => parseFileRefs([entry], "outputs"),
+  );
+  const verify = optional(node.verify, parseCheck);
   if (
-    stallTimeoutMs !== undefined &&
-    (typeof stallTimeoutMs !== "number" ||
-      !Number.isSafeInteger(stallTimeoutMs) ||
-      stallTimeoutMs < 1)
-  )
-    throw new Error("stallTimeoutMs must be a positive whole number.");
-  const outputs = parseFileRefs(node.outputs ?? [], "outputs").map(({ id, path, maxBytes }) => ({
-    id,
-    path,
-    maxBytes,
-  }));
-  const verify = node.verify === undefined ? undefined : parseCheck(node.verify);
-  if (
+    outputs !== undefined &&
     verify?.type === "structured" &&
     verify.outputId !== undefined &&
     !outputs.some((output) => output.id === verify.outputId)
   )
-    throw new Error("verify.outputId names an undeclared output: " + verify.outputId);
+    problems.push("verify.outputId names an undeclared output: " + verify.outputId);
+  const subject = field(problems, () => text(node.subject, "subject"));
+  const description = field(problems, () => text(node.description, "description"));
+  const phase = optional(node.phase, (raw) => text(raw, "phase"));
+  const model = optional(node.model, (raw) => text(raw, "model"));
+  const preset = optional(node.preset, (raw) => text(raw, "preset"));
+  const role = optional(node.role, (raw) => text(raw, "role"));
+  const scopes = optional(node.scopes, parseScopes);
+  const inputs = fileList(
+    problems,
+    node.inputs ?? [],
+    "inputs",
+    () => parseInputs(node.inputs ?? []),
+    (entry) => parseInputs([entry]),
+  );
+  if (
+    problems.length > 0 ||
+    dependsOn === undefined ||
+    attemptBudget === undefined ||
+    outputs === undefined ||
+    inputs === undefined ||
+    subject === undefined ||
+    description === undefined
+  )
+    return { problems };
   return {
-    subject: text(node.subject, "subject"),
-    description: text(node.description, "description"),
-    dependsOn,
-    ...(node.phase === undefined ? {} : { phase: text(node.phase, "phase") }),
-    ...(node.target === undefined ? {} : { target: node.target }),
-    ...(node.role === undefined ? {} : { role: text(node.role, "role") }),
-    ...(node.schema === undefined ? {} : { schema: node.schema }),
-    ...(node.scopes === undefined ? {} : { scopes: parseScopes(node.scopes) }),
-    inputs: parseInputs(node.inputs ?? []),
-    outputs,
-    ...(verify === undefined ? {} : { verify }),
-    attemptBudget,
-    ...(node.longBudgetApproved === true ? { longBudgetApproved: true } : {}),
-    ...(stallTimeoutMs === undefined ? {} : { stallTimeoutMs }),
+    node: {
+      subject,
+      description,
+      dependsOn,
+      ...(phase === undefined ? {} : { phase }),
+      ...(node.target === undefined ? {} : { target: node.target }),
+      ...(model === undefined ? {} : { model }),
+      ...(preset === undefined ? {} : { preset }),
+      ...(role === undefined ? {} : { role }),
+      ...(node.schema === undefined ? {} : { schema: node.schema }),
+      ...(scopes === undefined ? {} : { scopes }),
+      inputs,
+      outputs,
+      ...(verify === undefined ? {} : { verify }),
+      attemptBudget,
+      ...(node.longBudgetApproved === true ? { longBudgetApproved: true } : {}),
+      ...(stallTimeoutMs === undefined ? {} : { stallTimeoutMs }),
+    },
   };
 }
-
 function graphLayers(graph: WorkflowGraph): string[][] {
   const remaining = new Set(Object.keys(graph.nodes).sort());
   const done = new Set<string>();
@@ -196,28 +287,54 @@ export function parseGraph(value: unknown): ParseResult {
   const problems: string[] = [];
   if (source.schemaVersion !== 1) problems.push("schemaVersion must be 1.");
   const rawNodes = record(source.nodes);
-  if (rawNodes === undefined || Object.keys(rawNodes).length === 0)
+  const nodeKeys = rawNodes === undefined ? [] : Object.keys(rawNodes);
+  if (rawNodes === undefined || nodeKeys.length === 0)
     return {
       ok: false,
       problems: [...problems, "nodes must be a non-empty map of node ids to nodes."],
     };
+  // Every node starts an agent, so this much is known before any node is read.
+  if (nodeKeys.length > MAX_AGENTS_PER_WORKFLOW)
+    return {
+      ok: false,
+      problems: [
+        ...problems,
+        `graph has ${nodeKeys.length} nodes, but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW} agents.`,
+      ],
+    };
   const nodes: Record<string, GraphNode> = Object.create(null);
-  for (const key of Object.keys(rawNodes).sort()) {
+  for (const key of nodeKeys.sort()) {
     try {
       id(key, "node");
-      nodes[key] = parseNode(rawNodes[key]);
     } catch (error) {
-      problems.push(key + ": " + (error instanceof Error ? error.message : String(error)));
+      problems.push(key + ": " + messageOf(error));
+      continue;
     }
+    const parsedNode = parseNode(rawNodes[key]);
+    if ("node" in parsedNode) nodes[key] = parsedNode.node;
+    else problems.push(...parsedNode.problems.map((problem) => key + ": " + problem));
   }
   let name: string | undefined;
   if (source.name !== undefined) {
     try {
       name = text(source.name, "name");
     } catch (error) {
-      problems.push(error instanceof Error ? error.message : String(error));
+      problems.push(messageOf(error));
     }
   }
+  // Judgment checks add judge agents, so the nodes' worst case is known once they are read.
+  const agentsNeeded = Object.values(nodes).reduce(
+    (sum, node) => sum + maxAgentsPerCall(node.verify?.type),
+    0,
+  );
+  if (agentsNeeded > MAX_AGENTS_PER_WORKFLOW)
+    return {
+      ok: false,
+      problems: [
+        ...problems,
+        `graph can start up to ${agentsNeeded} agents (each node, plus up to ${MAX_AGENT_ATTEMPTS} judges for each judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
+      ],
+    };
   const paths = new Map<string, string>();
   for (const [key, node] of Object.entries(nodes)) {
     for (const dep of node.dependsOn)
@@ -228,7 +345,12 @@ export function parseGraph(value: unknown): ParseResult {
         problems.push(
           key + ": task_output " + input.id + " producer " + input.nodeId + " is not in dependsOn.",
         );
-      if (!nodes[input.nodeId]?.outputs.some((output) => output.id === input.outputId))
+      // A producer that failed to parse has its own problems; its outputs are not known to be missing.
+      const producer = nodes[input.nodeId];
+      if (
+        (producer !== undefined || !Object.hasOwn(rawNodes, input.nodeId)) &&
+        !producer?.outputs.some((output) => output.id === input.outputId)
+      )
         problems.push(
           key +
             ": task_output " +
@@ -272,7 +394,11 @@ function writePaths(node: GraphNode): string[] {
   ].sort();
 }
 
-export function reviewGraph(value: unknown, inputHashes: Readonly<Record<string, InputHash>>) {
+export function reviewGraph(
+  value: unknown,
+  inputHashes: Readonly<Record<string, InputHash>>,
+  drivers?: AdvisoryDrivers,
+) {
   const parsed = parseGraph(value);
   const inputs: Record<string, InputHash> = Object.create(null);
   const blockers = parsed.ok ? [] : [...parsed.problems];
@@ -314,22 +440,23 @@ export function reviewGraph(value: unknown, inputHashes: Readonly<Record<string,
       ancestors.set(key, found);
       return found;
     };
-    const ordered = layers.flat();
-    ordered.forEach((left, index) => {
-      for (const right of ordered.slice(index + 1)) {
-        if (ancestorsOf(left).has(right) || ancestorsOf(right).has(left)) continue;
-        const a = parsed.graph.nodes[left];
-        const b = parsed.graph.nodes[right];
-        if (a === undefined || b === undefined) continue;
-        const aPaths = writePaths(a);
-        const bPaths = writePaths(b);
-        if (!scopesOverlap(aPaths, bPaths)) continue;
+    // Only nodes that write can conflict, and each one's write paths are worked out once.
+    const writers = layers.flat().flatMap((key) => {
+      const node = parsed.graph.nodes[key];
+      const paths = node === undefined ? [] : writePaths(node);
+      return paths.length === 0 ? [] : [{ key, paths }];
+    });
+    writers.forEach((left, index) => {
+      for (let next = index + 1; next < writers.length; next += 1) {
+        const right = writers[next]!;
+        if (!scopesOverlap(left.paths, right.paths)) continue;
+        if (ancestorsOf(left.key).has(right.key) || ancestorsOf(right.key).has(left.key)) continue;
         writeConflicts.push({
-          nodes: [left, right],
+          nodes: [left.key, right.key],
           paths: [
             ...new Set([
-              ...aPaths.filter((path) => scopesOverlap([path], bPaths)),
-              ...bPaths.filter((path) => scopesOverlap(aPaths, [path])),
+              ...left.paths.filter((path) => scopesOverlap([path], right.paths)),
+              ...right.paths.filter((path) => scopesOverlap(left.paths, [path])),
             ]),
           ].sort(),
         });
@@ -341,6 +468,8 @@ export function reviewGraph(value: unknown, inputHashes: Readonly<Record<string,
     writeConflicts,
     blockers,
     inputs,
+    // Advice only: the digest below never reads it.
+    advisory: parsed.ok ? graphAdvisory(parsed.graph, layers, drivers, inputs) : undefined,
     digest: parsed.ok
       ? "sha256:" +
         NodeCrypto.createHash("sha256")
@@ -397,7 +526,10 @@ const runNode = async (key) => {
           return failedNode("Predecessor " + input.nodeId + " did not return output " + input.outputId + ".", inputDigests);
         }
         const declared = graph.nodes[input.nodeId].outputs.find((ref) => ref.id === input.outputId);
-        pinned = { id: input.id, path: output.path, maxBytes: declared.maxBytes, sha256: output.sha256 };
+        pinned = {
+          id: input.id, path: output.path, maxBytes: declared.maxBytes, sha256: output.sha256,
+          from: input.nodeId,
+        };
       }
       inputs.push(pinned);
       inputDigests[input.id] = pinned.sha256;
@@ -434,15 +566,29 @@ const run = (key) =>
     }
     // Once per node, including those that never reached agent(), so the app can show every node.
     if (recordsNodes) {
-      const { status, attempts, reason } = results[key];
-      node(key, reason ? { status, attempts, reason } : { status, attempts });
+      const { status, attempts, reason, inputs, outputs } = results[key];
+      const recorded = { status, attempts };
+      if (reason) recorded.reason = reason;
+      // Hashes and paths only, never content: the stored provenance a large result may leave out.
+      if (Object.keys(inputs).length > 0) recorded.inputs = inputs;
+      const files = Object.entries(outputs ?? {});
+      if (files.length > 0) {
+        recorded.outputs = Object.fromEntries(files.map(([id, file]) => [
+          id, { path: file.path, sha256: file.sha256, sizeBytes: file.sizeBytes },
+        ]));
+      }
+      node(key, recorded);
     }
     settled += 1;
-    log(settled + "/" + total + " nodes finished; " + key + " " + results[key].status + ".");
+    // The label the app shows for the node, never its key, which only the graph author chose.
+    log(settled + "/" + total + " nodes finished; " + graph.nodes[key].subject + " " + results[key].status + ".");
   }));
 await Promise.all(Object.keys(graph.nodes).sort().map(run));
 const record = { ok: Object.values(results).every((node) => node.status === "passed"), nodes: results };
-// A graph completes only when every node passed; the failed workflow keeps the record.
-if (!record.ok) throw new Error("Graph failed: " + JSON.stringify(record));
+// A graph completes only when every node passed. A failed one throws the summary; each node's
+// inputs and outputs are in the outcomes recorded above, for failed graphs too.
+if (!record.ok) throw new Error((${workflowGraphFailureSummary.toString()})(
+  Object.entries(results).map(([key, outcome]) => ({ ...outcome, label: graph.nodes[key].subject }))
+));
 return record;
 `;

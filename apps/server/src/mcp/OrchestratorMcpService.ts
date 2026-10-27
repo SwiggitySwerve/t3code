@@ -7,9 +7,12 @@ import {
   type RunId,
   isProviderAvailable,
   MessageId,
-  type ModelSelection,
+  ModelSelection,
   NodeId,
+  ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   TurnItemId,
+  WorkflowPresets,
+  type WorkflowPresetTarget,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -17,6 +20,7 @@ import {
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2TurnItem,
   OrchestrationV2WorkflowPlan,
+  type OrchestrationV2WorkflowReviewRecord,
   OrchestratorMcpFailure,
   type OrchestratorMcpCapabilitiesInput,
   type OrchestratorMcpCapabilitiesResult,
@@ -49,7 +53,7 @@ import {
   type OrchestratorMcpScheduledTask,
   type OrchestratorMcpScheduleTaskInput,
   type OrchestratorMcpScheduleTaskResult,
-  type OrchestratorMcpTarget,
+  OrchestratorMcpTarget,
   type OrchestratorMcpTaskCancelInput,
   type OrchestratorMcpTaskCancelResult,
   type OrchestratorMcpUpdateScheduledTaskInput,
@@ -85,10 +89,11 @@ import {
 } from "@t3tools/contracts";
 import { getProviderOptionCurrentValue } from "@t3tools/shared/model";
 import { runRanAfter } from "@t3tools/shared/orchestrationV2ThreadError";
+import { formatThreadLink } from "@t3tools/shared/threadLinks";
 import {
   normalizeThreadPullRequestKey,
   visibleThreadPullRequests,
-} from "@t3tools/shared/threadPullRequests";
+} from "../sourceControl/threadPullRequests.ts";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as Crypto from "effect/Crypto";
@@ -117,12 +122,15 @@ import {
 import { delegatedRunOutcome, runOutcome } from "../orchestration-v2/RestartBackgroundNote.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
+import * as WorkflowApprovalGate from "../orchestration-v2/WorkflowApprovalGate.ts";
+import { sendWithFreshId } from "../orchestration-v2/WorkflowCommandRetry.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { isSnoozed } from "../orchestration-v2/ThreadSettlementService.ts";
 import { userFacingDispatchErrorMessage } from "../orchestration-v2/UserFacingErrors.ts";
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
+import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import {
   clientRuntimeModeCeiling,
@@ -138,8 +146,20 @@ import {
   withResultSchema,
 } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
-import { makeWorkflowRunner, workflowAgentOutcomeCategory } from "./workflowRunner.ts";
-import { aggregateWorkflowUsage } from "./workflowUsage.ts";
+import { makeCheckerResults } from "./workflowCheckerResults.ts";
+import {
+  makeWorkflowRunner,
+  presetPreference,
+  sameWorkflowPresetTarget,
+  selectWorkflowTarget,
+  type WorkflowPreference,
+  workflowAgentOutcomeCategory,
+} from "./workflowRunner.ts";
+import {
+  aggregateWorkflowUsage,
+  workflowExecutionTiming,
+  workflowTurnUsage,
+} from "./workflowUsage.ts";
 import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -150,6 +170,7 @@ import {
 } from "@t3tools/shared/storedWorkflowScript";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { checkWorkflowScript } from "./workflowScript.ts";
+import { workflowReviewRecord } from "./workflowReviewRecord.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
 const MAX_WAIT_TIMEOUT_MS = 60 * 60 * 1_000;
@@ -245,9 +266,7 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpDeleteScheduledTaskInput,
   ) => Effect.Effect<OrchestratorMcpDeleteScheduledTaskResult, OrchestratorMcpFailure>;
-  /**
-   * The value never reaches the agent: the result is a status.
-   */
+  /** Only status reaches the agent, never this value. */
   readonly requestSecret: (
     scope: McpInvocationScope,
     input: OrchestratorMcpRequestSecretInput,
@@ -281,18 +300,31 @@ export class OrchestratorMcpService extends Context.Service<
 
 const isThreadManagementError = Schema.is(ThreadManagementService.ThreadManagementError);
 const decodeWorkflowPlan = Schema.decodeUnknownOption(OrchestrationV2WorkflowPlan);
+const decodeWorkflowCallerSelection = Schema.decodeUnknownOption(ModelSelection);
+const decodeWorkflowTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
+const WorkflowTargetSnapshot = Schema.Union([
+  Schema.Struct({ target: OrchestratorMcpTarget }),
+  Schema.Struct({ error: Schema.String }),
+]);
+const decodeWorkerTargetSnapshot = Schema.decodeUnknownOption(WorkflowTargetSnapshot);
+const decodeWorkflowPresets = Schema.decodeUnknownOption(WorkflowPresets);
+const decodePresetTargets = Schema.decodeUnknownOption(
+  Schema.Record(Schema.String, WorkflowTargetSnapshot),
+);
+const concreteWorkflowTarget = (selection: ModelSelection): OrchestratorMcpTarget => ({
+  providerInstanceId: selection.instanceId,
+  model: selection.model,
+  // The complete resolved options; ordering does not change selection.
+  options: [...(selection.options ?? [])].sort((a, b) => a.id.localeCompare(b.id)),
+  // Frozen: re-resolving at start or after a restart must not pick up the caller's later options.
+  inheritOptions: false,
+});
 
 function failure(code: OrchestratorMcpFailure["code"], message: string): OrchestratorMcpFailure {
   return new OrchestratorMcpFailure({ code, message });
 }
 
-/**
- * A caller's thread is live while it is not archived, runs on the caller's
- * provider instance, and has an active run or a background subagent that
- * instance started. A background subagent outlives its run and calls tools
- * with its thread's credential, which is revoked when the provider process
- * goes away.
- */
+/** Background subagents retain credentials until provider exit; archived threads and other instances cannot act. */
 export const isLiveCallerShell = (
   shell: Pick<
     OrchestrationV2ThreadShell,
@@ -348,6 +380,11 @@ function threadManagementFailure(error: unknown): OrchestratorMcpFailure {
     case "ThreadManagementProviderInstanceDisabledError":
       return failure("invalid_request", error.message);
   }
+}
+
+// Without a reason, a Stop reads as the user's (see RunExecutionService.USER_STOP_REASON).
+function agentStopReason(reason: string | undefined): string {
+  return reason === undefined ? "Stopped by an agent" : `Stopped by an agent: ${reason}`;
 }
 
 function errorMessage(error: unknown): string {
@@ -444,7 +481,6 @@ function providerConstraints(
     constraints.push("No V2 provider adapter is registered.");
   }
   if (provider === undefined) return constraints;
-  // Driver availability comes from the registry, even when health probes are skipped.
   if (!isProviderAvailable(provider)) {
     constraints.push(provider.unavailableReason ?? "Provider driver is unavailable.");
   }
@@ -463,11 +499,7 @@ function providerConstraints(
   return constraints;
 }
 
-/**
- * Models without descriptors skip the descriptor checks (mirroring how model slugs are only
- * validated when the provider advertises models), but duplicate ids always fail: downstream
- * consumers disagree on whether the first or last value of a duplicated id wins.
- */
+/** Skip checks without descriptors; reject duplicate IDs because consumers disagree on precedence. */
 function invalidOptionSelections(
   selections: ReadonlyArray<ProviderOptionSelection>,
   descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined,
@@ -553,6 +585,32 @@ function delegatedTaskRun(
     : childProjection.runs.find((run) => run.id === spawnTransfer.targetRunId);
 }
 
+/** Modern runs name their task; untagged legacy child threads retain thread-level ownership. */
+function workflowTaskRecords(
+  taskId: NodeId,
+  child: Pick<OrchestrationV2ThreadProjection, "runs" | "attempts" | "providerTurns">,
+) {
+  const runs = child.runs.filter(
+    (run) => run.delegatedTaskId === taskId || run.delegatedTaskId === undefined,
+  );
+  const runIds = new Set(runs.map((run) => run.id));
+  const attempts = child.attempts.filter((attempt) => runIds.has(attempt.runId));
+  const attemptIds = new Set([
+    ...attempts.map((attempt) => attempt.id),
+    ...runs.flatMap((run) => (run.activeAttemptId === null ? [] : [run.activeAttemptId])),
+  ]);
+  const rootNodeIds = new Set([
+    ...runs.map((run) => run.rootNodeId),
+    ...attempts.map((attempt) => attempt.rootNodeId),
+  ]);
+  return {
+    runs,
+    providerTurns: child.providerTurns.filter((turn) =>
+      turn.runAttemptId === null ? rootNodeIds.has(turn.nodeId) : attemptIds.has(turn.runAttemptId),
+    ),
+  };
+}
+
 function hasPendingChildRuns(
   childProjection: Pick<OrchestrationV2ThreadProjection, "runs">,
   delegatedRun: OrchestrationV2Run | undefined,
@@ -565,9 +623,7 @@ function hasPendingChildRuns(
   );
 }
 
-function isTerminalTaskStatus(
-  status: OrchestratorMcpDelegateTaskResult["status"],
-): status is TerminalTaskStatus {
+function isTerminalTaskStatus(status: string): status is TerminalTaskStatus {
   return (
     status === "completed" ||
     status === "failed" ||
@@ -812,6 +868,12 @@ export function resolveInteractionMode(
     : Effect.succeed(resolved);
 }
 
+/**
+ * The namespace of command ids for a workflow started on the user's approval. The approval's
+ * start key names the start, so the provider session that makes the call does not.
+ */
+const APPROVED_START_NAMESPACE = "workflow-approval";
+
 function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
@@ -931,7 +993,6 @@ function threadSnooze(
   };
 }
 
-/** The same links `list_thread_pull_requests` reports, without the snapshot details. */
 function threadPullRequests(
   links: OrchestrationV2ThreadShell["pullRequests"],
 ): OrchestratorMcpThreadPullRequest[] {
@@ -952,6 +1013,7 @@ function listItemFromShell(
   return {
     threadId: shell.id,
     title: shell.title,
+    link: formatThreadLink(shell.id, shell.title),
     createdBy: shell.createdBy,
     creationSource: shell.creationSource,
     status: shell.activityRunStatus ?? shell.status,
@@ -984,6 +1046,7 @@ function threadDetail(
     threadId: projection.thread.id,
     projectId: projection.thread.projectId,
     title: projection.thread.title,
+    link: formatThreadLink(projection.thread.id, projection.thread.title),
     createdBy: projection.thread.createdBy,
     creationSource: projection.thread.creationSource,
     status: active?.status ?? latest?.status ?? "idle",
@@ -1097,6 +1160,8 @@ function turnItemText(item: OrchestrationV2TurnItem): string | null {
       return `Created thread ${item.targetThreadId} with ${item.targetProviderInstanceId} (${item.targetModel}).`;
     case "secret_request":
       return `Asked the user for ${item.label}: ${item.secretStatus}.`;
+    case "workflow_review":
+      return `Reviewed a workflow graph with ${item.taskCount} task(s).`;
     case "subagent":
       return item.result ?? item.progress ?? item.prompt;
     case "dynamic_tool":
@@ -1153,11 +1218,18 @@ const make = Effect.gen(function* () {
   const scheduledTasks = yield* ScheduledTaskService.ScheduledTaskService;
   const projects = yield* ProjectService.ProjectService;
   const threadLaunch = yield* ThreadLaunchService.ThreadLaunchService;
+  const workflowApprovalGate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  const loadWorkflowPresets = serverSettings.getSettings.pipe(
+    Effect.map((settings) => settings.workflowPresets),
+    Effect.mapError(() => failure("orchestration_error", "Unable to read workflow presets.")),
+  );
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
+  const { workflowResultsDir } = yield* ServerConfig.ServerConfig;
+  const checkerResults = makeCheckerResults({ dir: workflowResultsDir, fileSystem, path });
 
   const requireProject = (projectId: ProjectId) =>
     projects.getById(projectId).pipe(
@@ -1314,10 +1386,7 @@ const make = Effect.gen(function* () {
     return { ...caller, target } as const;
   });
 
-  /**
-   * A thread caller writes to another thread only while its own run is live,
-   * so a credential that outlived its session cannot reach across threads.
-   */
+  /** Cross-thread writes require a live caller run; stale session credentials cannot authorize them. */
   const assertLiveCallerForOtherThread = (
     scope: McpInvocationScope,
     parent: Pick<OrchestrationV2ThreadProjection, "thread" | "runs"> | undefined,
@@ -1393,11 +1462,7 @@ const make = Effect.gen(function* () {
   const loadOrchestrationCapableInstanceIds = () =>
     providerAdapters.list().pipe(Effect.map((instanceIds) => new Set(instanceIds)));
 
-  /**
-   * Provider snapshots only re-probe while a client is in the foreground, so an
-   * unattended agent can see a provider as unavailable after it was fixed.
-   * Re-probe the requested instance once before refusing it.
-   */
+  /** Background agents miss foreground-only health probes; re-probe once before refusing. */
   const assertTargetEnabledForProject = (
     parent: Pick<OrchestrationV2ThreadProjection, "thread">,
     commandId: CommandId,
@@ -1434,13 +1499,7 @@ const make = Effect.gen(function* () {
     readonly parent: Pick<OrchestrationV2ThreadProjection, "thread">;
     readonly target: OrchestratorMcpTarget | undefined;
     readonly providers: ReadonlyArray<ServerProvider>;
-    /**
-     * Set only when the command that will dispatch this target already has a receipt: that
-     * dispatch can only replay the recorded result, never start anything new, so filtering
-     * candidates by the project's current settings would just refuse a retry that does no new
-     * work. Never set this for a resolution whose dispatch uses a different command id than the
-     * one checked for a receipt.
-     */
+    /** Receipt replays bypass current settings because they start no work. Dispatch must reuse the checked command ID. */
     readonly skipProjectEnablementFilter?: boolean;
   }): Effect.fn.Return<ResolvedTarget, OrchestratorMcpFailure> {
     const requestedInstanceId = input.target?.providerInstanceId;
@@ -1557,7 +1616,10 @@ const make = Effect.gen(function* () {
 
     const inheritsOptions =
       instanceId === inheritedSelection.instanceId && model === inheritedSelection.model;
-    let options = inheritsOptions ? inheritedSelection.options : undefined;
+    let options =
+      inheritsOptions && input.target?.inheritOptions !== false
+        ? inheritedSelection.options
+        : undefined;
     if (requestedOptions !== undefined) {
       const selections = new Map(
         (requestedOptions.length === 0 ? [] : (options ?? [])).map((selection) => [
@@ -1573,6 +1635,133 @@ const make = Effect.gen(function* () {
     return {
       modelSelection: { instanceId, model, ...(options === undefined ? {} : { options }) },
       supportedRuntimeModes: provider.supportedRuntimeModes,
+    };
+  });
+
+  /**
+   * Graph review needs a known concrete assignment: the usual target rules, then the model
+   * must be listed by the provider and the resolved options, inherited ones included, valid
+   * for it. Start runs this again, so a reviewed target is re-checked, not trusted.
+   */
+  const resolveAdvertisedTarget = Effect.fn("OrchestratorMcpService.resolveAdvertisedTarget")(
+    function* (parent: CallerProjection, target: OrchestratorMcpTarget | undefined) {
+      const resolved = yield* resolveTargetRechecking({
+        parent,
+        target,
+        providers: yield* loadProviders,
+      });
+      const selection = resolved.modelSelection;
+      const providers = yield* loadProviders;
+      const model = providers
+        .find((provider) => provider.instanceId === selection.instanceId)
+        ?.models.find((model) => model.slug === selection.model);
+      if (model === undefined) {
+        return yield* failure(
+          "model_unavailable",
+          `Model ${selection.model} is not advertised by provider ${selection.instanceId}.`,
+        );
+      }
+      // Dispatch receives these inherited values explicitly, so validate them too.
+      const invalid = invalidOptionSelections(
+        selection.options ?? [],
+        model.capabilities?.optionDescriptors,
+      );
+      if (invalid.length > 0)
+        return yield* failure(
+          "invalid_request",
+          `Model ${selection.model} on provider ${selection.instanceId} rejected options: ${invalid.join(" ")}`,
+        );
+      return concreteWorkflowTarget(selection);
+    },
+  );
+
+  type ProfileChoice = NonNullable<OrchestratorMcpGraphReviewResult["profiles"]>[number];
+  type ProfileResolution =
+    | {
+        readonly target: OrchestratorMcpTarget;
+        readonly choice: ProfileChoice;
+        /** The profile entry that was chosen, as stored: a start pins exactly this entry. */
+        readonly entry: WorkflowPresetTarget;
+      }
+    | { readonly target: undefined; readonly blocker: string };
+
+  /**
+   * Picks a profile's model: the first preference entry whose provider instance is enabled for
+   * the project and serves the exact model and options; unservable entries are skipped with
+   * their reason. Only `frozen` (the entry an earlier review chose, compared whole) may run, so a
+   * start never changes model. `advertisedModel` asks for the stricter check graph review applies.
+   */
+  const resolveProfile = Effect.fn("OrchestratorMcpService.resolveProfile")(function* (input: {
+    readonly parent: CallerProjection;
+    readonly preference: WorkflowPreference;
+    readonly advertisedModel: boolean;
+    readonly frozen?: WorkflowPresetTarget | undefined;
+  }): Effect.fn.Return<ProfileResolution> {
+    const { parent, preference, frozen } = input;
+    const serve = Effect.fn("OrchestratorMcpService.serveProfileEntry")(function* (
+      entry: WorkflowPresetTarget,
+    ) {
+      const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
+        projectId: parent.thread.projectId,
+        instanceId: entry.providerInstanceId,
+      });
+      if (!enabled) {
+        return yield* failure(
+          "provider_unavailable",
+          `Provider instance ${entry.providerInstanceId} is disabled for this project.`,
+        );
+      }
+      if (input.advertisedModel) return yield* resolveAdvertisedTarget(parent, entry);
+      const resolved = yield* resolveTargetRechecking({
+        parent,
+        target: entry,
+        providers: yield* loadProviders,
+      });
+      return concreteWorkflowTarget(resolved.modelSelection);
+    });
+    const frozenIndex =
+      frozen === undefined
+        ? -1
+        : preference.entries.findIndex((entry) => sameWorkflowPresetTarget(entry, frozen));
+    if (frozen !== undefined && frozenIndex === -1) {
+      return {
+        target: undefined,
+        blocker: `Profile "${preference.presetName}" no longer lists the model that was reviewed, and T3 does not switch to another model. Review the graph again.`,
+      };
+    }
+    const skipped: Array<ProfileChoice["skipped"][number]> = [];
+    for (const [index, entry] of preference.entries.entries()) {
+      if (frozen !== undefined && index !== frozenIndex) continue;
+      const served = yield* serve(entry).pipe(Effect.result);
+      if (served._tag === "Success") {
+        return {
+          target: served.success,
+          entry,
+          choice: {
+            presetId: preference.presetId,
+            presetName: preference.presetName,
+            chosenIndex: index,
+            skipped,
+          },
+        };
+      }
+      skipped.push({
+        index,
+        providerInstanceId: entry.providerInstanceId,
+        model: entry.model,
+        reason: served.failure.message,
+      });
+    }
+    const tried = skipped.map(
+      (entry) =>
+        `${entry.index + 1}. ${entry.providerInstanceId} / ${entry.model}: ${entry.reason}`,
+    );
+    return {
+      target: undefined,
+      blocker:
+        frozen === undefined
+          ? `Profile "${preference.presetName}" has no available model. ${tried.join(" ")}`
+          : `Profile "${preference.presetName}": the reviewed model is no longer available, and T3 does not switch to another model in the profile. Review the graph again. ${tried.join(" ")}`,
     };
   });
 
@@ -1714,9 +1903,10 @@ const make = Effect.gen(function* () {
         instanceId: task.providerInstanceId,
         model: task.model,
       };
-    const response = {
+    const result = {
       taskId: task.id,
       childThreadId: task.childThreadId,
+      link: formatThreadLink(task.childThreadId, childControls.thread.title),
       childRunId: childRun?.id ?? null,
       childNodeId: task.id,
       status,
@@ -1750,6 +1940,10 @@ const make = Effect.gen(function* () {
           : pendingTaskApproval(childControls, task.id, childRun),
       waitTimedOut,
     } satisfies OrchestratorMcpDelegateTaskResult;
+    const response: OrchestratorMcpDelegateTaskResult =
+      endsTaskWait(result) || task.completionDelivery?.state === "disposed"
+        ? result
+        : { ...result, next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT };
     if (
       acknowledgeTerminal &&
       isTerminalTaskStatus(status) &&
@@ -1977,6 +2171,16 @@ const make = Effect.gen(function* () {
   ): McpThreadInvocationScope => ({ ...scope, requestNamespace: `workflow:${workflowId}` });
   const workflowScopes = new Map<NodeId, McpThreadInvocationScope>();
 
+  /** The thread's own checkout: its worktree, else its project's workspace root. */
+  const callerCheckoutRoot = Effect.fn("OrchestratorMcpService.callerCheckoutRoot")(function* (
+    threadId: ThreadId,
+  ) {
+    const parent = yield* loadProjection(threadId);
+    return (
+      parent.thread.worktreePath ?? (yield* requireProject(parent.thread.projectId)).workspaceRoot
+    );
+  });
+
   /**
    * A workspace-relative file in the thread's own checkout, read and hashed up to maxBytes.
    * Workflow agents with declared files, and graphs, share this checkout.
@@ -1986,9 +2190,7 @@ const make = Effect.gen(function* () {
     relativePath: string,
     maxBytes: number,
   ) {
-    const parent = yield* loadProjection(threadId);
-    const root =
-      parent.thread.worktreePath ?? (yield* requireProject(parent.thread.projectId)).workspaceRoot;
+    const root = yield* callerCheckoutRoot(threadId);
     const filePath = path.join(root, relativePath);
     const unreadable = (error: { readonly message: string }) =>
       failure("orchestration_error", `Unable to read ${relativePath}: ${error.message}`);
@@ -2016,6 +2218,17 @@ const make = Effect.gen(function* () {
     } as const;
   });
 
+  // A process check runs a command on the host, so the calling thread must be in full access.
+  // Every ask reads the thread's current mode: its user can lower it while an agent works.
+  const callerCommandAuthority = (threadId: ThreadId) =>
+    threadManagement.getThreadShell(threadId).pipe(
+      Effect.mapError(threadManagementFailure),
+      Effect.map((shell) => ({
+        allowed: shell?.runtimeMode === "full-access",
+        runtimeMode: shell?.runtimeMode ?? null,
+      })),
+    );
+
   const workflowRunner = makeWorkflowRunner({
     threads: threadManagement,
     spawnAgent: Effect.fn("OrchestratorMcpService.spawnWorkflowAgent")(
@@ -2031,7 +2244,13 @@ const make = Effect.gen(function* () {
         }
         const prepared = yield* prepareDelegation({
           scope,
-          parent,
+          parent:
+            workflow.callerSelection === undefined
+              ? parent
+              : {
+                  ...parent,
+                  thread: { ...parent.thread, modelSelection: workflow.callerSelection },
+                },
           providers: yield* loadProviders,
           item,
           requestKey: key,
@@ -2063,9 +2282,7 @@ const make = Effect.gen(function* () {
       },
     ),
     canRunCommands: (workflow) =>
-      loadProjection(workflow.threadId).pipe(
-        Effect.map((projection) => projection.thread.runtimeMode === "full-access"),
-      ),
+      callerCommandAuthority(workflow.threadId).pipe(Effect.map(({ allowed }) => allowed)),
     runCommandCheck: Effect.fn("OrchestratorMcpService.runWorkflowCommandCheck")(
       function* (workflow, childThreadId, check, result, files) {
         const parent = yield* loadProjection(workflow.threadId);
@@ -2102,6 +2319,14 @@ const make = Effect.gen(function* () {
               return {
                 outcome: "error",
                 detail: `Unknown token in ${unknownToken}; checks support {{result}}, and {{input:<id>}} and {{output:<id>}} for the agent's declared files.`,
+              } satisfies CheckOutcome;
+            }
+            // The agent finished some time ago: ask again, right before the process starts.
+            const authority = yield* callerCommandAuthority(workflow.threadId);
+            if (!authority.allowed) {
+              return {
+                outcome: "error",
+                detail: `A process check runs a command, which needs the calling thread in full-access mode; it now runs in ${authority.runtimeMode ?? "an unknown mode"}.`,
               } satisfies CheckOutcome;
             }
             const ran = yield* processRunner
@@ -2156,6 +2381,38 @@ const make = Effect.gen(function* () {
     ),
     readWorkspaceFile: (workflow, relativePath, maxBytes) =>
       readCallerFile(workflow.threadId, relativePath, maxBytes),
+    writeCheckerResult: Effect.fn("OrchestratorMcpService.writeCheckerResult")(
+      function* (_workflow, _taskId, text) {
+        // Outside every checkout, in a folder of the server's own, one file for each check.
+        const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+        return yield* checkerResults
+          .write({ id, text })
+          .pipe(
+            Effect.mapError((error) =>
+              failure(
+                "orchestration_error",
+                `Unable to write a checker result file: ${error.message}`,
+              ),
+            ),
+          );
+      },
+    ),
+    removeCheckerResult: Effect.fn("OrchestratorMcpService.removeCheckerResult")(
+      function* (_workflow, filePath) {
+        // Only the file this check wrote; the folder is shared with other checks.
+        yield* checkerResults.remove(filePath).pipe(
+          Effect.tapError((error) =>
+            Effect.logWarning("Could not remove a checker result file", {
+              path: filePath,
+              error: error.message,
+            }),
+          ),
+          Effect.mapError((error) =>
+            failure("orchestration_error", `Unable to remove ${filePath}: ${error.message}`),
+          ),
+        );
+      },
+    ),
     stopAgent: Effect.fn("OrchestratorMcpService.stopWorkflowAgent")(
       function* (workflow, taskId, childThreadId, why) {
         const commandId = CommandId.make(`command:workflow-stall:${taskId}`);
@@ -2163,55 +2420,276 @@ const make = Effect.gen(function* () {
           why === "timed_out"
             ? "The agent passed its attempt's time budget, so its workflow stopped it."
             : "The agent recorded no activity for too long, so its workflow starts it again.";
-        yield* threadManagement
-          .dispatch({ type: "thread.stop", commandId, threadId: childThreadId, reason })
-          .pipe(Effect.mapError(threadManagementFailure));
-        yield* threadManagement
-          .stopDelegatedTasks({ threadId: childThreadId, commandId, reason })
-          .pipe(Effect.mapError(threadManagementFailure));
+        // The sweep asks again after a refusal, and a failed decide stores a rejection under this
+        // id, so the same id would be refused on every sweep. A stopped thread takes a second stop
+        // without effect, so one more try under a fresh id is safe.
+        yield* sendWithFreshId(commandId, (stopCommandId) =>
+          threadManagement
+            .dispatch({
+              type: "thread.stop",
+              commandId: stopCommandId,
+              threadId: childThreadId,
+              reason,
+            })
+            .pipe(
+              Effect.andThen(
+                threadManagement.stopDelegatedTasks({
+                  threadId: childThreadId,
+                  commandId: stopCommandId,
+                  reason,
+                }),
+              ),
+            ),
+        ).pipe(Effect.mapError(threadManagementFailure));
       },
     ),
-    readAgent: Effect.fn("OrchestratorMcpService.readWorkflowAgent")(function* (workflow, taskId) {
-      const scope = workflowScopes.get(workflow.workflowId);
-      if (scope === undefined) {
-        return yield* failure("orchestration_error", "The workflow is not running here.");
-      }
-      const task = yield* readTask(scope, taskId);
-      const { runs, providerTurns } = yield* threadManagement
-        .getThreadRecords(task.childThreadId, ["runs", "providerTurns"])
-        .pipe(Effect.mapError(threadManagementFailure));
-      const lastRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
-      return {
-        status: task.status,
-        summary: task.summary,
-        cancelledByServerRestart: lastRun?.cancelledByServerRestart === true,
-        outcomeCategory: workflowAgentOutcomeCategory({ status: task.status, started: true }),
-        usage: aggregateWorkflowUsage(
-          providerTurns.length === 0
-            ? [undefined]
-            : providerTurns.map((turn) => turn.turnTokenUsage),
-        ),
-        ...(task.structuredResult === undefined ? {} : { structuredResult: task.structuredResult }),
-        ...(task.structuredResultError === undefined
-          ? {}
-          : { structuredResultError: task.structuredResultError }),
-      };
-    }),
+    awaitAgent: Effect.fn("OrchestratorMcpService.awaitWorkflowAgent")(
+      function* (workflow, taskId, onUpdate) {
+        const scope = workflowScopes.get(workflow.workflowId);
+        if (scope === undefined) {
+          return yield* failure("orchestration_error", "The workflow is not running here.");
+        }
+        // Capture the global cursor before reading either thread, so late commits are replayed.
+        const afterSequence = yield* threadManagement
+          .getThreadEventSequence(scope.thread.threadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        const read = Effect.fn("OrchestratorMcpService.readWorkflowAgent")(function* () {
+          const task = yield* readTask(scope, taskId);
+          const child = yield* threadManagement
+            .getThreadRecords(task.childThreadId, ["runs", "attempts", "providerTurns"])
+            .pipe(Effect.mapError(threadManagementFailure));
+          const { runs, providerTurns } = workflowTaskRecords(taskId, child);
+          const lastRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
+          const parent = yield* threadManagement
+            .getThreadRecords(scope.thread.threadId, ["subagents"])
+            .pipe(Effect.mapError(threadManagementFailure));
+          const recorded = parent.subagents.find((member) => member.id === taskId);
+          const timing = workflowExecutionTiming(
+            runs.map((run) => ({
+              startedAt: run.startedAt === null ? null : DateTime.toEpochMillis(run.startedAt),
+              completedAt:
+                run.completedAt === null ? null : DateTime.toEpochMillis(run.completedAt),
+            })),
+            task.status === "running" || task.status === "waiting"
+              ? yield* Clock.currentTimeMillis
+              : undefined,
+          );
+          const outcome = {
+            timing,
+            status: task.status,
+            summary: task.summary,
+            cancelledByServerRestart: lastRun?.cancelledByServerRestart === true,
+            outcomeCategory: workflowAgentOutcomeCategory({ status: task.status, started: true }),
+            usage: aggregateWorkflowUsage(
+              providerTurns.length === 0 ? [undefined] : providerTurns.map(workflowTurnUsage),
+            ),
+            ...(task.structuredResult === undefined
+              ? {}
+              : { structuredResult: task.structuredResult }),
+            ...(task.structuredResultError === undefined
+              ? {}
+              : { structuredResultError: task.structuredResultError }),
+          };
+          return {
+            outcome,
+            settled:
+              isTerminalTaskStatus(task.status) &&
+              recorded !== undefined &&
+              isTerminalTaskStatus(recorded.status) &&
+              // Adapters persist final usage before the terminal that ends the run.
+              // Ingestion/interrupt failures and legacy rows can leave an open turn
+              // with no event producer. The run is authoritative; its counts stay partial.
+              runs.every(
+                (run) =>
+                  run.completedAt !== null ||
+                  (ThreadManagementService.isTerminalRunStatus(run.status) &&
+                    run.startedAt === null),
+              ),
+          };
+        });
+        const initial = yield* read();
+        onUpdate(initial.outcome);
+        if (initial.settled) return initial.outcome;
+        const task = yield* readTask(scope, taskId);
+        const settled = yield* Stream.mergeAll(
+          [
+            threadManagement
+              .streamStoredEventsFrom({
+                threadId: scope.thread.threadId,
+                afterSequence,
+                eventType: "subagent.updated",
+              })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "subagent.updated" && stored.event.payload.id === taskId,
+                ),
+              ),
+            ...(["run.updated", "provider-turn.updated"] as const).map((eventType) =>
+              threadManagement.streamStoredEventsFrom({
+                threadId: task.childThreadId,
+                afterSequence,
+                eventType,
+              }),
+            ),
+          ],
+          { concurrency: "unbounded" },
+        ).pipe(
+          Stream.mapError(threadManagementFailure),
+          Stream.mapEffect(read),
+          Stream.tap((snapshot) => Effect.sync(() => onUpdate(snapshot.outcome))),
+          Stream.filter((snapshot) => snapshot.settled),
+          Stream.runHead,
+        );
+        if (Option.isNone(settled))
+          return yield* failure(
+            "orchestration_error",
+            "The child event stream ended before settlement.",
+          );
+        return settled.value.outcome;
+      },
+    ),
   });
 
-  type GraphReview = ReturnType<typeof reviewGraph>;
-  // Input hashes of recent reviews by digest, so a refused start can name the files that changed.
-  const reviewedGraphInputs = new Map<string, GraphReview["inputs"]>();
+  const isReviewReady = (review: Pick<GraphReview, "digest" | "blockers">) =>
+    review.digest !== null && review.blockers.length === 0;
+
+  /**
+   * The user's approval gate refused, or could not be checked. The agent reads the message, which
+   * says what to do next.
+   */
+  const approvalFailure = (error: WorkflowApprovalGate.WorkflowApprovalRequiredError) =>
+    failure(
+      error.reason === "unverified" ? "orchestration_error" : "approval_required",
+      error.message,
+    );
+
+  type GraphReview = ReturnType<typeof reviewGraph> & {
+    targets: OrchestratorMcpGraphReviewResult["targets"];
+    profiles: ReadonlyArray<ProfileChoice>;
+    availableProfiles: NonNullable<OrchestratorMcpGraphReviewResult["availableProfiles"]>;
+    expandedGraph: unknown | null;
+  };
+  // Recent reviews by digest: input hashes, so a refused start can name the files that changed,
+  // and the profile entry each profile node chose, which a start may not replace with another.
+  const reviewedGraphs = new Map<
+    string,
+    {
+      readonly inputs: GraphReview["inputs"];
+      readonly profileEntries: Map<string, WorkflowPresetTarget>;
+    }
+  >();
   const REVIEWED_GRAPHS_KEPT = 256;
 
   /** Reviews a graph against the files in the caller's checkout as they are now. */
   const reviewCallerGraph = Effect.fn("OrchestratorMcpService.reviewCallerGraph")(function* (
-    threadId: ThreadId,
+    parent: CallerProjection,
     graph: unknown,
+    workerTarget: OrchestratorMcpTarget | undefined,
+    reviewedProfileEntries?: ReadonlyMap<string, WorkflowPresetTarget>,
   ) {
+    const threadId = parent.thread.id;
     const parsed = parseGraph(graph);
+    const presets = yield* loadWorkflowPresets;
+    let concreteGraph = parsed.ok ? parsed.graph : undefined;
     const hashes: Record<string, GraphReview["inputs"][string]> = {};
+    const targets: OrchestratorMcpGraphReviewResult["targets"][number][] = [];
+    // A profile's choice is reported once, however many nodes use it; a node names it by presetId.
+    const profiles = new Map<string, ProfileChoice>();
+    const profileEntries = new Map<string, WorkflowPresetTarget>();
+    const targetBlockers: string[] = [];
+    const resolveGraphTarget = Effect.fn("OrchestratorMcpService.resolveGraphTarget")(
+      function* (value: unknown, _label: string) {
+        const target =
+          value === undefined
+            ? undefined
+            : yield* decodeWorkflowTarget(value).pipe(
+                Effect.mapError(() => failure("invalid_request", "Invalid target.")),
+              );
+        return yield* resolveAdvertisedTarget(parent, target);
+      },
+      (effect, _value, label) =>
+        effect.pipe(
+          Effect.catch((error) => {
+            targetBlockers.push(`${label}: ${error.message}`);
+            return Effect.undefined;
+          }),
+        ),
+    );
+    // Every node of a profile resolves alike within one review, so a profile is resolved once.
+    const profileResolutions = new Map<
+      string,
+      Array<{
+        readonly frozen: WorkflowPresetTarget | undefined;
+        readonly value: ProfileResolution;
+      }>
+    >();
+    const chooseProfile = Effect.fn("OrchestratorMcpService.chooseGraphProfile")(function* (
+      nodeId: string,
+      preference: WorkflowPreference,
+    ) {
+      const frozen = reviewedProfileEntries?.get(nodeId);
+      const seen = profileResolutions.get(preference.presetId) ?? [];
+      profileResolutions.set(preference.presetId, seen);
+      let resolution = seen.find((entry) =>
+        frozen === undefined || entry.frozen === undefined
+          ? frozen === entry.frozen
+          : sameWorkflowPresetTarget(frozen, entry.frozen),
+      )?.value;
+      if (resolution === undefined) {
+        resolution = yield* resolveProfile({
+          parent,
+          preference,
+          advertisedModel: true,
+          frozen,
+        });
+        seen.push({ frozen, value: resolution });
+      }
+      if (resolution.target === undefined) {
+        targetBlockers.push(`${nodeId}: ${resolution.blocker}`);
+        return undefined;
+      }
+      return resolution;
+    });
     if (parsed.ok) {
+      const nodes: Record<string, (typeof parsed.graph.nodes)[string]> = {};
+      for (const [nodeId, node] of Object.entries(parsed.graph.nodes)) {
+        const selected = selectWorkflowTarget(node, workerTarget, presets);
+        if (selected.error !== undefined) targetBlockers.push(`${nodeId}: ${selected.error}`);
+        const chosen =
+          selected.error === undefined && selected.preference !== undefined
+            ? yield* chooseProfile(nodeId, selected.preference)
+            : undefined;
+        const target =
+          selected.error !== undefined
+            ? undefined
+            : selected.preference === undefined
+              ? yield* resolveGraphTarget(selected.target, nodeId)
+              : chosen?.target;
+        let verify = node.verify;
+        let judgmentTarget: OrchestratorMcpTarget | undefined;
+        if (verify?.type === "judgment") {
+          judgmentTarget = yield* resolveGraphTarget(verify.target ?? target, `${nodeId} judgment`);
+          verify = { ...verify, target: judgmentTarget };
+        }
+        if (chosen !== undefined) {
+          if (!profiles.has(chosen.choice.presetId)) {
+            profiles.set(chosen.choice.presetId, chosen.choice);
+          }
+          profileEntries.set(nodeId, chosen.entry);
+        }
+        if (target !== undefined)
+          targets.push({
+            nodeId,
+            source: selected.source,
+            target,
+            ...(judgmentTarget === undefined ? {} : { judgmentTarget }),
+            ...(chosen === undefined ? {} : { presetId: chosen.choice.presetId }),
+          });
+        const { model: _legacyModel, preset: _preset, ...concreteNode } = node;
+        nodes[nodeId] = { ...concreteNode, target, ...(verify === undefined ? {} : { verify }) };
+      }
+      concreteGraph = { ...parsed.graph, nodes };
       // A file several nodes read is read once, under the largest bound; review checks each.
       const bounds = new Map<string, number>();
       for (const node of Object.values(parsed.graph.nodes)) {
@@ -2228,24 +2706,60 @@ const make = Effect.gen(function* () {
             : file.status;
       }
     }
-    const review = reviewGraph(graph, hashes);
+    // The advisory's token figures depend on the driver that runs each agent, so it is told which.
+    const driverByInstance = new Map(
+      (yield* loadProviders).map((provider) => [provider.instanceId, provider.driver]),
+    );
+    const driverOfTarget = (target: OrchestratorMcpTarget) =>
+      target.providerInstanceId === undefined
+        ? undefined
+        : driverByInstance.get(target.providerInstanceId);
+    const reviewed = reviewGraph(concreteGraph ?? graph, hashes, {
+      coordinator: driverByInstance.get(parent.thread.modelSelection.instanceId),
+      nodes: new Map(targets.map((entry) => [entry.nodeId, driverOfTarget(entry.target)])),
+      judges: new Map(
+        targets.flatMap((entry) =>
+          entry.judgmentTarget === undefined
+            ? []
+            : [[entry.nodeId, driverOfTarget(entry.judgmentTarget)] as const],
+        ),
+      ),
+    });
+    const review: GraphReview = {
+      ...reviewed,
+      targets,
+      profiles: [...profiles.values()],
+      availableProfiles: presets.presets.map((preset) => ({
+        presetId: preset.id,
+        presetName: preset.name,
+      })),
+      expandedGraph:
+        targetBlockers.length === 0 && reviewed.blockers.length === 0
+          ? (concreteGraph ?? null)
+          : null,
+      blockers: [...reviewed.blockers, ...targetBlockers],
+      digest: targetBlockers.length > 0 ? null : reviewed.digest,
+    };
     if (review.digest !== null) {
-      reviewedGraphInputs.delete(review.digest);
-      reviewedGraphInputs.set(review.digest, review.inputs);
-      if (reviewedGraphInputs.size > REVIEWED_GRAPHS_KEPT) {
-        reviewedGraphInputs.delete(reviewedGraphInputs.keys().next().value!);
+      reviewedGraphs.delete(review.digest);
+      reviewedGraphs.set(review.digest, {
+        inputs: review.inputs,
+        profileEntries,
+      });
+      if (reviewedGraphs.size > REVIEWED_GRAPHS_KEPT) {
+        reviewedGraphs.delete(reviewedGraphs.keys().next().value!);
       }
     }
     const compiled =
-      parsed.ok && review.blockers.length === 0
+      concreteGraph !== undefined && review.blockers.length === 0
         ? {
             source: GRAPH_DRIVER_SCRIPT,
-            args: { graph: parsed.graph, inputs: review.inputs },
-            plan: graphPlan(parsed.graph),
-            title: parsed.graph.name ?? "Graph",
+            args: { graph: concreteGraph, inputs: review.inputs },
+            plan: graphPlan(concreteGraph),
+            title: concreteGraph.name ?? "Graph",
           }
         : undefined;
-    return { review, compiled };
+    return { review, compiled, graph: concreteGraph };
   });
 
   /** The input files whose hashes differ from an earlier review, or undefined if it is unknown. */
@@ -2253,16 +2767,26 @@ const make = Effect.gen(function* () {
     acceptedDigest: string,
     current: GraphReview["inputs"],
   ): ReadonlyArray<string> | undefined => {
-    const accepted = reviewedGraphInputs.get(acceptedDigest);
+    const accepted = reviewedGraphs.get(acceptedDigest)?.inputs;
     if (accepted === undefined) return undefined;
     return [...new Set([...Object.keys(accepted), ...Object.keys(current)])]
       .filter((file) => JSON.stringify(accepted[file]) !== JSON.stringify(current[file]))
       .toSorted();
   };
 
-  const graphReviewResult = (review: GraphReview): OrchestratorMcpGraphReviewResult => ({
+  const graphReviewResult = (
+    review: GraphReview,
+    decision: Pick<OrchestratorMcpGraphReviewResult, "reviewId" | "approvalRequired">,
+  ): OrchestratorMcpGraphReviewResult => ({
+    ...decision,
     digest: review.digest,
-    ready: review.digest !== null && review.blockers.length === 0,
+    ready: isReviewReady(review),
+    targets: review.targets,
+    ...(review.profiles.length === 0 ? {} : { profiles: review.profiles }),
+    ...(review.availableProfiles.length === 0
+      ? {}
+      : { availableProfiles: review.availableProfiles }),
+    expandedGraph: review.expandedGraph,
     layers: review.layers,
     writeConflicts: review.writeConflicts,
     inputs: Object.entries(review.inputs).map(([filePath, hash]) =>
@@ -2271,6 +2795,48 @@ const make = Effect.gen(function* () {
         : { path: filePath, status: "found", sha256: hash.sha256, sizeBytes: hash.sizeBytes },
     ),
     blockers: review.blockers,
+    ...(review.advisory === undefined ? {} : { advisory: review.advisory }),
+  });
+
+  /**
+   * Writes the approval record of a review as a turn item of the caller's run, where clients read
+   * it from. A review the person has to approve is refused when its record cannot be written,
+   * because a card the person cannot see is a review they cannot decide; any other review only
+   * loses its card.
+   */
+  const recordGraphReview = Effect.fn("OrchestratorMcpService.recordGraphReview")(function* (
+    scope: McpThreadInvocationScope,
+    parent: CallerProjection,
+    review: OrchestrationV2WorkflowReviewRecord,
+  ) {
+    const cause = yield* Effect.gen(function* () {
+      const run = yield* requireDelegatingRun(scope, parent);
+      yield* threadManagement.dispatch({
+        type: "workflow.review.record",
+        commandId: stableCommandId({
+          scope,
+          requestKey: review.reviewId,
+          operation: "workflow-review-record",
+        }),
+        threadId: scope.thread.threadId,
+        runId: run.id,
+        nodeId: run.rootNodeId,
+        turnItemId: TurnItemId.make(
+          `turn-item:workflow-review:${stablePart(scope.thread.threadId)}:${stablePart(review.reviewId)}`,
+        ),
+        review,
+      });
+    }).pipe(
+      Effect.match({ onSuccess: () => undefined, onFailure: (error) => errorMessage(error) }),
+    );
+    if (cause === undefined) return;
+    if (review.approvalRequired) {
+      return yield* failure(
+        "orchestration_error",
+        `Could not record the review for the user to approve: ${cause} Call graph_review again.`,
+      );
+    }
+    yield* Effect.logWarning("Could not record a graph review", { cause });
   });
 
   /**
@@ -2294,6 +2860,36 @@ const make = Effect.gen(function* () {
     const key = yield* requestKey(input.clientRequestId);
     const commandId = stableCommandId({ scope, requestKey: key, operation: "workflow-start" });
     const workflowId = NodeId.make(String(commandId).replace(/^command:/, "workflow:"));
+    const workflowPresets = yield* loadWorkflowPresets;
+    const snapshotTarget = Effect.fn("OrchestratorMcpService.snapshotWorkflowTarget")(function* (
+      target: OrchestratorMcpTarget,
+    ) {
+      return yield* resolveTargetRechecking({
+        parent,
+        target,
+        providers: yield* loadProviders,
+      }).pipe(
+        Effect.map((resolved) => ({ target: concreteWorkflowTarget(resolved.modelSelection) })),
+        Effect.catch((error) => Effect.succeed({ error: error.message })),
+      );
+    });
+    // A profile resolves once, here; the run and every resume use this choice, never the order.
+    const presetTargets: Record<string, typeof WorkflowTargetSnapshot.Type> = Object.create(null);
+    for (const preset of workflowPresets.presets) {
+      const resolution = yield* resolveProfile({
+        parent,
+        preference: presetPreference(preset),
+        advertisedModel: false,
+      });
+      presetTargets[preset.id] =
+        resolution.target === undefined
+          ? { error: resolution.blocker }
+          : { target: resolution.target };
+    }
+    // Defaults must not depend on catalog order after a restart. Keep failure until
+    // an agent actually selects the default: its own target can still override it.
+    const workerTargetSnapshot =
+      input.workerTarget === undefined ? undefined : yield* snapshotTarget(input.workerTarget);
     const afterSequence = yield* threadManagement
       .getThreadEventSequence(scope.thread.threadId)
       .pipe(Effect.mapError(threadManagementFailure));
@@ -2308,8 +2904,13 @@ const make = Effect.gen(function* () {
         workflowId,
         title: input.title ?? "Workflow",
         script: storedWorkflowScript(input.script, {
+          callerSelection: parent.thread.modelSelection,
+          workflowPresets,
+          presetTargets,
           ...(input.args === undefined ? {} : { args: input.args }),
           ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+          ...(input.workerTarget === undefined ? {} : { workerTarget: input.workerTarget }),
+          ...(workerTargetSnapshot === undefined ? {} : { workerTargetSnapshot }),
           ...(plan === undefined ? {} : { plan }),
         }),
       })
@@ -2323,18 +2924,56 @@ const make = Effect.gen(function* () {
       return yield* failure("orchestration_error", "The workflow did not start.");
     }
     if (started.status === "running" && !workflowRunner.isRunning(workflowId)) {
-      workflowScopes.set(workflowId, workflowScope(scope, workflowId));
-      yield* workflowRunner.launch({
-        workflowId,
-        threadId: scope.thread.threadId,
-        source: input.script,
-        args: input.args ?? null,
-        ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
-        ...(plan === undefined ? {} : { plan }),
-        afterSequence,
-      });
+      yield* resumeWorkflow(started, workflowScope(scope, workflowId), afterSequence);
     }
     return yield* workflowResult(yield* loadProjection(scope.thread.threadId), started);
+  });
+
+  /**
+   * The start of a reviewed graph, past the approval gate: the graph the caller sends is reviewed
+   * again and must still match the digest the caller accepted.
+   */
+  const startReviewedGraph = Effect.fn("OrchestratorMcpService.startReviewedGraph")(function* (
+    scope: McpThreadInvocationScope,
+    input: OrchestratorMcpGraphStartInput,
+  ) {
+    const parent = yield* loadProjection(scope.thread.threadId);
+    const { review, compiled } = yield* reviewCallerGraph(
+      parent,
+      input.graph,
+      input.workerTarget,
+      reviewedGraphs.get(input.acceptedDigest)?.profileEntries,
+    );
+    if (review.blockers.length > 0 || compiled === undefined) {
+      return yield* failure(
+        "invalid_request",
+        `The graph has blockers: ${review.blockers.join("; ")}`,
+      );
+    }
+    if (review.digest !== input.acceptedDigest) {
+      const changed = changedGraphInputs(input.acceptedDigest, review.inputs);
+      return yield* failure(
+        "invalid_request",
+        changed === undefined
+          ? // Reviews live in memory, so a restart forgets them; the digest alone cannot say what changed.
+            "Review not found: no review with that digest is on record (reviews do not survive a server restart), and the graph or its input files no longer match it. Run graph_review again."
+          : changed.length > 0
+            ? `Input files changed since review: ${changed.join(", ")}. Review the graph again.`
+            : "The graph changed since review (digest mismatch); review it again.",
+      );
+    }
+    return yield* startWorkflow(
+      scope,
+      parent,
+      {
+        script: compiled.source,
+        args: compiled.args,
+        title: input.title ?? compiled.title,
+        ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+        ...(input.clientRequestId === undefined ? {} : { clientRequestId: input.clientRequestId }),
+      },
+      compiled.plan,
+    );
   });
 
   const findWorkflow = (
@@ -2371,24 +3010,26 @@ const make = Effect.gen(function* () {
       [...members.values()],
       (member) =>
         Effect.gen(function* () {
-          const child =
+          const childRecords =
             member.childThreadId === null
               ? null
               : yield* threadManagement
-                  .getThreadRecords(member.childThreadId, ["runs", "providerTurns"])
+                  .getThreadRecords(member.childThreadId, ["runs", "attempts", "providerTurns"])
                   .pipe(Effect.mapError(threadManagementFailure));
+          const child = childRecords === null ? null : workflowTaskRecords(member.id, childRecords);
           return {
             member,
             child,
             usage:
               child === null || child.providerTurns.length === 0
                 ? [undefined]
-                : child.providerTurns.map((turn) => turn.turnTokenUsage),
+                : child.providerTurns.map(workflowTurnUsage),
           };
         }),
       { concurrency: 8 },
     );
     const usage = aggregateWorkflowUsage(records.flatMap((record) => record.usage));
+    const nodes = workflow.workflow?.nodeOutcomes;
     const epoch = (value: DateTime.Utc | null | undefined) =>
       value == null ? null : DateTime.toEpochMillis(value);
     const edge = (values: ReadonlyArray<number | null>, latest = false) => {
@@ -2474,6 +3115,8 @@ const make = Effect.gen(function* () {
       tokensUsed: usage.totalTokens,
       budgetTokens: storedBudget(workflow.prompt) ?? null,
       result: workflow.result,
+      // A graph's stored provenance: what its result may leave out when it is large.
+      ...(nodes === undefined || Object.keys(nodes).length === 0 ? {} : { nodes }),
     } satisfies OrchestratorMcpWorkflowResult;
   });
 
@@ -2495,6 +3138,8 @@ const make = Effect.gen(function* () {
 
   const resumeWorkflow = Effect.fn("OrchestratorMcpService.resumeWorkflow")(function* (
     row: OrchestrationV2Subagent,
+    scope = resumedWorkflowScope(row),
+    afterSequence = 0,
   ) {
     const stored = yield* Effect.try({
       try: () => parseStoredWorkflowScript(row.prompt),
@@ -2504,32 +3149,70 @@ const make = Effect.gen(function* () {
       stored._tag === "Some" && stored.value.plan !== undefined
         ? decodeWorkflowPlan(stored.value.plan)
         : Option.none();
-    if (stored._tag === "None" || (stored.value.plan !== undefined && Option.isNone(plan))) {
-      yield* threadManagement
-        .dispatch({
-          type: "workflow.complete",
-          commandId: CommandId.make(`command:workflow-complete:${row.id}`),
-          threadId: row.threadId,
-          workflowId: row.id,
-          status: "failed",
-          result: "The workflow could not resume: its stored arguments are unreadable.",
-        })
-        .pipe(Effect.ignore);
+    const callerSelection =
+      stored._tag === "Some" && stored.value.callerSelection !== undefined
+        ? decodeWorkflowCallerSelection(stored.value.callerSelection)
+        : Option.none();
+    const workerTargetSnapshot =
+      stored._tag === "Some" && stored.value.workerTargetSnapshot !== undefined
+        ? decodeWorkerTargetSnapshot(stored.value.workerTargetSnapshot)
+        : Option.none();
+    const workflowPresets =
+      stored._tag === "Some" && stored.value.workflowPresets !== undefined
+        ? decodeWorkflowPresets(stored.value.workflowPresets)
+        : Option.none();
+    const presetTargets =
+      stored._tag === "Some" && stored.value.presetTargets !== undefined
+        ? decodePresetTargets(stored.value.presetTargets)
+        : Option.none();
+    if (
+      stored._tag === "None" ||
+      (stored.value.plan !== undefined && Option.isNone(plan)) ||
+      (stored.value.callerSelection !== undefined && Option.isNone(callerSelection)) ||
+      (stored.value.workerTargetSnapshot !== undefined && Option.isNone(workerTargetSnapshot)) ||
+      (stored.value.workflowPresets !== undefined && Option.isNone(workflowPresets)) ||
+      (stored.value.presetTargets !== undefined && Option.isNone(presetTargets))
+    ) {
+      // An earlier start may have left a rejection under the usual id; the row is still running.
+      yield* sendWithFreshId(
+        CommandId.make(`command:workflow-complete:${row.id}`),
+        (completeCommandId) =>
+          threadManagement.dispatch({
+            type: "workflow.complete",
+            commandId: completeCommandId,
+            threadId: row.threadId,
+            workflowId: row.id,
+            status: "failed",
+            result: "The workflow could not resume: its stored arguments are unreadable.",
+          }),
+      ).pipe(Effect.ignore);
       return false;
     }
-    workflowScopes.set(row.id, resumedWorkflowScope(row));
+    workflowScopes.set(row.id, scope);
     // Replaying the thread's task updates from the start tells the script which of
     // its agents already finished.
     yield* workflowRunner.launch({
       workflowId: row.id,
+      ...(row.workflow === undefined ? {} : { previousWorkflow: row.workflow }),
       threadId: row.threadId,
       source: stored.value.source,
       args: stored.value.args,
+      ...(Option.isSome(workflowPresets) ? { workflowPresets: workflowPresets.value } : {}),
+      ...(Option.isSome(presetTargets) ? { presetTargets: presetTargets.value } : {}),
+      ...(Option.isSome(workerTargetSnapshot) && "target" in workerTargetSnapshot.value
+        ? { workerTarget: workerTargetSnapshot.value.target }
+        : stored.value.workerTarget === undefined
+          ? {}
+          : { workerTarget: stored.value.workerTarget }),
+      ...(Option.isSome(workerTargetSnapshot) && "error" in workerTargetSnapshot.value
+        ? { workerTargetError: workerTargetSnapshot.value.error }
+        : {}),
+      ...(Option.isSome(callerSelection) ? { callerSelection: callerSelection.value } : {}),
       ...(stored.value.budgetTokens === undefined
         ? {}
         : { budgetTokens: stored.value.budgetTokens }),
       ...(Option.isSome(plan) ? { plan: plan.value } : {}),
-      afterSequence: 0,
+      afterSequence,
     });
     return true;
   });
@@ -2592,8 +3275,7 @@ const make = Effect.gen(function* () {
           "orchestration_error",
           `Unable to watch delegated task ${taskId}: ${errorMessage(error)}`,
         );
-      // Sequences are global, so one cursor taken before the first read
-      // replays anything either thread records after it.
+      // One global cursor before both reads captures later events from either thread.
       const afterSequence = yield* threadManagement
         .getThreadEventSequence(scope.thread.threadId)
         .pipe(Effect.mapError(streamError));
@@ -2802,9 +3484,7 @@ const make = Effect.gen(function* () {
             : input.bindToCurrentThread && parent !== undefined
               ? parent.thread.id
               : null;
-        // Rebinding changes where runs execute, so the workspace strategy must
-        // follow: unbinding a root-strategy task would otherwise run loose
-        // prompts in the shared project checkout.
+        // Update workspace strategy on rebinding so unbound root tasks cannot run in the shared checkout.
         const workspaceStrategy =
           input.bindToCurrentThread === undefined
             ? existing.workspaceStrategy
@@ -2885,6 +3565,7 @@ const make = Effect.gen(function* () {
             label: input.label,
             reason: input.reason,
             ...(input.placeholder === undefined ? {} : { placeholder: input.placeholder }),
+            ...(input.delivery === "file" ? { delivery: "file" as const } : {}),
             secretStatus,
           })
           .pipe(
@@ -2963,6 +3644,12 @@ const make = Effect.gen(function* () {
       yield* Effect.annotateCurrentSpan({ "secret_request.status": status });
       yield* Metrics.increment(Metrics.secretRequestsTotal, { status });
       if (status !== "saved") return { status };
+      if (input.delivery === "file") {
+        const file = yield* secretRequests
+          .saveToFile({ threadId, turnItemId })
+          .pipe(Effect.mapError((error) => failure("orchestration_error", error.message)));
+        return { status, file };
+      }
       const secretRef = yield* secretRequests.savedRef({ threadId: threadId, turnItemId });
       if (Option.isNone(secretRef)) {
         return yield* failure(
@@ -2987,6 +3674,7 @@ const make = Effect.gen(function* () {
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
         inheritedModel: inherited?.model ?? null,
         inheritedOptions: inherited?.options ?? [],
+        workflowPresets: settings.workflowPresets,
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         providers: providers.map((provider) => {
@@ -3159,51 +3847,65 @@ const make = Effect.gen(function* () {
     ),
     workflowStart: Effect.fn("OrchestratorMcpService.workflowStart")(
       function* (callerScope, input) {
-        const { scope, parent } = yield* loadThreadCaller(callerScope, "workflow_start");
+        yield* requireCapability(callerScope);
+        const scope = yield* requireThreadScope(callerScope, "workflow_start");
+        // While the user's request for a workflow waits for approval, a script has no review to
+        // approve, so it does not start.
+        yield* workflowApprovalGate
+          .requireNoRequest(scope.thread.threadId)
+          .pipe(Effect.mapError(approvalFailure));
+        const parent = yield* loadProjection(scope.thread.threadId);
         return yield* startWorkflow(scope, parent, input);
       },
     ),
     graphReview: Effect.fn("OrchestratorMcpService.graphReview")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "graph_review");
       yield* requireCapability(scope);
-      const { review } = yield* reviewCallerGraph(scope.thread.threadId, input.graph);
-      return graphReviewResult(review);
+      // The request this review belongs to is taken before any of its work: a review that
+      // finishes under a newer request is stale and is not recorded.
+      const ticket = yield* workflowApprovalGate
+        .beginReview(scope.thread.threadId)
+        .pipe(Effect.mapError(approvalFailure));
+      const parent = yield* loadProjection(scope.thread.threadId);
+      const { review, graph } = yield* reviewCallerGraph(parent, input.graph, input.workerTarget);
+      // The review gets its id here, where it is produced. The client decides about it by this
+      // id and the digest; nothing the provider echoes back is read.
+      const reviewId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+      const { approvalRequired } = yield* workflowApprovalGate
+        .completeReview(ticket, {
+          environmentId: scope.environmentId,
+          reviewId,
+          digest: review.digest,
+          ready: isReviewReady(review),
+        })
+        .pipe(Effect.mapError(approvalFailure));
+      const result = graphReviewResult(review, { reviewId, approvalRequired });
+      yield* recordGraphReview(scope, parent, workflowReviewRecord(result, graph));
+      return result;
     }),
     graphStart: Effect.fn("OrchestratorMcpService.graphStart")(function* (callerScope, input) {
-      const { scope, parent } = yield* loadThreadCaller(callerScope, "graph_start");
-      const { review, compiled } = yield* reviewCallerGraph(scope.thread.threadId, input.graph);
-      if (review.blockers.length > 0 || compiled === undefined) {
-        return yield* failure(
-          "invalid_request",
-          `The graph has blockers: ${review.blockers.join("; ")}`,
+      yield* requireCapability(callerScope);
+      const scope = yield* requireThreadScope(callerScope, "graph_start");
+      // The gate wraps the whole start, before the graph is rebuilt: a rebuilt graph can never
+      // stand in for approval. An approved start runs under the approval's own key, whatever key
+      // the agent sent, in a namespace of its own, so a retry finds the committed workflow even
+      // from another provider session.
+      return yield* workflowApprovalGate
+        .guardGraphStart(
+          { threadId: scope.thread.threadId, digest: input.acceptedDigest },
+          (startKey) =>
+            startKey === undefined
+              ? startReviewedGraph(scope, input)
+              : startReviewedGraph(
+                  { ...scope, requestNamespace: APPROVED_START_NAMESPACE },
+                  { ...input, clientRequestId: startKey },
+                ),
+        )
+        .pipe(
+          Effect.catchTags({
+            WorkflowApprovalRequiredError: (error) => Effect.fail(approvalFailure(error)),
+          }),
         );
-      }
-      if (review.digest !== input.acceptedDigest) {
-        const changed = changedGraphInputs(input.acceptedDigest, review.inputs);
-        return yield* failure(
-          "invalid_request",
-          changed === undefined
-            ? // Reviews live in memory, so a restart forgets them; the digest alone cannot say what changed.
-              "Review not found: no review with that digest is on record (reviews do not survive a server restart), and the graph or its input files no longer match it. Run graph_review again."
-            : changed.length > 0
-              ? `Input files changed since review: ${changed.join(", ")}. Review the graph again.`
-              : "The graph changed since review (digest mismatch); review it again.",
-        );
-      }
-      return yield* startWorkflow(
-        scope,
-        parent,
-        {
-          script: compiled.source,
-          args: compiled.args,
-          title: input.title ?? compiled.title,
-          ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
-          ...(input.clientRequestId === undefined
-            ? {}
-            : { clientRequestId: input.clientRequestId }),
-        },
-        compiled.plan,
-      );
     }),
     workflowStatus: Effect.fn("OrchestratorMcpService.workflowStatus")(
       function* (callerScope, input) {
@@ -3272,6 +3974,8 @@ const make = Effect.gen(function* () {
             .streamStoredEventsFrom({
               threadId: scope.thread.threadId,
               afterSequence,
+              // Workflows cannot be waited on here (readTask refuses them), so only delegated
+              // task rows matter; filtering keeps transcript events out of this stream.
               eventType: "subagent.updated",
             })
             .pipe(
@@ -3409,14 +4113,14 @@ const make = Effect.gen(function* () {
               );
       const stopChild = Effect.gen(function* () {
         const commandId = stableCommandId({ scope, requestKey: key, operation: "cancel-task" });
-        const reason = input.reason;
+        const reason = agentStopReason(input.reason);
         yield* threadManagement
           .dispatch({
             type: "thread.stop",
             commandId,
             threadId: current.childThreadId,
             stopDelegatedTasks: false,
-            ...(reason === undefined ? {} : { reason }),
+            reason,
           })
           .pipe(
             Effect.mapError((error) =>
@@ -3485,29 +4189,27 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
-      // A follow-up that lost its child run (#19002) stays running on the parent, while its
+      // A follow-up that lost its child run stays running on the parent, while its
       // status here comes from the child's last run. Stop on the parent cancels that task.
       const cancelOrphan = Effect.gen(function* () {
         if (parentTask?.runId == null || !isOrchestrationV2WorkActive(parentTask.status))
           return false;
-        yield* threadManagement
-          .dispatch({
-            type: "subagent.stop",
-            commandId: stableCommandId({
-              scope,
-              requestKey: key,
-              operation: "cancel-task-orphan",
-            }),
-            threadId: scope.thread.threadId,
-            runId: parentTask.runId,
-            subagentId: parentTask.id,
-          })
-          .pipe(Effect.mapError(threadManagementFailure));
-        const { subagents } = yield* threadManagement
-          .getThreadRecords(scope.thread.threadId, ["subagents"])
-          .pipe(Effect.mapError(threadManagementFailure));
+        yield* threadManagement.dispatch({
+          type: "subagent.stop",
+          commandId: stableCommandId({
+            scope,
+            requestKey: key,
+            operation: "cancel-task-orphan",
+          }),
+          threadId: scope.thread.threadId,
+          runId: parentTask.runId,
+          subagentId: parentTask.id,
+        });
+        const { subagents } = yield* threadManagement.getThreadRecords(scope.thread.threadId, [
+          "subagents",
+        ]);
         return subagents.some((task) => task.id === input.taskId && task.status === "cancelled");
-      });
+      }).pipe(Effect.mapError(threadManagementFailure));
       if (isTerminalTaskStatus(current.status)) {
         // The child can still run work for another turn, so it is stopped either way.
         yield* stopWithinLimit;
@@ -3703,6 +4405,7 @@ const make = Effect.gen(function* () {
                 );
               return {
                 threadId,
+                link: formatThreadLink(threadId, projection.thread.title),
                 runId: run?.id ?? null,
                 status: run?.status ?? "idle",
                 title: projection.thread.title,
@@ -3894,6 +4597,7 @@ const make = Effect.gen(function* () {
         );
       return {
         threadId: input.threadId,
+        link: formatThreadLink(input.threadId, target.thread.title),
         messageId,
         runId: result.run.id,
         ...(result.run.delegatedTaskId === undefined ? {} : { taskId: result.run.delegatedTaskId }),
@@ -3902,7 +4606,7 @@ const make = Effect.gen(function* () {
       } satisfies OrchestratorMcpThreadSendResult;
     }),
     waitForThread: Effect.fn("OrchestratorMcpService.waitForThread")(function* (scope, input) {
-      const { target } = yield* loadScopedThread(scope, input.threadId);
+      const { parent, target } = yield* loadScopedThread(scope, input.threadId);
       const result = yield* threadManagement
         .waitForThread({
           projectId: target.thread.projectId,
@@ -3914,11 +4618,33 @@ const make = Effect.gen(function* () {
           ),
         })
         .pipe(Effect.mapError(threadManagementFailure));
+      const status = result.run === null ? "idle" : runOutcome(result.run);
+      const taskId = result.run?.delegatedTaskId;
+      const ownedTask =
+        result.timedOut &&
+        status !== "waiting" &&
+        parent?.subagents.some(
+          (task) =>
+            task.id === taskId &&
+            task.origin === "app_owned" &&
+            task.threadId === parent.thread.id &&
+            task.childThreadId === input.threadId &&
+            task.completionDelivery?.state !== "disposed",
+        ) === true;
+      // A child waiting on a question or approval needs an answer, not a wake.
+      const childRequests = ownedTask
+        ? (yield* threadManagement
+            .getThreadRecords(input.threadId, ["runtimeRequests"])
+            .pipe(Effect.mapError(threadManagementFailure))).runtimeRequests
+        : [];
+      const wakesCaller =
+        ownedTask && !childRequests.some((request) => request.status === "pending");
       return {
         threadId: input.threadId,
         runId: result.run?.id ?? null,
-        status: result.run === null ? "idle" : runOutcome(result.run),
+        status,
         timedOut: result.timedOut,
+        ...(wakesCaller ? { next: ORCHESTRATOR_MCP_RUNNING_TASK_NEXT } : {}),
       } satisfies OrchestratorMcpThreadWaitResult;
     }),
     interruptThread: Effect.fn("OrchestratorMcpService.interruptThread")(function* (scope, input) {
@@ -3937,7 +4663,7 @@ const make = Effect.gen(function* () {
           }),
           threadId: input.threadId,
           ...(input.runId === undefined ? {} : { runId: input.runId }),
-          ...(input.reason === undefined ? {} : { reason: input.reason }),
+          reason: agentStopReason(input.reason),
         })
         .pipe(
           Effect.mapError((error) =>
@@ -3971,6 +4697,7 @@ export const layer: Layer.Layer<
   | Crypto.Crypto
   | ThreadManagementService.ThreadManagementService
   | ThreadLaunchService.ThreadLaunchService
+  | WorkflowApprovalGate.WorkflowApprovalGate
   | GitVcsDriver.GitVcsDriver
   | ProviderRegistry.ProviderRegistry
   | ProviderAdapterRegistry.ProviderAdapterRegistryV2
@@ -3979,6 +4706,7 @@ export const layer: Layer.Layer<
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
   | ChildProcessSpawner.ChildProcessSpawner
+  | ServerConfig.ServerConfig
   | FileSystem.FileSystem
   | Path.Path
 > = Layer.effect(OrchestratorMcpService, make).pipe(Layer.provide(ProcessRunner.layer));

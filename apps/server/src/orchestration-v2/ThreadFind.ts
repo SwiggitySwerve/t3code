@@ -1,4 +1,8 @@
 import {
+  isProviderNativeSubagentThread,
+  OrchestrationV2AppThread,
+  OrchestrationV2CreationSource,
+  OrchestrationV2SubagentJson,
   OrchestrationV2TurnItemJson,
   type OrchestrationV2ProjectedTurnItem,
   OrchestrationV2SearchThreadInput,
@@ -9,6 +13,10 @@ import {
 } from "@t3tools/contracts";
 import { searchableMessageSegments, searchablePlanSegments } from "@t3tools/shared/threadFindText";
 import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
+import {
+  searchableWorkflowOpeningSegments,
+  workflowOpeningParentThreadId,
+} from "@t3tools/shared/workflowOpeningText";
 import * as Cache from "effect/Cache";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
@@ -98,19 +106,58 @@ function searchableRows(items: readonly OrchestrationV2ProjectedTurnItem[]) {
   );
 }
 
+function entryIdOf(item: OrchestrationV2TurnItem) {
+  return item.type === "user_message" || item.type === "assistant_message"
+    ? item.messageId
+    : item.id;
+}
+
 function documentFor(row: OrchestrationV2ProjectedTurnItem, count: number): FindDocument {
   return {
     position: row.position,
     visibility: row.visibility,
     sourceThreadId: row.sourceThreadId,
     sourceItemId: row.sourceItemId,
-    entryId:
-      row.item.type === "user_message" || row.item.type === "assistant_message"
-        ? row.item.messageId
-        : row.item.id,
+    entryId: entryIdOf(row.item),
     runId: row.item.runId,
     count,
   };
+}
+
+/** A thread's first user message when that message is the script of the workflow it opens. */
+interface WorkflowOpening {
+  readonly entryId: string;
+  /** The thread whose subagent row for this one says what the opening draws. */
+  readonly parentThreadId: ThreadId;
+}
+
+/**
+ * The one rule every projection store follows for a workflow coordinator: the timeline draws the
+ * opening in place of its first message, so find searches that drawn text and never the script.
+ */
+export function workflowOpening(
+  thread: Pick<OrchestrationV2AppThread, "lineage" | "creationSource">,
+  first: Extract<OrchestrationV2TurnItem, { type: "user_message" }> | undefined,
+): WorkflowOpening | undefined {
+  if (first === undefined) return undefined;
+  const parentThreadId = workflowOpeningParentThreadId({
+    thread,
+    messages: [{ role: "user", text: first.text, workflowScript: first.workflowScript }],
+  });
+  return parentThreadId === null ? undefined : { entryId: first.messageId, parentThreadId };
+}
+
+interface WorkflowOpeningText {
+  readonly entryId: string;
+  readonly segments: readonly string[];
+}
+
+/** What the opening draws, from the coordinator's row on the parent thread (null until it arrives). */
+export function workflowOpeningText(
+  opening: WorkflowOpening,
+  coordinator: Parameters<typeof searchableWorkflowOpeningSegments>[0],
+): WorkflowOpeningText {
+  return { entryId: opening.entryId, segments: searchableWorkflowOpeningSegments(coordinator) };
 }
 
 function countSegments(segments: readonly string[], query: string) {
@@ -144,18 +191,24 @@ function selectMatch(
   return { totalMatches, activeIndex, document: null, occurrence: 0 };
 }
 
-/** The memory projection uses the same match ordering as SQLite. */
+/** The memory projection uses the same match ordering and workflow openings as SQLite. */
 export function findProjectedThreadItems(
   items: readonly OrchestrationV2ProjectedTurnItem[],
   input: OrchestrationV2SearchThreadInput,
   snapshotSequence: number,
   cwd?: string,
+  opening?: WorkflowOpeningText,
 ): OrchestrationV2SearchThreadResult {
   const rows = searchableRows(items);
   const docs = rows.map((row) =>
     documentFor(
       row,
-      countSegments(parseText(textKey(row.item, cwd, input.skills ?? [])), input.query),
+      countSegments(
+        opening?.entryId === entryIdOf(row.item)
+          ? opening.segments
+          : parseText(textKey(row.item, cwd, input.skills ?? [])),
+        input.query,
+      ),
     ),
   );
   return resultForSelection(selectMatch(docs, input), docs, snapshotSequence);
@@ -220,6 +273,13 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
     Schema.fromJsonString(Schema.Array(Schema.Struct({ threadId: ThreadId, id: TurnItemId }))),
   );
   const decodeItem = Schema.decodeUnknownEffect(Schema.fromJsonString(OrchestrationV2TurnItemJson));
+  const decodeCoordinator = Schema.decodeUnknownEffect(
+    Schema.fromJsonString(OrchestrationV2SubagentJson),
+  );
+  const decodeLineage = Schema.decodeUnknownEffect(
+    Schema.fromJsonString(OrchestrationV2AppThread.fields.lineage),
+  );
+  const decodeCreationSource = Schema.decodeUnknownEffect(OrchestrationV2CreationSource);
   const isSnapshotError = Schema.is(
     Schema.Union([ProjectionStoreReadError, ProjectionStoreThreadNotFoundError]),
   );
@@ -264,8 +324,7 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
           });
     });
   });
-  // Each scan visits every message, so a cache smaller than the thread is cycled through and
-  // never hits. Real threads reach a few thousand messages of a few hundred characters.
+  // Scans visit every message; a cache smaller than the thread churns without hits.
   const textCache = yield* Cache.make({
     capacity: 8192,
     timeToLive: "1 minute",
@@ -307,11 +366,34 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
     `;
     return revision[0]?.sequence ?? 0;
   });
+  // Runs inside the snapshot: it decides whether the parent thread is a source of this scan.
+  const openingOf = Effect.fn("ThreadFind.openingOf")(function* (
+    active: { readonly lineage: string; readonly creation_source: string },
+    payloads: readonly FindPayload[],
+  ) {
+    const thread = {
+      lineage: yield* decodeLineage(active.lineage),
+      creationSource: yield* decodeCreationSource(active.creation_source),
+    };
+    // Only provider-native subagents can open with a workflow; skip decoding anyone else's message.
+    const first = isProviderNativeSubagentThread(thread)
+      ? payloads.find((row) => row.type === "user_message")
+      : undefined;
+    if (first === undefined) return undefined;
+    const item = yield* decodeItem(first.payload);
+    return item.type === "user_message" ? workflowOpening(thread, item) : undefined;
+  });
   const snapshot = Effect.fn("ThreadFind.snapshot")(
     function* (input: OrchestrationV2SearchThreadInput) {
       const { threadId } = input;
-      const active = yield* sql<{ cwd: string | null }>`
-      SELECT COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) AS cwd
+      const active = yield* sql<{
+        cwd: string | null;
+        lineage: string;
+        creation_source: string;
+      }>`
+      SELECT COALESCE(json_extract(t.payload_json, '$.worktreePath'), p.workspace_root) AS cwd,
+        json_extract(t.payload_json, '$.lineage') AS lineage,
+        json_extract(t.payload_json, '$.creationSource') AS creation_source
       FROM orchestration_v2_projection_threads t JOIN projection_projects p ON p.project_id = t.project_id
       WHERE t.thread_id = ${threadId} AND t.deleted_at IS NULL AND p.deleted_at IS NULL
     `;
@@ -331,8 +413,6 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
         return { result: resultForSelection(selected, cached.documents, cached.sequence) };
       }
       const index = yield* readIndex(threadId);
-      const sourceThreadIds = [...new Set([threadId, ...index.map((row) => row.sourceThreadId)])];
-      const sequence = yield* readRevision(sourceThreadIds);
       const candidates = index
         .map((row, position) => ({ ...row, position }))
         .filter((row) =>
@@ -344,7 +424,26 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
       for (let start = 0; start < candidates.length; start += 128) {
         payloads.push(...(yield* load(threadId, candidates.slice(start, start + 128))));
       }
-      return { payloads, cwd, sequence, cacheKey, sourceThreadIds };
+      // Only a thread that opens with a workflow draws what its parent says, so only its results
+      // follow the parent's events. Every other subagent thread leaves its parent alone.
+      const opening = yield* openingOf(active[0], payloads);
+      const sourceThreadIds = [
+        ...new Set([
+          threadId,
+          ...(opening === undefined ? [] : [opening.parentThreadId]),
+          ...index.map((row) => row.sourceThreadId),
+        ]),
+      ];
+      const sequence = yield* readRevision(sourceThreadIds);
+      const coordinator =
+        opening === undefined
+          ? null
+          : ((yield* sql<{ payload_json: string }>`
+              SELECT payload_json FROM orchestration_v2_projection_subagents
+              WHERE thread_id = ${opening.parentThreadId} AND child_thread_id = ${threadId}
+              ORDER BY COALESCE(started_at, ''), subagent_id ASC LIMIT 1
+            `)[0]?.payload_json ?? null);
+      return { payloads, cwd, sequence, cacheKey, sourceThreadIds, opening, coordinator };
     },
     (effect) => sql.withTransaction(effect).pipe(NodeSqliteClient.readOnly),
     (effect, input) =>
@@ -363,12 +462,12 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
         const data = yield* snapshot(input);
         if (data.result) return Stream.succeed(data.result);
         const { payloads, cwd, sequence, cacheKey, sourceThreadIds } = data;
+        const readFailure = (cause: unknown) =>
+          new ProjectionStoreReadError({ threadId: input.threadId, cause });
         const decode = (row: FindPayload) =>
           decodeItem(row.payload).pipe(
             Effect.map((item) => ({ ...row, item })),
-            Effect.mapError(
-              (cause) => new ProjectionStoreReadError({ threadId: input.threadId, cause }),
-            ),
+            Effect.mapError(readFailure),
           );
         // Answers rendered inside question cards must not appear as separate matches.
         const foldedAnswers = new Set<string>();
@@ -383,16 +482,25 @@ export const makeThreadFind = Effect.fn("makeThreadFind")(function* (
             row.type !== "user_input_request" &&
             !(row.type === "user_message" && foldedAnswers.has(row.entryId)),
         );
+        const opening =
+          data.opening === undefined
+            ? undefined
+            : workflowOpeningText(
+                data.opening,
+                data.coordinator === null
+                  ? null
+                  : yield* decodeCoordinator(data.coordinator).pipe(Effect.mapError(readFailure)),
+              );
         const documents = new Map<number, FindDocument>();
         const count = Effect.fnUntraced(function* (row: FindPayload) {
           const cached = documents.get(row.position);
           if (cached) return cached;
           const decoded = yield* decode(row);
           const key = textKey(decoded.item, cwd, input.skills ?? []);
-          const segments = yield* Cache.get(
-            key.text.length <= 32_768 ? textCache : largeTextCache,
-            key,
-          );
+          const segments =
+            opening !== undefined && row.entryId === opening.entryId
+              ? opening.segments
+              : yield* Cache.get(key.text.length <= 32_768 ? textCache : largeTextCache, key);
           const document = documentFor(decoded, countSegments(segments, input.query));
           documents.set(row.position, document);
           yield* Effect.yieldNow;

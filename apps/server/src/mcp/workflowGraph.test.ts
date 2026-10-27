@@ -1,4 +1,5 @@
 import { describe, expect, it } from "@effect/vitest";
+import { OrchestratorMcpGraphReviewInput } from "@t3tools/contracts";
 
 import { attemptBudgetMs, GRAPH_DRIVER_SCRIPT, parseGraph, reviewGraph } from "./workflowGraph.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
@@ -248,6 +249,85 @@ describe("graph parsing", () => {
     );
     expect(parsed.ok ? [] : parsed.problems).toHaveLength(3);
   });
+
+  it("reports every problem of a graph in one pass, so one review shows what to fix", () => {
+    const parsed = parseGraph(
+      graph(
+        {
+          a: node({ subject: "", description: 1, dependsOn: "a", attemptBudget: "forever" }),
+          b: node({
+            inputs: [
+              { id: "i1", kind: "bogus", path: "x" },
+              { kind: "workspace_snapshot", path: "y" },
+              { id: "i3", kind: "workspace_snapshot", path: "z", maxBytes: -1 },
+            ],
+            outputs: [{ id: "o1" }, { id: "o2", path: "out/o2.json" }],
+          }),
+          c: node({ dependsOn: ["absent"] }),
+          d: node({
+            outputs: [{ id: "o", path: "out/d.json" }],
+            verify: { type: "structured", outputId: "missing" },
+          }),
+        },
+        { schemaVersion: 2, name: "" },
+      ),
+    );
+    expect(parsed.ok).toBe(false);
+    const found = parsed.ok ? [] : parsed.problems;
+    for (const expected of [
+      "schemaVersion must be 1",
+      "name must be a non-empty string",
+      "a: dependsOn must be an array",
+      "a: subject must be a non-empty string",
+      "a: description must be a non-empty string",
+      "a: attemptBudget must be",
+      "b: inputs[0]",
+      "b: inputs[1]",
+      "b: inputs.i3.maxBytes",
+      "b: outputs.o1 needs a path",
+      "d: verify.outputId names an undeclared output: missing",
+      "c: unknown dependsOn node absent",
+    ]) {
+      expect(
+        found.some((problem) => problem.includes(expected)),
+        `${expected}\n${found.join("\n")}`,
+      ).toBe(true);
+    }
+  });
+
+  it("does not blame a node for an output of a node that failed to parse", () => {
+    const parsed = parseGraph(
+      graph({
+        producer: node({ subject: "" }),
+        consumer: node({
+          dependsOn: ["producer"],
+          inputs: [{ id: "in", kind: "task_output", nodeId: "producer", outputId: "report" }],
+        }),
+      }),
+    );
+    expect(parsed.ok ? [] : parsed.problems).toEqual([
+      "producer: subject must be a non-empty string.",
+    ]);
+  });
+
+  it("carries one complete valid example in the graph description", () => {
+    const description = String(
+      OrchestratorMcpGraphReviewInput.fields.graph.ast.annotations?.description ?? "",
+    );
+    const marker = "Complete valid example: ";
+    const at = description.indexOf(marker);
+    expect(at).toBeGreaterThan(-1);
+    const sample = description.slice(at + marker.length).split("\n")[0]!;
+    // Small: the example is about 0.6 KB on top of the description.
+    expect(Buffer.byteLength(sample, "utf8")).toBeLessThanOrEqual(700);
+    const example: unknown = JSON.parse(sample);
+    const review = reviewGraph(example, {
+      "src/index.ts": { sha256: HASH, sizeBytes: 1200 },
+    });
+    expect(review.blockers).toEqual([]);
+    expect(review.digest).toMatch(/^sha256:[a-f0-9]{64}$/);
+    expect(review.layers).toEqual([["scan"], ["summary"]]);
+  });
 });
 
 describe("graph review", () => {
@@ -363,6 +443,100 @@ describe("graph review", () => {
   });
 });
 
+describe("graph review write conflicts", () => {
+  it("compares only nodes that can run together and write overlapping paths", () => {
+    const value = graph({
+      root: node({ scopes: { write: ["lib"] } }),
+      mid: node({ dependsOn: ["root"], scopes: { write: ["lib/core"] } }),
+      leaf: node({ dependsOn: ["mid"], scopes: { write: ["lib"] } }),
+      side: node({ scopes: { write: ["lib/core/x.ts", "docs"] } }),
+      docs: node({
+        outputs: [{ id: "out", path: "docs/out.json" }],
+        scopes: { read: ["lib"], write: [] },
+      }),
+      reader: node({ scopes: { read: ["lib"], write: [] } }),
+      bare: node(),
+    });
+    // root, mid and leaf form one chain, so they never conflict with each other.
+    expect(reviewGraph(value, {}).writeConflicts).toEqual([
+      { nodes: ["docs", "side"], paths: ["docs", "docs/out.json"] },
+      { nodes: ["root", "side"], paths: ["lib", "lib/core/x.ts"] },
+      { nodes: ["side", "mid"], paths: ["lib/core", "lib/core/x.ts"] },
+      { nodes: ["side", "leaf"], paths: ["lib", "lib/core/x.ts"] },
+    ]);
+  });
+});
+
+describe("graph capacity", () => {
+  // A workflow starts at most this many agents (workflowRunner.test.ts pins the runner's side).
+  const CAPACITY = 1000;
+  // A judgment check adds a judge agent for each of the three attempts at its node.
+  const JUDGES_PER_NODE = 3;
+  const many = (count: number, make: (index: number) => unknown = () => node()) =>
+    Object.fromEntries(Array.from({ length: count }, (_, index) => [`n${index}`, make(index)]));
+  const judged = () => node({ verify: { type: "judgment", rubric: ["Correct"] } });
+
+  it("reviews a graph that exactly fills the workflow's agent capacity", () => {
+    const reviewed = reviewGraph(graph(many(CAPACITY)), {});
+    expect(reviewed.blockers).toEqual([]);
+    expect(reviewed.digest).not.toBeNull();
+    expect(reviewed.layers).toHaveLength(1);
+    const perNode = 1 + JUDGES_PER_NODE;
+    const full = reviewGraph(graph(many(CAPACITY / perNode, judged)), {});
+    expect(full.blockers).toEqual([]);
+    expect(full.digest).not.toBeNull();
+  });
+
+  it("blocks more nodes than the workflow can start, before looking inside any node", () => {
+    const value = graph(many(CAPACITY + 1, () => ({})));
+    const parsed = parseGraph(value);
+    expect(parsed.ok).toBe(false);
+    expect(parsed.ok ? [] : parsed.problems).toEqual([
+      expect.stringContaining(String(CAPACITY + 1)),
+    ]);
+    const reviewed = reviewGraph(value, {});
+    expect(reviewed.blockers).toHaveLength(1);
+    expect(reviewed.blockers[0]).toContain(String(CAPACITY));
+    expect(reviewed.digest).toBeNull();
+    expect(reviewed.layers).toEqual([]);
+    expect(reviewed.writeConflicts).toEqual([]);
+  });
+
+  it("counts the judge agents a judgment check can add at every attempt", () => {
+    const perNode = 1 + JUDGES_PER_NODE;
+    const fits = CAPACITY / perNode;
+    const over = graph(many(fits + 1, judged));
+    const reviewed = reviewGraph(over, {});
+    expect(reviewed.blockers).toHaveLength(1);
+    expect(reviewed.blockers[0]).toContain(String((fits + 1) * perNode));
+    expect(reviewed.digest).toBeNull();
+    expect(reviewed.layers).toEqual([]);
+    // The same count of nodes without judges is well within capacity.
+    expect(reviewGraph(graph(many(fits + 1)), {}).blockers).toEqual([]);
+  });
+
+  it("does not count process or structured checks as extra agents", () => {
+    const checked = (index: number) =>
+      node(
+        index % 2 === 0
+          ? { verify: { type: "process", argv: ["true"] } }
+          : {
+              schema: { type: "object" },
+              verify: { type: "structured", requiredPointers: ["/ok"] },
+            },
+      );
+    expect(reviewGraph(graph(many(CAPACITY, checked)), {}).blockers).toEqual([]);
+  });
+
+  it("never reports an over-capacity graph ready to start", () => {
+    const value = graph(
+      many(CAPACITY + 1, (index) => node({ dependsOn: index === 0 ? [] : ["n0"] })),
+    );
+    const reviewed = reviewGraph(value, {});
+    expect(reviewed.blockers).not.toEqual([]);
+    expect(reviewed.digest).toBeNull();
+  });
+});
 it("uses omx attempt deadlines", () => {
   expect(attemptBudgetMs("short")).toBe(30 * 60_000);
   expect(attemptBudgetMs("standard")).toBe(2 * 60 * 60_000);
@@ -379,6 +553,7 @@ function driver(
 ) {
   const calls: Array<{ prompt: string; options: Readonly<Record<string, unknown>> }> = [];
   const phases: string[] = [];
+  const logs: string[] = [];
   const outcomes: Array<[string, unknown]> = [];
   const result = runWorkflowScript({
     source: GRAPH_DRIVER_SCRIPT,
@@ -398,7 +573,9 @@ function driver(
               reason: null,
             };
       },
-      log: () => {},
+      log: (message) => {
+        logs.push(message);
+      },
       phase: (title) => {
         phases.push(title);
       },
@@ -409,11 +586,11 @@ function driver(
         : {}),
     } satisfies WorkflowScriptHost,
   });
-  return { calls, phases, outcomes, result };
+  return { calls, phases, logs, outcomes, result };
 }
 
-/** A graph with a node that did not pass ends the workflow as failed, keeping its record. */
-async function failedRecord(result: Promise<unknown>): Promise<unknown> {
+/** A graph with a node that did not pass fails with a readable summary. */
+async function failedRecord(result: Promise<unknown>): Promise<string> {
   const error = await result.then(
     () => {
       throw new Error("The graph should have failed.");
@@ -422,7 +599,7 @@ async function failedRecord(result: Promise<unknown>): Promise<unknown> {
   );
   const message = error instanceof Error ? error.message : String(error);
   expect(message.startsWith("Graph failed: ")).toBe(true);
-  return JSON.parse(message.slice("Graph failed: ".length, message.lastIndexOf(" (at ")));
+  return message;
 }
 
 describe("graph driver in QuickJS", () => {
@@ -471,6 +648,30 @@ describe("graph driver in QuickJS", () => {
     const resume = driver(value);
     expect(await resume.result).toEqual(await run.result);
     expect(resume.calls).toEqual(run.calls);
+  });
+
+  it("names a finished node by its label, not its key, in the progress text", async () => {
+    const run = driver(
+      graph({
+        n1: node({ subject: "Scan the sources", description: "scan" }),
+        n2: node({ subject: "Summarize the scan", description: "summarize", dependsOn: ["n1"] }),
+      }),
+      {
+        summarize: {
+          ok: false,
+          result: null,
+          attempts: 3,
+          outputs: {},
+          verification: null,
+          reason: "x",
+        },
+      },
+    );
+    await run.result.catch(() => undefined);
+    expect(run.logs).toEqual([
+      "1/2 nodes finished; Scan the sources passed.",
+      "2/2 nodes finished; Summarize the scan failed.",
+    ]);
   });
 
   it("starts independent nodes concurrently and waits for both at fan-in", async () => {
@@ -539,20 +740,9 @@ describe("graph driver in QuickJS", () => {
         },
       },
     );
-    expect(await failedRecord(run.result)).toMatchObject({
-      ok: false,
-      nodes: {
-        a: {
-          status: "failed",
-          attempts: 3,
-          reason: "check failed",
-          verification: { outcome: "failed", detail: "bad exit" },
-        },
-        b: { status: "skipped", attempts: 0, reason: "Predecessor a did not pass." },
-        c: { status: "skipped", reason: "Predecessor b did not pass." },
-        independent: { status: "passed" },
-      },
-    });
+    expect(await failedRecord(run.result)).toContain(
+      "Graph failed: 1 node failed, 2 skipped. Task: check failed",
+    );
     expect(run.calls.map((call) => call.prompt)).toEqual(["fails", "works"]);
     expect(run.calls.map((call) => call.options.node)).toEqual(["a", "independent"]);
     expect(Object.fromEntries(run.outcomes)).toEqual({
@@ -641,10 +831,52 @@ describe("graph driver in QuickJS", () => {
     expect(run.calls[0]?.options.inputs).toEqual([
       { id: "source", path: "src/file", maxBytes: 262144, sha256: HASH },
     ]);
+    // What each node was given and produced is recorded with its outcome, digests included.
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      producer: { status: "passed", attempts: 2, inputs: { source: HASH }, outputs },
+      consumer: { status: "passed", attempts: 1, inputs: { upstream: NEXT_HASH } },
+    });
     expect(run.calls[0]?.options.verify).toMatchObject({ type: "structured", outputId: "report" });
     expect(run.calls[1]?.options.inputs).toEqual([
-      { id: "upstream", path: "returned/report.json", maxBytes: 500000, sha256: NEXT_HASH },
+      {
+        id: "upstream",
+        path: "returned/report.json",
+        maxBytes: 500000,
+        sha256: NEXT_HASH,
+        from: "producer",
+      },
     ]);
+  });
+
+  it("records the digests of the inputs a node that did not pass was given, and no content", async () => {
+    const run = driver(
+      graph({
+        reader: node({
+          description: "read",
+          inputs: [{ id: "source", kind: "workspace_snapshot", path: "src/file" }],
+        }),
+      }),
+      {
+        read: {
+          ok: false,
+          result: "a long answer that is not a record",
+          attempts: 2,
+          outputs: {},
+          verification: { type: "process", outcome: "failed", attempts: 2, detail: "bad exit" },
+          reason: "check failed",
+        },
+      },
+      { "src/file": { sha256: HASH, sizeBytes: 10 } },
+    );
+    await failedRecord(run.result);
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      reader: {
+        status: "failed",
+        attempts: 2,
+        reason: "check failed",
+        inputs: { source: HASH },
+      },
+    });
   });
 
   it("refuses an unreviewed workspace snapshot", async () => {
@@ -653,9 +885,9 @@ describe("graph driver in QuickJS", () => {
         a: node({ inputs: [{ id: "source", kind: "workspace_snapshot", path: "src/file" }] }),
       }),
     );
-    expect(await failedRecord(run.result)).toMatchObject({
-      ok: false,
-      nodes: { a: { status: "failed", attempts: 0, reason: "Input source has no reviewed hash." } },
+    expect(await failedRecord(run.result)).toContain("Task: Input source has no reviewed hash.");
+    expect(Object.fromEntries(run.outcomes)).toEqual({
+      a: { status: "failed", attempts: 0, reason: "Input source has no reviewed hash." },
     });
     expect(run.calls).toEqual([]);
   });
@@ -670,14 +902,16 @@ describe("graph driver in QuickJS", () => {
         }),
       }),
     );
-    expect(await failedRecord(missing.result)).toMatchObject({
-      ok: false,
-      nodes: { b: { status: "failed", reason: "Predecessor a did not return output data." } },
+    expect(await failedRecord(missing.result)).toContain(
+      "Task: Predecessor a did not return output data.",
+    );
+    expect(Object.fromEntries(missing.outcomes)).toMatchObject({
+      b: { status: "failed", reason: "Predecessor a did not return output data." },
     });
     const nullReport = driver(graph({ a: node({ description: "a" }) }), { a: null });
-    expect(await failedRecord(nullReport.result)).toMatchObject({
-      ok: false,
-      nodes: { a: { status: "failed", attempts: 0 } },
+    expect(await failedRecord(nullReport.result)).toContain("Task: Agent did not pass.");
+    expect(Object.fromEntries(nullReport.outcomes)).toEqual({
+      a: { status: "failed", attempts: 0, reason: "Agent did not pass." },
     });
   });
 });

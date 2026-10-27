@@ -20,12 +20,14 @@ import {
   type ServerProvider,
   ServerSettings,
   type ServerSettingsPatch,
+  type WorkflowPresets,
   withIdleCompaction,
 } from "@t3tools/contracts";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
+import { workflowTriggerExtrasProblems } from "./workflowIntent.ts";
 import { createModelSelection, readCustomModelEntries } from "./model.ts";
 import {
   getBackgroundActivityBaseProfile,
@@ -34,6 +36,94 @@ import {
   resolveBackgroundActivitySettings,
 } from "./backgroundActivitySettings.ts";
 
+/**
+ * A profile name is a label in a picker, not a description; this is the longest the settings
+ * write boundary accepts. Stored presets can be longer: they decode and run unchanged.
+ */
+export const WORKFLOW_PRESET_NAME_MAX_CHARS = 80;
+
+export interface WorkflowPresetWriteProblem {
+  readonly presetId: string;
+  readonly kind: "name_too_long" | "name_duplicate";
+  readonly message: string;
+}
+
+/**
+ * What a settings write may not introduce into workflow profiles: a name over
+ * `WORKFLOW_PRESET_NAME_MAX_CHARS`, or one another profile has (ignoring case). A profile whose
+ * id and name already stand in `current` is never reported, so old data does not block an
+ * unrelated edit. The settings service and page call this; the decode schema does not.
+ */
+export function workflowPresetsWriteProblems(
+  next: WorkflowPresets,
+  current?: WorkflowPresets,
+): ReadonlyArray<WorkflowPresetWriteProblem> {
+  const storedNames = new Map(current?.presets.map((preset) => [preset.id, preset.name]));
+  const problems: WorkflowPresetWriteProblem[] = [];
+  const nameCounts = new Map<string, number>();
+  for (const preset of next.presets) {
+    const key = preset.name.toLowerCase();
+    nameCounts.set(key, (nameCounts.get(key) ?? 0) + 1);
+  }
+  for (const preset of next.presets) {
+    const unchanged = storedNames.get(preset.id) === preset.name;
+    if (!unchanged && Array.from(preset.name).length > WORKFLOW_PRESET_NAME_MAX_CHARS) {
+      problems.push({
+        presetId: preset.id,
+        kind: "name_too_long",
+        message: `A profile name can be at most ${WORKFLOW_PRESET_NAME_MAX_CHARS} characters.`,
+      });
+    }
+    if (!unchanged && (nameCounts.get(preset.name.toLowerCase()) ?? 0) > 1) {
+      problems.push({
+        presetId: preset.id,
+        kind: "name_duplicate",
+        message: `Another profile is already named "${preset.name.slice(0, WORKFLOW_PRESET_NAME_MAX_CHARS)}".`,
+      });
+    }
+  }
+  return problems;
+}
+
+/**
+ * A writer that predates `fallbacks` decodes presets without the key and sends every preset
+ * back whole, which would erase the list. A preset that is already stored and omits the key
+ * keeps its stored list; an explicit `[]` clears it. A new preset starts with none, and a
+ * preset the patch no longer lists is not kept.
+ */
+function keepStoredWorkflowFallbacks(
+  next: WorkflowPresets,
+  current: WorkflowPresets,
+): WorkflowPresets {
+  const stored = new Map(current.presets.map((preset) => [preset.id, preset.fallbacks]));
+  return {
+    ...next,
+    presets: next.presets.map((preset) => {
+      const fallbacks = stored.get(preset.id);
+      return "fallbacks" in preset || fallbacks === undefined ? preset : { ...preset, fallbacks };
+    }),
+  };
+}
+
+/**
+ * Every reason a write from `current` to `next` is refused; empty when it is accepted. Trigger
+ * extras are checked only when the write changes them, so a hand-edited list that is already
+ * stored does not block unrelated writes.
+ */
+export function serverSettingsWriteProblems(
+  current: ServerSettings,
+  next: ServerSettings,
+): ReadonlyArray<string> {
+  const extrasChanged =
+    JSON.stringify(current.workflowTriggers.extras) !==
+    JSON.stringify(next.workflowTriggers.extras);
+  return [
+    ...workflowPresetsWriteProblems(next.workflowPresets, current.workflowPresets).map(
+      (problem) => problem.message,
+    ),
+    ...(extrasChanged ? workflowTriggerExtrasProblems(next.workflowTriggers.extras) : []),
+  ];
+}
 const ServerSettingsJson = fromLenientJson(ServerSettings);
 const decodeServerSettingsJson = Schema.decodeUnknownOption(ServerSettingsJson);
 
@@ -89,13 +179,7 @@ const TEXT_GENERATION_FALLBACK_DRIVERS = [
   "antigravity",
 ].map((driver) => ProviderDriverKind.make(driver));
 
-/**
- * `includeConfiguredInstances` is for the project-scoped caller only: a
- * project that disabled every built-in instance should still be able to
- * fall back to one it configured itself. The machine-level caller leaves it
- * unset, since widening the candidates there would change behavior for
- * every user regardless of project scope.
- */
+/** Only project-scoped callers may include configured instances when falling back; machine-level callers leave it unset. */
 export function fallbackTextGenerationModelSelection(
   providerInstances: ServerSettings["providerInstances"],
   isEnabled: (instanceId: ProviderInstanceId, driver: ProviderDriverKind) => boolean,
@@ -259,13 +343,7 @@ function mergeSettingsEntries<Value>(
   return Object.fromEntries(next);
 }
 
-/**
- * `projectSettingsOverrides` entries otherwise replace whole (see the field's
- * doc comment in contracts), but `providerInstances` was added after clients
- * already round-trip a project's entry on every edit. A client built before
- * that addition sends an entry that never mentions the key, and a whole replace
- * would silently wipe it.
- */
+// Older clients omit providerInstances during whole-entry replacement; preserve it to avoid wiping overrides.
 function mergeProjectSettingsOverridesPatch(
   current: Readonly<Record<string, ProjectSettingsOverrides>>,
   patch: Readonly<Record<string, ProjectSettingsOverrides | null>>,
@@ -332,8 +410,7 @@ function translateLegacyProjectOverridePatch(
   const entries = new Map<string, ProjectSettingsOverrides | null>(
     Object.entries(rest.projectSettingsOverrides ?? {}),
   );
-  // A canonical entry in the same patch is the newer representation; a legacy
-  // map must not resurrect a key that entry deliberately omits.
+  // Canonical entries outrank legacy maps, including deliberately omitted keys.
   const canonicalProjectIds = new Set(Object.keys(rest.projectSettingsOverrides ?? {}));
   const applyKey = <K extends ProjectScopedServerSettingKey>(
     map: Readonly<Record<string, ProjectSettingsOverrides[K] | null>> | undefined,
@@ -343,7 +420,7 @@ function translateLegacyProjectOverridePatch(
     for (const [projectId, value] of Object.entries(map)) {
       if (canonicalProjectIds.has(projectId)) continue;
       const entry: ProjectSettingsOverrides = {
-        ...(entries.get(projectId) ?? currentEntries[projectId] ?? {}),
+        ...(entries.get(projectId) ?? currentEntries[projectId]),
       };
       if (value === null || value === undefined) {
         delete entry[key];
@@ -445,35 +522,41 @@ export function applyServerSettingsPatch(
   const initialFavorites =
     patch.favorites ?? current.favorites ?? migrateModelPreferences?.favorites ?? null;
   const favorites =
-    setModelFavorites?.reduce((current, change) => {
-      const exists = current.some(
-        (favorite) => favorite.provider === change.provider && favorite.model === change.model,
-      );
-      return change.favorite
-        ? exists
-          ? current
-          : [...current, { provider: change.provider, model: change.model }]
-        : current.filter(
-            (favorite) => favorite.provider !== change.provider || favorite.model !== change.model,
-          );
-    }, initialFavorites ?? []) ?? initialFavorites;
+    setModelFavorites?.reduce(
+      (current, change) => {
+        const exists = current.some(
+          (favorite) => favorite.provider === change.provider && favorite.model === change.model,
+        );
+        if (change.favorite) {
+          if (!exists) current.push({ provider: change.provider, model: change.model });
+          return current;
+        }
+        return current.filter(
+          (favorite) => favorite.provider !== change.provider || favorite.model !== change.model,
+        );
+      },
+      [...(initialFavorites ?? [])],
+    ) ?? initialFavorites;
   const initialModelPreferences =
     providerModelPreferences ??
     current.providerModelPreferences ??
     migrateModelPreferences?.providerModelPreferences ??
     null;
   let nextModelPreferences = initialModelPreferences;
-  for (const change of setModelsHidden ?? []) {
-    const preferences = nextModelPreferences?.[change.provider] ?? {
-      hiddenModels: [],
-      modelOrder: [],
-    };
-    const hiddenModels = preferences.hiddenModels.filter((model) => model !== change.model);
-    if (change.hidden) hiddenModels.push(change.model);
-    nextModelPreferences = {
-      ...nextModelPreferences,
-      [change.provider]: { ...preferences, hiddenModels },
-    };
+  if (setModelsHidden?.length) {
+    const updated = { ...initialModelPreferences };
+    for (const change of setModelsHidden) {
+      const preferences = (Object.hasOwn(updated, change.provider)
+        ? updated[change.provider]
+        : undefined) ?? {
+        hiddenModels: [],
+        modelOrder: [],
+      };
+      const hiddenModels = preferences.hiddenModels.filter((model) => model !== change.model);
+      if (change.hidden) hiddenModels.push(change.model);
+      updated[change.provider] = { ...preferences, hiddenModels };
+    }
+    nextModelPreferences = updated;
   }
   if (setProviderModelOrder) {
     const preferences = nextModelPreferences?.[setProviderModelOrder.provider] ?? {
@@ -491,6 +574,14 @@ export function applyServerSettingsPatch(
   const next = deepMerge(current, patchForMerge);
   const nextWithReplacementsBase = {
     ...next,
+    ...(patch.workflowPresets === undefined
+      ? {}
+      : {
+          workflowPresets: keepStoredWorkflowFallbacks(
+            next.workflowPresets,
+            current.workflowPresets,
+          ),
+        }),
     favorites,
     providerModelPreferences: nextModelPreferences,
     ...(worktreeCleanupPatch === undefined

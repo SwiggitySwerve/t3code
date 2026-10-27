@@ -7,14 +7,24 @@ export interface McpProviderSessionConfig {
   readonly providerInstanceId: ProviderInstanceId;
   readonly endpoint: string;
   readonly authorizationHeader: string;
-  /**
-   * Adapters read it to keep developer instructions truthful: when the user
-   * withholds agent browser access, the prompt must not advertise `preview_*`
-   * tools that every call would reject.
-   */
+  /** Omit preview_* instructions when the user withholds agent browser access. */
   readonly browserToolsAvailable: boolean;
   readonly capabilities?: ReadonlySet<string>;
   readonly agentDeviceEnvironment?: Readonly<Record<string, string>>;
+}
+
+/**
+ * A workflow member's thread credential is the only one issued without `orchestration`
+ * (ProviderSessionManager withholds it). Sessions that record no capabilities are not members.
+ */
+export function hasMemberToolset(capabilities: ReadonlySet<string> | undefined): boolean {
+  return capabilities !== undefined && !capabilities.has("orchestration");
+}
+
+export function isWorkflowMemberSession(
+  session: Pick<McpProviderSessionConfig, "capabilities"> | undefined,
+): boolean {
+  return hasMemberToolset(session?.capabilities);
 }
 
 export function withAgentDeviceEnvironment(

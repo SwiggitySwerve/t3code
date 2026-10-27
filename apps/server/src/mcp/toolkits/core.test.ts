@@ -1,3 +1,4 @@
+import * as DocumentText from "../../provider/DocumentText.ts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
@@ -18,6 +19,7 @@ import {
   type OrchestrationV2ThreadShell,
 } from "@t3tools/contracts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as TestClock from "effect/testing/TestClock";
 import * as Layer from "effect/Layer";
@@ -46,8 +48,10 @@ import * as SecretRequests from "../../secrets/SecretRequests.ts";
 import * as ScheduledTaskService from "../../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../../serverSettings.ts";
 import * as McpHttpServer from "../McpHttpServer.ts";
+import * as WorkflowApprovalGateTestkit from "../../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 import * as McpInvocationContext from "../McpInvocationContext.ts";
 import * as McpToolAccessTestkit from "../McpToolAccess.testkit.ts";
+import * as AnalyticsService from "../../telemetry/AnalyticsService.ts";
 import { dispatchFailure } from "../threadAccess.ts";
 import * as EnvironmentHandlers from "./environment/handlers.ts";
 import * as AttachmentHandlers from "./attachment/handlers.ts";
@@ -55,11 +59,11 @@ import * as AttachmentHandlers from "./attachment/handlers.ts";
 const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+  Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-core-test-" })),
   Layer.provide(NodeServices.layer),
 );
 
-// Effect returns a declared tool failure as `isError` with its encoded payload
-// as JSON text, never as `structuredContent`.
 const declaredFailure = (result: McpSchema.CallToolResult) => {
   const text = result.content[0];
   return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
@@ -87,6 +91,13 @@ const scope: McpInvocationContext.McpInvocationScope = {
   issuedAt: 0,
   capabilities: new Set(["orchestration"]),
 };
+/** An MCP client without a thread has no member toolset to filter, so handlers decide what it may do. */
+const capabilityLessClientScope: McpInvocationContext.McpInvocationScope = {
+  ...scope,
+  thread: undefined,
+  client: { sessionId: "mcp-core-client", label: "Test client", access: "auto" },
+  capabilities: new Set<never>(),
+};
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
   protocolVersion: "2025-06-18",
@@ -104,18 +115,24 @@ it.effect("checks capability through the production registration", () =>
   Effect.gen(function* () {
     const server = yield* McpServer.McpServer;
     expect(server.tools.some(({ tool }) => tool.name === "t3_thread_organize")).toBe(true);
-    const result = yield* server
-      .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
-      .pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, {
-          ...scope,
-          capabilities: new Set<never>(),
-        }),
-        Effect.provideService(McpSchema.McpServerClient, client),
-      );
+    const callAs = (invocation: McpInvocationContext.McpInvocationScope) =>
+      server
+        .callTool({ name: "t3_thread_organize", arguments: { action: "pin" } })
+        .pipe(
+          Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
+          Effect.provideService(McpSchema.McpServerClient, client),
+        );
+    const result = yield* callAs(capabilityLessClientScope);
     expect(declaredFailure(result)).toMatchObject({ code: "capability_denied" });
     expect(result.isError).toBe(true);
     expect(result.structuredContent).toBeUndefined();
+    // A workflow member (a thread credential without orchestration) cannot see or call the tool at all.
+    const member = yield* callAs({ ...scope, capabilities: new Set(["worktree"]) }).pipe(
+      Effect.flip,
+    );
+    expect(String((member as { readonly message?: unknown }).message ?? member)).toContain(
+      "not found",
+    );
   }).pipe(
     Effect.provide(
       layerThreadToolkit.pipe(
@@ -269,7 +286,7 @@ it.effect("returns an HTML render reference that Codex and Claude tool rows both
         Layer.provide(McpProviderSessions.layer),
         Layer.provide(PreviewBrowser.layer),
         Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-html-render-" })),
-        Layer.provide(NodeServices.layer),
+        Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
         Layer.provide(FetchHttpClient.layer),
         Layer.provide(
           Layer.mock(ThreadManagement.ThreadManagementService)({
@@ -287,6 +304,66 @@ it.effect("returns an HTML render reference that Codex and Claude tool rows both
     ),
   ),
 );
+
+it.effect("records only failed calls of tools that hand off no work", () => {
+  // Recording runs detached from the tool response, so the first event is awaited.
+  const recorded = Deferred.makeUnsafe<{ event: string; properties: object }>();
+  return Effect.gen(function* () {
+    const server = yield* McpServer.McpServer;
+    const organize = (
+      capabilities: McpInvocationContext.McpInvocationScope["capabilities"],
+      base: McpInvocationContext.McpInvocationScope = scope,
+    ) =>
+      server.callTool({ name: "t3_thread_organize", arguments: { action: "pin" } }).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, {
+          ...base,
+          capabilities,
+        }),
+        Effect.provideService(McpSchema.McpServerClient, client),
+      );
+    expect((yield* organize(scope.capabilities)).isError).not.toBe(true);
+    expect(
+      declaredFailure(yield* organize(new Set<never>(), capabilityLessClientScope)),
+    ).toMatchObject({
+      code: "capability_denied",
+    });
+    // The successful call ran first, so it would be the first event if it were recorded.
+    expect(yield* Deferred.await(recorded)).toMatchObject({
+      event: "mcp.tool.invoked",
+      properties: { tool: "t3_thread_organize", outcome: "error" },
+    });
+  }).pipe(
+    Effect.provide(
+      layerThreadToolkit.pipe(
+        Layer.provideMerge(McpServer.McpServer.layer),
+        Layer.provide(NodeCrypto.layer),
+        Layer.provide(
+          Layer.mock(ThreadManagement.ThreadManagementService)({
+            getThreadShell: (id) => Effect.succeed(McpToolAccessTestkit.liveThreadShell(id)),
+            getProjectThreadRecords: ({ threadId: id }) =>
+              Effect.succeed(
+                McpToolAccessTestkit.idleThreadProjection(McpToolAccessTestkit.liveThreadShell(id)),
+              ),
+            dispatch: () => Effect.succeed({ sequence: 1 } as never),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(
+            AnalyticsService.AnalyticsService,
+            AnalyticsService.AnalyticsService.of({
+              record: (event, properties) =>
+                Deferred.succeed(recorded, { event, properties: properties ?? {} }).pipe(
+                  Effect.asVoid,
+                ),
+              flush: Effect.void,
+              recordOwners: () => Effect.void,
+            }),
+          ),
+        ),
+      ),
+    ),
+  );
+});
 
 it.effect("keeps unexpected handler defects private through the production registration", () =>
   Effect.gen(function* () {
@@ -828,7 +905,7 @@ it.effect("only the caller that prepared a pending upload can discard it", () =>
         Layer.provide(McpToolAccessTestkit.liveThreadsLayer),
         Layer.provide(ServerSecretStore.layer),
         Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-attachment-" })),
-        Layer.provide(NodeServices.layer),
+        Layer.provide(DocumentText.layer.pipe(Layer.provideMerge(NodeServices.layer))),
       ),
     ),
   ),
