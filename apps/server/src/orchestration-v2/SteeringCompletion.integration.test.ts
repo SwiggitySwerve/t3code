@@ -26,6 +26,7 @@ import * as EventSink from "./EventSink.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
+import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 
@@ -1257,6 +1258,93 @@ it.effect.each(["next", "/goal ship it"])(
         }).pipe(Effect.provide(layer));
       }),
     ),
+);
+
+it.effect("a workflow request promoted into a compaction plans first and waits for approval", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const { events, layer, send, read, started, steered, startFirstTurn } =
+        yield* goalHarness("compaction-workflow");
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+        const threadId = yield* startFirstTurn;
+        yield* send("compact", "/compact", "queue");
+        yield* send("workflow", "Run it as a workflow", "queue");
+        const settled = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "run.updated" &&
+              event.payload.id === started[0]!.runId &&
+              event.payload.status === "waiting",
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        const compacting = yield* orchestrator.streamDomainEvents.pipe(
+          Stream.filter(
+            (event) =>
+              event.type === "provider-turn.updated" &&
+              event.payload.status === "running" &&
+              event.payload.runAttemptId !== started[0]!.attemptId,
+          ),
+          Stream.take(1),
+          Stream.runDrain,
+          Effect.forkScoped,
+        );
+        const turn = (yield* orchestrator.getThreadProjection(threadId)).providerTurns[0]!;
+        yield* Queue.offer(events, {
+          type: "provider_turn.updated",
+          driver,
+          providerTurn: { ...turn, status: "completed", completedAt: yield* DateTime.now },
+        });
+        yield* Queue.offer(events, {
+          type: "turn.terminal",
+          driver,
+          providerThreadId: turn.providerThreadId,
+          providerTurnId: turn.id,
+          runOrdinal: started[0]!.runOrdinal,
+          status: "completed",
+          failure: null,
+          threadDisposition: "reusable",
+        });
+        yield* Fiber.join(settled);
+        yield* worker.drain();
+        yield* orchestrator.resumeQueuedRuns;
+        yield* worker.drain();
+        yield* Fiber.join(compacting);
+        const projection = yield* orchestrator.getThreadProjection(threadId);
+        const compactRun = projection.runs.find(
+          (run) => run.userMessageId === MessageId.make("message:compact"),
+        )!;
+        const workflowRun = projection.runs.find(
+          (run) => run.userMessageId === MessageId.make("message:workflow"),
+        )!;
+        yield* orchestrator.dispatch({
+          type: "queued-message.promote-to-steer",
+          commandId: CommandId.make("promote-workflow"),
+          threadId,
+          queuedRunId: workflowRun.id,
+          targetRunId: compactRun.id,
+        });
+        yield* worker.drain();
+
+        assert.deepEqual(steered, []);
+        assert.deepEqual((yield* read(threadId)).queue, []);
+        assert.deepEqual(
+          started.slice(0, 2).map((turn) => turn.message.text),
+          ["first", "/compact"],
+        );
+        // The stopped compaction's replacement turn still gets the plan-first note.
+        assert.isTrue(started[2]?.message.text.startsWith("Run it as a workflow\n\n<t3-workflow>"));
+        // The request stays armed: nothing may start a workflow before the person approves.
+        const refused = yield* Effect.flip(gate.requireNoRequest(threadId));
+        assert.strictEqual(refused._tag, "WorkflowApprovalRequiredError");
+      }).pipe(Effect.provide(layer));
+    }),
+  ),
 );
 
 it.effect("stops a turn that is still starting when a goal is sent into it", () =>
