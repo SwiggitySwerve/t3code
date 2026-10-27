@@ -1336,49 +1336,6 @@ export function DiffsSettingsPanel() {
           }
         />
         <SettingsRow
-          serverScoped
-          settingKeys={["ultracode"]}
-          {...searchableSetting("ultracode")}
-          description={
-            mixedUltracode
-              ? "The selected targets use different ultracode settings."
-              : ULTRACODE_MODE_DESCRIPTIONS[settings.ultracode]
-          }
-          resetAction={
-            settings.ultracode !== DEFAULT_UNIFIED_SETTINGS.ultracode ? (
-              <SettingResetButton
-                label="ultracode"
-                onClick={() => updateSettings({ ultracode: DEFAULT_UNIFIED_SETTINGS.ultracode })}
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={mixedUltracode ? null : settings.ultracode}
-              onValueChange={(value) => {
-                if (value === "keyword" || value === "always" || value === "off") {
-                  updateSettings({ ultracode: value });
-                }
-              }}
-            >
-              <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Ultracode">
-                <SelectValue>
-                  {(value: UltracodeMode | null) =>
-                    value === null ? "Mixed" : ULTRACODE_MODE_LABELS[value]
-                  }
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {(["keyword", "always", "off"] as const).map((mode) => (
-                  <SelectItem key={mode} hideIndicator value={mode}>
-                    {ULTRACODE_MODE_LABELS[mode]}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-        <SettingsRow
           {...searchableSetting("hide-whitespace-changes")}
           description="Set whether the diff panel ignores whitespace-only edits by default."
           resetAction={
@@ -1552,6 +1509,7 @@ export function ThreadsSettingsPanel() {
   const environmentId = environment?.environmentId ?? null;
   const hasServerTargets = connectedEnvironments.length > 0;
   const mixedResponseStreamingMode = useScopedSettingsMixed(["responseStreamingMode"]);
+  const mixedUltracode = useScopedSettingsMixed(["ultracode"]);
   const providersByEnvironment = useEnvironmentProviders();
   const serverProviders =
     (environment?.serverConfig
@@ -1938,6 +1896,52 @@ export function ThreadsSettingsPanel() {
             }
           />
         </AdvancedSettings>
+      </SettingsSection>
+
+      <SettingsSection id="workflows" title="Workflows">
+        <SettingsRow
+          serverScoped
+          settingKeys={["ultracode"]}
+          {...searchableSetting("ultracode")}
+          description={
+            mixedUltracode
+              ? "The selected targets use different ultracode settings."
+              : ULTRACODE_MODE_DESCRIPTIONS[settings.ultracode]
+          }
+          resetAction={
+            settings.ultracode !== DEFAULT_UNIFIED_SETTINGS.ultracode ? (
+              <SettingResetButton
+                label="ultracode"
+                onClick={() => updateSettings({ ultracode: DEFAULT_UNIFIED_SETTINGS.ultracode })}
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={mixedUltracode ? null : settings.ultracode}
+              onValueChange={(value) => {
+                if (value === "keyword" || value === "always" || value === "off") {
+                  updateSettings({ ultracode: value });
+                }
+              }}
+            >
+              <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Ultracode">
+                <SelectValue>
+                  {(value: UltracodeMode | null) =>
+                    value === null ? "Mixed" : ULTRACODE_MODE_LABELS[value]
+                  }
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {(["keyword", "always", "off"] as const).map((mode) => (
+                  <SelectItem key={mode} hideIndicator value={mode}>
+                    {ULTRACODE_MODE_LABELS[mode]}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
       </SettingsSection>
     </SettingsPageContainer>
   );
