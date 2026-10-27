@@ -12,15 +12,20 @@ function SettingsAgentsRoute() {
       </SettingsScopeNotice>
     );
   }
-  return environment ? (
+  if (!environment) {
+    return (
+      <p className="p-8 text-sm text-muted-foreground">
+        {scope.kind === "environment"
+          ? `Reconnect ${scope.label} to manage its agent presets.`
+          : "Connect an environment to manage its agent presets."}
+      </p>
+    );
+  }
+  return (
     <WorkflowPresetsSettings
       key={environment.environmentId}
       environmentId={environment.environmentId}
     />
-  ) : (
-    <p className="p-8 text-sm text-muted-foreground">
-      Connect an environment to manage its agent presets.
-    </p>
   );
 }
 
