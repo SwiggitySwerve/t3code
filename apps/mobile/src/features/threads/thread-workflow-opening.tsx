@@ -9,7 +9,9 @@ import {
   type RuntimeSubagent,
   type WorkflowOpening,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentId, ScopedThreadRef, ThreadId } from "@t3tools/contracts";
+import type { EnvironmentThread } from "@t3tools/client-runtime/state/shell";
+import { Atom } from "effect/reactivity";
 import { useState } from "react";
 import { Pressable, View } from "react-native";
 
@@ -27,11 +29,10 @@ const FOLDED_SCRIPT_LINES = 10;
 /** An opening plus the parent thread that owns the coordinator's workflow row. */
 export type WorkflowOpeningView = WorkflowOpening & { readonly parentThreadId: ThreadId };
 
-export function useWorkflowOpening(
-  environmentId: EnvironmentId,
-  threadId: ThreadId,
-): WorkflowOpeningView | null {
-  const threadAtom = environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, threadId));
+const NO_THREAD_ATOM = Atom.make<EnvironmentThread | null>(null);
+
+export function useWorkflowOpening(ref: ScopedThreadRef | null): WorkflowOpeningView | null {
+  const threadAtom = ref === null ? NO_THREAD_ATOM : environmentThreadDetails.threadAtom(ref);
   // Selected as a primitive so an ordinary thread's updates never change the result.
   const parentId = useAtomValue(threadAtom, (thread) =>
     thread === null
@@ -45,7 +46,9 @@ export function useWorkflowOpening(
     parentId === null ? null : (thread?.projection ?? null),
   );
   const parentSubagents = useAtomValue(
-    environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, parentId ?? threadId)),
+    ref === null || parentId === null
+      ? NO_THREAD_ATOM
+      : environmentThreadDetails.threadAtom(scopeThreadRef(ref.environmentId, parentId)),
     (parent) => (parentId === null ? null : (parent?.projection.subagents ?? null)),
   );
   if (projection === null || parentId === null) return null;
