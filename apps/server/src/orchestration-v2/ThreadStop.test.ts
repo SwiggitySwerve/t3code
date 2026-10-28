@@ -162,6 +162,55 @@ const threadState = (threadId: ThreadId) =>
     };
   });
 
+it.effect("rejects workflow.stop for a deleted thread without changing its workflow", () =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const projections = yield* ProjectionStore.ProjectionStoreV2;
+    const threadId = ThreadId.make("thread:deleted-workflow-stop");
+    yield* createWatchingThread(threadId, 1);
+    yield* send(threadId, "Start a workflow", "start_immediately");
+    const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+    const workflowId = NodeId.make("workflow:deleted-thread");
+    yield* orchestrator.dispatch({
+      type: "workflow.start",
+      commandId: CommandId.make("start:deleted-thread-workflow"),
+      createdBy: "agent",
+      creationSource: "mcp",
+      threadId,
+      runId: run.id,
+      workflowId,
+      title: "Workflow",
+      script: "return 1",
+    });
+    const before = yield* orchestrator.getThreadProjection(threadId);
+    const now = yield* DateTime.now;
+    // A persisted tombstone must prevent late commands even if workflow cleanup has not settled.
+    yield* projections.apply({
+      id: EventId.make("event:deleted-workflow-thread"),
+      type: "thread.deleted",
+      threadId,
+      occurredAt: now,
+      payload: { ...before.thread, deletedAt: now, updatedAt: now },
+    });
+    const rejected = yield* Effect.flip(
+      orchestrator.dispatch({
+        type: "workflow.stop",
+        commandId: CommandId.make("stop:deleted-thread-workflow"),
+        threadId,
+        workflowId,
+      }),
+    );
+    assert.equal(rejected._tag, "OrchestratorDispatchError");
+    if (rejected._tag === "OrchestratorDispatchError") {
+      assert.equal(rejected.cause, `Thread ${threadId} is deleted.`);
+    }
+    const after = yield* orchestrator.getThreadProjection(threadId);
+    assert.deepEqual(after.subagents, before.subagents);
+    assert.deepEqual(after.nodes, before.nodes);
+    assert.deepEqual(after.turnItems, before.turnItems);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 it.effect.each([
   ["idle", "thread.stop"],
   ["idle", "run.interrupt"],

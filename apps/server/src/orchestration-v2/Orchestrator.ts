@@ -7873,6 +7873,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
   ) {
     const projection = yield* loadWorkflowProjection(command);
+    if (projection.thread.deletedAt !== null) {
+      return yield* workflowDispatchError(command, `Thread ${command.threadId} is deleted.`);
+    }
     const task = yield* runningWorkflow(command, projection);
     const now = yield* DateTime.now;
     yield* writeAppOwnedTask({
