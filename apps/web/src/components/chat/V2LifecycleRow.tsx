@@ -224,7 +224,7 @@ const STATUS_VISUALS: Record<
   OrchestrationV2TurnItem["status"],
   { dotClass: string; label: string }
 > = {
-  pending: { dotClass: "bg-info", label: "Queued" },
+  pending: { dotClass: "bg-muted-foreground/60", label: "Queued" },
   running: { dotClass: "bg-info", label: "Running" },
   waiting: { dotClass: "bg-info", label: "Waiting" },
   idle: { dotClass: "bg-muted-foreground/50", label: "Idle · resumable" },

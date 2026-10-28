@@ -38,10 +38,7 @@ export function WorkflowLineageStatus(props: {
       )}
     >
       <span className={cn("font-medium", status.className)}>{status.label}</span>
-      {/* A narrow panel keeps the word; the time is in the hover card. */}
-      <span className="@max-[18rem]:hidden">
-        <AgentElapsed agent={props.workflow} compact />
-      </span>
+      <AgentElapsed agent={props.workflow} compact />
     </span>
   );
 }
@@ -260,10 +257,7 @@ export function ThreadLineageWorkflowRow({
                       ) : null}
                       <span className="shrink-0 text-2xs font-normal tabular-nums">
                         {phase.settledCount}/{phase.members.length}
-                        {/* The unit is the first thing to go when the panel is narrow. */}
-                        <span className="@max-[18rem]:hidden">
-                          {phase.members.length === 1 ? " agent" : " agents"}
-                        </span>
+                        {phase.members.length === 1 ? " agent" : " agents"}
                       </span>
                       <span className="shrink-0 text-2xs font-normal tabular-nums empty:hidden">
                         <AgentElapsed agent={phaseElapsed(phase)} />
@@ -272,7 +266,11 @@ export function ThreadLineageWorkflowRow({
                   }
                 >
                   <Tooltip>
-                    <TooltipTrigger render={<span className="block max-w-[34cqw] truncate" />}>
+                    <TooltipTrigger
+                      render={
+                        <span className="block max-w-[34cqw] truncate @max-[18rem]:max-w-[24cqw]" />
+                      }
+                    >
                       {phase.title}
                     </TooltipTrigger>
                     <TooltipPopup side="left">{phase.title}</TooltipPopup>

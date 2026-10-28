@@ -49,21 +49,21 @@ export function sidebarThreadTopStatus(input: {
       return { label: "Queued", icon: "queued", className: "text-muted-foreground" };
     case "background":
       // The turn ended but a workflow or other background work keeps running.
-      return { label: "Running", icon: "working", className: "text-info-foreground" };
+      return { label: "Working", icon: "working", className: "text-info-foreground" };
     case "waiting":
       return { label: "Waiting", icon: "waiting", className: "text-muted-foreground" };
     case "approval":
-      return { label: "Approval", icon: "approval", className: "text-warning-foreground" };
+      return { label: "Needs approval", icon: "approval", className: "text-warning-foreground" };
     case "input":
       return {
-        label: "Input",
+        label: "Needs input",
         icon: "input",
         className: "text-indigo-600 dark:text-indigo-300",
       };
     case "request":
       return { label: "Request", icon: "request", className: "text-guest-foreground" };
     case "limited":
-      return { label: "Limited", icon: "failed", className: "text-warning-foreground" };
+      return { label: "Usage limit", icon: "failed", className: "text-warning-foreground" };
     case "failed":
       return { label: "Failed", icon: "failed", className: "text-error-foreground" };
     case "woke":

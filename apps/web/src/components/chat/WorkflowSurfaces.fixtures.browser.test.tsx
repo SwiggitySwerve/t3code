@@ -239,21 +239,9 @@ describe("workflow fixture rows", () => {
     }
     // The count itself is drawn, with its unit dropped first.
     expect(panel.textContent).toContain("2/2");
-    const unit = [...panel.querySelectorAll<HTMLElement>("span")].filter((el) =>
-      /^\s?agents?$/.test(el.textContent ?? ""),
-    );
-    expect(unit.length).toBeGreaterThan(0);
-    for (const el of unit) expect(getComputedStyle(el).display).toBe("none");
-  });
-
-  it("keeps the unit of a group count in a panel wide enough for it", async () => {
-    await using screen = await render(<LineageRowSurface kind="script" variant="failed" />);
-    await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
-    const unit = [...screen.container.querySelectorAll<HTMLElement>("span")].filter((el) =>
-      /^\s?agents?$/.test(el.textContent ?? ""),
-    );
-    expect(unit.length).toBeGreaterThan(0);
-    for (const el of unit) expect(getComputedStyle(el).display).not.toBe("none");
+    expect(panel.textContent).toContain("2/2 agents");
+    // The run's time stays too: the group name gives way first.
+    expect(panel.textContent).toContain("1m");
   });
 
   it("gives queued, waiting and skipped nodes a glyph each, and Waiting an hourglass in the sidebar", async () => {
@@ -271,6 +259,26 @@ describe("workflow fixture rows", () => {
     });
     expect(waiting.container.querySelector("svg.lucide-hourglass")).not.toBeNull();
     expect(waiting.container.querySelector("svg.lucide-circle-dot-dashed")).toBeNull();
+  });
+
+  it("says what a sidebar badge needs, and draws a queued agent's dot grey", async () => {
+    const labels = {
+      approval: "Needs approval",
+      input: "Needs input",
+      limited: "Usage limit",
+      "turn-ended-workflow-running": "Working",
+    } as const;
+    for (const [state, label] of Object.entries(labels)) {
+      await using screen = await render(
+        <SidebarStatusSurface state={state as keyof typeof labels} />,
+        { router: false },
+      );
+      expect(screen.container.textContent).toContain(label);
+    }
+    await using queued = await render(<WorkflowBlockSurface kind="script" variant="queued" />, {
+      router: false,
+    });
+    expect(queued.container.querySelector(".bg-info")).toBeNull();
   });
 
   it("keeps the Approve button legible while approving", async () => {
