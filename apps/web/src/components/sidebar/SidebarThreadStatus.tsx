@@ -41,7 +41,7 @@ export function sidebarThreadTopStatus(input: {
       return {
         label: input.goalActive ? "Goal" : "Working",
         icon: "working",
-        className: "text-info",
+        className: "text-info-foreground",
       };
     case "waiting":
       return { label: "Waiting", icon: "waiting", className: "text-muted-foreground" };
@@ -56,13 +56,13 @@ export function sidebarThreadTopStatus(input: {
     case "request":
       return { label: "Request", icon: "request", className: "text-guest-foreground" };
     case "limited":
-      return { label: "Limited", icon: "failed", className: "text-warning" };
+      return { label: "Limited", icon: "failed", className: "text-warning-foreground" };
     case "failed":
-      return { label: "Failed", icon: "failed", className: "text-error" };
+      return { label: "Failed", icon: "failed", className: "text-error-foreground" };
     case "woke":
-      return { label: "Woke", icon: "woke", className: "text-warning" };
+      return { label: "Woke", icon: "woke", className: "text-warning-foreground" };
     case "done":
-      return { label: "Done", icon: "done", className: "text-success" };
+      return { label: "Done", icon: "done", className: "text-success-foreground" };
     case null:
       return null;
   }

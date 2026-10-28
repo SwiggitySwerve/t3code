@@ -16,12 +16,12 @@ import { Spinner } from "../ui/spinner";
 
 const STATUS_TONE: Record<WorkflowReviewStatus, string> = {
   ready: "bg-accent/40 text-foreground",
-  blocked: "bg-warning/12 text-warning",
-  approving: "bg-accent/40 text-muted-foreground",
-  dismissing: "bg-accent/40 text-muted-foreground",
-  approved: "bg-success/12 text-success",
+  blocked: "bg-warning/8 text-warning-foreground",
+  approving: "bg-accent/40 text-foreground",
+  dismissing: "bg-accent/40 text-foreground",
+  approved: "bg-success/8 text-success-foreground",
   dismissed: "bg-muted text-muted-foreground",
-  stale: "bg-warning/12 text-warning",
+  stale: "bg-warning/8 text-warning-foreground",
   superseded: "bg-muted text-muted-foreground",
   info: "bg-muted text-muted-foreground",
   "read-only": "bg-accent/40 text-foreground",
@@ -29,8 +29,8 @@ const STATUS_TONE: Record<WorkflowReviewStatus, string> = {
 
 const NOTE_TONE = {
   info: "text-muted-foreground",
-  warning: "text-warning",
-  error: "text-destructive",
+  warning: "text-warning-foreground",
+  error: "text-destructive-foreground",
 } as const;
 
 /**
@@ -84,7 +84,7 @@ export function WorkflowReviewCard(props: {
         </p>
       ) : null}
       {review.blockers.length > 0 ? (
-        <ul aria-label="Blockers" className="m-0 list-disc pl-5 text-xs text-warning">
+        <ul aria-label="Blockers" className="m-0 list-disc pl-5 text-xs text-warning-foreground">
           {review.blockers.map((blocker) => (
             <li key={blocker} className="break-words">
               {blocker}
@@ -100,7 +100,9 @@ export function WorkflowReviewCard(props: {
           {summary.fanOutReasons.length > 0 ? (
             <p>One agent may do this for less: {summary.fanOutReasons.join(" ")}</p>
           ) : null}
-          {summary.writeConflicts ? <p className="text-warning">{summary.writeConflicts}</p> : null}
+          {summary.writeConflicts ? (
+            <p className="text-warning-foreground">{summary.writeConflicts}</p>
+          ) : null}
         </div>
       ) : null}
       {steps.length > 0 ? (

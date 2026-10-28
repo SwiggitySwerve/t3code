@@ -12,6 +12,7 @@ import { useEnvironmentScope } from "../../state/session";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
+import { workflowReviewTargetLabel } from "@t3tools/client-runtime/state/workflowReview";
 import {
   applyProviderInstanceSettings,
   deriveProviderInstanceEntries,
@@ -123,12 +124,12 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
             title={<span className="[overflow-wrap:anywhere]">{preset.name}</span>}
             description={
               <span className="[overflow-wrap:anywhere]">
-                {preset.target.providerInstanceId} / {preset.target.model}
+                {workflowReviewTargetLabel(preset.target, providers)}
               </span>
             }
             control={
               <div className="flex flex-wrap items-center gap-2">
-                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                <label className="flex min-h-6 items-center gap-2 text-xs text-muted-foreground">
                   <Switch
                     checked={presets.defaultPresetId === preset.id}
                     disabled={!canWrite || pending}

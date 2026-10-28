@@ -1,3 +1,4 @@
+import { useAtomValue } from "@effect/atom-react";
 import { useNowSecond } from "../../hooks/useNowSecond";
 import {
   WORKFLOW_GRAPH_STATE_LABEL,
@@ -14,13 +15,16 @@ import type {
   OrchestrationV2TurnItem,
   ProviderDriverKind,
   ProviderInstanceId,
+  ServerProvider,
 } from "@t3tools/contracts";
 import { ChevronRightIcon, HistoryIcon } from "lucide-react";
+import { formatModelSlugName } from "@t3tools/shared/model";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
+import { providersIgnoringCheckedAtAtom } from "../../state/server";
 import { Tooltip, TooltipCreateHandle, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { Button } from "../ui/button";
 import {
@@ -32,7 +36,7 @@ import {
 } from "../ui/popover";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import {
-  WAVE_CARD_HEIGHT,
+  WAVE_CARD_BORDER,
   type WaveBox,
   type WaveViewport,
   visibleWaveCards,
@@ -85,6 +89,7 @@ export function WorkflowWaveCanvas(props: {
 }) {
   const { graph } = props;
   const find = props.findable === true ? "true" : undefined;
+  const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const layout = workflowWaveLayout(graph.waves);
   const nodes = graph.waves.flat();
   const labels = new Map(nodes.map((node) => [node.key, node.label] as const));
@@ -229,6 +234,7 @@ export function WorkflowWaveCanvas(props: {
                     labels={labels}
                     find={find}
                     environmentId={props.environmentId}
+                    providers={providers}
                     providerInstanceId={node.member?.providerInstanceId ?? null}
                     // A node without an agent has no provider yet; the workflow's own provider
                     // is the coordinator's, not the node's, so its avatar stays neutral.
@@ -307,14 +313,17 @@ function WorkflowNodePlaceholder(props: {
       className={cn(
         "absolute overflow-hidden rounded-md border border-border/70 bg-card px-2 py-2",
         node.state === "failed" && "border-destructive/50",
-        props.emphasis === false ? "opacity-35" : MUTED_STATES.has(node.state) && "opacity-60",
+        props.emphasis === false && "opacity-35",
       )}
       style={{ left: box.x, top: box.y, width: box.width, height: box.height }}
       data-workflow-node={node.key}
       data-workflow-node-placeholder
     >
       <span
-        className="block truncate text-xs font-medium text-foreground"
+        className={cn(
+          "block truncate text-xs font-medium",
+          MUTED_STATES.has(node.state) ? "text-muted-foreground" : "text-foreground",
+        )}
         data-thread-find-text={props.find}
       >
         {node.label}
@@ -340,6 +349,7 @@ interface WorkflowNodeCardProps {
   readonly labels: ReadonlyMap<string, string>;
   readonly find: "true" | undefined;
   readonly environmentId: EnvironmentId;
+  readonly providers: ReadonlyArray<ServerProvider> | undefined;
   readonly providerInstanceId: ProviderInstanceId | null;
   readonly driver: ProviderDriverKind | undefined;
   readonly onOpenThread: (threadId: string) => void;
@@ -348,6 +358,33 @@ interface WorkflowNodeCardProps {
   /** Null when nothing is highlighted; otherwise whether this node relates to the highlighted one. */
   readonly emphasis: boolean | null;
   readonly onHighlight: (on: boolean) => void;
+}
+
+/** The status word's colour: green passed, blue running, red failed, grey for everything else. */
+const STATE_TEXT: Readonly<Partial<Record<WorkflowGraphNodeState, string>>> = {
+  passed: "text-success-foreground",
+  running: "text-info-foreground",
+  failed: "text-destructive-foreground",
+};
+
+const sentenceCase = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
+
+/**
+ * The agent line of a card: the model's short name from the provider catalog, else its slug
+ * tidied. The provider instance and raw model id stay in the tooltip and the accessible
+ * description.
+ */
+function workflowNodeAgent(
+  member: RuntimeSubagent | null,
+  providers: ReadonlyArray<ServerProvider> | undefined,
+): string {
+  const identity = workflowMemberIdentity(member);
+  if (member === null || identity === "Not started") return identity;
+  if (member.model === null) return "Unknown model";
+  const model = providers
+    ?.find((provider) => provider.instanceId === member.providerInstanceId)
+    ?.models.find((entry) => entry.slug === member.model);
+  return model?.shortName ?? model?.name ?? formatModelSlugName(member.model);
 }
 
 function WorkflowNodeCard(props: WorkflowNodeCardProps) {
@@ -359,12 +396,22 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   const threadId = node.member?.childThreadId ?? null;
   const state = WORKFLOW_GRAPH_STATE_LABEL[node.state];
   const identity = workflowMemberIdentity(node.member);
+  const started = identity !== "Not started";
   const totals = `${countText(accounting.tokens, formatTokens)} tokens · ${countText(accounting.elapsed, formatDuration)}`;
   const facts = [identity, retries, detail, totals].filter(Boolean).join(", ");
   const description = `${state}, ${facts}`;
+  // The first line: how the node stands. A failed node adds why, cut to the line; the tooltip
+  // has the whole reason, and the nodes a waiting node runs after.
+  const status = [
+    retries === null ? null : sentenceCase(retries),
+    sentenceCase(state),
+    node.state === "failed" ? node.reason : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
   const className = cn(
-    "group/node flex min-w-0 flex-1 items-center gap-2 px-2 text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
-    props.emphasis === false ? "opacity-35" : MUTED_STATES.has(node.state) && "opacity-60",
+    "group/node flex min-w-0 flex-1 items-center gap-2 px-2.5 text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
+    props.emphasis === false && "opacity-35",
   );
   const highlight = {
     onMouseEnter: () => props.onHighlight(true),
@@ -373,6 +420,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
     onBlur: () => props.onHighlight(false),
   };
   const style = { left: box.x, top: box.y, width: box.width, height: box.height };
+  const bodyStyle = { height: box.height - WAVE_CARD_BORDER - box.checkerBand };
   const content = (
     <>
       {props.providerInstanceId === null ? null : (
@@ -385,30 +433,37 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
       )}
       <span className="flex min-w-0 flex-1 flex-col">
         <span
-          className="truncate text-xs font-medium text-foreground"
+          className={cn(
+            "flex items-center gap-1 text-2xs leading-3.5 font-medium",
+            STATE_TEXT[node.state] ?? "text-muted-foreground",
+          )}
+        >
+          <span className="min-w-0 truncate">{status}</span>
+          {threadId !== null ? (
+            <ChevronRightIcon
+              aria-hidden
+              className="ml-auto size-3 shrink-0 text-muted-foreground/60 group-hover/node:text-foreground"
+            />
+          ) : null}
+        </span>
+        <span
+          className={cn(
+            "text-xs leading-4 font-medium [overflow-wrap:anywhere]",
+            MUTED_STATES.has(node.state) ? "text-muted-foreground" : "text-foreground",
+            box.nameLines === 1 ? "line-clamp-1" : "line-clamp-2",
+            box.historyButton && "pr-6",
+          )}
           data-thread-find-text={props.find}
         >
           {node.label}
         </span>
-        <span className="truncate text-2xs text-muted-foreground">{identity}</span>
-        <span
-          className={cn(
-            "truncate text-2xs",
-            node.state === "failed" ? "text-destructive" : "text-muted-foreground",
-          )}
-        >
-          {retries ? <span className="font-medium">{retries} · </span> : null}
-          {/* The state word always shows; a node's reason or the nodes it runs after follow it. */}
-          {detail ? `${state} · ${detail}` : state}
+        <span className="truncate text-2xs leading-3.5 text-muted-foreground">
+          {workflowNodeAgent(node.member, props.providers)}
         </span>
-        <span className="truncate text-2xs text-muted-foreground tabular-nums">{totals}</span>
+        <span className="truncate text-2xs leading-3.5 text-muted-foreground tabular-nums">
+          {started ? totals : "No usage yet"}
+        </span>
       </span>
-      {threadId !== null ? (
-        <ChevronRightIcon
-          aria-hidden
-          className="size-3 shrink-0 text-muted-foreground/60 group-hover/node:text-foreground"
-        />
-      ) : null}
     </>
   );
   // The card truncates its text; the tooltip shows all of it.
@@ -422,7 +477,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
       style={style}
       data-workflow-node={node.key}
     >
-      <div className="flex items-center">
+      <div className="relative flex items-center" style={bodyStyle}>
         <TooltipTrigger
           handle={props.overlays.tooltip}
           payload={
@@ -443,7 +498,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
                 aria-label={workflowNodeName(node)}
                 aria-description={facts}
                 className={className}
-                style={{ height: WAVE_CARD_HEIGHT }}
+                style={bodyStyle}
                 data-node-state={node.state}
                 data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
                 tabIndex={0}
@@ -459,7 +514,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
                   className,
                   "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
                 )}
-                style={{ height: WAVE_CARD_HEIGHT }}
+                style={bodyStyle}
                 data-node-state={node.state}
                 data-node-related={props.emphasis === null ? undefined : String(props.emphasis)}
                 {...highlight}
@@ -469,29 +524,36 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
         >
           {content}
         </TooltipTrigger>
-        {accounting.attempts.length > 0 ? (
+        {box.historyButton && accounting.attempts.length > 0 ? (
           <PopoverTrigger
             handle={props.overlays.attempts}
             onClick={props.onAttemptsOpen}
             payload={{ label: node.label, totals, accounting }}
             render={
-              <Button variant="ghost" size="icon-sm" aria-label={`Attempts for ${node.label}`} />
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                className="absolute right-1 top-4 size-6"
+                aria-label={`Attempts for ${node.label}`}
+              />
             }
           >
             <HistoryIcon aria-hidden />
           </PopoverTrigger>
         ) : null}
       </div>
-      <div className="h-14 overflow-y-auto" data-workflow-checkers>
-        {node.checkers.map((checker) => (
-          <WorkflowChecker
-            key={checker.id}
-            checker={checker}
-            tooltip={props.overlays.tooltip}
-            onOpenThread={props.onOpenThread}
-          />
-        ))}
-      </div>
+      {box.checkerBand > 0 ? (
+        <div className="overflow-y-auto" style={{ height: box.checkerBand }} data-workflow-checkers>
+          {node.checkers.map((checker) => (
+            <WorkflowChecker
+              key={checker.id}
+              checker={checker}
+              tooltip={props.overlays.tooltip}
+              onOpenThread={props.onOpenThread}
+            />
+          ))}
+        </div>
+      ) : null}
     </div>
   );
 }

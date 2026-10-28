@@ -123,7 +123,9 @@ export function WorkflowOpeningBlock(props: {
       {opening.budget === undefined ? null : <WorkflowBudgetMeter budget={opening.budget} />}
       {props.progress ? <WorkflowProgress text={props.progress} /> : null}
       {graphHeadline?.waitingOn ? (
-        <p className="truncate px-2 text-2xs text-foreground">{graphHeadline.waitingOn}</p>
+        <p className="px-2 text-2xs text-muted-foreground [overflow-wrap:anywhere]">
+          {graphHeadline.waitingOn}
+        </p>
       ) : null}
       {graph !== null ? (
         <WorkflowWaveCanvas
@@ -292,7 +294,7 @@ function WorkflowMemberRow(props: {
               <span
                 className={cn(
                   "block truncate text-2xs leading-relaxed",
-                  failed ? "text-destructive" : "text-muted-foreground",
+                  failed ? "text-destructive-foreground" : "text-muted-foreground",
                 )}
               >
                 {detail}
