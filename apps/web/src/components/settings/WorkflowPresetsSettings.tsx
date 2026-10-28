@@ -4,6 +4,7 @@ import { randomUUID } from "../../lib/utils";
 import {
   AuthSettingsWriteScope,
   type EnvironmentId,
+  type ServerProvider,
   type WorkflowPreset,
 } from "@t3tools/contracts";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
@@ -33,6 +34,20 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+
+/**
+ * Whether the catalog still serves a preset's provider and model. Nothing is said while the
+ * catalog is empty, because that is also what it looks like before providers have loaded.
+ */
+function unavailable(
+  target: WorkflowPreset["target"],
+  providers: ReadonlyArray<ServerProvider>,
+): string | null {
+  if (providers.length === 0) return null;
+  const provider = providers.find((entry) => entry.instanceId === target.providerInstanceId);
+  if (provider === undefined) return "Provider not available";
+  return provider.models.some((model) => model.slug === target.model) ? null : "Model not available";
+}
 
 export function WorkflowPresetsSettings({ environmentId }: { environmentId: EnvironmentId }) {
   const settings = useEnvironmentSettings(environmentId);
@@ -82,7 +97,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
         headerAction={
           <Button
             size="xs"
-            variant="ghost-muted"
+            variant="outline"
             disabled={!canWrite || pending || draft !== null}
             onClick={() => {
               const selection = resolveAppModelSelectionState(settings, providers);
@@ -114,8 +129,8 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
           </p>
         ) : null}
         {presets.presets.length === 0 ? (
-          <p className="px-3 py-3 text-base text-muted-foreground sm:px-4 sm:text-sm">
-            No agent presets yet.
+          <p className="px-3 py-3 text-xs text-muted-foreground sm:px-4">
+            No agent presets yet. Create one to choose the provider and model workers run with.
           </p>
         ) : null}
         {presets.presets.map((preset) => (
@@ -125,6 +140,11 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
             description={
               <span className="[overflow-wrap:anywhere]">
                 {workflowReviewTargetLabel(preset.target, providers)}
+                {unavailable(preset.target, providers) ? (
+                  <span className="ms-2 whitespace-nowrap font-medium text-warning-foreground">
+                    {unavailable(preset.target, providers)}
+                  </span>
+                ) : null}
               </span>
             }
             control={
@@ -155,6 +175,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                 <Button
                   size="xs"
                   variant="ghost"
+                  className="text-destructive-foreground"
                   disabled={!canWrite || pending}
                   aria-label={`Delete ${preset.name}`}
                   onClick={() =>

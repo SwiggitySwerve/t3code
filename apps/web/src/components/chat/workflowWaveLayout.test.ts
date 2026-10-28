@@ -60,6 +60,24 @@ describe("workflowWaveLayout", () => {
     expect(waveNameLines("Count documentation files", true)).toBe(2);
   });
 
+  it("drops the tokens line for a node that never ran and adds a band for a failure reason", () => {
+    const layout = workflowWaveLayout([
+      [
+        { key: "ran", wave: 0 },
+        { key: "idle", wave: 0, started: false },
+        { key: "short", wave: 0, failure: "docs/ was not found." },
+        { key: "long", wave: 0, failure: "The command exited with code 1: docs/ was not found. ".repeat(4) },
+      ],
+    ]);
+    const height = (key: string) => layout.cards.get(key)!.height;
+    expect(layout.cards.get("idle")!.started).toBe(false);
+    expect(height("idle")).toBeLessThan(height("ran"));
+    expect(layout.cards.get("short")!.reasonLines).toBe(1);
+    expect(layout.cards.get("long")!.reasonLines).toBe(2);
+    expect(height("long")).toBeGreaterThan(height("short"));
+    expect(height("short")).toBeGreaterThan(height("ran"));
+  });
+
   it("shows the history button only for a node that ran more than once", () => {
     const layout = workflowWaveLayout([
       [

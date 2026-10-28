@@ -27,6 +27,12 @@ import { AgentElapsed } from "./AgentElapsed";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
+import {
+  WORKFLOW_TONE_TEXT,
+  workflowMemberStatusText,
+  workflowTone,
+  type WorkflowTone,
+} from "./workflowStatusText";
 
 /**
  * A workflow's plan and agents in the timeline. The script, or a graph's generated runner, is debug
@@ -62,6 +68,7 @@ export function WorkflowOpeningBlock(props: {
   const phases =
     graph !== null ? [] : (opening.group?.phases.filter((phase) => phase.members.length > 0) ?? []);
   const counts = graphHeadline?.summary ?? headline.agents;
+  const tone = openingTone(opening, graph);
   const memberRow = (member: RuntimeSubagent) => {
     const providerInstanceId = member.providerInstanceId ?? opening.providerInstanceId;
     return providerInstanceId === null ? null : (
@@ -82,10 +89,15 @@ export function WorkflowOpeningBlock(props: {
       className="flex min-w-0 flex-col gap-3 px-1 py-0.5"
       data-workflow-opening
     >
-      <header className="flex min-w-0 items-start gap-2">
+      <header className="flex min-w-0 flex-wrap items-start gap-x-2 gap-y-1">
         <WorkflowIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <p className="text-2xs font-medium text-muted-foreground">
+          <p
+            className={cn(
+              "text-2xs font-medium",
+              tone === null ? "text-muted-foreground" : WORKFLOW_TONE_TEXT[tone],
+            )}
+          >
             {props.heading ?? "Workflow started"}
           </p>
           <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text={find}>
@@ -98,7 +110,11 @@ export function WorkflowOpeningBlock(props: {
           ) : null}
         </div>
         {counts ? (
-          <span aria-live="polite" className="shrink-0 text-2xs tabular-nums text-muted-foreground">
+          // On a narrow screen the counts drop under the title, so Stop and the title keep their room.
+          <span
+            aria-live="polite"
+            className="shrink-0 text-2xs tabular-nums text-muted-foreground max-sm:order-last max-sm:basis-full max-sm:pl-5.5"
+          >
             {counts}
           </span>
         ) : null}
@@ -160,6 +176,29 @@ export function WorkflowOpeningBlock(props: {
         <ul className="m-0 list-none p-0">{opening.group.unphasedMembers.map(memberRow)}</ul>
       ) : null}
     </section>
+  );
+}
+
+/** How the whole workflow stands, from its graph nodes or its agents; null while it has none. */
+function openingTone(
+  opening: WorkflowOpening,
+  graph: NonNullable<WorkflowOpening["group"]>["graph"] | null,
+): WorkflowTone | null {
+  if (graph !== null) {
+    const states = graph.waves.flat().map((node) => node.state);
+    if (states.length === 0) return null;
+    if (states.includes("failed")) return "failed";
+    if (states.some((state) => state === "running" || state === "queued" || state === "waiting")) {
+      return "running";
+    }
+    return states.every((state) => state === "passed" || state === "skipped") ? "passed" : "stopped";
+  }
+  const group = opening.group;
+  if (group === null) return null;
+  return workflowTone(
+    [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers].map(
+      (member) => member.status,
+    ),
   );
 }
 
@@ -248,6 +287,7 @@ function WorkflowMemberRow(props: {
   const { member } = props;
   const threadId = member.childThreadId;
   const failed = member.status === "failed";
+  const statusText = workflowMemberStatusText(member.status);
   const detail = (
     isTerminalSubagentStatus(member.status)
       ? (member.error ?? member.result ?? member.progress)
@@ -301,11 +341,15 @@ function WorkflowMemberRow(props: {
               </span>
             ) : null}
           </span>
-          {member.startedAt ? (
-            <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-              <AgentElapsed agent={member} />
-            </span>
-          ) : null}
+          <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
+            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
+            {member.startedAt ? (
+              <>
+                {" "}
+                <AgentElapsed agent={member} />
+              </>
+            ) : null}
+          </span>
           {threadId !== null ? (
             <ChevronRightIcon
               aria-hidden

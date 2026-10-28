@@ -16,6 +16,9 @@ const STATUS_LINE_HEIGHT = 14;
 const NAME_LINE_HEIGHT = 16;
 /** The agent line and the tokens-and-time line. */
 const DETAIL_LINE_HEIGHT = 14;
+/** A failed node's reason, shown in full below the card's text: two lines of text and room under them. */
+const REASON_LINE_HEIGHT = 14;
+const REASON_BAND_PADDING = 6;
 /** One checker row; a node shows at most two, and further attempts scroll inside them. */
 export const WAVE_CHECKER_ROW_HEIGHT = 28;
 export const WAVE_CHECKER_ROWS_VISIBLE = 2;
@@ -26,6 +29,10 @@ export const WAVE_HEADER_HEIGHT = 22;
 
 /** Width left for the step name beside the agent avatar. */
 const NAME_WIDTH = 160;
+/** Width of the card's inner text, for the failure reason that spans the whole card. */
+const REASON_WIDTH = 192;
+/** 11px text is narrower than the 12px name by this factor. */
+const SMALL_TEXT_SCALE = 11 / 12;
 const HISTORY_BUTTON_WIDTH = 24;
 // Estimated advance of a 12px medium glyph. Deliberately wide, so a name judged to fit one line
 // never wraps; a name judged to need two may occasionally leave a spare line of height.
@@ -41,16 +48,16 @@ function glyphWidth(glyph: string): number {
   return glyph !== glyph.toLowerCase() ? CAPITAL_WIDTH : GLYPH_WIDTH;
 }
 
+/** Lines `text` takes in `capacity` pixels at `scale` times the 12px name, capped at two. */
+
 const textWidth = (text: string) => [...text].reduce((sum, glyph) => sum + glyphWidth(glyph), 0);
 
-/** How many of the two allowed lines a step name needs; the card clamps the name to that many. */
-export function waveNameLines(label: string, historyButton: boolean): 1 | 2 {
-  const capacity = NAME_WIDTH - (historyButton ? HISTORY_BUTTON_WIDTH : 0);
+function wrapLines(text: string, capacity: number, scale: number): 1 | 2 {
   let lines = 1;
   let used = 0;
-  for (const word of label.split(/\s+/).filter(Boolean)) {
-    const width = textWidth(word);
-    const space = used === 0 ? 0 : SPACE_WIDTH;
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    const width = textWidth(word) * scale;
+    const space = used === 0 ? 0 : SPACE_WIDTH * scale;
     if (used + space + width <= capacity) {
       used += space + width;
       continue;
@@ -64,6 +71,11 @@ export function waveNameLines(label: string, historyButton: boolean): 1 | 2 {
     }
   }
   return lines > 1 ? 2 : 1;
+}
+
+/** How many of the two allowed lines a step name needs; the card clamps the name to that many. */
+export function waveNameLines(label: string, historyButton: boolean): 1 | 2 {
+  return wrapLines(label, NAME_WIDTH - (historyButton ? HISTORY_BUTTON_WIDTH : 0), 1);
 }
 
 /** Attempts the node took, counted as the card's retry note counts them. */
@@ -81,6 +93,10 @@ export interface WaveNodeInput {
   readonly label?: string;
   readonly dependsOn?: ReadonlyArray<string>;
   readonly checkers?: ReadonlyArray<unknown>;
+  /** False once known that the node never ran; its card then has no tokens-and-time line. */
+  readonly started?: boolean;
+  /** Why a failed node failed; the card shows it in full under its text. */
+  readonly failure?: string | null;
   readonly attempts?: number | null;
   readonly member?: { readonly attempt: number | null } | null;
 }
@@ -96,6 +112,10 @@ export interface WaveBox {
   readonly historyButton: boolean;
   /** Height of the checker rows at the bottom of the card; zero for a node without a checker. */
   readonly checkerBand: number;
+  /** Whether the node ran; a node that never did has no tokens-and-time line. */
+  readonly started: boolean;
+  /** Lines of failure reason under the card's text; zero when the node did not fail with one. */
+  readonly reasonLines: 0 | 1 | 2;
 }
 
 /** A dependency line, from the right edge of the node depended on to the left edge of its dependent. */
@@ -118,6 +138,8 @@ function nodeBox(node: WaveNodeInput): Omit<WaveBox, "x" | "y"> {
   const nameLines = waveNameLines(node.label ?? "", historyButton);
   const checkerBand =
     Math.min(node.checkers?.length ?? 0, WAVE_CHECKER_ROWS_VISIBLE) * WAVE_CHECKER_ROW_HEIGHT;
+  const started = node.started !== false;
+  const reasonLines = node.failure ? wrapLines(node.failure, REASON_WIDTH, SMALL_TEXT_SCALE) : 0;
   return {
     width: WAVE_CARD_WIDTH,
     height:
@@ -125,11 +147,14 @@ function nodeBox(node: WaveNodeInput): Omit<WaveBox, "x" | "y"> {
       WAVE_CARD_PADDING +
       STATUS_LINE_HEIGHT +
       nameLines * NAME_LINE_HEIGHT +
-      2 * DETAIL_LINE_HEIGHT +
+      (started ? 2 : 1) * DETAIL_LINE_HEIGHT +
+      (reasonLines === 0 ? 0 : reasonLines * REASON_LINE_HEIGHT + REASON_BAND_PADDING) +
       checkerBand,
     nameLines,
     historyButton,
     checkerBand,
+    started,
+    reasonLines,
   };
 }
 

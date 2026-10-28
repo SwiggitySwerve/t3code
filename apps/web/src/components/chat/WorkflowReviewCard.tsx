@@ -15,16 +15,16 @@ import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 
 const STATUS_TONE: Record<WorkflowReviewStatus, string> = {
-  ready: "bg-accent/40 text-foreground",
-  blocked: "bg-warning/8 text-warning-foreground",
-  approving: "bg-accent/40 text-foreground",
-  dismissing: "bg-accent/40 text-foreground",
-  approved: "bg-success/8 text-success-foreground",
-  dismissed: "bg-muted text-muted-foreground",
-  stale: "bg-warning/8 text-warning-foreground",
-  superseded: "bg-muted text-muted-foreground",
-  info: "bg-muted text-muted-foreground",
-  "read-only": "bg-accent/40 text-foreground",
+  ready: "border-info/30 bg-info/8 text-info-foreground",
+  blocked: "border-warning/30 bg-warning/8 text-warning-foreground",
+  approving: "border-border bg-accent/40 text-foreground",
+  dismissing: "border-border bg-accent/40 text-foreground",
+  approved: "border-success/30 bg-success/8 text-success-foreground",
+  dismissed: "border-border bg-muted text-muted-foreground",
+  stale: "border-destructive/30 bg-destructive/8 text-destructive-foreground",
+  superseded: "border-border bg-muted text-muted-foreground",
+  info: "border-border bg-muted text-muted-foreground",
+  "read-only": "border-border bg-accent/40 text-foreground",
 };
 
 const NOTE_TONE = {
@@ -68,7 +68,7 @@ export function WorkflowReviewCard(props: {
         <span
           role="status"
           className={cn(
-            "shrink-0 rounded-full px-2 py-0.5 text-2xs font-medium",
+            "shrink-0 rounded-full border px-2 py-0.5 text-2xs font-medium",
             STATUS_TONE[presentation.status],
           )}
         >

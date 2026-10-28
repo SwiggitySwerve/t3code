@@ -10,6 +10,7 @@ import { AgentElapsed } from "./AgentElapsed";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadRelationshipIcon } from "./ThreadRelationshipIcon";
+import { workflowMemberStatusText } from "./workflowStatusText";
 import { cn } from "../../lib/utils";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { CollapsibleSectionHeader, SectionHeaderStatus } from "../ui/collapsible-section-header";
@@ -66,6 +67,7 @@ function WorkflowMemberRow({
 }) {
   const threadId = member.childThreadId;
   const canOpen = threadId !== null && isThreadAvailable(threadId);
+  const statusText = workflowMemberStatusText(member.status);
   return (
     <li>
       <Tooltip>
@@ -82,12 +84,15 @@ function WorkflowMemberRow({
         >
           <ThreadRelationshipIcon driver={driver} provider={provider} status={member.status} />
           <span className="min-w-0 flex-1 truncate">{member.title}</span>
-          <span className="sr-only">{member.status}</span>
-          {member.startedAt ? (
-            <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-              <AgentElapsed agent={member} />
-            </span>
-          ) : null}
+          <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
+            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
+            {member.startedAt ? (
+              <>
+                {" "}
+                <AgentElapsed agent={member} />
+              </>
+            ) : null}
+          </span>
         </TooltipTrigger>
         <ThreadHoverCardPopup side="left">
           <SubagentTooltipContent
