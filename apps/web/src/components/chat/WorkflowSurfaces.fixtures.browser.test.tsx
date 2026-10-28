@@ -120,6 +120,22 @@ describe.each(["graph", "script"] as const)("lineage row, %s", (kind) => {
   });
 });
 
+// The details panel can be dragged narrow; these frames show the row at that width.
+describe.each(["graph", "script"] as const)("lineage row, narrow panel, %s", (kind) => {
+  const surface = `lineage-row-narrow-${kind}`;
+  it.each(statesOf(surface))("%s", async (variant) => {
+    await captureSurface({
+      surface,
+      state: variant,
+      selector: "[data-workflow-expanded]",
+      frame: "[data-qa-panel]",
+      widthIndependent: true,
+      element: () => <LineageRowSurface kind={kind} variant={variant} narrow />,
+      settle: expandLineage,
+    });
+  });
+});
+
 it("lineage row, graph, running, Stop shown while the row is hovered", async () => {
   await captureSurface({
     surface: "lineage-row-graph",
@@ -170,13 +186,9 @@ describe("workflow review card", () => {
 describe("workflow fixture rows", () => {
   // Fixtures are projected rows run through the functions the timeline uses, so what a frame
   // says is what the app would say.
-  it("shows the failure summary the timeline derives, cut where production cuts it", () => {
-    expect(workflowFixture("graph", "failed").progress).toBe(
-      "Graph failed: 1 node failed, 2 skipped. Count documentation files: The command exited with code 1: docs/ was not found.",
-    );
-    const long = workflowFixture("graph", "long-labels").progress;
-    expect(long).toContain("1 node failed, 1 skipped.");
-    expect(long?.endsWith("...")).toBe(true);
+  it("says a graph's failure on its nodes and in its counts, not in a third sentence", () => {
+    expect(workflowFixture("graph", "failed").progress).toBeNull();
+    expect(workflowFixture("graph", "long-labels").progress).toBeNull();
   });
 
   it("reports what a finished run returned, and nothing for a graph that passed", () => {
@@ -203,14 +215,20 @@ describe("workflow fixture rows", () => {
     expect(workflowFixture("graph", "retrying").heading).toBe("Workflow running");
   });
 
-  it("draws the failure line and keeps the stored script out of the timeline", async () => {
+  it("draws the failure once on the node and keeps the stored script out of the timeline", async () => {
     // The block reads no location, so it renders without the test router.
     await using screen = await render(<WorkflowBlockSurface kind="graph" variant="failed" />, {
       router: false,
     });
-    await expect
-      .element(screen.getByText(/Graph failed: 1 node failed, 2 skipped\./))
-      .toBeVisible();
+    expect(screen.container.textContent).not.toContain("Graph failed:");
+    await expect.element(screen.getByText(/docs\/ was not found/).first()).toBeVisible();
     expect(screen.container.textContent).not.toContain(WORKFLOW_QA_SCRIPT_MARKER);
+  });
+
+  it("names the run's state in the Lineage header, in words", async () => {
+    await using screen = await render(<LineageRowSurface kind="script" variant="failed" />);
+    const header = screen.getByRole("button", { name: /^State audit/ }).first();
+    await expect.element(header).toBeVisible();
+    expect(header.element().textContent).toContain("Failed");
   });
 });

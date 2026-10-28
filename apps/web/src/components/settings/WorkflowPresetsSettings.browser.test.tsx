@@ -165,6 +165,32 @@ describe("workflow preset settings interactions", () => {
     await expect.element(reviewer).not.toBeChecked();
     expect(state.settings.workflowPresets.defaultPresetId).toBe("writer");
   });
+  it("labels the options picker in the editor, as Effort once the preset sets one", async () => {
+    setup();
+    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    state.settings = {
+      ...state.settings!,
+      workflowPresets: {
+        presets: [
+          { id: "plain", name: "Plain", target },
+          {
+            id: "effortful",
+            name: "Effortful",
+            target: { ...target, options: [{ id: "reasoningEffort", value: "high" }] },
+          },
+        ],
+        defaultPresetId: null,
+      },
+    };
+    await using screen = await render(
+      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Edit Effortful" }));
+    await expect.element(screen.getByText("Effort", { exact: true })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Edit Plain" }));
+    await expect.element(screen.getByText("Options", { exact: true })).toBeVisible();
+  });
   it("C4 creates, edits model and options, renames, toggles default and deletes through settings commands", async () => {
     setup();
     await using screen = await render(

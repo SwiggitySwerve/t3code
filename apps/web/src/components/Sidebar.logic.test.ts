@@ -289,6 +289,40 @@ describe("resolveSidebarThreadStatus", () => {
     ).toBe("input");
   });
 
+  it("shows a queued thread as queued, not as working", () => {
+    expect(resolveSidebarThreadStatus({ ...idle, runtime: { ...runtime, status: "queued" } })).toBe(
+      "queued",
+    );
+    expect(resolveSidebarThreadStatus({ ...idle, runtime })).toBe("working");
+    expect(resolveSidebarV2TopStatus({ status: "queued", isUnread: false, isWoke: false })).toBe(
+      "queued",
+    );
+  });
+
+  it("shows a parent whose turn ended while its workflow runs as running, not idle", () => {
+    const idleRuntime = { ...runtime, status: "idle" as const };
+    const workflow = [{ taskId: "workflow", kind: "background_task" as const }];
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        runtime: idleRuntime,
+        pendingBackgroundTasks: workflow,
+      }),
+    ).toBe("background");
+    expect(resolveSidebarThreadStatus({ ...idle, runtime: idleRuntime })).toBe("waiting");
+    // A running turn is still working, and an awaited command is still a wait.
+    expect(resolveSidebarThreadStatus({ ...idle, runtime, pendingBackgroundTasks: workflow })).toBe(
+      "working",
+    );
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        runtime: idleRuntime,
+        pendingBackgroundTasks: [{ taskId: "build", kind: "command", awaited: true }],
+      }),
+    ).toBe("waiting");
+  });
+
   it("keeps usage-limit stops Limited and visible until the thread recovers", () => {
     const limited = {
       ...runtime,

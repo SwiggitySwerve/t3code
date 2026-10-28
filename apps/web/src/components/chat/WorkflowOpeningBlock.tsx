@@ -298,10 +298,13 @@ function WorkflowMemberRow(props: {
   const threadId = member.childThreadId;
   const failed = member.status === "failed";
   const statusText = workflowMemberStatusText(member.status);
+  // A failed agent's last progress text is what it was asked to do, not why it failed.
   const detail = (
-    isTerminalSubagentStatus(member.status)
-      ? (member.error ?? member.result ?? member.progress)
-      : member.progress
+    failed
+      ? (member.error ?? member.result)
+      : isTerminalSubagentStatus(member.status)
+        ? (member.error ?? member.result ?? member.progress)
+        : member.progress
   )
     ?.replace(/`/g, "")
     .replace(/\s+/g, " ")

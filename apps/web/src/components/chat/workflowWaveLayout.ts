@@ -6,6 +6,8 @@
 export const WAVE_CARD_WIDTH = 216;
 /** On a narrow screen cards shrink, down to this width, so two columns fit side by side. */
 export const WAVE_CARD_MIN_WIDTH = 152;
+/** Three columns share the row only while each card keeps at least this width. */
+const WAVE_CARD_COMFORT_WIDTH = 184;
 /** The scroll area's side padding. */
 const CANVAS_PADDING = 8;
 /** Space above and below a card's text. */
@@ -81,14 +83,16 @@ export function waveNameLines(
 }
 
 /**
- * The card width for a scroll area `areaWidth` wide: full size when two columns fit, otherwise
- * shrunk so they still do, and never below the minimum.
+ * The card width for a scroll area `areaWidth` wide holding `waveCount` waves: up to three
+ * columns share the row at full size or a little less, and a screen too narrow for that shows two.
  */
-export function waveCardWidth(areaWidth: number | null | undefined): number {
+export function waveCardWidth(areaWidth: number | null | undefined, waveCount = 3): number {
   if (areaWidth === null || areaWidth === undefined || areaWidth <= 0) return WAVE_CARD_WIDTH;
   const room = areaWidth - CANVAS_PADDING;
-  const two = Math.floor((room - WAVE_COLUMN_GAP) / 2);
-  return Math.min(WAVE_CARD_WIDTH, Math.max(WAVE_CARD_MIN_WIDTH, two));
+  const fit = (columns: number) => Math.floor((room - (columns - 1) * WAVE_COLUMN_GAP) / columns);
+  const columns = Math.min(Math.max(waveCount, 1), 3);
+  const width = columns === 3 && fit(3) < WAVE_CARD_COMFORT_WIDTH ? fit(2) : fit(columns);
+  return Math.min(WAVE_CARD_WIDTH, Math.max(WAVE_CARD_MIN_WIDTH, width));
 }
 
 /** Attempts the node took, counted as the card's retry note counts them. */

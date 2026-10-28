@@ -106,6 +106,19 @@ describe("workflowWaveLayout", () => {
     expect(waveNameLines("Count documentation files", false, narrow)).toBe(2);
   });
 
+  it("fits three waves in the chat column and two on a phone", () => {
+    // The scroll area of the workflow block at the normal chat width.
+    const chat = 696;
+    const three = waveCardWidth(chat, 3);
+    expect(3 * three + 2 * WAVE_COLUMN_GAP + 8).toBeLessThanOrEqual(chat);
+    expect(three).toBeGreaterThan(WAVE_CARD_MIN_WIDTH);
+    // A graph of one or two waves keeps the full card.
+    expect(waveCardWidth(chat, 2)).toBe(WAVE_CARD_WIDTH);
+    // Too narrow for three comfortable cards: two columns share the row.
+    const phone = waveCardWidth(352, 3);
+    expect(2 * phone + WAVE_COLUMN_GAP + 8).toBeLessThanOrEqual(352);
+  });
+
   it("gives the note of a node that never ran a second line when it needs one", () => {
     const layout = workflowWaveLayout([
       [

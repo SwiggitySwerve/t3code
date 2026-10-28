@@ -952,3 +952,44 @@ it.each(Object.entries(AGREEMENT_ROWS))(
     expect(counted("meta")).toEqual([]);
   },
 );
+
+function failedAgentGroup(fields: { progress: string | null; error: string | null }) {
+  const group = scriptGroup();
+  return {
+    ...group,
+    phases: group.phases.map((phase) => ({
+      ...phase,
+      members: phase.members.map((member) => ({
+        ...member,
+        status: "failed" as const,
+        result: null,
+        ...fields,
+      })),
+    })),
+  };
+}
+
+it("shows a failed agent's error as its subtitle and never its prompt", async () => {
+  const prompt = "Run this command exactly once: ping -n 181 127.0.0.1";
+  await using screen = await render(
+    <WorkflowOpeningBlock
+      opening={{ ...opening, group: failedAgentGroup({ progress: prompt, error: null }) }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(screen.getByRole("button", { name: "Open Read files" })).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Run this command");
+  await screen.rerender(
+    <WorkflowOpeningBlock
+      opening={{
+        ...opening,
+        group: failedAgentGroup({ progress: prompt, error: "The command exited with code 1." }),
+      }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(screen.getByText("The command exited with code 1.")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Run this command");
+});

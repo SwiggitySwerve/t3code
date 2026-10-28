@@ -69,7 +69,11 @@ import { orchestrationEnvironment } from "../../state/orchestration";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadRelationshipIcon, threadRelationshipStatusLabel } from "./ThreadRelationshipIcon";
-import { ThreadLineageWorkflowRow, workflowLineageLabel } from "./ThreadLineageWorkflowRow";
+import {
+  ThreadLineageWorkflowRow,
+  WorkflowLineageStatus,
+  workflowLineageLabel,
+} from "./ThreadLineageWorkflowRow";
 
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
@@ -579,9 +583,11 @@ export function ThreadRelationshipsPanel(props: {
                   {agent ? null : (
                     <ArrowRightIcon className="size-3 shrink-0 text-muted-foreground opacity-0 transition-opacity group-hover:opacity-100" />
                   )}
-                  {agent &&
-                  !failed &&
-                  (deriveSubagentElapsedMs(agent, 0) !== null || showWorkflowStop) ? (
+                  {workflowGroup && agent ? (
+                    <WorkflowLineageStatus workflow={agent} className={trailingVisibilityClass} />
+                  ) : agent &&
+                    !failed &&
+                    (deriveSubagentElapsedMs(agent, 0) !== null || showWorkflowStop) ? (
                     <span
                       className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${showWorkflowStop ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
                     >

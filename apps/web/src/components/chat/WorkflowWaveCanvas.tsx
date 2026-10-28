@@ -98,7 +98,7 @@ export function WorkflowWaveCanvas(props: {
         note: workflowGraphNodeDetail(node, labels).detail,
       })),
     ),
-    waveCardWidth(viewport?.width),
+    waveCardWidth(viewport?.width, graph.waves.length),
   );
   // Hovering or focusing a node highlights it, what it depends on and what depends on it.
   const [highlighted, setHighlighted] = useState<string | null>(null);

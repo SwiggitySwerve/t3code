@@ -247,23 +247,30 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                     }
                   />
                   {activeEntry ? (
-                    <TraitsPicker
-                      provider={activeEntry.driverKind}
-                      models={activeEntry.models}
-                      model={draft.target.model}
-                      modelOptions={draft.target.options ?? []}
-                      allowPromptInjectedEffort={false}
-                      planModeEnabled={settings.planModeEnabled}
-                      disabled={pending || !canWrite}
-                      triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                      onModelOptionsChange={(options) => {
-                        if (!pending && canWrite)
-                          setDraft({
-                            ...draft,
-                            target: { ...draft.target, options: options ?? [] },
-                          });
-                      }}
-                    />
+                    <span className="inline-flex items-center gap-1.5">
+                      <span className="text-xs text-muted-foreground">
+                        {(draft.target.options ?? []).some((option) => /effort/i.test(option.id))
+                          ? "Effort"
+                          : "Options"}
+                      </span>
+                      <TraitsPicker
+                        provider={activeEntry.driverKind}
+                        models={activeEntry.models}
+                        model={draft.target.model}
+                        modelOptions={draft.target.options ?? []}
+                        allowPromptInjectedEffort={false}
+                        planModeEnabled={settings.planModeEnabled}
+                        disabled={pending || !canWrite}
+                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                        onModelOptionsChange={(options) => {
+                          if (!pending && canWrite)
+                            setDraft({
+                              ...draft,
+                              target: { ...draft.target, options: options ?? [] },
+                            });
+                        }}
+                      />
+                    </span>
                   ) : null}
                 </div>
               }

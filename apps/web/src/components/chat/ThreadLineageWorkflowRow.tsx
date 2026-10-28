@@ -21,6 +21,28 @@ import {
   THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS,
 } from "./threadDetailsPanelStyles";
 
+/**
+ * What the Lineage header of a workflow shows at its right: how the run stands in words, and how
+ * long it has run. Stop takes its place while the row is hovered.
+ */
+export function WorkflowLineageStatus(props: {
+  readonly workflow: RuntimeSubagent;
+  readonly className?: string | undefined;
+}) {
+  const status = workflowMemberStatusText(props.workflow.status);
+  return (
+    <span
+      className={cn(
+        "flex shrink-0 items-baseline gap-1.5 text-2xs font-normal tabular-nums text-muted-foreground",
+        props.className,
+      )}
+    >
+      <span className={cn("font-medium", status.className)}>{status.label}</span>
+      <AgentElapsed agent={props.workflow} compact />
+    </span>
+  );
+}
+
 function phaseElapsed(phase: SubagentWorkflowGroup["phases"][number]) {
   const instants = (key: "startedAt" | "completedAt") =>
     phase.members

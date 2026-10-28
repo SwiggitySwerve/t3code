@@ -385,6 +385,13 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                         const isActive = activePath === to || activePath.startsWith(`${to}/`);
                         return (
                           <SidebarMenuItem key={to}>
+                            {/* The selected entry is white on near-white in light; a bar shows it. */}
+                            {isActive ? (
+                              <span
+                                aria-hidden
+                                className="pointer-events-none absolute inset-y-1.5 start-0 z-10 w-0.5 rounded-full bg-foreground"
+                              />
+                            ) : null}
                             <SidebarMenuButton
                               isActive={isActive}
                               onClick={() => handleSectionClick(to)}

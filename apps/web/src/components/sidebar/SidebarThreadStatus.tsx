@@ -3,6 +3,7 @@ import {
   CircleCheckIcon,
   CircleDashedIcon,
   CircleDotDashedIcon,
+  ClockIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
   UserRoundIcon,
@@ -18,6 +19,7 @@ export interface SidebarTopStatus {
   readonly label: string;
   readonly icon:
     | "working"
+    | "queued"
     | "waiting"
     | "approval"
     | "input"
@@ -43,6 +45,11 @@ export function sidebarThreadTopStatus(input: {
         icon: "working",
         className: "text-info-foreground",
       };
+    case "queued":
+      return { label: "Queued", icon: "queued", className: "text-muted-foreground" };
+    case "background":
+      // The turn ended but a workflow or other background work keeps running.
+      return { label: "Running", icon: "working", className: "text-info-foreground" };
     case "waiting":
       return { label: "Waiting", icon: "waiting", className: "text-muted-foreground" };
     case "approval":
@@ -97,6 +104,8 @@ export function SidebarTopStatusBadge(props: {
     <span className={`inline-flex items-center gap-1 font-medium ${topStatus.className}`}>
       {topStatus.icon === "working" ? (
         <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+      ) : topStatus.icon === "queued" ? (
+        <ClockIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "waiting" ? (
         <CircleDotDashedIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "input" ? (

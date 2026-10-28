@@ -309,6 +309,8 @@ const SCRIPT_STATES = without(GRAPH_STATES, "retrying", "missing-model");
 // A collapsed Lineage row shows the run's status and title only.
 const COLLAPSED_GRAPH_STATES = ["running", "passed", "failed", "stopped", "long-labels"];
 const COLLAPSED_SCRIPT_STATES = COLLAPSED_GRAPH_STATES;
+// The narrow panel shows the states most likely to overflow a row.
+const NARROW_LINEAGE_STATES = ["running", "failed", "long-labels"];
 
 /**
  * Every surface and state the fixtures must record. Adding a surface or state means adding it
@@ -320,6 +322,8 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
   "workflow-canvas": [...GRAPH_STATES, WORKFLOW_QA_RUNNING_WAVE],
   "lineage-row-graph": [...GRAPH_STATES, WORKFLOW_QA_STOP_VISIBLE],
   "lineage-row-script": SCRIPT_STATES,
+  "lineage-row-narrow-graph": NARROW_LINEAGE_STATES,
+  "lineage-row-narrow-script": NARROW_LINEAGE_STATES,
   "lineage-collapsed-graph": COLLAPSED_GRAPH_STATES,
   "lineage-collapsed-script": COLLAPSED_SCRIPT_STATES,
   "sidebar-status": WORKFLOW_QA_SIDEBAR_STATES,
