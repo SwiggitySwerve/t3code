@@ -40,8 +40,15 @@ export function scanEncoding(files: ReadonlyArray<EncodingInput>): Array<string>
 /** Scans what the checkout at `cwd` changed since its merge base with `base`. */
 export function scanChangedEncoding(cwd: string, base: string): Array<string> {
   const mergeBase = git(cwd, ["merge-base", "HEAD", base]).trim();
-  const changed = git(cwd, ["diff", "--name-only", "--no-renames", "--diff-filter=ACMR", mergeBase])
-    .split("\n")
+  const changed = git(cwd, [
+    "diff",
+    "--name-only",
+    "-z",
+    "--no-renames",
+    "--diff-filter=ACMR",
+    mergeBase,
+  ])
+    .split("\0")
     .filter((path) => path !== "" && TEXT_FILE.test(path));
   return scanEncoding(
     changed.map((path) => ({

@@ -1,10 +1,33 @@
+// @effect-diagnostics nodeBuiltinImport:off - the tests build a real temporary git repository.
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+import * as NodePath from "node:path";
 import { expect, it } from "vite-plus/test";
 
-import { scanEncoding } from "./encoding.ts";
+import { scanChangedEncoding, scanEncoding } from "./encoding.ts";
+import { git } from "./util.ts";
 
 // "—" and "é" read back as Windows-1252, the damage a Windows shell does to UTF-8 source.
 const damagedDash = "\u00e2\u20ac\u201d";
 const damagedAccent = "\u00c3\u00a9";
+
+it("scans changed non-ASCII paths with Git path quoting enabled", () => {
+  using directory = NodeFS.mkdtempDisposableSync(
+    NodePath.join(NodeOS.tmpdir(), "workflow-qa-encoding-"),
+  );
+  const cwd = directory.path;
+  git(cwd, ["init", "-q"]);
+  git(cwd, ["config", "user.name", "test"]);
+  git(cwd, ["config", "user.email", "test@example.com"]);
+  git(cwd, ["config", "core.quotePath", "true"]);
+  git(cwd, ["config", "core.autocrlf", "false"]);
+  const path = "caf\u00e9.md";
+  NodeFS.writeFileSync(NodePath.join(cwd, path), "Original text\n");
+  git(cwd, ["add", "--", path]);
+  git(cwd, ["-c", "commit.gpgsign=false", "commit", "-q", "-m", "base"]);
+  NodeFS.writeFileSync(NodePath.join(cwd, path), `Original text\nBroken ${damagedDash}\n`);
+  expect(scanChangedEncoding(cwd, "HEAD")).toEqual([`${path}:2: Broken ${damagedDash}`]);
+});
 
 it("reports damaged lines a change adds and not damage already at the base", () => {
   expect(
