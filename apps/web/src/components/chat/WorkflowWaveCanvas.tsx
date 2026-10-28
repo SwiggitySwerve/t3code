@@ -12,9 +12,6 @@ import {
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import type {
   EnvironmentId,
-  OrchestrationV2TurnItem,
-  ProviderDriverKind,
-  ProviderInstanceId,
   ServerProvider,
 } from "@t3tools/contracts";
 import { ChevronRightIcon, HistoryIcon } from "lucide-react";
@@ -35,7 +32,6 @@ import {
   PopoverTrigger,
 } from "../ui/popover";
 import { scrollFadeStyle } from "./scrollFade";
-import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import {
   WAVE_CARD_BORDER,
   type WaveBox,
@@ -45,16 +41,11 @@ import {
   workflowWaveLayout,
 } from "./workflowWaveLayout";
 
-/** The avatar dot for each node state; nodes that never ran share the stopped dot. */
-const AVATAR_STATUS: Readonly<Record<WorkflowGraphNodeState, OrchestrationV2TurnItem["status"]>> = {
-  passed: "completed",
-  failed: "failed",
-  skipped: "cancelled",
-  running: "running",
-  queued: "pending",
-  waiting: "pending",
-  not_run: "cancelled",
-  interrupted: "interrupted",
+/** The dot before a node's status word: green passed, blue running, red failed, grey otherwise. */
+const STATE_DOT: Readonly<Partial<Record<WorkflowGraphNodeState, string>>> = {
+  passed: "bg-success",
+  running: "bg-info",
+  failed: "bg-destructive",
 };
 
 type AttemptsPayload = {
@@ -172,6 +163,8 @@ export function WorkflowWaveCanvas(props: {
       ref={scrollRef}
       className="max-h-120 overflow-auto px-1 pb-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
       style={scrollFadeStyle({
+        left: viewport !== null && viewport.left > 1,
+        top: viewport !== null && viewport.top > 1,
         right: viewport !== null && viewport.left + viewport.width < layout.width - 1,
         bottom: viewport !== null && viewport.top + viewport.height < layout.height - 1,
       })}
@@ -197,7 +190,7 @@ export function WorkflowWaveCanvas(props: {
                 fill="none"
                 stroke="currentColor"
                 strokeWidth={active ? 1.5 : 1}
-                className={active ? "text-foreground/70" : "text-border"}
+                className={active ? "text-foreground/70" : "text-muted-foreground/60"}
                 data-edge-active={active ? "" : undefined}
               />
             );
@@ -220,7 +213,7 @@ export function WorkflowWaveCanvas(props: {
                 style={{ left: x, top: 0, width: layout.cards.get(nodes[0]?.key ?? "")?.width }}
               >
                 <span>Wave {column + 1}</span>
-                <span className="tabular-nums">
+                <span className="font-normal tabular-nums">
                   {settled} of {nodes.length} finished
                 </span>
               </h4>
@@ -250,12 +243,7 @@ export function WorkflowWaveCanvas(props: {
                     box={box}
                     labels={labels}
                     find={find}
-                    environmentId={props.environmentId}
                     providers={providers}
-                    providerInstanceId={node.member?.providerInstanceId ?? null}
-                    // A node without an agent has no provider yet; the workflow's own provider
-                    // is the coordinator's, not the node's, so its avatar stays neutral.
-                    driver={node.member?.driver}
                     onOpenThread={props.onOpenThread}
                     overlays={overlays}
                     onAttemptsOpen={() => setAttemptsOpenFor(node.key)}
@@ -365,10 +353,7 @@ interface WorkflowNodeCardProps {
   readonly box: WaveBox;
   readonly labels: ReadonlyMap<string, string>;
   readonly find: "true" | undefined;
-  readonly environmentId: EnvironmentId;
   readonly providers: ReadonlyArray<ServerProvider> | undefined;
-  readonly providerInstanceId: ProviderInstanceId | null;
-  readonly driver: ProviderDriverKind | undefined;
   readonly onOpenThread: (threadId: string) => void;
   readonly overlays: CanvasOverlays;
   readonly onAttemptsOpen: () => void;
@@ -401,7 +386,8 @@ function workflowNodeAgent(
   const model = providers
     ?.find((provider) => provider.instanceId === member.providerInstanceId)
     ?.models.find((entry) => entry.slug === member.model);
-  return model?.shortName ?? model?.name ?? formatModelSlugName(member.model);
+  // A model the catalog lacks shows its tidied slug, without a build date stamp.
+  return model?.shortName ?? model?.name ?? formatModelSlugName(member.model).replace(/ \d{8}\b/, "");
 }
 
 function WorkflowNodeCard(props: WorkflowNodeCardProps) {
@@ -413,7 +399,10 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   const threadId = node.member?.childThreadId ?? null;
   const state = WORKFLOW_GRAPH_STATE_LABEL[node.state];
   const identity = workflowMemberIdentity(node.member);
-  const totals = `${countText(accounting.tokens, formatTokens)} tokens · ${countText(accounting.elapsed, formatDuration)}`;
+  const totals =
+    accounting.tokens.value === null && accounting.elapsed.value === null
+      ? "Usage unknown"
+      : `${countText(accounting.tokens, formatTokens)} tokens · ${countText(accounting.elapsed, formatDuration)}`;
   const facts = [identity, retries, detail, totals].filter(Boolean).join(", ");
   const description = `${state}, ${facts}`;
   // The first line: how the node stands. A failed node's reason has its own band under the text;
@@ -439,21 +428,17 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   };
   const content = (
     <>
-      {props.providerInstanceId === null ? null : (
-        <EnvironmentSubagentAvatar
-          environmentId={props.environmentId}
-          providerInstanceId={props.providerInstanceId}
-          driver={props.driver}
-          status={AVATAR_STATUS[node.state]}
-        />
-      )}
       <span className="flex min-w-0 flex-1 flex-col">
         <span
           className={cn(
-            "flex items-center gap-1 text-2xs leading-3.5 font-semibold",
+            "flex items-center gap-1.5 text-2xs leading-3.5 font-semibold",
             STATE_TEXT[node.state] ?? "text-muted-foreground",
           )}
         >
+          <span
+            aria-hidden
+            className={cn("size-1.5 shrink-0 rounded-full", STATE_DOT[node.state] ?? "bg-muted-foreground/60")}
+          />
           <span className="min-w-0 truncate">{status}</span>
           {threadId !== null ? (
             <ChevronRightIcon

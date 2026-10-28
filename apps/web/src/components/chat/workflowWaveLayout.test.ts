@@ -55,11 +55,11 @@ describe("workflowWaveLayout", () => {
 
   it("estimates wide glyphs, unbroken words and the history button when counting name lines", () => {
     expect(waveNameLines("", false)).toBe(1);
-    expect(waveNameLines("日本語のステップ名ですよろしく", false)).toBe(2);
+    expect(waveNameLines("日本語のステップ名ですよろしくお願いします", false)).toBe(2);
     expect(waveNameLines("/var/lib/build/cache/workspace/generated/index.ts", false)).toBe(2);
     // A name that just fits one line wraps once the history button takes room beside it.
-    expect(waveNameLines("Count documentation files", false)).toBe(1);
-    expect(waveNameLines("Count documentation files", true)).toBe(2);
+    expect(waveNameLines("Count documentation files now", false)).toBe(1);
+    expect(waveNameLines("Count documentation files now", true)).toBe(2);
   });
 
   it("drops the tokens line for a node that never ran and adds a band for a failure reason", () => {
@@ -92,7 +92,8 @@ describe("workflowWaveLayout", () => {
     expect(layout.cards.get("b")!.x).toBe(narrow + WAVE_COLUMN_GAP);
     expect(layout.width).toBe(2 * narrow + WAVE_COLUMN_GAP);
     // Narrower cards wrap a name sooner.
-    expect(waveNameLines("Count source files", false, narrow)).toBe(2);
+    expect(waveNameLines("Count documentation files", false)).toBe(1);
+    expect(waveNameLines("Count documentation files", false, narrow)).toBe(2);
   });
 
   it("gives the note of a node that never ran a second line when it needs one", () => {

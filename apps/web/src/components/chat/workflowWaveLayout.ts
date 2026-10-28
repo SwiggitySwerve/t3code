@@ -31,10 +31,9 @@ export const WAVE_COLUMN_GAP = 24;
 export const WAVE_ROW_GAP = 12;
 export const WAVE_HEADER_HEIGHT = 22;
 
-/** Card width not available to the step name: borders, padding, the avatar and its gap. */
-const NAME_INSET = 56;
-/** Card width not available to text that spans the card: borders and padding. */
-const SPAN_INSET = 24;
+/** Card width not available to text: borders, padding and a little slack. */
+const NAME_INSET = 28;
+const SPAN_INSET = NAME_INSET;
 /** 11px text is narrower than the 12px name by this factor. */
 const SMALL_TEXT_SCALE = 11 / 12;
 const HISTORY_BUTTON_WIDTH = 24;

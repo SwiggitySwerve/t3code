@@ -120,7 +120,7 @@ export function WorkflowReviewCard(props: {
       {steps.length > 0 ? (
         <ol
           ref={tasksRef}
-          style={scrollFadeStyle({ right: false, bottom: taskEdges.bottom })}
+          style={scrollFadeStyle({ top: taskEdges.top === true, right: false, bottom: taskEdges.bottom })}
           aria-label="Tasks"
           // A long graph scrolls inside the card, so the decision buttons stay near the plan.
           tabIndex={0}
