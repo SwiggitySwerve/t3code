@@ -136,21 +136,14 @@ describe("workflowWaveLayout", () => {
     expect(layout.cards.get("long")!.height).toBeGreaterThan(layout.cards.get("short")!.height);
   });
 
-  it("shows the history button only for a node that ran more than once", () => {
+  it("draws the history button only where the caller asks for it", () => {
     const layout = workflowWaveLayout([
       [
         { key: "first", wave: 0 },
-        { key: "retried", wave: 0, attempts: 2 },
-        { key: "member", wave: 0, member: { attempt: 1 } },
-        { key: "unknown", wave: 0, attempts: null, member: null },
+        { key: "retried", wave: 0, historyButton: true },
       ],
     ]);
-    expect([...layout.cards.values()].map((box) => box.historyButton)).toEqual([
-      false,
-      true,
-      true,
-      false,
-    ]);
+    expect([...layout.cards.values()].map((box) => box.historyButton)).toEqual([false, true]);
   });
 
   it("keeps one row grid: a row is as tall as its tallest card, and lines meet each card's middle", () => {

@@ -103,12 +103,18 @@ export function WorkflowWaveCanvas(props: {
   // The scroll area's width decides the card width, so a narrow chat shows two whole columns.
   const layout = workflowWaveLayout(
     graph.waves.map((wave) =>
-      wave.map((node) => ({
-        ...node,
-        started: workflowMemberIdentity(node.member) !== "Not started",
-        failure: node.state === "failed" ? node.reason : null,
-        note: workflowGraphNodeDetail(node, labels).detail,
-      })),
+      wave.map((node) => {
+        const { detail, retries } = workflowGraphNodeDetail(node, labels);
+        const failure = node.state === "failed" ? node.reason : null;
+        return {
+          ...node,
+          started: workflowMemberIdentity(node.member) !== "Not started",
+          failure,
+          // A failure's reason has its own band; the note would repeat it.
+          note: failure ? null : detail,
+          historyButton: retries !== null,
+        };
+      }),
     ),
     waveCardWidth(viewport?.width, graph.waves.length),
   );
@@ -496,7 +502,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
               box.noteLines === 1 ? "line-clamp-1" : "line-clamp-2",
             )}
           >
-            {detail ?? "Not started"}
+            {(box.reasonLines > 0 ? null : detail) ?? "Not started"}
           </span>
         )}
       </span>

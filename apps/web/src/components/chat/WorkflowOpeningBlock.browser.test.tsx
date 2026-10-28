@@ -622,6 +622,41 @@ it("lets keyboard users inspect a checker with no child thread", async () => {
   await expect.element(popup).not.toBeInTheDocument();
 });
 
+it("states the reason of a node that failed before it started once", async () => {
+  const reason = "Count source files produced no output to pass on.";
+  const graph: WorkflowGraphView<RuntimeSubagent> = {
+    waves: [
+      [
+        {
+          key: "audit",
+          label: "Audit",
+          wave: 0,
+          dependsOn: [],
+          dependents: [],
+          state: "failed",
+          reason,
+          attempts: 1,
+          member: null,
+          checkers: [],
+        },
+      ],
+    ],
+    counts: { failed: 1 },
+    waitingOn: null,
+    otherMembers: [],
+  };
+  await using _ = await render(
+    <WorkflowWaveCanvas
+      graph={graph}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(page.getByText(reason, { exact: true })).toBeVisible();
+  const card = document.querySelector('[data-workflow-node="audit"]');
+  expect(card?.textContent?.split(reason).length).toBe(2);
+});
+
 // A card cuts a long label and model with an ellipsis, and a dependent node is dimmed. The full
 // text and the state in words must reach assistive technology and show on hover and on focus,
 // and colour alone must never be what says a node waits.

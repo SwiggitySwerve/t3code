@@ -321,6 +321,22 @@ describe("resolveSidebarThreadStatus", () => {
         pendingBackgroundTasks: [{ taskId: "build", kind: "command", awaited: true }],
       }),
     ).toBe("waiting");
+    // A failed or usage-limited turn keeps its badge while the workflow runs on.
+    const failedRuntime = { ...runtime, status: "failed" as const };
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        runtime: failedRuntime,
+        pendingBackgroundTasks: workflow,
+      }),
+    ).toBe("failed");
+    expect(
+      resolveSidebarThreadStatus({
+        ...idle,
+        runtime: { ...failedRuntime, lastErrorClass: "usage_limit" as const },
+        pendingBackgroundTasks: workflow,
+      }),
+    ).toBe("limited");
   });
 
   it("keeps usage-limit stops Limited and visible until the thread recovers", () => {

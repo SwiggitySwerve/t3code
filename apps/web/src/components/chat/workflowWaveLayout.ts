@@ -95,14 +95,6 @@ export function waveCardWidth(areaWidth: number | null | undefined, waveCount = 
   return Math.min(WAVE_CARD_WIDTH, Math.max(WAVE_CARD_MIN_WIDTH, width));
 }
 
-/** Attempts the node took, counted as the card's retry note counts them. */
-export function waveNodeAttempts(node: {
-  readonly attempts?: number | null;
-  readonly member?: { readonly attempt: number | null } | null;
-}): number {
-  return node.attempts ?? (node.member?.attempt ?? 0) + 1;
-}
-
 /** What a node's own data decides about its card; the card draws exactly this. */
 export interface WaveNodeInput {
   readonly key: string;
@@ -116,8 +108,8 @@ export interface WaveNodeInput {
   readonly failure?: string | null;
   /** What holds back a node that never ran (its reason, or what it runs after). */
   readonly note?: string | null;
-  readonly attempts?: number | null;
-  readonly member?: { readonly attempt: number | null } | null;
+  /** The node ran more than once, so its card has a history button. */
+  readonly historyButton?: boolean;
 }
 
 export interface WaveBox {
@@ -155,7 +147,7 @@ export interface WaveLayout {
 }
 
 function nodeBox(node: WaveNodeInput, cardWidth: number): Omit<WaveBox, "x" | "y"> {
-  const historyButton = waveNodeAttempts(node) > 1;
+  const historyButton = node.historyButton === true;
   const nameLines = waveNameLines(node.label ?? "", historyButton, cardWidth);
   const checkerBand =
     Math.min(node.checkers?.length ?? 0, WAVE_CHECKER_ROWS_VISIBLE) * WAVE_CHECKER_ROW_HEIGHT;

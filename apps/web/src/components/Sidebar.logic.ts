@@ -902,6 +902,9 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   ) {
     return "working";
   }
+  if (thread.runtime?.status === "failed") {
+    return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
+  }
   // The turn ended but background work, such as a workflow, still runs: that is not idle.
   // Subagents and background tasks are work the agent started; an awaited command is a wait.
   if (
@@ -913,9 +916,6 @@ export function resolveSidebarThreadStatus(thread: SidebarThreadStatusInput): Si
   }
   if (thread.runtime?.status === "idle") {
     return "waiting";
-  }
-  if (thread.runtime?.status === "failed") {
-    return thread.runtime.lastErrorClass === "usage_limit" ? "limited" : "failed";
   }
   return "ready";
 }
