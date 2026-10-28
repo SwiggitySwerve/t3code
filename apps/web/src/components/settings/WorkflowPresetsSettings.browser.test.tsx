@@ -165,6 +165,31 @@ describe("workflow preset settings interactions", () => {
     await expect.element(reviewer).not.toBeChecked();
     expect(state.settings.workflowPresets.defaultPresetId).toBe("writer");
   });
+  it("draws Delete in the destructive red, not in the neutral grey of a plain ghost button", async () => {
+    setup();
+    await using screen = await render(
+      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
+    );
+    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    state.settings = {
+      ...state.settings!,
+      workflowPresets: { presets: [{ id: "r", name: "Reviewer", target }], defaultPresetId: null },
+    };
+    await screen.rerender(<WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />);
+    const color = getComputedStyle(
+      screen.getByRole("button", { name: "Delete Reviewer" }).element(),
+    ).color;
+    // Computed colours may be oklab or rgb; render the colour to a canvas pixel to read its channels.
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = color;
+    context.fillRect(0, 0, 1, 1);
+    const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+    expect(red!).toBeGreaterThan(green! + 60);
+    expect(red!).toBeGreaterThan(blue! + 60);
+  });
+
   it("labels the options picker in the editor, as Effort once the preset sets one", async () => {
     setup();
     const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
