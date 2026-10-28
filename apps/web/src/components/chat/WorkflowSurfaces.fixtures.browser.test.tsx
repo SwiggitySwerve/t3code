@@ -239,6 +239,21 @@ describe("workflow fixture rows", () => {
     }
     // The count itself is drawn, with its unit dropped first.
     expect(panel.textContent).toContain("2/2");
+    const unit = [...panel.querySelectorAll<HTMLElement>("span")].filter((el) =>
+      /^\s?agents?$/.test(el.textContent ?? ""),
+    );
+    expect(unit.length).toBeGreaterThan(0);
+    for (const el of unit) expect(getComputedStyle(el).display).toBe("none");
+  });
+
+  it("keeps the unit of a group count in a panel wide enough for it", async () => {
+    await using screen = await render(<LineageRowSurface kind="script" variant="failed" />);
+    await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
+    const unit = [...screen.container.querySelectorAll<HTMLElement>("span")].filter((el) =>
+      /^\s?agents?$/.test(el.textContent ?? ""),
+    );
+    expect(unit.length).toBeGreaterThan(0);
+    for (const el of unit) expect(getComputedStyle(el).display).not.toBe("none");
   });
 
   it("gives queued, waiting and skipped nodes a glyph each, and Waiting an hourglass in the sidebar", async () => {
