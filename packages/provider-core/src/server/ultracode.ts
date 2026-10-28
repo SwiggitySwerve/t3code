@@ -35,8 +35,10 @@ export function applyUltracode(input: {
   /** The thread is a delegated task or workflow member (persisted lineage: a subagent child). */
   readonly delegatedThread: boolean;
 }): string {
-  // System turns (completion wakes, restart continuations) report back; they do not start work.
-  if (input.mode === "off" || input.createdBy === "system") return input.text;
+  // Server messages include approved workflow instructions; they must not trigger another workflow.
+  if (input.mode === "off" || input.createdBy === "system" || input.creationSource === "server") {
+    return input.text;
+  }
   const typed = KEYWORD.test(input.typedWords);
   if (input.delegatedThread && !(typed && isPersonTypedMessage(input))) return input.text;
   if (input.mode === "keyword" && !typed) return input.text;

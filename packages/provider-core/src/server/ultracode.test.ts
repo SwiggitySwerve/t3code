@@ -37,9 +37,16 @@ describe("applyUltracode", () => {
     }
   });
 
-  it("opts in every user or agent turn when always, but never a system wake", () => {
+  it("opts in an agent's root turn when always, but never a system wake", () => {
     expect(
-      applyUltracode({ mode: "always", driver: codex, text: "Go", createdBy: "agent", ...root }),
+      applyUltracode({
+        mode: "always",
+        driver: codex,
+        text: "Go",
+        createdBy: "agent",
+        creationSource: "mcp",
+        delegatedThread: false,
+      }),
     ).toBe(`Go${note}`);
     expect(
       applyUltracode({
@@ -51,6 +58,20 @@ describe("applyUltracode", () => {
       }),
     ).toBe("Task finished");
   });
+
+  it.each([codex, claude])(
+    "leaves server-created workflow approvals unchanged for %s",
+    (driver) => {
+      const text = "The workflow is approved. Use graph_start with the accepted digest.";
+      for (const mode of ["always", "keyword"] as const) {
+        expect(applyUltracode({ mode, driver, text, createdBy: "user", ...root })).toBe(text);
+        const mentioningKeyword = `${text} The request was ultracode.`;
+        expect(
+          applyUltracode({ mode, driver, text: mentioningKeyword, createdBy: "user", ...root }),
+        ).toBe(mentioningKeyword);
+      }
+    },
+  );
 
   it("never opts in when off", () => {
     expect(
