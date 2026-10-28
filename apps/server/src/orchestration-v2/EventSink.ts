@@ -352,9 +352,9 @@ const layerBase: Layer.Layer<
               const previous =
                 inBatch ??
                 (event.type === "workflow.updated" || event.payload.workflow?.revision !== undefined
-                  ? (yield* projectionStore.getThreadRecords(event.threadId, [
-                      "subagents",
-                    ])).subagents.find((task) => task.id === event.payload.id)
+                  ? (yield* projectionStore.getThreadRecords(event.threadId, ["subagents"], {
+                      subagentIds: [event.payload.id],
+                    })).subagents.find((task) => task.id === event.payload.id)
                   : undefined);
               const change =
                 event.type === "workflow.updated"
