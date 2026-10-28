@@ -11,7 +11,14 @@ import {
   type WorkflowGraphView,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
-import { ChevronRightIcon, HistoryIcon } from "lucide-react";
+import {
+  ChevronRightIcon,
+  ClockIcon,
+  HistoryIcon,
+  HourglassIcon,
+  MinusIcon,
+  type LucideIcon,
+} from "lucide-react";
 import { formatModelSlugName } from "@t3tools/shared/model";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { formatTokens } from "@t3tools/shared/usageFormat";
@@ -43,9 +50,14 @@ const STATE_DOT: Readonly<Partial<Record<WorkflowGraphNodeState, string>>> = {
   passed: "bg-success",
   running: "bg-info",
   failed: "bg-destructive",
-  // Nodes still to run show a ring, so they read apart from ones that ended without running.
-  queued: "border border-muted-foreground/70",
-  waiting: "border border-muted-foreground/70",
+};
+
+/** Nodes that have not run get a glyph, so queued, waiting and skipped read apart without colour. */
+const STATE_ICON: Readonly<Partial<Record<WorkflowGraphNodeState, LucideIcon>>> = {
+  queued: ClockIcon,
+  waiting: HourglassIcon,
+  skipped: MinusIcon,
+  not_run: MinusIcon,
 };
 
 type AttemptsPayload = {
@@ -423,6 +435,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
     onFocus: () => props.onHighlight(true),
     onBlur: () => props.onHighlight(false),
   };
+  const StateIcon = STATE_ICON[node.state];
   const style = { left: box.x, top: box.y, width: box.width, height: box.height };
   const bodyStyle = {
     height: box.height - WAVE_CARD_BORDER - box.checkerBand - reasonBand,
@@ -436,13 +449,17 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
             STATE_TEXT[node.state] ?? "text-muted-foreground",
           )}
         >
-          <span
-            aria-hidden
-            className={cn(
-              "size-1.5 shrink-0 rounded-full",
-              STATE_DOT[node.state] ?? "bg-muted-foreground/60",
-            )}
-          />
+          {StateIcon === undefined ? (
+            <span
+              aria-hidden
+              className={cn(
+                "size-1.5 shrink-0 rounded-full",
+                STATE_DOT[node.state] ?? "bg-muted-foreground/60",
+              )}
+            />
+          ) : (
+            <StateIcon aria-hidden className="size-3 shrink-0" />
+          )}
           <span className="min-w-0 truncate">{status}</span>
           {threadId !== null ? (
             <ChevronRightIcon

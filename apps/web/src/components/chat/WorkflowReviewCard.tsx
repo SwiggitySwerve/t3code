@@ -153,6 +153,8 @@ export function WorkflowReviewCard(props: {
             <Button
               type="button"
               size="sm"
+              // Busy, the filled button would fade to white on pale blue; outlined it stays legible.
+              variant={presentation.status === "approving" ? "outline" : "default"}
               disabled={!presentation.approve.enabled}
               onClick={props.onApprove}
             >

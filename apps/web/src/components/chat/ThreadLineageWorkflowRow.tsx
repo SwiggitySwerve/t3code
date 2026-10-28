@@ -38,7 +38,10 @@ export function WorkflowLineageStatus(props: {
       )}
     >
       <span className={cn("font-medium", status.className)}>{status.label}</span>
-      <AgentElapsed agent={props.workflow} compact />
+      {/* A narrow panel keeps the word; the time is in the hover card. */}
+      <span className="@max-[18rem]:hidden">
+        <AgentElapsed agent={props.workflow} compact />
+      </span>
     </span>
   );
 }
@@ -98,6 +101,7 @@ function WorkflowMemberRow({
           render={
             <ThreadDetailsControl
               part="row"
+              multiline
               aria-label={`Open ${member.title} chat`}
               disabled={!canOpen}
               onClick={() => canOpen && onOpen(threadId)}
@@ -105,7 +109,9 @@ function WorkflowMemberRow({
           }
         >
           <ThreadRelationshipIcon driver={driver} provider={provider} status={member.status} />
-          <span className="min-w-0 flex-1 truncate">{member.title}</span>
+          <span className="line-clamp-2 min-w-0 flex-1 whitespace-normal [overflow-wrap:anywhere]">
+            {member.title}
+          </span>
           <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
             <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
             {member.startedAt ? (
@@ -187,7 +193,7 @@ export function ThreadLineageWorkflowRow({
           driver: member.driver ?? driver,
         };
   return (
-    <li className="group" data-workflow-expanded={expanded ? "" : undefined}>
+    <li className="group @container" data-workflow-expanded={expanded ? "" : undefined}>
       <div className={cn("relative", THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS)}>
         {header}
         {onStop ? (
@@ -253,8 +259,11 @@ export function ThreadLineageWorkflowRow({
                         <SectionHeaderStatus>Failed</SectionHeaderStatus>
                       ) : null}
                       <span className="shrink-0 text-2xs font-normal tabular-nums">
-                        {phase.settledCount}/{phase.members.length}{" "}
-                        {phase.members.length === 1 ? "agent" : "agents"}
+                        {phase.settledCount}/{phase.members.length}
+                        {/* The unit is the first thing to go when the panel is narrow. */}
+                        <span className="@max-[18rem]:hidden">
+                          {phase.members.length === 1 ? " agent" : " agents"}
+                        </span>
                       </span>
                       <span className="shrink-0 text-2xs font-normal tabular-nums empty:hidden">
                         <AgentElapsed agent={phaseElapsed(phase)} />
@@ -263,7 +272,7 @@ export function ThreadLineageWorkflowRow({
                   }
                 >
                   <Tooltip>
-                    <TooltipTrigger render={<span className="block max-w-28 truncate" />}>
+                    <TooltipTrigger render={<span className="block max-w-[34cqw] truncate" />}>
                       {phase.title}
                     </TooltipTrigger>
                     <TooltipPopup side="left">{phase.title}</TooltipPopup>

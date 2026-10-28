@@ -10,6 +10,7 @@ import {
   LineageRowSurface,
   WorkflowBlockSurface,
   WorkflowReviewSurface,
+  SidebarStatusSurface,
   WorkflowCanvasSurface,
   scrollWavesToNode,
 } from "../../../test/workflow-fixtures/surfaces";
@@ -223,6 +224,53 @@ describe("workflow fixture rows", () => {
     expect(screen.container.textContent).not.toContain("Graph failed:");
     await expect.element(screen.getByText(/docs\/ was not found/).first()).toBeVisible();
     expect(screen.container.textContent).not.toContain(WORKFLOW_QA_SCRIPT_MARKER);
+  });
+
+  it("keeps a narrow Lineage panel's group counts whole", async () => {
+    await using screen = await render(<LineageRowSurface kind="script" variant="failed" narrow />);
+    await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
+    const panel = screen.container.querySelector<HTMLElement>("[data-qa-panel]")!;
+    const panelRight = panel.getBoundingClientRect().right;
+    // Nothing inside the panel runs past its edge: the group counts are never clipped.
+    for (const el of panel.querySelectorAll<HTMLElement>("li *")) {
+      if (el.children.length === 0 && (el.textContent ?? "").trim() !== "") {
+        expect(el.getBoundingClientRect().right).toBeLessThanOrEqual(panelRight + 0.5);
+      }
+    }
+    // The count itself is drawn, with its unit dropped first.
+    expect(panel.textContent).toContain("2/2");
+  });
+
+  it("gives queued, waiting and skipped nodes a glyph each, and Waiting an hourglass in the sidebar", async () => {
+    await using canvas = await render(<WorkflowCanvasSurface variant="queued" />, {
+      router: false,
+    });
+    expect(canvas.container.querySelector("svg.lucide-clock")).not.toBeNull();
+    expect(canvas.container.querySelector("svg.lucide-hourglass")).not.toBeNull();
+    await using failed = await render(<WorkflowCanvasSurface variant="failed" />, {
+      router: false,
+    });
+    expect(failed.container.querySelector("svg.lucide-minus")).not.toBeNull();
+    await using waiting = await render(<SidebarStatusSurface state="waiting-idle" />, {
+      router: false,
+    });
+    expect(waiting.container.querySelector("svg.lucide-hourglass")).not.toBeNull();
+    expect(waiting.container.querySelector("svg.lucide-circle-dot-dashed")).toBeNull();
+  });
+
+  it("keeps the Approve button legible while approving", async () => {
+    await using pending = await render(<WorkflowReviewSurface state="pending" />, {
+      router: false,
+    });
+    const idle = getComputedStyle(
+      pending.getByRole("button", { name: /^Approve/ }).element(),
+    ).backgroundColor;
+    await using approving = await render(<WorkflowReviewSurface state="approving" />, {
+      router: false,
+    });
+    const button = approving.getByRole("button", { name: /^Approving/ }).element();
+    // Busy it is outlined, not a filled primary button faded to white on pale blue.
+    expect(getComputedStyle(button).backgroundColor).not.toBe(idle);
   });
 
   it("names the run's state in the Lineage header, in words", async () => {

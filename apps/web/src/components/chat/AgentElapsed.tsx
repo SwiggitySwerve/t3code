@@ -3,17 +3,16 @@ import { isOrchestrationV2WorkActive } from "@t3tools/contracts";
 import { deriveSubagentElapsedMs } from "@t3tools/shared/orchestrationTiming";
 import { tickTextContent } from "~/lib/tickTextContent";
 
-function formatElapsedSeconds(totalSeconds: number): string {
+export function formatElapsedSeconds(totalSeconds: number): string {
   const seconds = Math.max(0, Math.floor(totalSeconds));
   const minutes = Math.floor(seconds / 60);
   if (minutes === 0) {
     return `${seconds}s`;
   }
   const hours = Math.floor(minutes / 60);
-  if (hours === 0) {
-    return `${minutes}m ${String(seconds % 60).padStart(2, "0")}s`;
-  }
-  return `${hours}h ${String(minutes % 60).padStart(2, "0")}m`;
+  // Zero parts are left out and nothing is padded, as in the workflow node cards.
+  if (hours === 0) return seconds % 60 === 0 ? `${minutes}m` : `${minutes}m ${seconds % 60}s`;
+  return minutes % 60 === 0 ? `${hours}h` : `${hours}h ${minutes % 60}m`;
 }
 
 function formatCompactElapsedSeconds(totalSeconds: number): string {

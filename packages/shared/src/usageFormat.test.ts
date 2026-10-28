@@ -1,7 +1,19 @@
 // @effect-diagnostics globalDate:off -- A fixed instant keeps calendar-window assertions deterministic.
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { formatHourShort, makeWindow } from "./usageFormat.ts";
+import { formatHourShort, formatTokens, makeWindow } from "./usageFormat.ts";
+
+describe("formatTokens", () => {
+  it("never ends a figure in a zero after the point", () => {
+    expect(formatTokens(8300)).toBe("8.3K");
+    expect(formatTokens(18_400)).toBe("18.4K");
+    expect(formatTokens(1_230_000)).toBe("1.23M");
+    expect(formatTokens(1000)).toBe("1K");
+    expect(formatTokens(6200)).toBe("6.2K");
+    expect(formatTokens(900)).toBe("900");
+    expect(formatTokens(150_000)).toBe("150K");
+  });
+});
 
 describe("hourly usage formatting", () => {
   it("keeps requested zones separate when formatting repeated calls", () => {

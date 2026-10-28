@@ -2,8 +2,8 @@ import {
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
-  CircleDotDashedIcon,
   ClockIcon,
+  HourglassIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
   UserRoundIcon,
@@ -107,7 +107,7 @@ export function SidebarTopStatusBadge(props: {
       ) : topStatus.icon === "queued" ? (
         <ClockIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "waiting" ? (
-        <CircleDotDashedIcon aria-hidden className="size-4 shrink-0" />
+        <HourglassIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "input" ? (
         <MessageCircleQuestionIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "request" ? (
