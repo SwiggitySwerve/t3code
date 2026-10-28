@@ -7177,6 +7177,7 @@ export const makeAcpAdapterV2 = Effect.fn("makeAcpAdapterV2")(function* (
             hasT3Mcp: acpMcpContext(mcpSession, self).servers.length > 0,
             hasDeviceTools: mcpSession?.capabilities?.has("device") === true,
             workflows: mcpSession?.capabilities?.has("workflows") === true,
+            model: turnInput.modelSelection.model,
           } satisfies T3AcpInstructionState;
           const previousInstructionState = (yield* Ref.get(promptInstructionStates)).get(sessionId);
           const compactionMarker = (yield* Ref.get(compactionMarkers)).get(sessionId);

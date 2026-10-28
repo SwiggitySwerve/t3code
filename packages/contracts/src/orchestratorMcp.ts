@@ -129,8 +129,7 @@ export const OrchestratorMcpTarget = Schema.Struct({
   ),
   inheritOptions: Schema.optional(
     Schema.Literal(false).annotate({
-      description:
-        "false: use exactly these options, without inheriting the caller's. Targets T3 resolves for review and restart carry it, so caller changes cannot alter a reviewed assignment.",
+      description: "false: use exactly these options, without inheriting the caller's.",
     }),
   ),
 });
@@ -199,7 +198,7 @@ export const OrchestratorMcpDelegateTaskInput = Schema.Struct({
   resultSchema: Schema.optional(
     Schema.Record(Schema.String, Schema.Unknown).annotate({
       description:
-        "Optional JSON Schema for the child's result. The child is asked to end its final message with a fenced json block matching it; task_status and task_wait then return the parsed value as structuredResult, or structuredResultError when it is missing or does not match.",
+        "JSON Schema for the child's result; task_status and task_wait return it parsed as structuredResult, or structuredResultError.",
     }),
   ),
   runtimeMode: Schema.optional(
@@ -357,8 +356,7 @@ export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult
 
 export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   workerTarget: Schema.optional(OrchestratorMcpTarget).annotate({
-    description:
-      "Default worker target. An agent's own target or legacy model replaces it as a whole, followed by its preset, this worker target, the configured workflow worker default preset, then the caller. The selected target uses the usual option inheritance rules.",
+    description: "Default target for agents that set none.",
   }),
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
@@ -369,7 +367,7 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   }),
   budgetTokens: Schema.optional(PositiveInt).annotate({
     description:
-      "Token budget, counted from the usage providers report for finished agents, judges and retries included. It does not count your own tokens as coordinator. Once spent, starting another agent throws in the script; agents already running finish, so a wide wave can overshoot it. graph_review returns suggestedBudgetTokens and overshootBoundTokens as a starting point. The script reads it as budget.total, budget.spent and budget.remaining().",
+      "Token budget for workflow agents, judges and retries; your own tokens are not counted. Start near graph_review's suggestedBudgetTokens. Running agents can overshoot it. The script reads budget.total, budget.spent and budget.remaining().",
   }),
   title: Schema.optional(OrchestratorMcpTitle),
   clientRequestId: Schema.optional(OrchestratorMcpClientRequestId),
@@ -556,7 +554,7 @@ export const OrchestratorMcpGraphStartInput = Schema.Struct({
   graph: OrchestratorMcpGraphReviewInput.fields.graph,
   acceptedDigest: OrchestrationV2WorkflowReviewDigest.annotate({
     description:
-      "Digest returned by graph_review for the exact graph and input files to run. While the user's request for a workflow waits for their decision, graph_start accepts only a digest the user approved in T3 Code and refuses any other. The reviewed model of each profile-assigned node is fixed by the digest: graph_start checks it is still served and refuses (review again) if not; it never moves to the next model in a profile.",
+      "graph_review's digest for this exact graph and inputs; while a workflow request is pending, only a user-approved digest.",
   }),
   budgetTokens: OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
   title: Schema.optional(OrchestratorMcpTitle),

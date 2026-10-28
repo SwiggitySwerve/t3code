@@ -63,7 +63,7 @@ const WorktreeStatusTool = Tool.make("t3_worktree_status", {
 
 const WorktreeRemoveTool = Tool.make("t3_worktree_remove", {
   description:
-    "Needs a coordinator thread. Remove the isolated checkout of a finished workflow member you started with isolation 'worktree'. It removes the checkout only when nothing in it would be lost: no modified, staged, untracked, or ignored files (an ignored node_modules/ folder is allowed), no open terminal, no live provider session, no pending thread work, and no other thread using it. It never deletes a branch, never cleans files, never forces, and nothing runs it automatically. The thread keeps its path and branch, and its next turn or a rollback recreates the checkout at the same path if the branch still exists and is not checked out elsewhere; dependencies and setup are not recreated. A member's provider session stays open for about 30 minutes after it finishes (up to 4 hours while background work runs). If removal is refused for an open session or a recent settle, settle or archive the member thread, wait about a minute, and retry. This tool never closes sessions. Fails for any thread that is not a finished member of a workflow you started.",
+    "Remove the worktree checkout of a finished workflow member you started with isolation 'worktree'. Refused if anything would be lost (modified, staged, untracked or ignored files other than node_modules/) or while a terminal, provider session, pending work or another thread uses it. Never deletes a branch, cleans files or forces. If refused for an open session, settle or archive the member thread, wait about a minute and retry.",
   parameters: WorktreeMcpRemoveInput,
   success: WorktreeMcpRemoveResult,
   failure: WorktreeToolFailure,

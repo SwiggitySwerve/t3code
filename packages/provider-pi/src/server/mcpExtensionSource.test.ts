@@ -8,7 +8,7 @@ import { assert, describe, it } from "@effect/vitest";
 
 import {
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-  T3_CODE_WORKFLOW_INSTRUCTIONS,
+  t3OrchestrationInstructions,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 import { PI_T3_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
@@ -58,7 +58,22 @@ describe("Pi orchestration prompt section", () => {
       const result = await hook({ systemPrompt: "base" }, { ui: { notify: assert.fail } });
       assert.equal(
         result?.systemPrompt,
-        `base\n\n${(workflows ? T3_CODE_WORKFLOW_INSTRUCTIONS : T3_CODE_ORCHESTRATION_INSTRUCTIONS).trim()}`,
+        `base\n\n${(workflows ? t3OrchestrationInstructions(true) : T3_CODE_ORCHESTRATION_INSTRUCTIONS).trim()}`,
+      );
+    }
+  });
+  it("selects the model family rather than the transport API on every turn", async () => {
+    const bridge = await loadMcpBridge({ workflows: true });
+    const hook = bridge.handlers.get("before_agent_start")!;
+    for (const id of ["anthropic/claude-opus-4-6", "openai/gpt-5.4", "unknown-model"]) {
+      const result = await hook(
+        { systemPrompt: "base" },
+        { model: { id, api: "openai-completions" }, ui: { notify: assert.fail } },
+      );
+      assert.equal(result?.systemPrompt, `base\n\n${t3OrchestrationInstructions(true, id).trim()}`);
+      assert.equal(
+        result?.systemPrompt.includes("- Claude Code: native subagents"),
+        id.includes("claude"),
       );
     }
   });

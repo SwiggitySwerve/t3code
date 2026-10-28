@@ -594,7 +594,7 @@ describe("CursorAdapterV2", () => {
       const instanceId = ProviderInstanceId.make("cursor");
       const threadId = ThreadId.make("cursor-device-thread");
       const mcpSessions = yield* McpProviderSessions.McpProviderSessions;
-      const setDeviceAccess = (device: boolean) =>
+      const setDeviceAccess = (device: boolean, workflows = false) =>
         mcpSessions.set({
           environmentId: EnvironmentId.make("cursor-device-environment"),
           threadId,
@@ -603,7 +603,10 @@ describe("CursorAdapterV2", () => {
           endpoint: "http://127.0.0.1:43123/mcp",
           authorizationHeader: "Bearer synthetic-cursor-token",
           browserToolsAvailable: true,
-          capabilities: new Set(device ? ["device"] : []),
+          capabilities: new Set([
+            ...(device ? ["device"] : []),
+            ...(workflows ? ["workflows"] : []),
+          ]),
         });
       const modelSelection = { instanceId, model: "composer-2.5" };
       const runtimePolicy = ProviderAdapter.ProviderAdapterV2RuntimePolicy.make({
@@ -682,12 +685,12 @@ describe("CursorAdapterV2", () => {
       };
       // Starts at run 5: a conversation from before device instructions existed, now resumed.
       let runOrdinal = 4;
-      const send = Effect.fnUntraced(function* (compact = false) {
+      const send = Effect.fnUntraced(function* (compact = false, model = modelSelection.model) {
         runOrdinal += 1;
         const turnInput = {
           threadId,
           providerThread,
-          modelSelection,
+          modelSelection: { ...modelSelection, model },
           runtimePolicy,
           runId: RunId.make(`cursor-device-run-${runOrdinal}`),
           runOrdinal,
@@ -730,6 +733,14 @@ describe("CursorAdapterV2", () => {
       yield* setDeviceAccess(true);
       assert.deepEqual(yield* send(), told(false, true), "device access turned on later");
       assert.deepEqual(yield* send(), told(false, false));
+      yield* setDeviceAccess(true, true);
+      assert.deepEqual(yield* send(false, "gpt-5.4"), told(true, true));
+      assert.notInclude(sentMessages.at(-1)!, "- Claude Code: native subagents");
+      assert.deepEqual(yield* send(false, "claude-sonnet-4-6"), told(true, true));
+      assert.include(sentMessages.at(-1)!, "- Claude Code: native subagents");
+      assert.deepEqual(yield* send(false, "claude-opus-4-6"), told(false, false));
+      assert.deepEqual(yield* send(false, "gpt-5.4"), told(true, true));
+      assert.notInclude(sentMessages.at(-1)!, "- Claude Code: native subagents");
     }).pipe(
       Effect.scoped,
       Effect.provide(

@@ -52,7 +52,10 @@ import {
   hasCursorSkillMention,
   rewriteCursorSkillMentions,
 } from "./skills.ts";
-import { t3OrchestrationPrompt } from "@t3tools/provider-core/server/orchestrationInstructions";
+import {
+  t3OrchestrationPrompt,
+  t3OrchestrationModelFamily,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeInstructions";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -909,6 +912,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
           readonly agent: string;
           readonly orchestration: boolean;
           readonly workflows: boolean;
+          readonly family: ReturnType<typeof t3OrchestrationModelFamily>;
           readonly device: boolean;
         } | null>(null);
         const warnedUnsupportedSandbox = yield* Ref.make(false);
@@ -2222,9 +2226,8 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             }),
             hasT3Mcp: mcpServers !== undefined,
             hasDeviceTools,
-            workflows:
-              (yield* mcpSessions.read(turnInput.threadId))?.capabilities?.has("workflows") ===
-              true,
+            workflows,
+            model: turnInput.modelSelection.model,
             orchestrationDelivered: delivered.orchestration,
             deviceInstructionsDelivered: delivered.device,
           });
@@ -2295,10 +2298,13 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
             const hasDeviceTools =
               mcpServers !== undefined && mcpSession?.capabilities?.has("device") === true;
             const workflows = mcpSession?.capabilities?.has("workflows") === true;
+            const family = t3OrchestrationModelFamily(turnInput.modelSelection.model);
             const known = yield* Ref.get(told);
             // A conversation this process has not sent to was told on its first run.
             const delivered =
-              known?.agent === agent.nativeThreadId && known.workflows === workflows
+              known?.agent === agent.nativeThreadId &&
+              known.workflows === workflows &&
+              (!workflows || known.family === family)
                 ? known
                 : {
                     orchestration: known === null && turnInput.runOrdinal > 1 && !workflows,
@@ -2337,6 +2343,7 @@ export const makeCursorAdapterV2 = Effect.fn("makeCursorAdapterV2")(function* (
               orchestration: !compacted && (delivered.orchestration || mcpServers !== undefined),
               device: !compacted && hasDeviceTools,
               workflows,
+              family,
             });
             const startedAt = yield* DateTime.now;
             const completed = yield* Deferred.make<void, never>();

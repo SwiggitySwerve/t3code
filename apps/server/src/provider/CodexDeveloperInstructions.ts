@@ -49,12 +49,13 @@ export function buildCodexAdditionalContext(
   return {
     ...(orchestrationAvailable
       ? Object.fromEntries(
-          t3OrchestrationSections(normalizeAvailability(toolsAvailable).workflows).map(
-            (section, index) => [
-              `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
-              { kind: "application" as const, value: section },
-            ],
-          ),
+          t3OrchestrationSections(
+            normalizeAvailability(toolsAvailable).workflows,
+            runtime.model,
+          ).map((section, index) => [
+            `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
+            { kind: "application" as const, value: section },
+          ]),
         )
       : {}),
     t3_code_runtime: {

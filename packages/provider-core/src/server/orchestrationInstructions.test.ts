@@ -6,8 +6,9 @@ import {
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-  T3_CODE_WORKFLOW_SECTIONS,
-  T3_CODE_WORKFLOW_INSTRUCTIONS,
+  t3OrchestrationInstructions,
+  t3OrchestrationModelFamily,
+  t3OrchestrationSections,
   t3AcpPromptWithInstructions,
   t3OrchestrationPrompt,
   t3OrchestrationSystemPrompt,
@@ -88,34 +89,63 @@ describe("T3 device instructions", () => {
   });
 });
 
-const bytes = (text: string) => Buffer.byteLength(text, "utf8");
-
-describe("coordinator fan-out guidance", () => {
-  const section = T3_CODE_WORKFLOW_SECTIONS.find((candidate) =>
-    candidate.startsWith("### Fan-out and effort"),
-  );
-
-  it("tells the coordinator to default to one agent and to size fan-out", () => {
-    expect(section).toBeDefined();
-    expect(section).toContain("Default to one agent");
-    expect(section).toContain("Split by context, never by role");
-    expect(T3_CODE_WORKFLOW_INSTRUCTIONS).toContain(section);
+// Goldens from the supplied ablation report's variants/final/*.rendered.md.
+describe("model-family orchestration instructions", () => {
+  it.each([
+    ["claude-opus-4-6", "anthropic"],
+    ["anthropic/claude-sonnet-4-6", "anthropic"],
+    ["gpt-5.4", "openai"],
+    ["openai/gpt-5.4", "openai"],
+    ["unknown-model", "generic"],
+  ] as const)("recognizes selected model %s", (model, family) => {
+    expect(t3OrchestrationModelFamily(model)).toBe(family);
   });
 
-  it("stays under 1 KB", () => {
-    expect(bytes(section ?? "")).toBeLessThan(1_000);
+  it("refreshes ACP instructions on a family change only when workflows are on", () => {
+    const state = {
+      interactionMode: "default",
+      hasT3Mcp: true,
+      hasDeviceTools: false,
+      workflows: true,
+      model: "gpt-5.4",
+    } as const;
+    const changed = { ...state, model: "claude-sonnet-4-6" };
+    expect(
+      t3AcpPromptWithInstructions({ prompt: "Continue.", state: changed, previousState: state }),
+    ).toContain("- Claude Code: native subagents");
+    expect(
+      t3AcpPromptWithInstructions({
+        prompt: "Continue.",
+        state: { ...changed, model: "claude-opus-4-6" },
+        previousState: changed,
+      }),
+    ).toBe("Continue.");
+    expect(
+      t3AcpPromptWithInstructions({
+        prompt: "Continue.",
+        state: { ...changed, workflows: false },
+        previousState: { ...state, workflows: false },
+      }),
+    ).toBe("Continue.");
   });
 
-  it("keeps a requested workflow and points at the advisory and the suggested budget", () => {
-    expect(section).toContain("graph_review");
-    expect(section).toContain("never swap the workflow for one agent");
-    expect(section).toContain("suggestedBudgetTokens");
-    expect(section).toContain("budgetTokens excludes your own tokens");
-  });
-
-  it("is its own section after the existing ones, within Codex's per-entry cap", () => {
-    expect(T3_CODE_WORKFLOW_SECTIONS.at(-1)).toBe(section);
-    for (const entry of T3_CODE_WORKFLOW_SECTIONS) expect(bytes(entry)).toBeLessThanOrEqual(4_000);
+  it.each([
+    ["", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
+    [
+      "anthropic/claude-opus-4-6",
+      "82ec47e2e8cbfccc7edb37998eb34969569cc4f9cc06f9e6baffdc498284e070",
+      3858,
+    ],
+    ["openai/gpt-5.4", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
+    ["unknown-model", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
+  ] as const)("matches the report for selected model %s", (model, digest, bytes) => {
+    const rendered = t3OrchestrationInstructions(true, model);
+    expect(NodeCrypto.createHash("sha256").update(rendered).digest("hex")).toBe(digest);
+    expect(Buffer.byteLength(rendered, "utf8")).toBe(bytes);
+    for (const section of t3OrchestrationSections(true, model)) {
+      expect(Buffer.byteLength(section, "utf8")).toBeLessThanOrEqual(4_000);
+    }
+    expect(t3OrchestrationInstructions(false, model)).toBe(T3_CODE_ORCHESTRATION_INSTRUCTIONS);
   });
 });
 
@@ -129,13 +159,7 @@ describe("workflow instruction gate", () => {
       T3_CODE_ORCHESTRATION_INSTRUCTIONS,
     );
     const enabled = t3OrchestrationSystemPrompt(true, false, true);
-    for (const addition of [
-      "delegate_tasks",
-      "task_wait",
-      "workflow_start",
-      "graph_review",
-      "### Fan-out and effort",
-    ]) {
+    for (const addition of ["workflow_start", "graph_review"]) {
       expect(T3_CODE_ORCHESTRATION_INSTRUCTIONS).not.toContain(addition);
       expect(enabled).toContain(addition);
     }

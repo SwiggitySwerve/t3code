@@ -34,7 +34,7 @@ type AgentStartHook = (
     systemPromptOptions?: { sections?: Record<string, string> | null; forceSystemPrompt?: string };
   },
   ctx: {
-    model?: { api: string };
+    model?: { api: string; id?: string };
     ui: { notify: (message: string, severity: string) => void };
   },
 ) => Promise<{ systemPrompt: string } | undefined>;

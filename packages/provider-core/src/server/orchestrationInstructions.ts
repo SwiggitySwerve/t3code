@@ -1,16 +1,16 @@
 import type { ProviderInteractionMode } from "@t3tools/contracts";
 
 // Codex truncates entries over 4,000 bytes; keep each section self-contained and below that limit.
-const orchestrationSections = (workflows: boolean): ReadonlyArray<string> => [
+const orchestrationSections = (workflows: boolean, familyLayer = ""): ReadonlyArray<string> => [
   `## T3 Code orchestration
 
 Ordinary coding tasks need no T3 tools.
 
-- Subagents: use your native tool when the child uses your provider, a model it offers, and no settings beyond yours, and it finishes in this turn (Claude \`Agent\` always with \`run_in_background:false\`; Codex \`spawn_agent\`, then wait). Use \`delegate_task\` for another provider's model, user-asked settings, a separate checkout (\`isolation:"worktree"\`), background work, or \`delegate_task\` by name. A native type running another provider's model counts too. Workflow only when asked.
-- Call \`orchestrator_capabilities\` once per thread, before the first \`delegate_task\`. Again only after an error or a user-named provider change. Settings go in \`target.options\`. Provider or model unavailable: say so. Never switch unasked, or fall back to native tools, Workflow, or CLIs. Never make a child's checkout in the shell or in \`task\`.
-${workflows ? `- To fan out more than one delegated task, call \`delegate_tasks\` once with every task (up to 100, each with its own target, isolation and title) instead of repeated \`delegate_task\` calls. To join a phase within this turn, call \`task_wait\` with the taskIds and mode \`all\` or \`any\`; otherwise end your turn, since each completion wakes this thread. When you will branch on a child's answer, pass \`resultSchema\` (a JSON Schema) and read \`structuredResult\` instead of parsing prose. Tasks past the environment's running limit report \`queued\` and start as slots free. For work with phases or many agents, write a script and call T3's \`workflow_start\` (a T3 tool, not the native Workflow above) instead of driving each step yourself: it runs on the server, any provider can run its agents, and one completion wakes you. When the user asked for a workflow, plan it with \`graph_review\` and end your turn instead: T3 starts it only after the user approves the review in T3 Code, and then sends you a message with the approved digest.\n` : ""}- Every new delegate review or re-check is a new \`delegate_task\` (brief, findings, objections), never a \`t3_thread_send\`. Fix small review findings yourself; start no delegate for them. When told to proceed without a delegate, or to run fewer, \`task_cancel\` the extras. Start no replacement.
+- Subagents: use your native${workflows ? " subagent" : ""} tool when the child uses your provider, a model it offers, and no settings beyond yours, and it finishes in this turn${workflows ? "" : " (Claude `Agent` always with `run_in_background:false`; Codex `spawn_agent`, then wait)"}. Use \`delegate_task\` for another provider's model, user-asked settings, a separate checkout (\`isolation:"worktree"\`), background work, or \`delegate_task\` by name. A native type running another provider's model counts too.${workflows ? "" : " Workflow only when asked."}
+- Call \`orchestrator_capabilities\` once per thread, before the first \`delegate_task\`. Again only after an error or a user-named provider change. Settings go in \`target.options\`. Provider or model unavailable: say so. Never switch unasked, or fall back to native tools${workflows ? " or" : ", Workflow, or"} CLIs. Never make a child's checkout in the shell or in \`task\`.
+${workflows ? `- When you will branch on a child's answer, pass \`resultSchema\` and read \`structuredResult\`. When the user asks for a workflow, plan it with \`graph_review\`, tell the user its advisory in one sentence, and end your turn: T3 starts it after the user approves. Other phased or many-agent work can run as a \`workflow_start\` script.\n` : ""}- Every new delegate review or re-check is a new \`delegate_task\` (brief, findings, objections), never a \`t3_thread_send\`. Fix small review findings yourself; start no delegate for them. When told to proceed without a delegate, or to run fewer, \`task_cancel\` the extras. Start no replacement.
 - Follow a running delegate's \`next\`. Do not poll it (\`task_status\`, \`sleep\`, watchers, Monitor, ScheduleWakeup). Stop a delegate run you replace or no longer need with \`task_cancel\`, never \`t3_thread_interrupt\` on a \`childThreadId\`.
-- If you are a subagent or child, do the work yourself. Start no subagents unless your task says to.`,
+- If you are a subagent or child, do the work yourself. Start no subagents unless your task says to.${workflows && familyLayer ? `\n${familyLayer}` : ""}`,
   `- \`t3_thread_launch\` and \`create_threads\` make new top-level threads, only when the user asks for a new thread. "Subagent", "delegate", and "parallel" never mean one. Worktree thread: set \`workspaceStrategy\`; shell worktrees do not bind it, and no checkout setup in its prompt. No \`workspaceStrategy\`: project root, not your worktree.
 - Given a thread id, \`t3_thread_read\` it before you answer about it.
 - Another machine: \`t3_environment_links\` lists linked ones. Pass its \`environmentId\` to a T3 tool to act there. Ids are then that machine's, so pass \`threadId\`.
@@ -22,30 +22,44 @@ ${workflows ? `- To fan out more than one delegated task, call \`delegate_tasks\
 
 - Answer data with a trend or comparison with a chart, and show any visual the user asks for here: pass its HTML to \`html_preview\`, then \`html_render\`. If the visual is a file, pass that file's HTML. A screenshot on disk or a text description does not show it. Never start a server for it. Tools a web page exposes give data only. Never use them to show results. Asked for an image to post, send, or use elsewhere: a \`.png\` file and its path, never \`html_render\`.
 - Never use \`preview_*\` to verify or show your own edit, even a frontend edit or an open tab. Do not repeat preview calls from an earlier turn. Use them only when the current request asks for browser work or names a page or tab. Public pages: web fetch or search unless browser work was asked; then preview tools only, no web fetch. Close a tab you opened before you reply, unless the user asked for it or uses it.`,
-  ...(workflows
-    ? [
-        `### Fan-out and effort
-
-Default to one agent. Fan out only for independent branches that each need about 10 or more tool calls, material too large for one context, or a check that needs a fresh context (ideally another model). Chains, role splits (plan, implement, test, review) and jobs under about 15 tool calls stay with one agent: each extra agent pays for a full context prefix. Size: 1 agent for lookups and edits, 2-4 for comparisons, 5-10 only for clear breadth; more than 10 needs a stated reason. Split by context, never by role. Brief each agent with objective, output file and boundaries; give verifiers artifacts and criteria. If the user asked for a workflow, still plan the graph, tell the user graph_review's advisory in one sentence, and never swap the workflow for one agent. budgetTokens excludes your own tokens: set it near graph_review's suggestedBudgetTokens. A workflow wake lists node status and output paths; read the files or call workflow_status.`,
-      ]
-    : []),
 ];
 
+const T3_ORCHESTRATION_FAMILY_LAYERS = {
+  generic: "",
+  anthropic: "- Claude Code: native subagents use `Agent`, always with `run_in_background:false`.",
+  openai: "",
+};
+
+/** Select by model identity, independently of the harness hosting it. Kept self-contained for Pi. */
+export function t3OrchestrationModelFamily(
+  model = "",
+): keyof typeof T3_ORCHESTRATION_FAMILY_LAYERS {
+  if (/(?:^|[/:])claude(?:[-.]|$)/i.test(model)) return "anthropic";
+  if (/(?:^|[/:])gpt(?:[-.]|$)/i.test(model)) return "openai";
+  return "generic";
+}
+
+const renderSections = (sections: ReadonlyArray<string>) => `\n\n${sections.join("\n\n")}\n`;
+
 export const T3_CODE_ORCHESTRATION_SECTIONS = orchestrationSections(false);
-export const T3_CODE_WORKFLOW_SECTIONS = orchestrationSections(true);
-export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = `
+export const T3_CODE_ORCHESTRATION_INSTRUCTIONS = renderSections(T3_CODE_ORCHESTRATION_SECTIONS);
 
-${T3_CODE_ORCHESTRATION_SECTIONS.join("\n\n")}
-`;
-export const T3_CODE_WORKFLOW_INSTRUCTIONS = `
+export const t3OrchestrationSections = (workflows = false, model?: string) =>
+  workflows
+    ? orchestrationSections(true, T3_ORCHESTRATION_FAMILY_LAYERS[t3OrchestrationModelFamily(model)])
+    : T3_CODE_ORCHESTRATION_SECTIONS;
+export const t3OrchestrationInstructions = (workflows = false, model?: string) =>
+  workflows
+    ? renderSections(t3OrchestrationSections(true, model))
+    : T3_CODE_ORCHESTRATION_INSTRUCTIONS;
 
-${T3_CODE_WORKFLOW_SECTIONS.join("\n\n")}
-`;
-
-export const t3OrchestrationSections = (workflows = false) =>
-  workflows ? T3_CODE_WORKFLOW_SECTIONS : T3_CODE_ORCHESTRATION_SECTIONS;
-export const t3OrchestrationInstructions = (workflows = false) =>
-  workflows ? T3_CODE_WORKFLOW_INSTRUCTIONS : T3_CODE_ORCHESTRATION_INSTRUCTIONS;
+// Pi runs outside this package and embeds every layer alongside the shared selector.
+export const T3_CODE_WORKFLOW_INSTRUCTIONS_BY_FAMILY = Object.fromEntries(
+  Object.entries(T3_ORCHESTRATION_FAMILY_LAYERS).map(([family, layer]) => [
+    family,
+    renderSections(orchestrationSections(true, layer)),
+  ]),
+);
 
 export const T3_CODE_BROWSER_TOOL_INSTRUCTIONS = `
 
@@ -90,6 +104,7 @@ export interface T3AcpInstructionState {
   readonly hasT3Mcp: boolean;
   readonly hasDeviceTools: boolean;
   readonly workflows?: boolean;
+  readonly model?: string;
 }
 
 /** ACP lacks system/developer fields; inject context on first prompt and tool/mode changes. */
@@ -104,7 +119,10 @@ export function t3AcpPromptWithInstructions(input: {
     input.previousState?.interactionMode === input.state.interactionMode &&
     input.previousState.hasT3Mcp === input.state.hasT3Mcp &&
     input.previousState.hasDeviceTools === input.state.hasDeviceTools &&
-    input.previousState.workflows === input.state.workflows
+    input.previousState.workflows === input.state.workflows &&
+    (!input.state.workflows ||
+      t3OrchestrationModelFamily(input.previousState.model) ===
+        t3OrchestrationModelFamily(input.state.model))
   ) {
     return input.prompt;
   }
@@ -116,7 +134,7 @@ export function t3AcpPromptWithInstructions(input: {
       ? [
           T3_CODE_BROWSER_TOOL_INSTRUCTIONS.trim(),
           ...(input.state.hasDeviceTools ? [T3_CODE_DEVICE_TOOL_INSTRUCTIONS] : []),
-          t3OrchestrationInstructions(input.state.workflows).trim(),
+          t3OrchestrationInstructions(input.state.workflows, input.state.model).trim(),
           T3_CODE_ACP_MCP_FALLBACK_INSTRUCTIONS,
         ]
       : []),
@@ -124,10 +142,10 @@ export function t3AcpPromptWithInstructions(input: {
   return `<t3_code_instructions>\n${instructions.join("\n\n")}\n</t3_code_instructions>\n\n<user_request>\n${input.prompt}\n</user_request>`;
 }
 
-const orchestrationInstructions = (hasDeviceTools: boolean, workflows = false) =>
+const orchestrationInstructions = (hasDeviceTools: boolean, workflows = false, model?: string) =>
   hasDeviceTools
-    ? `${t3OrchestrationInstructions(workflows)}\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS}\n`
-    : t3OrchestrationInstructions(workflows);
+    ? `${t3OrchestrationInstructions(workflows, model)}\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS}\n`
+    : t3OrchestrationInstructions(workflows, model);
 
 function prependT3OrchestrationInstructions(prompt: string, instructions: string): string {
   return `<t3_code_orchestration_instructions>${instructions.trim()}</t3_code_orchestration_instructions>\n\n<user_request>\n${prompt}\n</user_request>`;
@@ -139,6 +157,7 @@ export function t3OrchestrationPrompt(input: {
   readonly hasT3Mcp: boolean;
   readonly hasDeviceTools: boolean;
   readonly workflows?: boolean;
+  readonly model?: string;
   readonly orchestrationDelivered: boolean;
   readonly deviceInstructionsDelivered: boolean;
 }): string {
@@ -146,7 +165,7 @@ export function t3OrchestrationPrompt(input: {
   if (!input.orchestrationDelivered) {
     return prependT3OrchestrationInstructions(
       input.prompt,
-      orchestrationInstructions(input.hasDeviceTools, input.workflows),
+      orchestrationInstructions(input.hasDeviceTools, input.workflows, input.model),
     );
   }
   return input.hasDeviceTools && !input.deviceInstructionsDelivered
@@ -158,6 +177,7 @@ export function t3OrchestrationSystemPrompt(
   hasT3Mcp: boolean,
   hasDeviceTools: boolean,
   workflows = false,
+  model?: string,
 ): string | undefined {
-  return hasT3Mcp ? orchestrationInstructions(hasDeviceTools, workflows) : undefined;
+  return hasT3Mcp ? orchestrationInstructions(hasDeviceTools, workflows, model) : undefined;
 }

@@ -22,7 +22,7 @@ describe("orchestrator MCP contracts", () => {
     const description = String(
       OrchestratorMcpWorkflowStartInput.fields.budgetTokens.ast.annotations?.description ?? "",
     );
-    expect(description).toContain("does not count your own tokens");
+    expect(description).toContain("your own tokens are not counted");
     expect(description).toContain("suggestedBudgetTokens");
     expect(OrchestratorMcpGraphStartInput.fields.budgetTokens).toBe(
       OrchestratorMcpWorkflowStartInput.fields.budgetTokens,

@@ -1587,7 +1587,7 @@ export function makeClaudeQueryOptions(input: {
         buildRuntimeInstructions({ harness: "Claude Code" }) +
           (input.mcpServers === undefined || input.workflowMember === true
             ? ""
-            : t3OrchestrationInstructions(input.workflowsAvailable) +
+            : t3OrchestrationInstructions(input.workflowsAvailable, input.modelSelection.model) +
               CLAUDE_BACKGROUND_WAIT_INSTRUCTIONS +
               (deviceInstructions
                 ? `\n${T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH}\n`

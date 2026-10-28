@@ -111,7 +111,7 @@ const DelegateTaskTool = Tool.make("delegate_task", {
 
 const DelegateTasksTool = Tool.make("delegate_tasks", {
   description:
-    "Needs an agent running inside a T3 thread. Start up to 100 delegated child tasks of THIS thread in one call, each with its own task prompt, target provider/model/options, isolation, title, role and modes, with the same rules as delegate_task. Use it instead of repeated delegate_task calls whenever you fan out more than one task. Every entry is checked before any starts, so an invalid entry starts nothing and the error names its index. Each entry's retry key is its own clientRequestId, or the batch clientRequestId plus its position; retrying the same call starts only the tasks that did not start. Tasks always run async: the result lists each taskId and childThreadId in request order, and each completion wakes this thread. Use task_wait to wait for any or all of them, task_status for one, and task_cancel to stop one.",
+    "Start several delegated tasks of this thread in one call, each with delegate_task's fields. Use it instead of repeated delegate_task calls. All entries are checked before any starts; an error names the index. Retrying the same call starts only tasks that did not start. Tasks run async: the result lists each taskId and childThreadId in order, and each completion wakes this thread. Join them with task_wait.",
   parameters: OrchestratorMcpDelegateTasksInput,
   success: OrchestratorMcpDelegateTasksResult,
   failure: OrchestratorMcpFailure,
@@ -139,7 +139,7 @@ const TaskStatusTool = Tool.make("task_status", {
 
 const TaskWaitTool = Tool.make("task_wait", {
   description:
-    "Needs an agent running inside a T3 thread. Wait for several delegated tasks of THIS thread at once: mode all (default) returns when every listed task is ready, mode any when at least one is. A task is ready when it finished or when it waits on a question or approval. Returns ready tasks with their summaries in request order, the rest as pending, and timedOut when timeoutMs elapsed first; a timeout cancels nothing. Prefer ending your turn when you have nothing else to do, since every completion already wakes this thread; use task_wait when this turn needs the results to continue, for example between phases.",
+    "Wait for delegated tasks of this thread. mode all (default): every listed task is ready; any: at least one is. Ready means finished or waiting on a question or approval. Returns ready tasks with summaries in order, the rest as pending, and timedOut; a timeout cancels nothing. Use it only when this turn needs the results; otherwise end your turn, since each completion wakes this thread.",
   parameters: OrchestratorMcpTaskWaitInput,
   success: OrchestratorMcpTaskWaitResult,
   failure: OrchestratorMcpFailure,
@@ -154,7 +154,7 @@ const TaskWaitTool = Tool.make("task_wait", {
 
 const WorkflowStartTool = Tool.make("workflow_start", {
   description:
-    "Needs an agent running inside a T3 thread. Run a multi-agent workflow script in the background on the T3 server, for any provider. Use it when work splits into phases or many agents: the script, not your turns, drives the fan-out, and you get ONE completion wake when it ends. Script format is Claude Code's Workflow: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return a JSON value. agent(prompt, { label, phase, schema, target: { providerInstanceId, model, options }, isolation: 'worktree', role }) runs one delegated task and resolves with its final text, or the parsed object when `schema` (a JSON Schema) is given, or null if it failed. More agent options (verify, scopes, inputs, outputs, attemptTimeoutMs, stallTimeoutMs, report) are described on the script parameter; report: true makes agent() resolve to { ok, result, outputs, attempts, verification, reason } even on failure. parallel([() => agent(...), ...]) runs functions concurrently and returns their results in order (null for failures). pipeline(items, (item, original, index) => ..., ...moreStages) runs each item through the stages. phase(title) sets the phase for later agents; log(...) reports progress. args is the JSON you pass. Scripts cannot read the clock, random numbers, files or the network, so a run can resume. Agents run under this thread's modes and the environment's running-agent limit. Returns the workflowId; end your turn and wait for the completion wake, or read workflow_status. While the user's request for a workflow waits for their approval, T3 refuses this tool: plan with graph_review instead.",
+    "Run a multi-agent workflow script on the T3 server, for any provider; the script drives the fan-out and you get one completion wake when it ends. Script format is Claude Code's Workflow: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return a JSON value. agent(prompt, { label, phase, schema, target: { providerInstanceId, model, options }, isolation: 'worktree', role }) runs one delegated task and resolves with its final text, or the parsed object when `schema` (a JSON Schema) is given, or null if it failed. More agent options (verify, scopes, inputs, outputs, attemptTimeoutMs, stallTimeoutMs, report) are described on the script parameter; report: true makes agent() resolve to { ok, result, outputs, attempts, verification, reason } even on failure. parallel([() => agent(...), ...]) runs functions concurrently and returns their results in order (null for failures). pipeline(items, (item, original, index) => ..., ...moreStages) runs each item through the stages. phase(title) sets the phase for later agents; log(...) reports progress. args is the JSON you pass. Scripts cannot read the clock, random numbers, files or the network, so a run can resume. Agents run under this thread's modes and the environment's running-agent limit. Returns the workflowId. Refused while the user's workflow request awaits approval: use graph_review.",
   parameters: OrchestratorMcpWorkflowStartInput,
   success: OrchestratorMcpWorkflowResult,
   failure: OrchestratorMcpFailure,
@@ -168,7 +168,7 @@ const WorkflowStartTool = Tool.make("workflow_start", {
 
 const WorkflowStatusTool = Tool.make("workflow_status", {
   description:
-    "Needs an agent running inside a T3 thread. Read a workflow this thread started: its status, phases, each agent's status and result, the latest log line, and the script's result once it ends.",
+    "Read a workflow this thread started: status, phases, each agent's status and result, the latest log line, and the script's result once it ends.",
   parameters: OrchestratorMcpWorkflowInput,
   success: OrchestratorMcpWorkflowResult,
   failure: OrchestratorMcpFailure,
@@ -183,7 +183,7 @@ const WorkflowStatusTool = Tool.make("workflow_status", {
 
 const WorkflowRunStopTool = Tool.make("workflow_stop", {
   description:
-    "Needs an agent running inside a T3 thread. Stop a workflow this thread started: the script stops and every agent it started is stopped. No completion wake follows.",
+    "Stop a workflow this thread started and every agent it started. No completion wake follows.",
   parameters: OrchestratorMcpWorkflowStopInput,
   success: OrchestratorMcpWorkflowResult,
   failure: OrchestratorMcpFailure,
@@ -196,7 +196,7 @@ const WorkflowRunStopTool = Tool.make("workflow_stop", {
 
 const GraphReviewTool = Tool.make("graph_review", {
   description:
-    "Needs an agent running inside a T3 thread. Review a dependency graph before starting it. Validates the graph, hashes its workspace input files in the caller's shared checkout, and returns a digest, run order as dependency layers, write conflicts, input status and blockers. Review does not start agents. Assign workers with a node's preset: a profile id from availableProfiles in the result or from orchestrator_capabilities workflowPresets. Profiles are created by the user in Settings, so there may be none; do not invent ids. Assign a verifier with a judgment check's target. The result has a reviewId and approvalRequired. When approvalRequired is true, the user asked for a workflow: end your turn. The user approves or dismisses the review in T3 Code, and T3 sends you a message with the approved digest; call graph_start only after that message. Otherwise, when ready, call graph_start with the same graph and acceptedDigest. Start refuses a digest mismatch, blockers, or inputs that changed since review. The graph runs as a workflow: workflow_status reads progress, workflow_stop stops it, and it sends one completion wake.",
+    "Validate a dependency graph without starting it. Returns reviewId, digest, run order as dependency layers, write conflicts, input status, blockers and approvalRequired. Assign workers with a node's preset: a profile id from availableProfiles or orchestrator_capabilities workflowPresets; there may be none, so never invent ids. Assign a verifier with a judgment check's target. When approvalRequired is true, end your turn: T3 messages you the approved digest after the user approves it in T3 Code. Otherwise call graph_start with the same graph and acceptedDigest.",
   parameters: OrchestratorMcpGraphReviewInput,
   success: OrchestratorMcpGraphReviewResult,
   failure: OrchestratorMcpFailure,
@@ -211,7 +211,7 @@ const GraphReviewTool = Tool.make("graph_review", {
 
 const GraphStartTool = Tool.make("graph_start", {
   description:
-    "Needs an agent running inside a T3 thread. Start a graph reviewed with graph_review, passing the same graph and its acceptedDigest. Review hashes workspace input files and returns a digest and run order. Start refuses a digest mismatch, blockers, or inputs that changed since review. While the user's request for a workflow waits for their decision, T3 also refuses any digest the user has not approved in T3 Code, and one approval starts one workflow: T3 supplies the start key for it, so calling graph_start again for the same approved digest, with or without a clientRequestId, returns that same workflow. Nodes run in dependency order in the caller's shared checkout, using workflow agents and their checks. Returns the existing workflow result with workflowId: use workflow_status for progress and workflow_stop to stop it. End your turn to receive the single completion wake when the workflow ends.",
+    "Start a graph reviewed with graph_review, passing the same graph and its acceptedDigest. Refused for a digest mismatch, blockers, inputs changed since review, or, while the user's workflow request is pending, a digest the user has not approved. Calling again for an approved digest returns the same workflow. Returns the workflowId: workflow_status reads progress, workflow_stop stops it; end your turn for the single completion wake.",
   parameters: OrchestratorMcpGraphStartInput,
   success: OrchestratorMcpWorkflowResult,
   failure: OrchestratorMcpFailure,

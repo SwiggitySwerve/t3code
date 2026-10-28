@@ -3055,6 +3055,7 @@ export const make = Effect.fn("OpenCode2Adapter.make")(function* (instanceId: Pr
           mcpAvailable,
           mcpSession?.capabilities?.has("device") === true,
           mcpSession?.capabilities?.has("workflows") === true,
+          turnInput.modelSelection.model,
         ),
       ]
         .filter((part) => part !== undefined && part.length > 0)

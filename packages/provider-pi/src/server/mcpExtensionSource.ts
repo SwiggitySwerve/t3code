@@ -1,7 +1,8 @@
 // No T3 imports inside the string; resolve Pi and typebox from the user's Pi install.
 import {
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-  T3_CODE_WORKFLOW_INSTRUCTIONS,
+  T3_CODE_WORKFLOW_INSTRUCTIONS_BY_FAMILY,
+  t3OrchestrationModelFamily,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 
 export const PI_T3_MCP_EXTENSION_FILENAME = "pi-t3-mcp-extension.ts";
@@ -25,7 +26,8 @@ const TOKEN_ENV = ${JSON.stringify(T3_MCP_BEARER_ENV)};
 const RUNTIME_MODE_ENV = ${JSON.stringify(T3_PI_RUNTIME_MODE_ENV)};
 const EXTENSION_PATH_ENV = ${JSON.stringify(T3_PI_MCP_EXTENSION_PATH_ENV)};
 const ORCHESTRATION_INSTRUCTIONS = ${JSON.stringify(T3_CODE_ORCHESTRATION_INSTRUCTIONS.trim())};
-const WORKFLOW_INSTRUCTIONS = ${JSON.stringify(T3_CODE_WORKFLOW_INSTRUCTIONS.trim())};
+const orchestrationModelFamily = ${t3OrchestrationModelFamily.toString()};
+const WORKFLOW_INSTRUCTIONS = ${JSON.stringify(Object.fromEntries(Object.entries(T3_CODE_WORKFLOW_INSTRUCTIONS_BY_FAMILY).map(([family, instructions]) => [family, instructions.trim()])))};
 const PROTOCOL = "2025-06-18";
 const READ_ONLY_TOOLS = new Set(["read", "grep", "find", "ls"]);
 const FILE_CHANGE_TOOLS = new Set(${JSON.stringify(PI_FILE_CHANGE_TOOLS)});
@@ -455,7 +457,7 @@ export default async function t3McpExtension(pi: ExtensionAPI) {
   // Keep guidance in the system prompt so leading slash commands still expand.
   pi.on("before_agent_start", (event, ctx) => {
     reconcileDiscovery(ctx);
-    const instructions = catalog.some((tool) => tool.name === "workflow_start") ? WORKFLOW_INSTRUCTIONS : ORCHESTRATION_INSTRUCTIONS;
+    const instructions = catalog.some((tool) => tool.name === "workflow_start") ? WORKFLOW_INSTRUCTIONS[orchestrationModelFamily(ctx.model?.id)] : ORCHESTRATION_INSTRUCTIONS;
     const sections = event.systemPromptOptions?.sections;
     if (sections && typeof sections === "object" && event.systemPromptOptions?.forceSystemPrompt === undefined) {
       // A full prompt override bypasses Pi's later section rendering.
