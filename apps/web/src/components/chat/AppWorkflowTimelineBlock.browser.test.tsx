@@ -73,10 +73,13 @@ describe("workflow block Stop", () => {
   it("stays on a cancelled workflow while a member it started still runs, through a failed stop and a remount", async () => {
     stop.mockReset();
     stop.mockResolvedValue(failure);
-    const add = vi.spyOn(toastManager, "add");
     const element = showWorkflow({ rowStatus: "cancelled", member: "running" });
     {
-      await using screen = await render(element, { router: false });
+      await using screen = await render(element, {
+        // Stop uses the fixture's command atoms and does not navigate.
+        router: false,
+      });
+      using add = vi.spyOn(toastManager, "add");
       expect(stopButton(screen.container)).not.toBeNull();
       await act(async () => stopButton(screen.container)!.click());
       expect(stop).toHaveBeenCalledTimes(1);
@@ -91,15 +94,18 @@ describe("workflow block Stop", () => {
       expect(stop).toHaveBeenCalledTimes(2);
     }
     // A new mount reads the same projection, so nothing local is needed to keep Stop.
-    await using again = await render(element, { router: false });
+    await using again = await render(element, {
+      // Remounting reads the fixture projection without navigating.
+      router: false,
+    });
     expect(stopButton(again.container)).not.toBeNull();
-    add.mockRestore();
   });
 
   it("goes away once the workflow and every member have settled", async () => {
     await using screen = await render(
       showWorkflow({ rowStatus: "cancelled", member: "cancelled" }),
       {
+        // The settled state comes from fixture atoms, independent of the route.
         router: false,
       },
     );
@@ -109,6 +115,7 @@ describe("workflow block Stop", () => {
 
   it("is offered on a running workflow", async () => {
     await using screen = await render(showWorkflow({ rowStatus: "running", member: "completed" }), {
+      // The running state comes from fixture atoms, independent of the route.
       router: false,
     });
     expect(stopButton(screen.container)).not.toBeNull();

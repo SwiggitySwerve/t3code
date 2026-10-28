@@ -246,15 +246,18 @@ describe("workflow fixture rows", () => {
 
   it("gives queued, waiting and skipped nodes a glyph each, and Waiting an hourglass in the sidebar", async () => {
     await using canvas = await render(<WorkflowCanvasSurface variant="queued" />, {
+      // Canvas glyphs are rendered from fixture props without navigation.
       router: false,
     });
     expect(canvas.container.querySelector("svg.lucide-clock")).not.toBeNull();
     expect(canvas.container.querySelector("svg.lucide-hourglass")).not.toBeNull();
     await using failed = await render(<WorkflowCanvasSurface variant="failed" />, {
+      // Skipped-node glyphs are rendered from fixture props without navigation.
       router: false,
     });
     expect(failed.container.querySelector("svg.lucide-minus")).not.toBeNull();
     await using waiting = await render(<SidebarStatusSurface state="waiting-idle" />, {
+      // The sidebar status glyph does not read router state.
       router: false,
     });
     expect(waiting.container.querySelector("svg.lucide-hourglass")).not.toBeNull();
@@ -271,11 +274,15 @@ describe("workflow fixture rows", () => {
     for (const [state, label] of Object.entries(labels)) {
       await using screen = await render(
         <SidebarStatusSurface state={state as keyof typeof labels} />,
-        { router: false },
+        {
+          // Sidebar badges depend only on the supplied status.
+          router: false,
+        },
       );
       expect(screen.container.textContent).toContain(label);
     }
     await using queued = await render(<WorkflowBlockSurface kind="script" variant="queued" />, {
+      // Queued-agent styling is supplied by the fixture without navigation.
       router: false,
     });
     expect(queued.container.querySelector(".bg-info")).toBeNull();
@@ -283,12 +290,14 @@ describe("workflow fixture rows", () => {
 
   it("keeps the Approve button legible while approving", async () => {
     await using pending = await render(<WorkflowReviewSurface state="pending" />, {
+      // Approval styling depends on fixture state, not the route.
       router: false,
     });
     const idle = getComputedStyle(
       pending.getByRole("button", { name: /^Approve/ }).element(),
     ).backgroundColor;
     await using approving = await render(<WorkflowReviewSurface state="approving" />, {
+      // Approval styling depends on fixture state, not the route.
       router: false,
     });
     const button = approving.getByRole("button", { name: /^Approving/ }).element();
