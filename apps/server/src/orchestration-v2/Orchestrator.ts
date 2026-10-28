@@ -13579,10 +13579,28 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             threadId: waiting.threadId,
             runId: waiting.runId,
           }).pipe(
-            Effect.catchCause((cause) =>
-              Effect.logWarning("Failed to start a waiting delegated task", {
-                runId: waiting.runId,
-                cause,
+            Effect.catch((cause) =>
+              Effect.gen(function* () {
+                yield* Effect.logWarning("Failed to start a waiting delegated task", {
+                  runId: waiting.runId,
+                  cause,
+                });
+                const reason =
+                  cause._tag === "OrchestratorDispatchError" ? (cause.cause ?? cause) : cause;
+                yield* dispatchWithReceipt({
+                  type: "prepared-run.fail",
+                  commandId: CommandId.make(
+                    `command:system:delegated-admission-failure:${waiting.runId}`,
+                  ),
+                  threadId: waiting.threadId,
+                  runId: waiting.runId,
+                  failure: makeProviderFailure({
+                    cause,
+                    message: `Failed to start a waiting delegated task: ${reason instanceof Error ? reason.message : String(reason)}`,
+                    class: "validation_error",
+                    retryable: false,
+                  }),
+                });
               }),
             ),
           );

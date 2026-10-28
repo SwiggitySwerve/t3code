@@ -9,13 +9,17 @@ import {
 } from "@t3tools/contracts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as Effect from "effect/Effect";
+import * as Layer from "effect/Layer";
+import * as Ref from "effect/Ref";
 import * as Option from "effect/Option";
+import * as TestClock from "effect/testing/TestClock";
 import * as Stream from "effect/Stream";
 
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as Orchestrator from "./Orchestrator.ts";
 import * as ProviderAdapterRegistry from "./ProviderAdapterRegistry.ts";
+import * as RuntimePolicy from "./RuntimePolicy.ts";
 import * as ProviderReplayHarness from "./testkit/ProviderReplayHarness.ts";
 
 const instanceId = ProviderInstanceId.make("codex");
@@ -28,15 +32,19 @@ const adapter = {
   openSession: () => Effect.die("Runs here never reach a provider"),
 } as ProviderAdapter.ProviderAdapterV2["Service"];
 
-const layerTest = ProviderReplayHarness.layerWithRegistry(
-  { name: "delegated-admission" },
-  ProviderAdapterRegistry.layerFromAdapters([adapter]),
-  {
-    databaseLayer: SqlitePersistence.layerMemory,
-    runEffectWorker: false,
-    maxRunningDelegatedTasks: 1,
-  },
-);
+const makeLayerTest = (runtimePolicyLayer?: Layer.Layer<RuntimePolicy.RuntimePolicyV2>) =>
+  ProviderReplayHarness.layerWithRegistry(
+    { name: "delegated-admission" },
+    ProviderAdapterRegistry.layerFromAdapters([adapter]),
+    {
+      databaseLayer: SqlitePersistence.layerMemory,
+      runEffectWorker: false,
+      maxRunningDelegatedTasks: 1,
+      ...(runtimePolicyLayer === undefined ? {} : { runtimePolicyLayer }),
+    },
+  );
+
+const layerTest = makeLayerTest();
 
 const parentThreadId = ThreadId.make("thread:admission-parent");
 
@@ -218,4 +226,63 @@ it.effect("a delegate with a prepared workspace starts at once when a slot freed
     assert.equal(started.run.admission, "admitted");
     assert.equal(started.preparationTitle, "Workspace ready");
   }).pipe(Effect.provide(layerTest)),
+);
+
+it.effect.each([false, true])(
+  "a rejected admission release ends its task and frees the queue (prior receipt=%s)",
+  (priorReceipt) =>
+    Effect.gen(function* () {
+      const rejectedThread = yield* Ref.make<ThreadId | null>(null);
+      const policy = Layer.succeed(RuntimePolicy.RuntimePolicyV2, {
+        resolve: Effect.fn("test.admissionRuntimePolicy")(function* (input) {
+          if ((yield* Ref.get(rejectedThread)) === input.thread.id)
+            return yield* new RuntimePolicy.RuntimePolicyResolveError({
+              projectId: input.thread.projectId,
+              providerInstanceId: input.modelSelection.instanceId,
+              cause: "fixture policy rejection",
+            });
+          return {
+            runtimeMode: input.thread.runtimeMode,
+            interactionMode: input.thread.interactionMode,
+            cwd: input.thread.worktreePath,
+          };
+        }),
+      });
+      yield* Effect.gen(function* () {
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        yield* startParent;
+        const first = yield* delegate("running task");
+        yield* TestClock.adjust(1);
+        const rejected = yield* delegate("rejected task");
+        yield* TestClock.adjust(1);
+        const next = yield* delegate("next task");
+        const { run } = yield* firstRun(rejected);
+        yield* Ref.set(rejectedThread, rejected);
+        if (priorReceipt)
+          yield* orchestrator
+            .dispatch({
+              type: "prepared-run.release",
+              commandId: CommandId.make(`command:system:delegated-admission:${run.id}`),
+              threadId: rejected,
+              runId: run.id,
+            })
+            .pipe(Effect.flip);
+        yield* stop(first);
+        assert.equal((yield* firstRun(first)).run.status, "interrupted");
+        yield* orchestrator.recoverDelegatedTasks;
+        const failed = yield* orchestrator.getThreadProjection(rejected);
+        assert.equal(failed.runs[0]?.status, "failed");
+        assert.isNotNull(failed.runs[0]?.completedAt);
+        const reason = failed.turnItems.find((item) => item.type === "error");
+        assert.equal(reason?.type, "error");
+        if (reason?.type === "error") {
+          assert.include(reason.failure.message, "Failed to start a waiting delegated task");
+          if (!priorReceipt)
+            assert.include(reason.failure.message, "Failed to resolve runtime policy");
+        }
+        yield* orchestrator.recoverDelegatedTasks;
+        assert.equal((yield* firstRun(next)).run.status, "starting");
+        assert.equal((yield* firstRun(next)).run.admission, "admitted");
+      }).pipe(Effect.provide(makeLayerTest(policy)));
+    }),
 );
