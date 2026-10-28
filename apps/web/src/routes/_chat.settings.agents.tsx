@@ -8,7 +8,7 @@ function SettingsAgentsRoute() {
   if (scope.kind === "project" || scope.kind === "checkout") {
     return (
       <SettingsScopeNotice target="environment">
-        Agent presets belong to an environment. Select the environment to manage its presets.
+        Worker presets belong to an environment. Select the environment to manage its presets.
       </SettingsScopeNotice>
     );
   }
@@ -16,8 +16,8 @@ function SettingsAgentsRoute() {
     return (
       <p className="p-8 text-sm text-muted-foreground">
         {scope.kind === "environment"
-          ? `Reconnect ${scope.label} to manage its agent presets.`
-          : "Connect an environment to manage its agent presets."}
+          ? `Reconnect ${scope.label} to manage its worker presets.`
+          : "Connect an environment to manage its worker presets."}
       </p>
     );
   }
