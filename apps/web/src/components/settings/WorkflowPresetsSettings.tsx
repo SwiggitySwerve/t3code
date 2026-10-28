@@ -64,10 +64,10 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
       const result = await persist({ environmentId, input: { patch: { workflowPresets: next } } });
       if (result._tag === "Failure") {
         const failure = squashAtomCommandFailure(result);
-        setError(failure instanceof Error ? failure.message : "Could not save agent presets.");
+        setError(failure instanceof Error ? failure.message : "Could not save worker presets.");
       } else if (closeEditor) setDraft(null);
     } catch {
-      setError("Could not save agent presets. Reconnect and try again.");
+      setError("Could not save worker presets. Reconnect and try again.");
     }
     setPending(false);
   };
@@ -78,7 +78,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
     <SettingsPageContainer>
       <SettingsSection
         id="workflow-presets"
-        title="Agent presets"
+        title="Workflow"
         headerAction={
           <Button
             size="xs"
@@ -103,9 +103,9 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
         }
       >
         <SettingsRow
-          title="Workflow workers"
+          title="Worker presets"
           description="Save a provider, model and options for workflow workers. The coordinator keeps its own model."
-          status={canWrite ? undefined : "This connection cannot change agent presets."}
+          status={canWrite ? undefined : "This connection cannot change worker presets."}
         />
         {error ? (
           <p role="alert" className="px-3 py-3 text-sm text-destructive sm:px-4">
@@ -114,7 +114,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
         ) : null}
         {presets.presets.length === 0 ? (
           <p className="px-3 py-3 text-xs text-muted-foreground sm:px-4">
-            No agent presets yet. Create one to choose the provider and model workers run with.
+            No worker presets yet. Create one to choose the provider and model workers run with.
           </p>
         ) : null}
         {presets.presets.map((preset) => (
@@ -178,7 +178,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
         <SettingsSection id="workflow-preset-editor" title={editing ? "Edit preset" : "New preset"}>
           <form
             className="divide-y divide-border/50"
-            aria-label="Agent preset"
+            aria-label="Worker preset"
             onSubmit={(event) => {
               event.preventDefault();
               if (!draft.name.trim() || pending || !canWrite) return;

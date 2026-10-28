@@ -266,7 +266,7 @@ describe("workflow preset settings interactions", () => {
       .element(reopened.getByRole("switch", { name: "Workflow worker default: Writer" }))
       .toBeChecked();
     await userEvent.click(reopened.getByRole("button", { name: "Delete Writer" }));
-    await expect.element(reopened.getByText(/No agent presets yet./)).toBeVisible();
+    await expect.element(reopened.getByText(/No worker presets yet./)).toBeVisible();
     expect(decodeSettings(JSON.parse(state.disk)).workflowPresets).toEqual({
       presets: [],
       defaultPresetId: null,
@@ -301,7 +301,7 @@ describe("workflow preset settings interactions", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save preset" }));
     await expect
       .element(screen.getByRole("alert"))
-      .toHaveTextContent("Could not save agent presets. Reconnect and try again.");
+      .toHaveTextContent("Could not save worker presets. Reconnect and try again.");
     await expect
       .element(screen.getByRole("textbox", { name: "Preset name" }))
       .toHaveValue("Unsaved");
@@ -313,7 +313,7 @@ describe("workflow preset settings interactions", () => {
     await userEvent.click(screen.getByRole("button", { name: "Save preset" }));
     await expect.element(screen.getByRole("button", { name: "Edit Unsaved" })).toBeVisible();
     await expect
-      .element(screen.getByRole("form", { name: "Agent preset" }))
+      .element(screen.getByRole("form", { name: "Worker preset" }))
       .not.toBeInTheDocument();
     await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
     await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeEnabled();
