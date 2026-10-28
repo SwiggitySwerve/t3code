@@ -175,7 +175,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                 </Button>
                 <Button
                   size="xs"
-                  variant="ghost-destructive"
+                  variant="destructive-outline"
                   disabled={!canWrite || pending}
                   aria-label={`Delete ${preset.name}`}
                   onClick={() =>

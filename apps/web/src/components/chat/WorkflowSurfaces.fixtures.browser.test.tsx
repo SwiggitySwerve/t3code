@@ -228,7 +228,9 @@ describe("workflow fixture rows", () => {
   it("names the run's state in the Lineage header, in words", async () => {
     await using screen = await render(<LineageRowSurface kind="script" variant="failed" />);
     const header = screen.getByRole("button", { name: /^State audit/ }).first();
-    await expect.element(header).toBeVisible();
-    expect(header.element().textContent).toContain("Failed");
+    // The word is drawn, not only read by a screen reader: a screen-reader-only span is 1px wide.
+    const word = header.getByText("Failed", { exact: true });
+    await expect.element(word).toBeVisible();
+    expect(word.element().getBoundingClientRect().width).toBeGreaterThan(12);
   });
 });
