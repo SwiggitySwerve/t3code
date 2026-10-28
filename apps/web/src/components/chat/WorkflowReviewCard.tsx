@@ -149,6 +149,7 @@ export function WorkflowReviewCard(props: {
             <Button
               type="button"
               size="sm"
+              className={presentation.status === "approving" ? "disabled:opacity-100" : undefined}
               disabled={!presentation.approve.enabled}
               onClick={props.onApprove}
             >

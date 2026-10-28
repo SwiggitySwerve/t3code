@@ -156,7 +156,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                       void save({ ...presets, defaultPresetId: checked ? preset.id : null })
                     }
                   />
-                  <span aria-hidden>Default</span>
+                  <span aria-hidden>Worker default</span>
                   <span className="sr-only">{`Workflow worker default: ${preset.name}`}</span>
                 </label>
                 <Button

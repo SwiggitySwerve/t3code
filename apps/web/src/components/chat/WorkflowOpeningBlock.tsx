@@ -130,7 +130,7 @@ export function WorkflowOpeningBlock(props: {
             {props.stop.stopping ? (
               <Spinner size="xs" aria-hidden />
             ) : (
-              <SquareIcon aria-hidden className="size-3 fill-current text-destructive-foreground" />
+              <SquareIcon aria-hidden className="size-3 fill-current" />
             )}
             Stop
           </Button>
@@ -266,7 +266,7 @@ function WorkflowProgress(props: { readonly text: string }) {
         <Button
           type="button"
           size="xs"
-          variant="ghost-muted"
+          variant="ghost"
           aria-expanded={expanded}
           aria-controls={contentId}
           data-scroll-anchor-ignore
@@ -352,13 +352,6 @@ function WorkflowMemberRow(props: {
           </span>
           <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
             <span className={cn("font-medium", statusText.className)}>
-              <span
-                aria-hidden
-                className={cn(
-                  "me-1.5 inline-block size-1.5 rounded-full align-middle",
-                  statusText.dotClassName,
-                )}
-              />
               {statusText.label}
             </span>
             {member.startedAt ? (
