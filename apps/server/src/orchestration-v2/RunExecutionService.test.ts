@@ -56,6 +56,7 @@ import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
 
 const driver = ProviderDriverKind.make("codex");
 const DEFAULT_TURN_TRIGGERS: RunExecutionService.RunExecutionTurnTriggers = {
+  workflows: true,
   workflowTriggers: DEFAULT_SERVER_SETTINGS.workflowTriggers,
   ultracode: DEFAULT_SERVER_SETTINGS.ultracode,
   workflowPresets: DEFAULT_SERVER_SETTINGS.workflowPresets,
@@ -3083,6 +3084,13 @@ it.effect("shapes the turn from the settings turn start read, not from a later r
       turnTriggers: { ...DEFAULT_TURN_TRIGGERS, ultracode: "keyword" },
     });
     assert.isTrue(text?.startsWith("Review the parser. ultracode\n\n<t3-ultracode>"));
+    const [disabled] = yield* providerTextsFor({
+      key: "workflow-feature-snapshot-off",
+      messageText: "ultracode: run a workflow",
+      settings: { workflows: true },
+      turnTriggers: { ...DEFAULT_TURN_TRIGGERS, workflows: false, ultracode: "always" },
+    });
+    assert.equal(disabled, "ultracode: run a workflow");
     // And the other way: a note that was not budgeted is not added.
     const [plain] = yield* providerTextsFor({
       key: "ultracode-settings-snapshot-off",
@@ -3629,7 +3637,7 @@ function captureRootRunTermination(input: {
           Layer.mock(ProviderEventIngestor.ProviderEventIngestorV2)({
             ingestNormalized: input.ingestNormalized ?? (() => Effect.succeed([])),
           }),
-          ServerSettings.layerTest(input.settings),
+          ServerSettings.layerTest({ workflows: true, ...input.settings }),
           Layer.succeed(RunFinalizationService.RunFinalizationObserver, {
             refresh: () => Effect.void,
             refreshAfterTurn: () =>
@@ -3646,16 +3654,18 @@ function captureRootRunTermination(input: {
       Effect.flatMap((service) => service.getSettings),
       Effect.map(
         ({
+          workflows,
           workflowTriggers,
           ultracode,
           workflowPresets,
         }): RunExecutionService.RunExecutionTurnTriggers => ({
+          workflows,
           workflowTriggers,
           ultracode,
           workflowPresets,
         }),
       ),
-      Effect.provide(ServerSettings.layerTest(input.settings)),
+      Effect.provide(ServerSettings.layerTest({ workflows: true, ...input.settings })),
     );
     const previewActivityEnded = yield* Effect.gen(function* () {
       const runExecution = yield* RunExecutionService.RunExecutionServiceV2;

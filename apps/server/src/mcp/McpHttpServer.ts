@@ -8,6 +8,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Scope from "effect/Scope";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import type * as Types from "effect/Types";
@@ -56,6 +57,7 @@ import * as ThreadHandlers from "./toolkits/thread/handlers.ts";
 import * as ThreadMetadataMcpService from "./ThreadMetadataMcpService.ts";
 import * as McpSessionRegistry from "./McpSessionRegistry.ts";
 import * as PreviewAutomationBroker from "./PreviewAutomationBroker.ts";
+import { toolsWithoutWorkflows } from "./toolkits/orchestrator/tools.ts";
 import * as OrchestratorHandlers from "./toolkits/orchestrator/handlers.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
 import * as PreviewHandlers from "./toolkits/preview/handlers.ts";
@@ -196,9 +198,12 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
   const registry = yield* McpSessionRegistry.McpSessionRegistry;
   const clients = yield* Effect.serviceOption(McpClientAuthenticator);
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  const linksEnabled = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.linkedEnvironmentsEnabled),
-    Effect.orElseSucceed(() => false),
+  const featureSettings = serverSettings.getSettings.pipe(
+    Effect.map(({ linkedEnvironmentsEnabled, workflows }) => ({
+      linkedEnvironmentsEnabled,
+      workflows,
+    })),
+    Effect.orElseSucceed(() => ({ linkedEnvironmentsEnabled: false, workflows: false })),
   );
   return Effect.fn("McpHttpServer.authenticateRequest")(function* (httpEffect) {
     const request = yield* HttpServerRequest.HttpServerRequest;
@@ -224,7 +229,10 @@ const makeMcpAuthMiddleware = Effect.gen(function* () {
     }
     const limited = withModeLimit(invocation, request);
     if (limited === undefined) return invalidModeLimit;
-    const linkedEnvironments = yield* linksEnabled;
+    const { linkedEnvironmentsEnabled: linkedEnvironments, workflows } = yield* featureSettings;
+    const capabilities = new Set(limited.capabilities);
+    if (!workflows) capabilities.delete("workflows");
+    else if (limited.client !== undefined) capabilities.add("workflows");
     if (limited.client?.linked === true && !linkedEnvironments) return linkedEnvironmentsOff;
     return yield* httpEffect.pipe(
       Effect.provideService(McpInvocationContext.McpInvocationContext, {
@@ -1017,21 +1025,39 @@ const withAdvertisedSchemas = Effect.fn("McpHttpServer.withAdvertisedSchemas")(f
 >(toolkit: Toolkit.Toolkit<Tools>, registration: Effect.Effect<A, E, R>) {
   const server = yield* McpServer.McpServer;
   const tools: Record<string, Tool.Any> = toolkit.tools;
+  const settings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
+  const scope = yield* Effect.scope;
   const advertisingServer = McpServer.McpServer.of({
     ...server,
     addTool: Effect.fn("McpServer.addTool")(function (options) {
       const tool = tools[options.tool.name];
-      return server.addTool(
-        tool === undefined
-          ? options
-          : {
-              ...options,
-              tool: new McpSchema.Tool({
-                ...options.tool,
-                inputSchema: advertisedJsonSchema(tool),
-              }),
-            },
-      );
+      if (tool === undefined) return server.addTool(options);
+      const variant = toolsWithoutWorkflows[tool.name];
+      const register = (workflows: boolean) =>
+        server.addTool({
+          ...options,
+          tool: new McpSchema.Tool({
+            ...options.tool,
+            inputSchema: advertisedJsonSchema(!workflows && variant !== undefined ? variant : tool),
+          }),
+        });
+      if (variant === undefined || Option.isNone(settings)) return register(false);
+      return Effect.gen(function* () {
+        const changes = yield* settings.value.subscribeChanges.pipe(
+          Effect.provideService(Scope.Scope, scope),
+        );
+        const initial = yield* settings.value.getSettings.pipe(
+          Effect.map((value) => value.workflows),
+          Effect.orElseSucceed(() => false),
+        );
+        yield* register(initial);
+        yield* changes.pipe(
+          Stream.map((value) => value.workflows),
+          Stream.changes,
+          Stream.runForEach(register),
+          Effect.forkIn(scope),
+        );
+      });
     }),
   });
   return yield* registration.pipe(Effect.provideService(McpServer.McpServer, advertisingServer));
@@ -1053,6 +1079,7 @@ export const TOOLKIT_REQUIRED_CAPABILITY = {
   preview: "preview",
   previewControls: "preview",
   device: "device",
+  workflows: "workflows",
 } as const satisfies Record<string, McpInvocationContext.McpCapability>;
 
 /** Hides the tools it registers from workflow members that lack `capability`; a hidden tool is "not found". */

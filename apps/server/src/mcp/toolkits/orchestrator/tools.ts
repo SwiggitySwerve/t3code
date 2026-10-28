@@ -8,6 +8,8 @@ import {
   OrchestratorMcpEnvironmentUnlinkInput,
   OrchestratorMcpEnvironmentUnlinkResult,
   OrchestratorMcpCreateThreadsInput,
+  OrchestratorMcpCreateThreadRequest,
+  OrchestratorMcpTarget,
   OrchestratorMcpCreateThreadsResult,
   OrchestratorMcpDelegateTaskInput,
   OrchestratorMcpDelegateTaskResult,
@@ -118,7 +120,8 @@ const DelegateTasksTool = Tool.make("delegate_tasks", {
 })
   .annotate(Tool.Title, "Delegate child tasks")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
 const TaskStatusTool = Tool.make("task_status", {
   description:
@@ -146,7 +149,8 @@ const TaskWaitTool = Tool.make("task_wait", {
   .annotate(Tool.Title, "Wait for delegated tasks")
   .annotate(Tool.Readonly, false)
   .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+  .annotate(Tool.Idempotent, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
 const WorkflowStartTool = Tool.make("workflow_start", {
   description:
@@ -159,7 +163,8 @@ const WorkflowStartTool = Tool.make("workflow_start", {
 })
   .annotate(Tool.Title, "Start a workflow")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
 const WorkflowStatusTool = Tool.make("workflow_status", {
   description:
@@ -173,7 +178,8 @@ const WorkflowStatusTool = Tool.make("workflow_status", {
   .annotate(Tool.Title, "Get workflow status")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+  .annotate(Tool.Idempotent, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
 const WorkflowRunStopTool = Tool.make("workflow_stop", {
   description:
@@ -185,7 +191,8 @@ const WorkflowRunStopTool = Tool.make("workflow_stop", {
   dependencies,
 })
   .annotate(Tool.Title, "Stop a workflow")
-  .annotate(Tool.Destructive, true);
+  .annotate(Tool.Destructive, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
 const GraphReviewTool = Tool.make("graph_review", {
   description:
@@ -199,7 +206,8 @@ const GraphReviewTool = Tool.make("graph_review", {
   .annotate(Tool.Title, "Review a workflow graph")
   .annotate(Tool.Readonly, true)
   .annotate(Tool.Destructive, false)
-  .annotate(Tool.Idempotent, true);
+  .annotate(Tool.Idempotent, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
 const GraphStartTool = Tool.make("graph_start", {
   description:
@@ -212,7 +220,8 @@ const GraphStartTool = Tool.make("graph_start", {
 })
   .annotate(Tool.Title, "Start a workflow graph")
   .annotate(Tool.Destructive, true)
-  .annotate(Tool.OpenWorld, true);
+  .annotate(Tool.OpenWorld, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
 const TaskCancelTool = Tool.make("task_cancel", {
   description:
@@ -480,3 +489,26 @@ export const OrchestratorToolkit = Toolkit.make(
   EnvironmentLinkTool,
   EnvironmentUnlinkTool,
 );
+
+const targetWithoutWorkflows = Schema.Struct(
+  Struct.omit(OrchestratorMcpTarget.fields, ["inheritOptions"]),
+);
+export const toolsWithoutWorkflows: Readonly<Record<string, Tool.Any>> = {
+  delegate_task: DelegateTaskTool.setParameters(
+    Schema.Struct({
+      ...Struct.omit(OrchestratorMcpDelegateTaskInput.fields, ["resultSchema"]),
+      target: Schema.optional(targetWithoutWorkflows),
+    }),
+  ),
+  create_threads: CreateThreadsTool.setParameters(
+    Schema.Struct({
+      ...OrchestratorMcpCreateThreadsInput.fields,
+      threads: Schema.Array(
+        Schema.Struct({
+          ...OrchestratorMcpCreateThreadRequest.fields,
+          target: Schema.optional(targetWithoutWorkflows),
+        }),
+      ).check(Schema.isMinLength(1), Schema.isMaxLength(20)),
+    }),
+  ),
+};

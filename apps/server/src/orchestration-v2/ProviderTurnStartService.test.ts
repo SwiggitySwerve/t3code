@@ -73,7 +73,7 @@ const normalize = (target: string) => {
 };
 const layerWorktreeLocation = (
   worktreesDir = managedWorktreesDir,
-  settings = ServerSettings.layerTest(),
+  settings = ServerSettings.layerTest({ workflows: true }),
 ) =>
   Layer.mergeAll(
     Path.layer,
@@ -86,6 +86,7 @@ const layerUltracodeReads = (values: ReadonlyArray<UltracodeMode>, reads: { coun
   Layer.mock(ServerSettings.ServerSettingsService)({
     getSettings: Effect.sync(() => ({
       ...DEFAULT_SERVER_SETTINGS,
+      workflows: true,
       ultracode: values[Math.min(reads.count++, values.length - 1)]!,
     })),
   });

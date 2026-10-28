@@ -66,17 +66,45 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
     setPending(false);
   };
 
+  const toggleWorkflows = async (workflows: boolean) => {
+    if (!canWrite || pending) return;
+    setPending(true);
+    setError(null);
+    try {
+      const result = await persist({ environmentId, input: { patch: { workflows } } });
+      if (result._tag === "Failure") setError("Could not save workflows. Reconnect and try again.");
+      else setDraft(null);
+    } catch {
+      setError("Could not save workflows. Reconnect and try again.");
+    }
+    setPending(false);
+  };
+
   const editing = draft !== null && presets.presets.some((entry) => entry.id === draft.id);
 
   return (
     <SettingsPageContainer>
+      <SettingsSection id="workflows" title="Enable workflows">
+        <SettingsRow
+          title="Workflows"
+          description="Enable workflow tools, agent guidance and keyword triggers. Existing runs can finish when this is off. New agent turns use the current setting."
+          control={
+            <Switch
+              aria-label="Enable workflows"
+              checked={settings.workflows}
+              disabled={!canWrite || pending}
+              onCheckedChange={(checked) => void toggleWorkflows(checked)}
+            />
+          }
+        />
+      </SettingsSection>
       <SettingsSection
         id="workflow-presets"
         title="Workflow"
         headerAction={
           <Button
             size="xs"
-            disabled={!canWrite || pending || draft !== null}
+            disabled={!settings.workflows || !canWrite || pending || draft !== null}
             onClick={() => {
               const selection = resolveAppModelSelectionState(settings, providers);
               setDraft({
@@ -98,7 +126,11 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
       >
         <SettingsRow
           title="Worker presets"
-          description="Save a provider, model and options for workflow workers. The coordinator keeps its own model."
+          description={
+            settings.workflows
+              ? "Save a provider, model and options for workflow workers. The coordinator keeps its own model."
+              : "Workflows are off. Enable workflows to configure and run workers. Saved presets are kept."
+          }
           status={canWrite ? undefined : "This connection cannot change worker presets."}
         />
         {error ? (
@@ -125,7 +157,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                 <label className="flex min-h-6 items-center gap-2 text-xs text-muted-foreground">
                   <Switch
                     checked={presets.defaultPresetId === preset.id}
-                    disabled={!canWrite || pending}
+                    disabled={!settings.workflows || !canWrite || pending}
                     onCheckedChange={(checked) =>
                       void save({ ...presets, defaultPresetId: checked ? preset.id : null })
                     }
@@ -136,7 +168,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                 <Button
                   size="xs"
                   variant="outline"
-                  disabled={!canWrite || pending}
+                  disabled={!settings.workflows || !canWrite || pending}
                   aria-label={`Edit ${preset.name}`}
                   onClick={() => {
                     setDraft(preset);
@@ -148,7 +180,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                 <Button
                   size="xs"
                   variant="destructive-outline"
-                  disabled={!canWrite || pending}
+                  disabled={!settings.workflows || !canWrite || pending}
                   aria-label={`Delete ${preset.name}`}
                   onClick={() =>
                     void save(
@@ -168,7 +200,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
           />
         ))}
       </SettingsSection>
-      {draft ? (
+      {draft && settings.workflows ? (
         <SettingsSection id="workflow-preset-editor" title={editing ? "Edit preset" : "New preset"}>
           <form
             className="divide-y divide-border/50"

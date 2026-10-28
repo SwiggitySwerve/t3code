@@ -1,10 +1,11 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { ProviderInstanceId } from "@t3tools/contracts";
+import { EnvironmentId, ThreadId, ProviderInstanceId } from "@t3tools/contracts";
 import { McpProviderSessions } from "@t3tools/provider-core/server/McpProviderSessions";
+import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import { McpServer } from "effect/ai";
+import { McpServer, McpSchema } from "effect/ai";
 
 import { ServerSecretStore } from "../auth/ServerSecretStore.ts";
 import { ServerConfig } from "../config.ts";
@@ -43,6 +44,7 @@ import { VcsStatusBroadcaster } from "../vcs/VcsStatusBroadcaster.ts";
 import { buildCodexAdditionalContext } from "./CodexDeveloperInstructions.ts";
 import { DocumentText } from "./DocumentText.ts";
 import { ProviderRegistry } from "./ProviderRegistry.ts";
+import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import budget from "./agentContextBudget.json" with { type: "json" };
 
 // Registration only stores tool definitions, so the handlers' services are never called.
@@ -71,7 +73,6 @@ const toolHandlerServices = Layer.mergeAll(
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-agent-context-budget-" }),
   Layer.mock(ServerEnvironment)({}),
   Layer.mock(ServerSecretStore)({}),
-  Layer.mock(ServerSettingsService)({}),
   Layer.mock(SourceControlRepositoryService)({}),
   Layer.mock(StorageCleanup)({}),
   Layer.mock(ThreadLaunchService)({}),
@@ -81,9 +82,22 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(WorkflowApprovalGate)({}),
 ).pipe(Layer.provideMerge(NodeServices.layer));
 
+const client = McpSchema.McpServerClient.of({
+  clientId: 1,
+  clientCapabilities: {},
+  clientInfo: { name: "budget", version: "1" },
+  protocolVersion: "2025-06-18",
+  initializePayload: {
+    protocolVersion: "2025-06-18",
+    capabilities: {},
+    clientInfo: { name: "budget", version: "1" },
+  },
+  getClient: Effect.die("unused"),
+});
+
 const utf8Bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
-const claudeSystemAppend = () => {
+const claudeSystemAppend = (workflows = false) => {
   const { systemPrompt } = makeClaudeQueryOptions({
     modelSelection: {
       instanceId: ProviderInstanceId.make(CLAUDE_PROVIDER),
@@ -91,17 +105,18 @@ const claudeSystemAppend = () => {
     },
     nativeThreadId: "context-budget",
     resume: false,
+    workflowsAvailable: workflows,
     cwd: null,
     mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1/mcp" } },
   });
   return typeof systemPrompt === "object" && "append" in systemPrompt ? systemPrompt.append : "";
 };
 
-const codexAdditionalContext = () =>
+const codexAdditionalContext = (workflows = false) =>
   Object.values(
     buildCodexAdditionalContext(
       { model: "gpt-6.1-sol", modelName: "GPT-6.1 Sol", reasoningEffort: "high" },
-      { browser: true, device: true },
+      { browser: true, device: true, workflows },
     ),
   )
     .map((entry) => entry.value)
@@ -109,31 +124,117 @@ const codexAdditionalContext = () =>
 
 // CI rejects a PR that raises any value above main's agentContextBudget.json, so growth
 // needs the agent-context-increase label. Lower the values when the text shrinks.
-it.effect("agent context matches the committed budget", () =>
+it.effect.each([false, true])("agent context matches upstream when workflows=%s", (workflows) =>
   Effect.gen(function* () {
     const mcp = yield* McpServer.McpServer;
     const measured = {
-      claudeSystemAppendBytes: utf8Bytes(claudeSystemAppend()),
-      codexAdditionalContextBytes: utf8Bytes(codexAdditionalContext()),
+      claudeSystemAppendBytes: utf8Bytes(claudeSystemAppend(workflows)),
+      codexAdditionalContextBytes: utf8Bytes(codexAdditionalContext(workflows)),
       // The model sees these fields. outputSchema and annotations are protocol metadata.
       mcpToolListJsonBytes: utf8Bytes(
         JSON.stringify(
-          mcp.tools.map(({ tool }) => ({
-            name: tool.name,
-            description: tool.description,
-            inputSchema: tool.inputSchema,
-          })),
+          mcp.tools
+            .filter(
+              ({ annotations }) =>
+                Context.getOrUndefined(
+                  annotations,
+                  McpSchema.EnabledWhen,
+                )?.(client.initializePayload) !== false,
+            )
+            .map(({ tool }) => ({
+              name: tool.name,
+              description: tool.description,
+              inputSchema: tool.inputSchema,
+            })),
         ),
       ),
     };
 
-    expect(measured).toEqual(budget);
+    expect(measured).toEqual(
+      workflows
+        ? {
+            claudeSystemAppendBytes: 7136,
+            codexAdditionalContextBytes: 8864,
+            mcpToolListJsonBytes: 61887,
+          }
+        : {
+            claudeSystemAppendBytes: 5135,
+            codexAdditionalContextBytes: 6865,
+            mcpToolListJsonBytes: 45907,
+          },
+    );
+    if (!workflows) expect(measured).toEqual(budget);
+    const names = mcp.tools
+      .filter(
+        ({ annotations }) =>
+          Context.getOrUndefined(annotations, McpSchema.EnabledWhen)?.(client.initializePayload) !==
+          false,
+      )
+      .map(({ tool }) => tool.name);
+    for (const name of [
+      "delegate_tasks",
+      "task_wait",
+      "workflow_start",
+      "workflow_status",
+      "workflow_stop",
+      "graph_review",
+      "graph_start",
+      "t3_worktree_remove",
+    ]) {
+      expect(names.includes(name)).toBe(workflows);
+    }
   }).pipe(
-    Effect.provide(
-      McpHttpServer.layerTools.pipe(
-        Layer.provideMerge(McpServer.McpServer.layer),
-        Layer.provide(toolHandlerServices),
-      ),
-    ),
+    Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(workflows)),
+    Effect.provide(budgetLayer(workflows)),
+  ),
+);
+
+const invocation = (workflows: boolean): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("budget"),
+  capabilities: new Set<McpInvocationContext.McpCapability>([
+    "orchestration",
+    "preview",
+    "device",
+    "worktree",
+    "pull-requests",
+    ...(workflows ? ["workflows" as const] : []),
+  ]),
+  issuedAt: 0,
+  requestNamespace: "budget",
+  thread: {
+    threadId: ThreadId.make("budget"),
+    providerSessionId: "budget",
+    providerInstanceId: ProviderInstanceId.make("codex"),
+  },
+  client: undefined,
+});
+const budgetLayer = (workflows: boolean) =>
+  McpHttpServer.layerTools.pipe(
+    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provide(toolHandlerServices),
+    Layer.provide(ServerSettingsService.layerTest({ workflows })),
+  );
+
+it.effect("hidden workflow tools are not found with the default capability set", () =>
+  Effect.gen(function* () {
+    const mcp = yield* McpServer.McpServer;
+    for (const name of [
+      "delegate_tasks",
+      "task_wait",
+      "workflow_start",
+      "workflow_status",
+      "workflow_stop",
+      "graph_review",
+      "graph_start",
+      "t3_worktree_remove",
+    ]) {
+      const error = yield* mcp
+        .callTool({ name, arguments: {} })
+        .pipe(Effect.flip, Effect.provideService(McpSchema.McpServerClient, client));
+      expect(error.message).toContain("not found");
+    }
+  }).pipe(
+    Effect.provideService(McpInvocationContext.McpInvocationContext, invocation(false)),
+    Effect.provide(budgetLayer(false)),
   ),
 );

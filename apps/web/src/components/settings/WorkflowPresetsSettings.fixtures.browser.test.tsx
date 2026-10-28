@@ -111,7 +111,11 @@ function presets(variant: SettingsVariant): NonNullable<UnifiedSettings["workflo
 }
 
 function setup(variant: SettingsVariant) {
-  state.settings = { ...DEFAULT_UNIFIED_SETTINGS, workflowPresets: presets(variant) };
+  state.settings = {
+    ...DEFAULT_UNIFIED_SETTINGS,
+    workflows: true,
+    workflowPresets: presets(variant),
+  };
   state.canWrite = variant !== "read-only";
   state.providers = [...QA_PROVIDERS];
 }

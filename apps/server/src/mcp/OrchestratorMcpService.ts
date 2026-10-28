@@ -3720,7 +3720,7 @@ const make = Effect.gen(function* () {
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
         inheritedModel: inherited?.model ?? null,
         inheritedOptions: inherited?.options ?? [],
-        workflowPresets: settings.workflowPresets,
+        ...(settings.workflows ? { workflowPresets: settings.workflowPresets } : {}),
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         providers: providers.map((provider) => {

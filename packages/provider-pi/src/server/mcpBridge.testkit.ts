@@ -42,6 +42,7 @@ type AgentStartHook = (
 export async function loadMcpBridge(
   options: {
     readonly modern?: boolean;
+    readonly workflows?: boolean;
     readonly result?: unknown;
     readonly toolSearchAvailable?: boolean;
     readonly toolSearchDisabled?: boolean;
@@ -67,6 +68,7 @@ export async function loadMcpBridge(
       description: "Discover available providers and models.",
       annotations: { readOnlyHint: true },
     },
+    ...(options.workflows ? [{ name: "workflow_start", description: "Start a workflow." }] : []),
     { name: "delegate_task", description: "Delegate work to another agent." },
     {
       name: "task_status",

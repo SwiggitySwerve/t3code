@@ -1363,7 +1363,7 @@ it.effect(
             "coordinatorToken",
             threadScope(
               "coordinatorToken",
-              ["orchestration", "preview", "device", "worktree", "pull-requests"],
+              ["orchestration", "preview", "device", "worktree", "pull-requests", "workflows"],
               false,
             ),
           ],
@@ -1375,7 +1375,9 @@ it.effect(
         ]);
         const serverLayer = Layer.mergeAll(...(registrations as [Layer.Layer<never>])).pipe(
           Layer.provideMerge(
-            McpHttpServer.layerMcpTransport.pipe(Layer.provide(ServerSettings.layerTest())),
+            McpHttpServer.layerMcpTransport.pipe(
+              Layer.provide(ServerSettings.layerTest({ workflows: true })),
+            ),
           ),
           Layer.provide(
             Layer.mock(McpSessionRegistry.McpSessionRegistry)({
@@ -1445,12 +1447,17 @@ it.effect("registers the worktree removal tool for coordinators and hides it fro
   Effect.scoped(
     Effect.gen(function* () {
       const scopes = new Map([
-        ["coordinatorToken", threadScope("coordinatorToken", ["orchestration", "worktree"], false)],
+        [
+          "coordinatorToken",
+          threadScope("coordinatorToken", ["orchestration", "worktree", "workflows"], false),
+        ],
         ["memberToken", threadScope("memberToken", ["worktree"], true)],
       ]);
       const serverLayer = McpHttpServer.layerWorktreeToolkit.pipe(
         Layer.provideMerge(
-          McpHttpServer.layerMcpTransport.pipe(Layer.provide(ServerSettings.layerTest())),
+          McpHttpServer.layerMcpTransport.pipe(
+            Layer.provide(ServerSettings.layerTest({ workflows: true })),
+          ),
         ),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
@@ -1490,11 +1497,16 @@ it.effect("hides the image-returning preview tools from a member credential", ()
     Effect.gen(function* () {
       const scopes = new Map([
         ["memberToken", threadScope("memberToken", ["worktree", "pull-requests"], true)],
-        ["noBrowserToken", threadScope("noBrowserToken", ["orchestration", "worktree"], false)],
+        [
+          "noBrowserToken",
+          threadScope("noBrowserToken", ["orchestration", "worktree", "workflows"], false),
+        ],
       ]);
       const serverLayer = McpHttpServer.layerPreviewToolkit.pipe(
         Layer.provideMerge(
-          McpHttpServer.layerMcpTransport.pipe(Layer.provide(ServerSettings.layerTest())),
+          McpHttpServer.layerMcpTransport.pipe(
+            Layer.provide(ServerSettings.layerTest({ workflows: true })),
+          ),
         ),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({

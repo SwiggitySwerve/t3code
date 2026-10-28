@@ -1207,6 +1207,7 @@ export const WorkflowTriggers = Schema.Struct({
 export type WorkflowTriggers = typeof WorkflowTriggers.Type;
 
 export const ServerSettings = Schema.Struct({
+  workflows: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   workflowPresets: WorkflowPresets.pipe(
     Schema.withDecodingDefault(Effect.succeed({ presets: [], defaultPresetId: null })),
   ),
@@ -1556,6 +1557,7 @@ const ModelSelectionPatch = Schema.Struct({
 });
 
 export const ServerSettingsPatch = Schema.Struct({
+  workflows: Schema.optionalKey(Schema.Boolean),
   workflowPresets: Schema.optionalKey(WorkflowPresets),
   workflowTriggers: Schema.optionalKey(
     Schema.Struct({

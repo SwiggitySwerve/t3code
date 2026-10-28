@@ -1,4 +1,5 @@
 import {
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   OrchestrationV2WorkflowApprovalError,
   RunId,
@@ -25,7 +26,7 @@ import { QA_PROVIDERS } from "../../../test/workflow-fixtures/providers";
 import { act, render } from "../../../test/render";
 import { deriveTimelineEntriesFromVisibleTurnItems } from "../../session-logic";
 import { orchestrationEnvironment } from "../../state/orchestration";
-import { providersIgnoringCheckedAtAtom } from "../../state/server";
+import { serverEnvironment, providersIgnoringCheckedAtAtom } from "../../state/server";
 import { environmentThreadDetails } from "../../state/threads";
 import { MessagesTimeline } from "./MessagesTimeline";
 
@@ -38,6 +39,7 @@ const RUN_ID = RunId.make("run-review");
 // is the real shared atom, so the card is tested as the person uses it.
 const app = vi.hoisted(() => ({
   canDecide: true,
+  workflows: true,
   turnItems: [] as ReadonlyArray<unknown>,
   approve: undefined as unknown as ReturnType<typeof vi.fn>,
   dismiss: undefined as unknown as ReturnType<typeof vi.fn>,
@@ -62,6 +64,10 @@ vi.mock(import("@effect/atom-react"), async (original) => {
           app.canDecide,
         ],
         [providersIgnoringCheckedAtAtom(ENVIRONMENT_ID), QA_PROVIDERS],
+        [
+          serverEnvironment.settingsValueAtom(ENVIRONMENT_ID),
+          { ...DEFAULT_SERVER_SETTINGS, workflows: app.workflows },
+        ],
         [
           environmentThreadDetails.threadAtom(scopeThreadRef(ENVIRONMENT_ID, THREAD_ID)),
           { projection: { turnItems: app.turnItems, subagents: [] } },
@@ -226,6 +232,7 @@ async function renderReviewTurn(options: {
 }
 
 function resetApp() {
+  app.workflows = true;
   app.canDecide = true;
   app.turnItems = [];
   app.approve = vi.fn(async () => AsyncResult.success<void, unknown>(undefined));
@@ -248,6 +255,15 @@ const approvalError = (reviewId: string, reason: OrchestrationV2WorkflowApproval
   new OrchestrationV2WorkflowApprovalError({ threadId: THREAD_ID, reviewId, reason });
 
 describe("workflow review card in the chat timeline", () => {
+  it("keeps historical plans visible without approval actions when workflows are off", async () => {
+    resetApp();
+    app.workflows = false;
+    await using screen = await renderReviewTurn({ record: { reviewId: "review-disabled" } });
+    await vi.waitFor(() => expect(card(screen.container)).not.toBeNull());
+    expect(card(screen.container)!.dataset.workflowReviewStatus).toBe("read-only");
+    expect(card(screen.container)!.querySelectorAll("button")).toHaveLength(0);
+    expect(app.approve).not.toHaveBeenCalled();
+  });
   it("shows the reviewed graph on a finished turn: tasks, order, workers and cost", async () => {
     resetApp();
     await using screen = await renderReviewTurn({

@@ -37,6 +37,8 @@ describe("workflow preset settings", () => {
     target: { providerInstanceId: "codex", model: "gpt-5.4", options: [] },
   };
   it("C4 decodes defaults and a complete preset settings patch", () => {
+    expect(decodeServerSettings({}).workflows).toBe(false);
+    expect(decodeServerSettingsPatch({ workflows: true })).toEqual({ workflows: true });
     expect(decodeServerSettings({}).workflowPresets).toEqual({
       presets: [],
       defaultPresetId: null,

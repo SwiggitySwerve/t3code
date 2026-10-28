@@ -88,6 +88,7 @@ import { WorkflowPresetsSettings } from "./WorkflowPresetsSettings";
 function setup() {
   state.settings = {
     ...DEFAULT_UNIFIED_SETTINGS,
+    workflows: true,
     textGenerationModelSelection: {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-5.4",
@@ -137,6 +138,20 @@ function setup() {
 }
 
 describe("workflow preset settings interactions", () => {
+  it("keeps presets inactive until workflows are enabled and persists both toggle directions", async () => {
+    setup();
+    state.settings = { ...state.settings!, workflows: false };
+    await using screen = await render(
+      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
+    );
+    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeDisabled();
+    await userEvent.click(screen.getByRole("switch", { name: "Enable workflows" }));
+    expect(decodeSettings(JSON.parse(state.disk)).workflows).toBe(true);
+    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeEnabled();
+    await userEvent.click(screen.getByRole("switch", { name: "Enable workflows" }));
+    expect(decodeSettings(JSON.parse(state.disk)).workflows).toBe(false);
+    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeDisabled();
+  });
   it("C4 labels each default switch with its preset name and keeps a single default", async () => {
     setup();
     const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };

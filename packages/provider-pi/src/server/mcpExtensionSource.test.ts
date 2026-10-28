@@ -6,6 +6,10 @@ import * as NodeModule from "node:module";
 import * as NodeVM from "node:vm";
 import { assert, describe, it } from "@effect/vitest";
 
+import {
+  T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+  T3_CODE_WORKFLOW_INSTRUCTIONS,
+} from "@t3tools/provider-core/server/orchestrationInstructions";
 import { PI_T3_MCP_EXTENSION_SOURCE } from "./mcpExtensionSource.ts";
 import { loadMcpBridge } from "./mcpBridge.testkit.ts";
 
@@ -47,6 +51,17 @@ async function loadHooks(commands: ReadonlyArray<SkillCommand> = []) {
 }
 
 describe("Pi orchestration prompt section", () => {
+  it("selects shared instructions from the workflow capability in its MCP catalog", async () => {
+    for (const workflows of [false, true]) {
+      const bridge = await loadMcpBridge({ workflows });
+      const hook = bridge.handlers.get("before_agent_start")!;
+      const result = await hook({ systemPrompt: "base" }, { ui: { notify: assert.fail } });
+      assert.equal(
+        result?.systemPrompt,
+        `base\n\n${(workflows ? T3_CODE_WORKFLOW_INSTRUCTIONS : T3_CODE_ORCHESTRATION_INSTRUCTIONS).trim()}`,
+      );
+    }
+  });
   it.each([
     {
       name: "on Pi builds without prompt sections",

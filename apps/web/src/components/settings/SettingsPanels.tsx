@@ -1862,9 +1862,11 @@ export function ThreadsSettingsPanel() {
           settingKeys={["ultracode"]}
           {...searchableSetting("ultracode")}
           description={
-            mixedUltracode
-              ? "The selected targets use different ultracode settings."
-              : ULTRACODE_MODE_DESCRIPTIONS[settings.ultracode]
+            !settings.workflows
+              ? "Workflows are off. Enable them in Workflow settings to use Ultracode."
+              : mixedUltracode
+                ? "The selected targets use different ultracode settings."
+                : ULTRACODE_MODE_DESCRIPTIONS[settings.ultracode]
           }
           resetAction={
             settings.ultracode !== DEFAULT_UNIFIED_SETTINGS.ultracode ? (
@@ -1876,6 +1878,7 @@ export function ThreadsSettingsPanel() {
           }
           control={
             <Select
+              disabled={!settings.workflows}
               value={mixedUltracode ? null : settings.ultracode}
               onValueChange={(value) => {
                 if (value === "keyword" || value === "always" || value === "off") {

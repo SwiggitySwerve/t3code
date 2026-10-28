@@ -636,6 +636,7 @@ function runBrowserAccessScenario(input: {
   readonly enableAgentBrowserAccess: boolean;
   readonly projectOverride: boolean;
   readonly deviceOverride?: boolean;
+  readonly workflows?: boolean;
   readonly createThread?: boolean;
   readonly projectExists?: boolean;
   readonly delegatedBy?: ThreadId;
@@ -690,6 +691,7 @@ function runBrowserAccessScenario(input: {
           projectServiceLayer: layerProjectService,
           serverSettingsLayer: ServerSettings.layerTest({
             enableAgentBrowserAccess: input.enableAgentBrowserAccess,
+            workflows: input.workflows ?? false,
             projectSettingsOverrides: {
               [projectId]: {
                 enableAgentBrowserAccess: input.projectOverride,
@@ -3722,6 +3724,13 @@ it.effect(
         deviceOverride: true,
       });
       assert.isTrue(enabled?.capabilities?.has("device"));
+      assert.isFalse(enabled?.capabilities?.has("workflows"));
+      const workflows = yield* runBrowserAccessScenario({
+        enableAgentBrowserAccess: false,
+        projectOverride: false,
+        workflows: true,
+      });
+      assert.isTrue(workflows?.capabilities?.has("workflows"));
       assert.isFalse(enabled?.browserToolsAvailable);
       const denied = yield* runBrowserAccessScenario({
         enableAgentBrowserAccess: false,

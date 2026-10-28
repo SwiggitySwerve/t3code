@@ -75,6 +75,7 @@ export type WorkflowRequest =
   | "ignored";
 
 export interface WorkflowRequestInput {
+  readonly workflows?: boolean;
   readonly workflowTriggers: WorkflowTriggers;
   /** The message as stored, before provider context projection: what the person wrote. */
   readonly typedText: string;
@@ -94,7 +95,12 @@ export interface WorkflowRequestInput {
  * the other.
  */
 export function workflowRequestOf(input: WorkflowRequestInput): WorkflowRequest {
-  if (input.delegatedThread || input.resumesEarlierTurn || !isPersonTypedMessage(input)) {
+  if (
+    input.workflows === false ||
+    input.delegatedThread ||
+    input.resumesEarlierTurn ||
+    !isPersonTypedMessage(input)
+  ) {
     return "ignored";
   }
   return detectWorkflowIntent(input.typedText, input.workflowTriggers) === null
@@ -116,6 +122,7 @@ export function applyTurnTriggers(
   },
   request: WorkflowRequest = workflowRequestOf(input),
 ): string {
+  if (input.workflows === false) return input.text;
   if (request === "requested") {
     return `${input.text}\n\n${workflowTurnNote(input.workflowPresets)}`;
   }

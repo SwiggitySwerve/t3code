@@ -16,6 +16,7 @@ import { orchestrationEnvironment } from "../../state/orchestration";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
 import { environmentThreadDetails } from "../../state/threads";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useEnvironmentSettings } from "../../hooks/useSettings";
 import { WorkflowReviewCard } from "./WorkflowReviewCard";
 
 /**
@@ -29,6 +30,7 @@ export function WorkflowReviewTimelineBlock(props: {
   readonly projectedItem: ProjectedWorkflowReviewItem;
 }) {
   const { environmentId, projectedItem } = props;
+  const { workflows } = useEnvironmentSettings(environmentId);
   const { item } = projectedItem;
   const review = workflowReviewOf(item);
   const registry = useContext(RegistryContext);
@@ -51,7 +53,7 @@ export function WorkflowReviewTimelineBlock(props: {
   const decide = (action: "approve" | "dismiss") => {
     const base = { environmentId, threadId: item.threadId, reviewId: review.reviewId };
     const digest = review.digest;
-    if (action === "approve" && digest === null) return;
+    if (action === "approve" && (!workflows || digest === null)) return;
     void runWorkflowReviewDecision(registry, {
       key: decisionKey,
       action,
@@ -67,7 +69,7 @@ export function WorkflowReviewTimelineBlock(props: {
       presentation={presentWorkflowReview({
         review,
         decision,
-        canDecide,
+        canDecide: canDecide && workflows,
         superseded: latestReviewId !== null && latestReviewId !== item.id,
         local: projectedItem.visibility === "local",
       })}

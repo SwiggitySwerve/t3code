@@ -4,7 +4,7 @@ import { buildRuntimeInstructions } from "@t3tools/provider-core/server/runtimeI
 import {
   T3_CODE_BROWSER_TOOL_INSTRUCTIONS,
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
-  T3_CODE_ORCHESTRATION_SECTIONS,
+  t3OrchestrationSections,
 } from "@t3tools/provider-core/server/orchestrationInstructions";
 
 /** Codex silently truncates additionalContext values over 1,000 tokens, counted as UTF-8 bytes / 4. */
@@ -13,6 +13,7 @@ export const CODEX_ADDITIONAL_CONTEXT_VALUE_MAX_BYTES = 4_000;
 export interface T3CodeToolAvailability {
   readonly browser: boolean;
   readonly device: boolean;
+  readonly workflows?: boolean;
 }
 
 const normalizeAvailability = (
@@ -48,10 +49,12 @@ export function buildCodexAdditionalContext(
   return {
     ...(orchestrationAvailable
       ? Object.fromEntries(
-          T3_CODE_ORCHESTRATION_SECTIONS.map((section, index) => [
-            `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
-            { kind: "application" as const, value: section },
-          ]),
+          t3OrchestrationSections(normalizeAvailability(toolsAvailable).workflows).map(
+            (section, index) => [
+              `t3_code_orchestration_${String(index + 1).padStart(2, "0")}`,
+              { kind: "application" as const, value: section },
+            ],
+          ),
         )
       : {}),
     t3_code_runtime: {

@@ -28,6 +28,7 @@ function turn(
   overrides: Partial<Parameters<typeof applyTurnTriggers>[0]> = {},
 ): string {
   return applyTurnTriggers({
+    workflows: true,
     ultracode: "keyword",
     workflowTriggers: triggersOn,
     workflowPresets: noProfiles,
@@ -42,6 +43,20 @@ function turn(
 const isWorkflowTurn = (result: string) => result.includes("<t3-workflow>");
 
 describe("applyTurnTriggers", () => {
+  it("suppresses workflow and ultracode guidance while workflows are off", () => {
+    for (const driver of [codex, claude, cursor]) {
+      const text = "ultracode: run a workflow";
+      expect(turn(text, { workflows: false, ultracode: "always", driver })).toBe(text);
+      expect(
+        workflowRequestOf({
+          ...person,
+          workflows: false,
+          workflowTriggers: triggersOn,
+          typedText: text,
+        }),
+      ).toBe("ignored");
+    }
+  });
   it("adds the same plan-first note on every driver, without a native trigger word", () => {
     const notes = [codex, claude, cursor].map((driver) =>
       turn("Split this into a workflow", { driver }).replace("Split this into a workflow", ""),

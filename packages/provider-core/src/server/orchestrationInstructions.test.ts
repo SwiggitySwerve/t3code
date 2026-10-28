@@ -1,10 +1,13 @@
+// @effect-diagnostics nodeBuiltinImport:off -- Pins the upstream instruction bytes without a second prose definition.
+import * as NodeCrypto from "node:crypto";
 import { assert, describe, expect, it } from "@effect/vitest";
 
 import {
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS,
   T3_CODE_DEVICE_TOOL_INSTRUCTIONS_WITH_TOOL_SEARCH,
   T3_CODE_ORCHESTRATION_INSTRUCTIONS,
-  T3_CODE_ORCHESTRATION_SECTIONS,
+  T3_CODE_WORKFLOW_SECTIONS,
+  T3_CODE_WORKFLOW_INSTRUCTIONS,
   t3AcpPromptWithInstructions,
   t3OrchestrationPrompt,
   t3OrchestrationSystemPrompt,
@@ -88,7 +91,7 @@ describe("T3 device instructions", () => {
 const bytes = (text: string) => Buffer.byteLength(text, "utf8");
 
 describe("coordinator fan-out guidance", () => {
-  const section = T3_CODE_ORCHESTRATION_SECTIONS.find((candidate) =>
+  const section = T3_CODE_WORKFLOW_SECTIONS.find((candidate) =>
     candidate.startsWith("### Fan-out and effort"),
   );
 
@@ -96,7 +99,7 @@ describe("coordinator fan-out guidance", () => {
     expect(section).toBeDefined();
     expect(section).toContain("Default to one agent");
     expect(section).toContain("Split by context, never by role");
-    expect(T3_CODE_ORCHESTRATION_INSTRUCTIONS).toContain(section);
+    expect(T3_CODE_WORKFLOW_INSTRUCTIONS).toContain(section);
   });
 
   it("stays under 1 KB", () => {
@@ -111,8 +114,30 @@ describe("coordinator fan-out guidance", () => {
   });
 
   it("is its own section after the existing ones, within Codex's per-entry cap", () => {
-    expect(T3_CODE_ORCHESTRATION_SECTIONS.at(-1)).toBe(section);
-    for (const entry of T3_CODE_ORCHESTRATION_SECTIONS)
-      expect(bytes(entry)).toBeLessThanOrEqual(4_000);
+    expect(T3_CODE_WORKFLOW_SECTIONS.at(-1)).toBe(section);
+    for (const entry of T3_CODE_WORKFLOW_SECTIONS) expect(bytes(entry)).toBeLessThanOrEqual(4_000);
+  });
+});
+
+describe("workflow instruction gate", () => {
+  it("uses upstream's exact instructions by default and restores workflow guidance on opt-in", () => {
+    expect(
+      NodeCrypto.createHash("sha256").update(T3_CODE_ORCHESTRATION_INSTRUCTIONS).digest("hex"),
+    ).toBe("1e7107a2fe573c8dfed40776217ae38eef55e8193815783c252aaf138594be01");
+    expect(t3OrchestrationSystemPrompt(true, false)).toBe(T3_CODE_ORCHESTRATION_INSTRUCTIONS);
+    expect(t3OrchestrationSystemPrompt(true, false, false)).toBe(
+      T3_CODE_ORCHESTRATION_INSTRUCTIONS,
+    );
+    const enabled = t3OrchestrationSystemPrompt(true, false, true);
+    for (const addition of [
+      "delegate_tasks",
+      "task_wait",
+      "workflow_start",
+      "graph_review",
+      "### Fan-out and effort",
+    ]) {
+      expect(T3_CODE_ORCHESTRATION_INSTRUCTIONS).not.toContain(addition);
+      expect(enabled).toContain(addition);
+    }
   });
 });

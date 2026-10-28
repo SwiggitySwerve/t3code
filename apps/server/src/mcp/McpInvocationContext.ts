@@ -19,6 +19,7 @@ const ALL_MCP_CAPABILITIES = [
   "orchestration",
   "worktree",
   "device",
+  "workflows",
   "pull-requests",
 ] as const;
 export type McpCapability = (typeof ALL_MCP_CAPABILITIES)[number];
@@ -136,6 +137,7 @@ export const hiddenWhileLinksOff = (): boolean => {
 export const visibleToMembersWith = (capability: McpCapability) => (): boolean => {
   const fiber = Fiber.getCurrent();
   const scope = fiber && Context.getOrUndefined(fiber.context, McpInvocationContext);
+  if (capability === "workflows") return scope?.capabilities.has(capability) === true;
   return scope === undefined || scope.thread === undefined
     ? true
     : !hasMemberToolset(scope.capabilities) || scope.capabilities.has(capability);

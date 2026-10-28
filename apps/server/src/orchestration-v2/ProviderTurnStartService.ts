@@ -773,11 +773,9 @@ export const layer: Layer.Layer<
       // The gate answers `workflowRequestOf`, so asking here has no side effects.
       const turnTriggersResult = yield* serverSettings.getSettings.pipe(
         Effect.map((settings): RunExecutionService.RunExecutionTurnTriggers => {
-          const { workflowTriggers, ultracode, workflowPresets } = resolveProjectSettings(
-            settings,
-            projection.thread.projectId,
-          ).settings;
-          return { workflowTriggers, ultracode, workflowPresets };
+          const { workflows, workflowTriggers, ultracode, workflowPresets } =
+            resolveProjectSettings(settings, projection.thread.projectId).settings;
+          return { workflows, workflowTriggers, ultracode, workflowPresets };
         }),
         Effect.result,
       );
@@ -792,6 +790,7 @@ export const layer: Layer.Layer<
       }
       const turnTriggers = turnTriggersResult.success;
       const triggerRequest = {
+        workflows: turnTriggers.workflows,
         workflowTriggers: turnTriggers.workflowTriggers,
         typedText: message.text,
         createdBy: message.createdBy,

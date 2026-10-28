@@ -94,7 +94,7 @@ const makeLayer = (
               ),
             ),
         }),
-        ServerSettings.layerTest(settings),
+        ServerSettings.layerTest({ workflows: true, ...settings }),
       ),
     ),
   );

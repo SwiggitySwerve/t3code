@@ -557,7 +557,7 @@ export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
  */
 export type RunExecutionTurnTriggers = Pick<
   ServerSettingsValue,
-  "workflowTriggers" | "ultracode" | "workflowPresets"
+  "workflows" | "workflowTriggers" | "ultracode" | "workflowPresets"
 >;
 
 export interface RunExecutionServiceV2StartRootRunInput {
@@ -1680,6 +1680,7 @@ export const layer: Layer.Layer<
         }));
         // The gate and the note answer one question about this message, asked once.
         const workflowRequest = {
+          workflows: input.turnTriggers.workflows,
           workflowTriggers: input.turnTriggers.workflowTriggers,
           typedText: input.typedText,
           createdBy: input.message.createdBy,

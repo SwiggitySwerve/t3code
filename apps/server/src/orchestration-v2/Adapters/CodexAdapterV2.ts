@@ -730,6 +730,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
     readonly hasT3Mcp?: boolean;
     readonly browserToolsAvailable?: boolean;
     readonly deviceToolsAvailable?: boolean;
+    readonly workflowsAvailable?: boolean;
     /** False for workflow members: they cannot call the tools the orchestration text describes. */
     readonly orchestrationAvailable?: boolean;
     /** ChatGPT token sharing does not accept service tiers. */
@@ -768,6 +769,7 @@ export const buildCodexTurnStartParams = Effect.fn("CodexAdapterV2.buildCodexTur
             {
               browser: input.browserToolsAvailable ?? true,
               device: input.deviceToolsAvailable ?? false,
+              workflows: input.workflowsAvailable ?? false,
             },
             input.orchestrationAvailable ?? true,
           )
@@ -6496,6 +6498,7 @@ export const makeCodexAdapterV2 = Effect.fn("makeCodexAdapterV2")(function* (
               hasT3Mcp: mcpSession !== undefined,
               browserToolsAvailable: mcpSession?.browserToolsAvailable ?? true,
               deviceToolsAvailable: mcpSession?.capabilities?.has("device") ?? false,
+              workflowsAvailable: mcpSession?.capabilities?.has("workflows") === true,
               orchestrationAvailable: !McpProviderSession.isWorkflowMemberSession(mcpSession),
               omitServiceTier: adapterOptions.resolveRuntime !== undefined,
               ...(turnInput.appContext === undefined ? {} : { appContext: turnInput.appContext }),
