@@ -314,8 +314,117 @@ const LONG_MODEL = "claude-sonnet-5-5-20261001-extended-thinking-preview";
 const LONG_REASON =
   "The command exited with code 1 after printing a very long diagnostic that mentions /var/lib/build/cache/workspace/packages/example/src/generated/index.ts, then /var/lib/build/cache/workspace/packages/example/src/generated/routes.ts, then a stack of forty frames from the bundler, and does not stop there.";
 
+function fourStageRun(): RunSpec {
+  return {
+    title: "Repository health audit",
+    status: "running",
+    progress: "Cross-checking completed audits; retrying the desktop audit",
+    nodes: [
+      {
+        key: "survey",
+        label: "Survey the workspace",
+        dependsOn: [],
+        agent: ok(8_400, 18_000, "Mapped seven packages and their public boundaries."),
+        outcome: passed(),
+      },
+      {
+        key: "contracts",
+        label: "Audit API contracts",
+        dependsOn: ["survey"],
+        agent: ok(24_600, 48_000, "Checked request schemas and compatibility."),
+        outcome: passed(),
+      },
+      {
+        key: "shared",
+        label: "Audit shared utilities",
+        dependsOn: ["survey"],
+        agent: ok(18_200, 42_000, "Checked parsing and error handling."),
+        outcome: passed(),
+      },
+      {
+        key: "client-runtime",
+        label: "Audit client runtime",
+        dependsOn: ["survey"],
+        agent: ok(31_800, 65_000, "Checked state transitions and subscriptions."),
+        outcome: passed(),
+      },
+      {
+        key: "server",
+        label: "Audit server orchestration",
+        dependsOn: ["survey"],
+        agent: { state: "running", tokens: 37_500, durationMs: 85_000 },
+      },
+      {
+        key: "web",
+        label: "Audit web components",
+        dependsOn: ["survey"],
+        agent: { state: "running", tokens: 28_300, durationMs: 76_000 },
+      },
+      {
+        key: "mobile",
+        label: "Audit mobile client",
+        dependsOn: ["survey"],
+        agent: { state: "running", tokens: 22_700, durationMs: 70_000 },
+      },
+      {
+        key: "desktop",
+        label: "Audit desktop bridge",
+        dependsOn: ["survey"],
+        agent: { state: "running", tokens: 34_200, durationMs: 90_000, retries: 1 },
+      },
+      {
+        key: "schema-parity",
+        label: "Cross-check schema compatibility",
+        dependsOn: ["contracts", "shared"],
+        agent: { state: "running", tokens: 6_900, durationMs: 16_000 },
+      },
+      {
+        key: "state-parity",
+        label: "Cross-check client state handling",
+        dependsOn: ["contracts", "client-runtime"],
+        agent: { state: "running", tokens: 4_800, durationMs: 10_000 },
+      },
+      {
+        key: "error-parity",
+        label: "Cross-check error propagation",
+        dependsOn: ["shared", "client-runtime"],
+        agent: { state: "queued" },
+      },
+      {
+        key: "auth-boundaries",
+        label: "Cross-check authorization boundaries",
+        dependsOn: ["contracts", "server"],
+      },
+      {
+        key: "client-parity",
+        label: "Cross-check web and mobile behavior",
+        dependsOn: ["web", "mobile"],
+      },
+      {
+        key: "ipc-boundaries",
+        label: "Cross-check desktop IPC boundaries",
+        dependsOn: ["desktop", "server"],
+      },
+      {
+        key: "report",
+        label: "Write the audit report",
+        dependsOn: [
+          "schema-parity",
+          "state-parity",
+          "error-parity",
+          "auth-boundaries",
+          "client-parity",
+          "ipc-boundaries",
+        ],
+      },
+    ],
+  };
+}
+
 function stressRun(stress: WorkflowQaStress): RunSpec {
   switch (stress) {
+    case "four-stage-running":
+      return fourStageRun();
     case "long-labels":
       return {
         title:
@@ -461,6 +570,20 @@ function scriptAgents(variant: WorkflowQaVariant): ReadonlyArray<OrchestrationV2
           `Batch ${Math.floor(index / 10) + 1}`,
           index < 50 ? done : index < 60 ? running : queued,
         ]);
+      case "four-stage-running": {
+        const run = fourStageRun();
+        const byKey = new Map(run.nodes.map((node) => [node.key, node] as const));
+        const titles = ["Workspace survey", "Package audits", "Cross-checks", "Final report"];
+        return run.nodes.map((node) => {
+          const index = waveOf(node, byKey);
+          return [
+            node.label,
+            index,
+            titles[index]!,
+            { prompt: node.label, ...(node.agent ?? { state: "queued" }) },
+          ];
+        });
+      }
       default:
         // running, stopped and retrying share members; the stopped run's coordinator ends them.
         return [
@@ -551,7 +674,10 @@ export function workflowFixture(
             workflow.agents.map((agent) => [agent.phaseIndex!, agent.phaseTitle!] as const),
           ),
         ].map(([index, title]) => ({ index, title }));
-  const name = variant === "long-labels" ? run.title : kind === "graph" ? run.title : "State audit";
+  const name =
+    variant === "long-labels" || variant === "four-stage-running" || kind === "graph"
+      ? run.title
+      : "State audit";
   const row: WorkflowQaRow = {
     id: WORKFLOW_ID,
     title: name,

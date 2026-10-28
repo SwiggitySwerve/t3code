@@ -252,7 +252,12 @@ export const WORKFLOW_QA_STATUSES = [
 ] as const;
 
 /** Data stress on top of the run states: nothing here may truncate away the state or break layout. */
-export const WORKFLOW_QA_STRESS = ["long-labels", "missing-model", "many-nodes"] as const;
+export const WORKFLOW_QA_STRESS = [
+  "long-labels",
+  "missing-model",
+  "many-nodes",
+  "four-stage-running",
+] as const;
 
 /**
  * What the default sidebar row can report for a thread, named for the facts that produce it
