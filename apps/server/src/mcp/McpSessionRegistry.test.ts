@@ -87,6 +87,30 @@ it.effect("honors explicit capability sets and gates browser and device access i
   }),
 );
 
+it.effect("removes explicit preview access when browser tools are unavailable", () =>
+  Effect.gen(function* () {
+    const registry = yield* makeRegistry(() => 1_000);
+    for (const capabilities of [undefined, new Set(["preview", "device", "worktree"] as const)]) {
+      const issued = yield* registry.issue({
+        threadId: ThreadId.make("thread-browser-disabled"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        browserToolsAvailable: false,
+        ...(capabilities === undefined ? {} : { capabilities }),
+      });
+      const scope = yield* registry.resolve(
+        issued.config.authorizationHeader.replace(/^Bearer\s+/, ""),
+      );
+      expect(scope?.capabilities).toEqual(
+        new Set(
+          capabilities === undefined
+            ? ["orchestration", "worktree", "pull-requests"]
+            : ["device", "worktree"],
+        ),
+      );
+    }
+  }),
+);
+
 // regression: #3114 use bound host for MCP endpoint
 it.effect("builds MCP endpoints from the bound server host", () =>
   Effect.gen(function* () {
