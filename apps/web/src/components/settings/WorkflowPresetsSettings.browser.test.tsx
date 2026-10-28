@@ -215,7 +215,7 @@ describe("workflow preset settings interactions", () => {
       .element(reopened.getByRole("switch", { name: "Workflow worker default: Writer" }))
       .toBeChecked();
     await userEvent.click(reopened.getByRole("button", { name: "Delete Writer" }));
-    await expect.element(reopened.getByText("No agent presets yet.")).toBeVisible();
+    await expect.element(reopened.getByText(/No agent presets yet./)).toBeVisible();
     expect(decodeSettings(JSON.parse(state.disk)).workflowPresets).toEqual({
       presets: [],
       defaultPresetId: null,

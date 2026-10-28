@@ -141,7 +141,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
               <span className="[overflow-wrap:anywhere]">
                 {workflowReviewTargetLabel(preset.target, providers)}
                 {unavailable(preset.target, providers) ? (
-                  <span className="ms-2 whitespace-nowrap font-medium text-warning-foreground">
+                  <span className="block font-medium text-warning-foreground">
                     {unavailable(preset.target, providers)}
                   </span>
                 ) : null}

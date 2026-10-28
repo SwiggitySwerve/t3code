@@ -240,7 +240,9 @@ export function ThreadLineageWorkflowRow({
                     </>
                   }
                 >
-                  {phase.title}
+                  <span className="block max-w-44 truncate" title={phase.title}>
+                    {phase.title}
+                  </span>
                 </CollapsibleSectionHeader>
                 {open ? (
                   <ul className="m-0 list-none p-0">

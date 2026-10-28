@@ -10,18 +10,21 @@ import {
 } from "@t3tools/client-runtime/state/workflowReview";
 import { WorkflowIcon } from "lucide-react";
 
+import { useRef } from "react";
+
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
+import { scrollFadeStyle, useScrollEdges } from "./scrollFade";
 
 const STATUS_TONE: Record<WorkflowReviewStatus, string> = {
-  ready: "border-info/30 bg-info/8 text-info-foreground",
+  ready: "border-warning/30 bg-warning/8 text-warning-foreground",
   blocked: "border-warning/30 bg-warning/8 text-warning-foreground",
   approving: "border-border bg-accent/40 text-foreground",
   dismissing: "border-border bg-accent/40 text-foreground",
   approved: "border-success/30 bg-success/8 text-success-foreground",
   dismissed: "border-border bg-muted text-muted-foreground",
-  stale: "border-destructive/30 bg-destructive/8 text-destructive-foreground",
+  stale: "border-warning/30 bg-warning/8 text-warning-foreground",
   superseded: "border-border bg-muted text-muted-foreground",
   info: "border-border bg-muted text-muted-foreground",
   "read-only": "border-border bg-accent/40 text-foreground",
@@ -50,6 +53,15 @@ export function WorkflowReviewCard(props: {
   const title = review.name ?? "Workflow plan";
   const steps = workflowReviewSteps(review);
   const pending = presentation.status === "approving" || presentation.status === "dismissing";
+  const tasksRef = useRef<HTMLOListElement>(null);
+  const taskEdges = useScrollEdges(tasksRef);
+  // A stale plan is out of date, not broken: its note shares the pill's amber warning.
+  const noteTone =
+    presentation.note === null
+      ? null
+      : presentation.status === "stale" && presentation.note.tone === "error"
+        ? "warning"
+        : presentation.note.tone;
   return (
     <section
       aria-label={`Workflow review: ${title}`}
@@ -78,7 +90,7 @@ export function WorkflowReviewCard(props: {
       {presentation.note ? (
         <p
           role={presentation.note.tone === "error" ? "alert" : undefined}
-          className={cn("text-xs", NOTE_TONE[presentation.note.tone])}
+          className={cn("text-xs", NOTE_TONE[noteTone ?? presentation.note.tone])}
         >
           {presentation.note.text}
         </p>
@@ -107,6 +119,8 @@ export function WorkflowReviewCard(props: {
       ) : null}
       {steps.length > 0 ? (
         <ol
+          ref={tasksRef}
+          style={scrollFadeStyle({ right: false, bottom: taskEdges.bottom })}
           aria-label="Tasks"
           // A long graph scrolls inside the card, so the decision buttons stay near the plan.
           tabIndex={0}
@@ -171,7 +185,15 @@ function ReviewNodeRow(props: {
       <span className="min-w-0 break-words text-xs font-medium text-foreground">
         {node.subject}
       </span>
-      <span className="min-w-0 break-words text-2xs text-muted-foreground">{lines.runs}</span>
+      <span className="min-w-0 break-words text-2xs text-muted-foreground">
+        {/* A model name never splits across lines; the line breaks only between its parts. */}
+        {lines.runs.split(" \u00b7 ").map((part, index) => (
+          <span key={index} className="whitespace-nowrap">
+            {index === 0 ? "" : " \u00b7 "}
+            {part}
+          </span>
+        ))}
+      </span>
       {lines.after === null ? null : (
         <span className="min-w-0 break-words text-2xs text-muted-foreground">{lines.after}</span>
       )}

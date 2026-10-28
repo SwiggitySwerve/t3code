@@ -8,6 +8,10 @@
  * so the free strips between rows run across the whole canvas.
  */
 export const WAVE_CARD_WIDTH = 216;
+/** On a narrow screen cards shrink, down to this width, so two columns fit side by side. */
+export const WAVE_CARD_MIN_WIDTH = 152;
+/** The scroll area's side padding. */
+const CANVAS_PADDING = 8;
 /** Space above and below a card's text. */
 export const WAVE_CARD_PADDING = 12;
 /** The card's 1px border, top and bottom. */
@@ -27,10 +31,10 @@ export const WAVE_COLUMN_GAP = 24;
 export const WAVE_ROW_GAP = 12;
 export const WAVE_HEADER_HEIGHT = 22;
 
-/** Width left for the step name beside the agent avatar. */
-const NAME_WIDTH = 160;
-/** Width of the card's inner text, for the failure reason that spans the whole card. */
-const REASON_WIDTH = 192;
+/** Card width not available to the step name: borders, padding, the avatar and its gap. */
+const NAME_INSET = 56;
+/** Card width not available to text that spans the card: borders and padding. */
+const SPAN_INSET = 24;
 /** 11px text is narrower than the 12px name by this factor. */
 const SMALL_TEXT_SCALE = 11 / 12;
 const HISTORY_BUTTON_WIDTH = 24;
@@ -74,8 +78,27 @@ function wrapLines(text: string, capacity: number, scale: number): 1 | 2 {
 }
 
 /** How many of the two allowed lines a step name needs; the card clamps the name to that many. */
-export function waveNameLines(label: string, historyButton: boolean): 1 | 2 {
-  return wrapLines(label, NAME_WIDTH - (historyButton ? HISTORY_BUTTON_WIDTH : 0), 1);
+export function waveNameLines(
+  label: string,
+  historyButton: boolean,
+  cardWidth = WAVE_CARD_WIDTH,
+): 1 | 2 {
+  return wrapLines(
+    label,
+    cardWidth - NAME_INSET - (historyButton ? HISTORY_BUTTON_WIDTH : 0),
+    1,
+  );
+}
+
+/**
+ * The card width for a scroll area `areaWidth` wide: full size when two columns fit, otherwise
+ * shrunk so they still do, and never below the minimum.
+ */
+export function waveCardWidth(areaWidth: number | null | undefined): number {
+  if (areaWidth === null || areaWidth === undefined || areaWidth <= 0) return WAVE_CARD_WIDTH;
+  const room = areaWidth - CANVAS_PADDING;
+  const two = Math.floor((room - WAVE_COLUMN_GAP) / 2);
+  return Math.min(WAVE_CARD_WIDTH, Math.max(WAVE_CARD_MIN_WIDTH, two));
 }
 
 /** Attempts the node took, counted as the card's retry note counts them. */
@@ -97,6 +120,8 @@ export interface WaveNodeInput {
   readonly started?: boolean;
   /** Why a failed node failed; the card shows it in full under its text. */
   readonly failure?: string | null;
+  /** What holds back a node that never ran (its reason, or what it runs after). */
+  readonly note?: string | null;
   readonly attempts?: number | null;
   readonly member?: { readonly attempt: number | null } | null;
 }
@@ -116,6 +141,8 @@ export interface WaveBox {
   readonly started: boolean;
   /** Lines of failure reason under the card's text; zero when the node did not fail with one. */
   readonly reasonLines: 0 | 1 | 2;
+  /** Lines the note of a node that never ran takes. */
+  readonly noteLines: 1 | 2;
 }
 
 /** A dependency line, from the right edge of the node depended on to the left edge of its dependent. */
@@ -133,21 +160,25 @@ export interface WaveLayout {
   readonly edges: ReadonlyArray<WaveEdge>;
 }
 
-function nodeBox(node: WaveNodeInput): Omit<WaveBox, "x" | "y"> {
+function nodeBox(node: WaveNodeInput, cardWidth: number): Omit<WaveBox, "x" | "y"> {
   const historyButton = waveNodeAttempts(node) > 1;
-  const nameLines = waveNameLines(node.label ?? "", historyButton);
+  const nameLines = waveNameLines(node.label ?? "", historyButton, cardWidth);
   const checkerBand =
     Math.min(node.checkers?.length ?? 0, WAVE_CHECKER_ROWS_VISIBLE) * WAVE_CHECKER_ROW_HEIGHT;
   const started = node.started !== false;
-  const reasonLines = node.failure ? wrapLines(node.failure, REASON_WIDTH, SMALL_TEXT_SCALE) : 0;
+  const reasonLines = node.failure
+    ? wrapLines(node.failure, cardWidth - SPAN_INSET, SMALL_TEXT_SCALE)
+    : 0;
+  const noteLines =
+    started || !node.note ? 1 : wrapLines(node.note, cardWidth - NAME_INSET, SMALL_TEXT_SCALE);
   return {
-    width: WAVE_CARD_WIDTH,
+    width: cardWidth,
     height:
       WAVE_CARD_BORDER +
       WAVE_CARD_PADDING +
       STATUS_LINE_HEIGHT +
       nameLines * NAME_LINE_HEIGHT +
-      (started ? 2 : 1) * DETAIL_LINE_HEIGHT +
+      (started ? 2 : noteLines) * DETAIL_LINE_HEIGHT +
       (reasonLines === 0 ? 0 : reasonLines * REASON_LINE_HEIGHT + REASON_BAND_PADDING) +
       checkerBand,
     nameLines,
@@ -155,11 +186,15 @@ function nodeBox(node: WaveNodeInput): Omit<WaveBox, "x" | "y"> {
     checkerBand,
     started,
     reasonLines,
+    noteLines,
   };
 }
 
-export function workflowWaveLayout(waves: ReadonlyArray<ReadonlyArray<WaveNodeInput>>): WaveLayout {
-  const sizes = waves.map((nodes) => nodes.map(nodeBox));
+export function workflowWaveLayout(
+  waves: ReadonlyArray<ReadonlyArray<WaveNodeInput>>,
+  cardWidth: number = WAVE_CARD_WIDTH,
+): WaveLayout {
+  const sizes = waves.map((nodes) => nodes.map((node) => nodeBox(node, cardWidth)));
   // A row is as tall as its tallest card in any column.
   const rows = Math.max(0, ...waves.map((nodes) => nodes.length));
   const rowHeights = Array.from({ length: rows }, (_, row) =>
@@ -175,7 +210,7 @@ export function workflowWaveLayout(waves: ReadonlyArray<ReadonlyArray<WaveNodeIn
   rowTops.push(top);
   const cards = new Map<string, WaveBox>();
   const columns = waves.map((nodes, column) => {
-    const x = column * (WAVE_CARD_WIDTH + WAVE_COLUMN_GAP);
+    const x = column * (cardWidth + WAVE_COLUMN_GAP);
     nodes.forEach((node, row) => {
       cards.set(node.key, { x, y: rowTops[row] ?? 0, ...sizes[column]![row]! });
     });
@@ -225,7 +260,7 @@ export function workflowWaveLayout(waves: ReadonlyArray<ReadonlyArray<WaveNodeIn
     width:
       waves.length === 0
         ? 0
-        : waves.length * WAVE_CARD_WIDTH + (waves.length - 1) * WAVE_COLUMN_GAP,
+        : waves.length * cardWidth + (waves.length - 1) * WAVE_COLUMN_GAP,
     height:
       rows === 0
         ? 0

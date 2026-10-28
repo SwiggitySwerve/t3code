@@ -122,7 +122,7 @@ export function WorkflowOpeningBlock(props: {
           <Button
             type="button"
             size="xs"
-            variant="ghost-muted"
+            variant="outline"
             aria-label={`Stop workflow ${headline.title}`}
             disabled={props.stop.disabled}
             onClick={props.stop.onStop}
@@ -262,7 +262,7 @@ function WorkflowProgress(props: { readonly text: string }) {
         <Button
           type="button"
           size="xs"
-          variant="ghost-muted"
+          variant="link"
           aria-expanded={expanded}
           aria-controls={contentId}
           data-scroll-anchor-ignore
@@ -334,7 +334,8 @@ function WorkflowMemberRow(props: {
               <span
                 className={cn(
                   "block truncate text-2xs leading-relaxed",
-                  failed ? "text-destructive-foreground" : "text-muted-foreground",
+                  // Red is for a recorded reason; the last progress text of a failed agent is not one.
+                  failed && (member.error ?? member.result) ? "text-destructive-foreground" : "text-muted-foreground",
                 )}
               >
                 {detail}

@@ -21,7 +21,7 @@ import { ChevronRightIcon, HistoryIcon } from "lucide-react";
 import { formatModelSlugName } from "@t3tools/shared/model";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { formatTokens } from "@t3tools/shared/usageFormat";
-import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
@@ -34,13 +34,14 @@ import {
   PopoverTitle,
   PopoverTrigger,
 } from "../ui/popover";
+import { scrollFadeStyle } from "./scrollFade";
 import { EnvironmentSubagentAvatar } from "./V2LifecycleRow";
 import {
   WAVE_CARD_BORDER,
   type WaveBox,
-  type WaveLayout,
   type WaveViewport,
   visibleWaveCards,
+  waveCardWidth,
   workflowWaveLayout,
 } from "./workflowWaveLayout";
 
@@ -91,22 +92,25 @@ export function WorkflowWaveCanvas(props: {
   const { graph } = props;
   const find = props.findable === true ? "true" : undefined;
   const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
+  const nodes = graph.waves.flat();
+  const labels = new Map(nodes.map((node) => [node.key, node.label] as const));
+  // Only cards in view (plus a margin) draw in full; a 150-node graph stays fast to render.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const [viewport, setViewport] = useState<WaveViewport | null>(null);
+  // The scroll area's width decides the card width, so a narrow chat shows two whole columns.
   const layout = workflowWaveLayout(
     graph.waves.map((wave) =>
       wave.map((node) => ({
         ...node,
         started: workflowMemberIdentity(node.member) !== "Not started",
         failure: node.state === "failed" ? node.reason : null,
+        note: workflowGraphNodeDetail(node, labels).detail,
       })),
     ),
+    waveCardWidth(viewport?.width),
   );
-  const nodes = graph.waves.flat();
-  const labels = new Map(nodes.map((node) => [node.key, node.label] as const));
   // Hovering or focusing a node highlights it, what it depends on and what depends on it.
   const [highlighted, setHighlighted] = useState<string | null>(null);
-  // Only cards in view (plus a margin) draw in full; a 150-node graph stays fast to render.
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const [viewport, setViewport] = useState<WaveViewport | null>(null);
   // oxlint-disable-next-line t3code/react-effect-budget -- subscribes to the scroll container's scroll and resize events, which only the DOM reports.
   useLayoutEffect(() => {
     const element = scrollRef.current;
@@ -167,7 +171,10 @@ export function WorkflowWaveCanvas(props: {
     <div
       ref={scrollRef}
       className="max-h-120 overflow-auto px-1 pb-1 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70"
-      style={scrollFade(viewport, layout)}
+      style={scrollFadeStyle({
+        right: viewport !== null && viewport.left + viewport.width < layout.width - 1,
+        bottom: viewport !== null && viewport.top + viewport.height < layout.height - 1,
+      })}
       data-workflow-waves
       role="region"
       aria-label="Workflow graph"
@@ -214,7 +221,7 @@ export function WorkflowWaveCanvas(props: {
               >
                 <span>Wave {column + 1}</span>
                 <span className="tabular-nums">
-                  {settled}/{nodes.length}
+                  {settled} of {nodes.length} finished
                 </span>
               </h4>
               {nodes.map((node) => {
@@ -300,26 +307,6 @@ export function WorkflowWaveCanvas(props: {
       </Popover>
     </div>
   );
-}
-
-/**
- * Fades the edge a graph continues past, so a card cut by the scroll area reads as more to
- * scroll to and not as a broken layout. Nothing fades once the end is in view.
- */
-function scrollFade(
-  viewport: WaveViewport | null,
-  layout: Pick<WaveLayout, "width" | "height">,
-): CSSProperties | undefined {
-  if (viewport === null) return undefined;
-  const right = viewport.left + viewport.width < layout.width - 1;
-  const bottom = viewport.top + viewport.height < layout.height - 1;
-  if (!right && !bottom) return undefined;
-  const none = "linear-gradient(#000, #000)";
-  const image = [
-    right ? "linear-gradient(to right, #000 calc(100% - 32px), transparent)" : none,
-    bottom ? "linear-gradient(to bottom, #000 calc(100% - 32px), transparent)" : none,
-  ].join(", ");
-  return { maskImage: image, maskComposite: "intersect", WebkitMaskComposite: "source-in" };
 }
 
 /**
@@ -463,7 +450,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
       <span className="flex min-w-0 flex-1 flex-col">
         <span
           className={cn(
-            "flex items-center gap-1 text-2xs leading-3.5 font-medium",
+            "flex items-center gap-1 text-2xs leading-3.5 font-semibold",
             STATE_TEXT[node.state] ?? "text-muted-foreground",
           )}
         >
@@ -471,7 +458,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
           {threadId !== null ? (
             <ChevronRightIcon
               aria-hidden
-              className="ml-auto size-3 shrink-0 text-muted-foreground/60 group-hover/node:text-foreground"
+              className="ml-auto size-3 shrink-0 text-muted-foreground group-hover/node:text-foreground"
             />
           ) : null}
         </span>
@@ -497,7 +484,12 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
           </>
         ) : (
           // A node that never ran has no agent or usage; what holds it back is what matters.
-          <span className="truncate text-2xs leading-3.5 text-muted-foreground">
+          <span
+            className={cn(
+              "text-2xs leading-3.5 text-muted-foreground [overflow-wrap:anywhere]",
+              box.noteLines === 1 ? "line-clamp-1" : "line-clamp-2",
+            )}
+          >
             {detail ?? "Not started"}
           </span>
         )}

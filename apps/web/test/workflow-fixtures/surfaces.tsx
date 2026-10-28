@@ -5,6 +5,7 @@
  * Tests mount these inside `captureSurface`.
  */
 import { AgentElapsed } from "../../src/components/chat/AgentElapsed";
+import { cn } from "../../src/lib/utils";
 import { ThreadDetailsControl } from "../../src/components/chat/ThreadDetailsControl";
 import {
   ThreadLineageWorkflowRow,
@@ -115,7 +116,14 @@ export function LineageRowSurface(props: {
         </span>
       </span>
       {failed ? null : (
-        <span className="min-w-6 shrink-0 text-end text-2xs font-normal tabular-nums text-muted-foreground">
+        <span
+          className={cn(
+            "min-w-6 shrink-0 text-end text-2xs font-normal tabular-nums text-muted-foreground",
+            // Stop takes the time's place while the row is hovered, focused or on a touch screen.
+            running &&
+              "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0",
+          )}
+        >
           <AgentElapsed agent={workflow} compact />
         </span>
       )}

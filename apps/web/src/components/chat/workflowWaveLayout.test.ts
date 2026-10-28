@@ -8,6 +8,8 @@ import {
   WAVE_HEADER_HEIGHT,
   WAVE_ROW_GAP,
   visibleWaveCards,
+  WAVE_CARD_MIN_WIDTH,
+  waveCardWidth,
   waveNameLines,
   workflowWaveLayout,
 } from "./workflowWaveLayout";
@@ -76,6 +78,33 @@ describe("workflowWaveLayout", () => {
     expect(layout.cards.get("long")!.reasonLines).toBe(2);
     expect(height("long")).toBeGreaterThan(height("short"));
     expect(height("short")).toBeGreaterThan(height("ran"));
+  });
+
+  it("shrinks cards on a narrow screen so two columns fit, and never below the minimum", () => {
+    expect(waveCardWidth(null)).toBe(WAVE_CARD_WIDTH);
+    expect(waveCardWidth(1200)).toBe(WAVE_CARD_WIDTH);
+    const narrow = waveCardWidth(352);
+    expect(narrow).toBeLessThan(WAVE_CARD_WIDTH);
+    expect(2 * narrow + WAVE_COLUMN_GAP + 8).toBeLessThanOrEqual(352);
+    expect(waveCardWidth(100)).toBe(WAVE_CARD_MIN_WIDTH);
+    const layout = workflowWaveLayout([[{ key: "a", wave: 0 }], [{ key: "b", wave: 1 }]], narrow);
+    expect(layout.cards.get("a")!.width).toBe(narrow);
+    expect(layout.cards.get("b")!.x).toBe(narrow + WAVE_COLUMN_GAP);
+    expect(layout.width).toBe(2 * narrow + WAVE_COLUMN_GAP);
+    // Narrower cards wrap a name sooner.
+    expect(waveNameLines("Count source files", false, narrow)).toBe(2);
+  });
+
+  it("gives the note of a node that never ran a second line when it needs one", () => {
+    const layout = workflowWaveLayout([
+      [
+        { key: "short", wave: 0, started: false, note: "after Survey" },
+        { key: "long", wave: 0, started: false, note: "Skipped because Count documentation files failed to build" },
+      ],
+    ]);
+    expect(layout.cards.get("short")!.noteLines).toBe(1);
+    expect(layout.cards.get("long")!.noteLines).toBe(2);
+    expect(layout.cards.get("long")!.height).toBeGreaterThan(layout.cards.get("short")!.height);
   });
 
   it("shows the history button only for a node that ran more than once", () => {
