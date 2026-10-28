@@ -1459,6 +1459,34 @@ describe("groupSidebarThreadsByProject", () => {
 });
 
 describe("resolveSidebarFolderDot", () => {
+  it.each(["queued", "background"] as const)(
+    "shows hidden %s work and preserves attention priority",
+    (status) => {
+      const thread = {
+        hasActionableProposedPlan: false,
+        hasPendingApprovals: false,
+        hasPendingUserInput: false,
+        interactionMode: "default" as const,
+        latestRun: makeLatestRun(),
+        lastVisitedAt: "2026-03-09T10:06:00.000Z",
+        runtime: {
+          status: status === "queued" ? ("queued" as const) : ("idle" as const),
+          activeRunId: null,
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          providerName: "Codex",
+          lastError: null,
+          updatedAt: "2026-03-09T10:00:00.000Z",
+        },
+        pendingBackgroundTasks:
+          status === "background" ? [{ taskId: "workflow", kind: "background_task" as const }] : [],
+      };
+      expect(resolveSidebarFolderDot([thread])).toBe("working");
+      expect(resolveSidebarFolderDot([thread, { ...thread, hasPendingApprovals: true }])).toBe(
+        "attention",
+      );
+    },
+  );
+
   it("flags the most urgent hidden thread and stays quiet otherwise", () => {
     const idle = {
       hasActionableProposedPlan: false,

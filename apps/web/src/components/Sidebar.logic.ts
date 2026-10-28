@@ -917,7 +917,8 @@ export function resolveSidebarFolderDot(
     (thread) => resolveSidebarThreadStatus(thread) === "ready" && hasUnseenCompletion(thread),
   );
   if (hasUnread) return "unread";
-  if (statuses.has("working")) return "working";
+  if (statuses.has("working") || statuses.has("queued") || statuses.has("background"))
+    return "working";
   return null;
 }
 
