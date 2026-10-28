@@ -615,7 +615,9 @@ it("lets keyboard users inspect a checker with no child thread", async () => {
   await expect.element(popup).toBeVisible();
   expect(popup.element().textContent).toContain(checker.model);
   // The failed node's own card also shows its reason; the popup's is the last in the document.
-  await expect.element(page.getByRole("paragraph").filter({ hasText: reason }).last()).toBeVisible();
+  await expect
+    .element(page.getByRole("paragraph").filter({ hasText: reason }).last())
+    .toBeVisible();
   await userEvent.keyboard("{Escape}");
   await expect.element(popup).not.toBeInTheDocument();
 });

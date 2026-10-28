@@ -85,9 +85,7 @@ function WorkflowMemberRow({
           <ThreadRelationshipIcon driver={driver} provider={provider} status={member.status} />
           <span className="min-w-0 flex-1 truncate">{member.title}</span>
           <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-            <span className={cn("font-medium", statusText.className)}>
-              {statusText.label}
-            </span>
+            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
             {member.startedAt ? (
               <>
                 {" "}
@@ -242,9 +240,12 @@ export function ThreadLineageWorkflowRow({
                     </>
                   }
                 >
-                  <span className="block max-w-28 truncate" title={phase.title}>
-                    {phase.title}
-                  </span>
+                  <Tooltip>
+                    <TooltipTrigger render={<span className="block max-w-28 truncate" />}>
+                      {phase.title}
+                    </TooltipTrigger>
+                    <TooltipPopup side="left">{phase.title}</TooltipPopup>
+                  </Tooltip>
                 </CollapsibleSectionHeader>
                 {open ? (
                   <ul className="m-0 list-none p-0">

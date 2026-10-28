@@ -46,7 +46,13 @@ describe("workflowWaveLayout", () => {
   it("gives a long step name a second line and a short one a single line", () => {
     const one = workflowWaveLayout([[{ key: "a", wave: 0, label: "Count source files" }]]);
     const two = workflowWaveLayout([
-      [{ key: "a", wave: 0, label: "Audit every package manifest, lockfile and workspace override" }],
+      [
+        {
+          key: "a",
+          wave: 0,
+          label: "Audit every package manifest, lockfile and workspace override",
+        },
+      ],
     ]);
     expect(one.cards.get("a")!.nameLines).toBe(1);
     expect(two.cards.get("a")!.nameLines).toBe(2);
@@ -68,7 +74,11 @@ describe("workflowWaveLayout", () => {
         { key: "ran", wave: 0 },
         { key: "idle", wave: 0, started: false },
         { key: "short", wave: 0, failure: "docs/ was not found." },
-        { key: "long", wave: 0, failure: "The command exited with code 1: docs/ was not found. ".repeat(4) },
+        {
+          key: "long",
+          wave: 0,
+          failure: "The command exited with code 1: docs/ was not found. ".repeat(4),
+        },
       ],
     ]);
     const height = (key: string) => layout.cards.get(key)!.height;
@@ -100,7 +110,12 @@ describe("workflowWaveLayout", () => {
     const layout = workflowWaveLayout([
       [
         { key: "short", wave: 0, started: false, note: "after Survey" },
-        { key: "long", wave: 0, started: false, note: "Skipped because Count documentation files failed to build" },
+        {
+          key: "long",
+          wave: 0,
+          started: false,
+          note: "Skipped because Count documentation files failed to build",
+        },
       ],
     ]);
     expect(layout.cards.get("short")!.noteLines).toBe(1);

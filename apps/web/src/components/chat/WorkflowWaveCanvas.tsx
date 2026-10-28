@@ -10,10 +10,7 @@ import {
   type WorkflowGraphNodeView,
   type WorkflowGraphView,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type {
-  EnvironmentId,
-  ServerProvider,
-} from "@t3tools/contracts";
+import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
 import { ChevronRightIcon, HistoryIcon } from "lucide-react";
 import { formatModelSlugName } from "@t3tools/shared/model";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
@@ -390,7 +387,9 @@ function workflowNodeAgent(
     ?.find((provider) => provider.instanceId === member.providerInstanceId)
     ?.models.find((entry) => entry.slug === member.model);
   // A model the catalog lacks shows its tidied slug, without a build date stamp.
-  return model?.shortName ?? model?.name ?? formatModelSlugName(member.model).replace(/ \d{8}\b/, "");
+  return (
+    model?.shortName ?? model?.name ?? formatModelSlugName(member.model).replace(/ \d{8}\b/, "")
+  );
 }
 
 function WorkflowNodeCard(props: WorkflowNodeCardProps) {
@@ -413,8 +412,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   const status = [retries === null ? null : sentenceCase(retries), sentenceCase(state)]
     .filter(Boolean)
     .join(" · ");
-  const reasonBand =
-    box.reasonLines === 0 ? 0 : box.reasonLines * 14 + 6;
+  const reasonBand = box.reasonLines === 0 ? 0 : box.reasonLines * 14 + 6;
   const className = cn(
     "group/node flex min-w-0 flex-1 items-center gap-2 px-2.5 text-left rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring/70",
     props.emphasis === false && "opacity-35",
@@ -440,7 +438,10 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
         >
           <span
             aria-hidden
-            className={cn("size-1.5 shrink-0 rounded-full", STATE_DOT[node.state] ?? "bg-muted-foreground/60")}
+            className={cn(
+              "size-1.5 shrink-0 rounded-full",
+              STATE_DOT[node.state] ?? "bg-muted-foreground/60",
+            )}
           />
           <span className="min-w-0 truncate">{status}</span>
           {threadId !== null ? (

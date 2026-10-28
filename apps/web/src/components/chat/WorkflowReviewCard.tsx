@@ -120,7 +120,11 @@ export function WorkflowReviewCard(props: {
       {steps.length > 0 ? (
         <ol
           ref={tasksRef}
-          style={scrollFadeStyle({ top: taskEdges.top === true, right: false, bottom: taskEdges.bottom })}
+          style={scrollFadeStyle({
+            top: taskEdges.top === true,
+            right: false,
+            bottom: taskEdges.bottom,
+          })}
           aria-label="Tasks"
           // A long graph scrolls inside the card, so the decision buttons stay near the plan.
           tabIndex={0}
@@ -149,7 +153,6 @@ export function WorkflowReviewCard(props: {
             <Button
               type="button"
               size="sm"
-              className={presentation.status === "approving" ? "disabled:opacity-100" : undefined}
               disabled={!presentation.approve.enabled}
               onClick={props.onApprove}
             >
@@ -175,6 +178,17 @@ export function WorkflowReviewCard(props: {
   );
 }
 
+/** The parts of a "who runs it" line, each keyed by where it starts in the line. */
+function runParts(runs: string): ReadonlyArray<{ text: string; offset: number; last: boolean }> {
+  const texts = runs.split(" \u00b7 ");
+  let offset = 0;
+  return texts.map((text, index) => {
+    const part = { text, offset, last: index === texts.length - 1 };
+    offset += text.length + 3;
+    return part;
+  });
+}
+
 function ReviewNodeRow(props: {
   readonly node: WorkflowReviewNodeView;
   readonly providers: ReadonlyArray<ServerProvider> | undefined;
@@ -188,10 +202,10 @@ function ReviewNodeRow(props: {
       </span>
       <span className="min-w-0 break-words text-2xs text-muted-foreground">
         {/* A model name never splits across lines; the line breaks only between its parts. */}
-        {lines.runs.split(" \u00b7 ").map((part, index, parts) => (
-          <span key={index} className="whitespace-nowrap">
-            {part}
-            {index === parts.length - 1 ? "" : " \u00b7"}{" "}
+        {runParts(lines.runs).map((part) => (
+          <span key={part.offset} className="whitespace-nowrap">
+            {part.text}
+            {part.last ? "" : " \u00b7"}{" "}
           </span>
         ))}
       </span>

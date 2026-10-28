@@ -1,11 +1,7 @@
 /**
- * Where each card of a graph workflow sits: one column per wave, cards stacked in plan order.
- * The canvas gets an explicit size, because its cards are absolutely positioned and the chat
- * list measures each row's real height.
- *
- * A card is as tall as its own text needs: the step name takes one or two lines, and checker
- * rows add height only for nodes that have a checker. Every column still shares one row grid,
- * so the free strips between rows run across the whole canvas.
+ * Where each card of a graph workflow sits: one column per wave, cards in plan order, each as
+ * tall as its text needs. Every column shares one row grid, so the free strips between rows run
+ * across the whole canvas; the canvas gets an explicit size for the chat list to measure.
  */
 export const WAVE_CARD_WIDTH = 216;
 /** On a narrow screen cards shrink, down to this width, so two columns fit side by side. */
@@ -43,8 +39,7 @@ const GLYPH_WIDTH = 6.2;
 const SPACE_WIDTH = 3.4;
 const CAPITAL_WIDTH = 7.6;
 const WIDE_GLYPH_WIDTH = 12.5;
-const WIDE_GLYPH =
-  /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠\u{1f300}-\u{1faff}]/u;
+const WIDE_GLYPH = /[ᄀ-ᅟ⺀-꓏가-힣豈-﫿︰-﹯＀-｠\u{1f300}-\u{1faff}]/u;
 
 function glyphWidth(glyph: string): number {
   if (WIDE_GLYPH.test(glyph)) return WIDE_GLYPH_WIDTH;
@@ -82,11 +77,7 @@ export function waveNameLines(
   historyButton: boolean,
   cardWidth = WAVE_CARD_WIDTH,
 ): 1 | 2 {
-  return wrapLines(
-    label,
-    cardWidth - NAME_INSET - (historyButton ? HISTORY_BUTTON_WIDTH : 0),
-    1,
-  );
+  return wrapLines(label, cardWidth - NAME_INSET - (historyButton ? HISTORY_BUTTON_WIDTH : 0), 1);
 }
 
 /**
@@ -256,10 +247,7 @@ export function workflowWaveLayout(
     }
   }
   return {
-    width:
-      waves.length === 0
-        ? 0
-        : waves.length * cardWidth + (waves.length - 1) * WAVE_COLUMN_GAP,
+    width: waves.length === 0 ? 0 : waves.length * cardWidth + (waves.length - 1) * WAVE_COLUMN_GAP,
     height:
       rows === 0
         ? 0

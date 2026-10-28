@@ -195,7 +195,9 @@ function openingTone(
     if (states.some((state) => state === "running" || state === "queued" || state === "waiting")) {
       return "running";
     }
-    return states.every((state) => state === "passed" || state === "skipped") ? "passed" : "stopped";
+    return states.every((state) => state === "passed" || state === "skipped")
+      ? "passed"
+      : "stopped";
   }
   const group = opening.group;
   if (group === null) return null;
@@ -343,7 +345,9 @@ function WorkflowMemberRow(props: {
                 className={cn(
                   "block truncate text-2xs leading-relaxed",
                   // Red is for a recorded reason; the last progress text of a failed agent is not one.
-                  failed && (member.error ?? member.result) ? "text-destructive-foreground" : "text-muted-foreground",
+                  failed && (member.error ?? member.result)
+                    ? "text-destructive-foreground"
+                    : "text-muted-foreground",
                 )}
               >
                 {detail}
@@ -351,9 +355,7 @@ function WorkflowMemberRow(props: {
             ) : null}
           </span>
           <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-            <span className={cn("font-medium", statusText.className)}>
-              {statusText.label}
-            </span>
+            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
             {member.startedAt ? (
               <>
                 {" "}

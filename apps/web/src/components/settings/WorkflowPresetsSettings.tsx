@@ -46,7 +46,9 @@ function unavailable(
   if (providers.length === 0) return null;
   const provider = providers.find((entry) => entry.instanceId === target.providerInstanceId);
   if (provider === undefined) return "Provider not available";
-  return provider.models.some((model) => model.slug === target.model) ? null : "Model not available";
+  return provider.models.some((model) => model.slug === target.model)
+    ? null
+    : "Model not available";
 }
 
 export function WorkflowPresetsSettings({ environmentId }: { environmentId: EnvironmentId }) {
@@ -173,8 +175,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                 </Button>
                 <Button
                   size="xs"
-                  variant="ghost"
-                  className="text-destructive-foreground"
+                  variant="ghost-destructive"
                   disabled={!canWrite || pending}
                   aria-label={`Delete ${preset.name}`}
                   onClick={() =>

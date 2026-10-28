@@ -43,12 +43,12 @@ export const WORKFLOW_TONE_TEXT: Readonly<Record<WorkflowTone, string>> = {
   stopped: GREY,
 };
 
-export function workflowTone(
-  statuses: ReadonlyArray<RuntimeSubagentStatus>,
-): WorkflowTone | null {
+export function workflowTone(statuses: ReadonlyArray<RuntimeSubagentStatus>): WorkflowTone | null {
   if (statuses.length === 0) return null;
   if (statuses.includes("failed")) return "failed";
-  if (statuses.some((status) => status === "running" || status === "pending" || status === "waiting")) {
+  if (
+    statuses.some((status) => status === "running" || status === "pending" || status === "waiting")
+  ) {
     return "running";
   }
   return statuses.every((status) => status === "completed") ? "passed" : "stopped";
