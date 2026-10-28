@@ -1,3 +1,4 @@
+import { PlusIcon } from "lucide-react";
 import { useState } from "react";
 import { randomUUID } from "../../lib/utils";
 import {
@@ -28,6 +29,7 @@ import { Switch } from "../ui/switch";
 import {
   SETTINGS_PICKER_TRIGGER_CLASSNAME,
   SettingsPageContainer,
+  SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
 
@@ -69,81 +71,17 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
     setPending(false);
   };
 
+  const editing = draft !== null && presets.presets.some((entry) => entry.id === draft.id);
+
   return (
     <SettingsPageContainer>
-      <SettingsSection id="workflow-presets" title="Agent presets">
-        <p className="px-4 py-3 text-sm text-muted-foreground">
-          Save a provider, model and options for workflow workers. The coordinator keeps its own
-          model.
-        </p>
-        {!canWrite ? (
-          <p className="px-4 py-3 text-sm text-muted-foreground">
-            This connection cannot change agent presets.
-          </p>
-        ) : null}
-        {error ? (
-          <p role="alert" className="px-4 py-3 text-sm text-destructive">
-            {error}
-          </p>
-        ) : null}
-        <div className="space-y-3 p-4">
-          {presets.presets.length === 0 ? (
-            <p className="text-sm text-muted-foreground">No agent presets yet.</p>
-          ) : null}
-          {presets.presets.map((preset) => (
-            <div key={preset.id} className="flex min-w-0 flex-wrap items-center gap-3">
-              <div className="min-w-0 flex-1">
-                <p className="break-words text-sm font-medium">{preset.name}</p>
-                <p className="break-words text-xs text-muted-foreground">
-                  {preset.target.providerInstanceId} / {preset.target.model}
-                </p>
-              </div>
-              <label className="flex items-center gap-2 text-xs">
-                <Switch
-                  checked={presets.defaultPresetId === preset.id}
-                  disabled={!canWrite || pending}
-                  onCheckedChange={(checked) =>
-                    void save({ ...presets, defaultPresetId: checked ? preset.id : null })
-                  }
-                />
-                <span aria-hidden>Workflow worker default</span>
-                <span className="sr-only">{`Workflow worker default: ${preset.name}`}</span>
-              </label>
-              <Button
-                size="sm"
-                variant="outline"
-                disabled={!canWrite || pending}
-                aria-label={`Edit ${preset.name}`}
-                onClick={() => {
-                  setDraft(preset);
-                  setError(null);
-                }}
-              >
-                Edit
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={!canWrite || pending}
-                aria-label={`Delete ${preset.name}`}
-                onClick={() =>
-                  void save(
-                    {
-                      presets: presets.presets.filter((entry) => entry.id !== preset.id),
-                      defaultPresetId:
-                        presets.defaultPresetId === preset.id ? null : presets.defaultPresetId,
-                    },
-                    draft?.id === preset.id,
-                  )
-                }
-              >
-                Delete
-              </Button>
-            </div>
-          ))}
+      <SettingsSection
+        id="workflow-presets"
+        title="Agent presets"
+        headerAction={
           <Button
-            size="sm"
-            variant="outline"
+            size="xs"
+            variant="ghost-muted"
             disabled={!canWrite || pending || draft !== null}
             onClick={() => {
               const selection = resolveAppModelSelectionState(settings, providers);
@@ -159,12 +97,87 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
               setError(null);
             }}
           >
+            <PlusIcon className="size-3" />
             Create preset
           </Button>
-        </div>
-        {draft ? (
+        }
+      >
+        <SettingsRow
+          title="Workflow workers"
+          description="Save a provider, model and options for workflow workers. The coordinator keeps its own model."
+          status={canWrite ? undefined : "This connection cannot change agent presets."}
+        />
+        {error ? (
+          <p role="alert" className="px-3 py-3 text-sm text-destructive sm:px-4">
+            {error}
+          </p>
+        ) : null}
+        {presets.presets.length === 0 ? (
+          <p className="px-3 py-3 text-base text-muted-foreground sm:px-4 sm:text-sm">
+            No agent presets yet.
+          </p>
+        ) : null}
+        {presets.presets.map((preset) => (
+          <SettingsRow
+            key={preset.id}
+            title={<span className="[overflow-wrap:anywhere]">{preset.name}</span>}
+            description={
+              <span className="[overflow-wrap:anywhere]">
+                {preset.target.providerInstanceId} / {preset.target.model}
+              </span>
+            }
+            control={
+              <div className="flex flex-wrap items-center gap-2">
+                <label className="flex items-center gap-2 text-xs text-muted-foreground">
+                  <Switch
+                    checked={presets.defaultPresetId === preset.id}
+                    disabled={!canWrite || pending}
+                    onCheckedChange={(checked) =>
+                      void save({ ...presets, defaultPresetId: checked ? preset.id : null })
+                    }
+                  />
+                  <span aria-hidden>Worker default</span>
+                  <span className="sr-only">{`Workflow worker default: ${preset.name}`}</span>
+                </label>
+                <Button
+                  size="xs"
+                  variant="outline"
+                  disabled={!canWrite || pending}
+                  aria-label={`Edit ${preset.name}`}
+                  onClick={() => {
+                    setDraft(preset);
+                    setError(null);
+                  }}
+                >
+                  Edit
+                </Button>
+                <Button
+                  size="xs"
+                  variant="ghost"
+                  disabled={!canWrite || pending}
+                  aria-label={`Delete ${preset.name}`}
+                  onClick={() =>
+                    void save(
+                      {
+                        presets: presets.presets.filter((entry) => entry.id !== preset.id),
+                        defaultPresetId:
+                          presets.defaultPresetId === preset.id ? null : presets.defaultPresetId,
+                      },
+                      draft?.id === preset.id,
+                    )
+                  }
+                >
+                  Delete
+                </Button>
+              </div>
+            }
+          />
+        ))}
+      </SettingsSection>
+      {draft ? (
+        <SettingsSection id="workflow-preset-editor" title={editing ? "Edit preset" : "New preset"}>
           <form
-            className="space-y-4 p-4"
+            className="divide-y divide-border/50"
             aria-label="Agent preset"
             onSubmit={(event) => {
               event.preventDefault();
@@ -179,51 +192,61 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
               );
             }}
           >
-            <label className="block space-y-2 text-sm">
-              Name
-              <Input
-                aria-label="Preset name"
-                value={draft.name}
-                onChange={(event) => setDraft({ ...draft, name: event.target.value })}
-                disabled={pending || !canWrite}
-              />
-            </label>
-            <div className="flex flex-wrap items-center gap-2">
-              <ProviderModelPicker
-                environmentId={environmentId}
-                activeInstanceId={draft.target.providerInstanceId}
-                model={draft.target.model}
-                lockedProvider={null}
-                instanceEntries={instanceEntries}
-                modelOptionsByInstance={modelOptions}
-                triggerAriaLabel="Preset model"
-                triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                disabled={pending || !canWrite}
-                onInstanceModelChange={(providerInstanceId, model) =>
-                  setDraft({ ...draft, target: { providerInstanceId, model, options: [] } })
-                }
-              />
-              {activeEntry ? (
-                <TraitsPicker
-                  provider={activeEntry.driverKind}
-                  models={activeEntry.models}
-                  model={draft.target.model}
-                  modelOptions={draft.target.options ?? []}
-                  allowPromptInjectedEffort={false}
-                  planModeEnabled={settings.planModeEnabled}
-                  disabled={pending || !canWrite}
-                  triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                  onModelOptionsChange={(options) => {
-                    if (!pending && canWrite)
-                      setDraft({ ...draft, target: { ...draft.target, options: options ?? [] } });
-                  }}
-                />
-              ) : null}
-            </div>
-            <div className="flex gap-2">
-              <Button type="submit" size="sm" disabled={!draft.name.trim() || !canWrite || pending}>
-                {pending ? "Saving…" : "Save preset"}
-              </Button>
+            <SettingsRow
+              title="Name"
+              control={
+                <div className="w-full @min-[32rem]/settings-row:w-64">
+                  <Input
+                    aria-label="Preset name"
+                    value={draft.name}
+                    onChange={(event) => setDraft({ ...draft, name: event.target.value })}
+                    disabled={pending || !canWrite}
+                  />
+                </div>
+              }
+            />
+            <SettingsRow
+              title="Model"
+              description="The provider, model and options a worker using this preset runs with."
+              control={
+                <div className="flex flex-wrap items-center gap-2">
+                  <ProviderModelPicker
+                    environmentId={environmentId}
+                    activeInstanceId={draft.target.providerInstanceId}
+                    model={draft.target.model}
+                    lockedProvider={null}
+                    instanceEntries={instanceEntries}
+                    modelOptionsByInstance={modelOptions}
+                    triggerAriaLabel="Preset model"
+                    triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                    disabled={pending || !canWrite}
+                    onInstanceModelChange={(providerInstanceId, model) =>
+                      setDraft({ ...draft, target: { providerInstanceId, model, options: [] } })
+                    }
+                  />
+                  {activeEntry ? (
+                    <TraitsPicker
+                      provider={activeEntry.driverKind}
+                      models={activeEntry.models}
+                      model={draft.target.model}
+                      modelOptions={draft.target.options ?? []}
+                      allowPromptInjectedEffort={false}
+                      planModeEnabled={settings.planModeEnabled}
+                      disabled={pending || !canWrite}
+                      triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+                      onModelOptionsChange={(options) => {
+                        if (!pending && canWrite)
+                          setDraft({
+                            ...draft,
+                            target: { ...draft.target, options: options ?? [] },
+                          });
+                      }}
+                    />
+                  ) : null}
+                </div>
+              }
+            />
+            <div className="flex justify-end gap-2 px-3 py-3 sm:px-4">
               <Button
                 type="button"
                 size="sm"
@@ -233,10 +256,13 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
               >
                 Cancel
               </Button>
+              <Button type="submit" size="sm" disabled={!draft.name.trim() || !canWrite || pending}>
+                {pending ? "Saving…" : "Save preset"}
+              </Button>
             </div>
           </form>
-        ) : null}
-      </SettingsSection>
+        </SettingsSection>
+      ) : null}
     </SettingsPageContainer>
   );
 }

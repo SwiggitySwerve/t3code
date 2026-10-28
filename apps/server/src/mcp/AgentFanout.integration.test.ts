@@ -1045,6 +1045,82 @@ it.effect(
     }).pipe(Effect.provide(Layer.merge(layerTest, layerDatabase))),
 );
 
+it.effect("keeps a parent run that settles between workflow.complete's read and its commit", () =>
+  Effect.gen(function* () {
+    yield* startParent;
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const runId = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.at(-1)!.id;
+    const workflowId = NodeId.make("workflow:late-settle");
+    yield* orchestrator.dispatch({
+      type: "workflow.start",
+      commandId: CommandId.make("late-settle-start"),
+      createdBy: "agent",
+      creationSource: "mcp",
+      threadId: parentThreadId,
+      runId,
+      workflowId,
+      title: "Late settle",
+      script: "// reviewed graph",
+    });
+    const parent = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.find(
+      (run) => run.id === runId,
+    )!;
+    const now = yield* DateTime.now;
+    const commit = sink.commitCommand;
+    let settled = false;
+    yield* Effect.acquireUseRelease(
+      Effect.sync(() =>
+        vi.spyOn(sink, "commitCommand").mockImplementation((input) =>
+          Effect.gen(function* () {
+            if (!settled && input.commandType === "workflow.complete") {
+              settled = true;
+              // The parent turn ends after workflow.complete read the run, before it commits.
+              yield* commit({
+                commandId: CommandId.make("late-settle-provider-turn-end"),
+                threadId: parentThreadId,
+                commandType: "provider.event",
+                acceptedAt: now,
+                effects: [],
+                events: [
+                  {
+                    id: EventId.make("event:late-settle-provider-turn-end"),
+                    type: "run.updated",
+                    threadId: parentThreadId,
+                    runId,
+                    occurredAt: now,
+                    payload: { ...parent, status: "completed", completedAt: now },
+                  },
+                ],
+              });
+            }
+            return yield* commit(input);
+          }),
+        ),
+      ),
+      () =>
+        orchestrator.dispatch({
+          type: "workflow.complete",
+          commandId: CommandId.make("late-settle-complete"),
+          threadId: parentThreadId,
+          workflowId,
+          status: "completed",
+          result: "Done.",
+        }),
+      (spy) => Effect.sync(() => spy.mockRestore()),
+    );
+    expect(settled).toBe(true);
+    const run = (yield* orchestrator.getThreadProjection(parentThreadId)).runs.find(
+      (candidate) => candidate.id === runId,
+    )!;
+    expect({ status: run.status, completedAt: run.completedAt }).toEqual({
+      status: "completed",
+      completedAt: now,
+    });
+    expect(run.delegatedCompletion?.delivery?.taskIds).toEqual([workflowId]);
+  }).pipe(Effect.provide(layerTest)),
+);
+
 const startWorkflow = (script: string, args?: unknown) =>
   Effect.gen(function* () {
     const result = yield* invoke("workflow_start", {

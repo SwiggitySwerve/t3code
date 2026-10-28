@@ -962,7 +962,9 @@ function structuredResultFor(prompt: string, summary: string | null) {
     : readStructuredResult(summary, (value) => validateJsonSchema(schema, value));
 }
 
-function taskPrompt(input: OrchestratorMcpDelegateTasksItem): string {
+export function taskPrompt(
+  input: Pick<OrchestratorMcpDelegateTasksItem, "task" | "role" | "resultSchema">,
+): string {
   return withResultSchema(
     input.role === undefined || input.role === "general"
       ? input.task
