@@ -504,6 +504,26 @@ describe("delegate_tasks", () => {
       expect(yield* childTasks).toHaveLength(0);
     }).pipe(Effect.provide(layerTest)),
   );
+  it.effect.each([{ environmentId: "environment:elsewhere" }, { projectId: "project:elsewhere" }])(
+    "starts no tasks when a mixed batch asks for an unsupported destination %j",
+    (destination) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const result = yield* invoke("delegate_tasks", {
+          tasks: [
+            { task: "Valid local task." },
+            {
+              task: "Unsupported destination.",
+              target: { providerInstanceId: instanceId, model, ...destination },
+            },
+          ],
+        });
+        expect(result.isError).toBe(true);
+        expect(errorText(result)).toContain("tasks[1]:");
+        expect(errorText(result)).toContain("delegate_task");
+        expect(yield* childTasks).toHaveLength(0);
+      }).pipe(Effect.provide(layerTest)),
+  );
 });
 
 const startThree = Effect.gen(function* () {

@@ -3874,6 +3874,14 @@ const make = Effect.gen(function* () {
       function* (callerScope, input) {
         const { scope, parent } = yield* loadThreadCaller(callerScope, "delegate_tasks");
         const parentRun = yield* requireDelegatingRun(scope, parent);
+        for (const [index, item] of input.tasks.entries()) {
+          if (item.target?.environmentId !== undefined || item.target?.projectId !== undefined) {
+            return yield* failure(
+              "invalid_request",
+              `tasks[${index}]: Batch delegation supports only the caller's environment and project. Use delegate_task for target.environmentId or target.projectId.`,
+            );
+          }
+        }
         const providers = yield* loadProviders;
         const batchKey = yield* requestKey(input.clientRequestId);
         const parentCommit = yield* makeParentCommitResolver(parent);
