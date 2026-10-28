@@ -3,7 +3,7 @@ import { commands, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 
-import { readQaAtom } from "../../../test/workflow-fixtures/atoms";
+import { readQaAtom, stubQaWorkflowStopPermission } from "../../../test/workflow-fixtures/atoms";
 import {
   LINEAGE_FIRST_AGENT_TITLE,
   LINEAGE_PARENT,
@@ -11,7 +11,6 @@ import {
 } from "../../../test/workflow-fixtures/lineagePanel";
 import { QA_ENVIRONMENT, QA_PROVIDERS } from "../../../test/workflow-fixtures/providers";
 import { render } from "../../../test/render";
-import { orchestrationEnvironment } from "../../state/orchestration";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 
 const stop = vi.hoisted(() => vi.fn());
@@ -24,10 +23,8 @@ const state = vi.hoisted(() => ({
 // a factory for the atom library must not import them.
 vi.mock(import("@effect/atom-react"), async (original) => ({
   ...(await original()),
-  useAtomValue: ((atom: unknown, selector?: (value: unknown) => unknown) => {
-    if (atom === orchestrationEnvironment.stopWorkflow.permissionAtom(QA_ENVIRONMENT)) return true;
-    return readQaAtom(atom, selector);
-  }) as never,
+  useAtomValue: ((atom: unknown, selector?: (value: unknown) => unknown) =>
+    readQaAtom(atom, selector)) as never,
 }));
 vi.mock(import("../../state/use-atom-command"), () => ({
   useAtomCommand: (() => stop) as never,
@@ -64,6 +61,7 @@ async function showLineage() {
 
 describe("a workflow's row in the Lineage panel", () => {
   it("is named for the workflow, never for its first agent's thread", async () => {
+    using _permission = stubQaWorkflowStopPermission();
     const { screen, title } = await showLineage();
     await using _screen = screen;
     await expect
@@ -78,6 +76,7 @@ describe("a workflow's row in the Lineage panel", () => {
   });
 
   it("offers Stop to a pointer that hovers the row, and Stop works", async () => {
+    using _permission = stubQaWorkflowStopPermission();
     const { screen, title } = await showLineage();
     await using _screen = screen;
     const row = screen.getByRole("button", { name: new RegExp(`^${title}`) });
@@ -98,6 +97,7 @@ describe("a workflow's row in the Lineage panel", () => {
   });
 
   it("offers Stop to the keyboard: Tab reaches it and Enter stops the workflow", async () => {
+    using _permission = stubQaWorkflowStopPermission();
     const { screen, title } = await showLineage();
     await using _screen = screen;
     const button = screen.getByRole("button", { name: `Stop workflow ${title}`, exact: true });
@@ -110,7 +110,10 @@ describe("a workflow's row in the Lineage panel", () => {
     await userEvent.tab();
     await expect.element(button).toHaveFocus();
     expect(getComputedStyle(wrapper).opacity).toBe("1");
+    // React retains its permission atom across the Stop rerender, even after weak caches collect.
+    await commands.collectGarbage();
     await userEvent.keyboard("{Enter}");
     expect(stop).toHaveBeenCalledTimes(1);
+    await expect.element(button).toBeEnabled();
   });
 });

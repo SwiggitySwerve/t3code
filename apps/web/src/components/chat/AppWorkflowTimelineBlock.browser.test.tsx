@@ -6,11 +6,10 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import "~/index.css";
 
-import { readQaAtom } from "../../../test/workflow-fixtures/atoms";
+import { readQaAtom, stubQaWorkflowStopPermission } from "../../../test/workflow-fixtures/atoms";
 import { QA_ENVIRONMENT } from "../../../test/workflow-fixtures/providers";
 import { workflowFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 import { act, render } from "../../../test/render";
-import { orchestrationEnvironment } from "../../state/orchestration";
 import { environmentThreadDetails } from "../../state/threads";
 import { toastManager } from "../ui/toast";
 import { AppWorkflowTimelineBlock } from "./AppWorkflowTimelineBlock";
@@ -29,7 +28,6 @@ vi.mock(import("@effect/atom-react"), async (original) => ({
       const thread = { projection };
       return selector === undefined ? thread : selector(thread);
     }
-    if (atom === orchestrationEnvironment.stopWorkflow.permissionAtom(QA_ENVIRONMENT)) return true;
     return readQaAtom(atom, selector);
   }) as never,
 }));
@@ -71,6 +69,7 @@ const stopButton = (container: HTMLElement) =>
 
 describe("workflow block Stop", () => {
   it("stays on a cancelled workflow while a member it started still runs, through a failed stop and a remount", async () => {
+    using _permission = stubQaWorkflowStopPermission();
     stop.mockReset();
     stop.mockResolvedValue(failure);
     const add = vi.spyOn(toastManager, "add");
@@ -97,6 +96,7 @@ describe("workflow block Stop", () => {
   });
 
   it("goes away once the workflow and every member have settled", async () => {
+    using _permission = stubQaWorkflowStopPermission();
     await using screen = await render(
       showWorkflow({ rowStatus: "cancelled", member: "cancelled" }),
       {
@@ -108,6 +108,7 @@ describe("workflow block Stop", () => {
   });
 
   it("is offered on a running workflow", async () => {
+    using _permission = stubQaWorkflowStopPermission();
     await using screen = await render(showWorkflow({ rowStatus: "running", member: "completed" }), {
       router: false,
     });

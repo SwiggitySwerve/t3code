@@ -5,6 +5,8 @@ declare module "vite-plus/test/browser" {
   interface BrowserCommands {
     /** Defined in vite.config.ts. Moves Playwright's mouse off the page. */
     resetPointer: () => Promise<void>;
+    /** Collects Chromium's weak caches for identity and lifecycle regressions. */
+    collectGarbage: () => Promise<void>;
   }
 }
 
