@@ -154,6 +154,7 @@ const makeLayerTest = (
     {
       databaseLayer: layerDatabase,
       runEffectWorker: false,
+      serverSettings: { workflows: true },
       ...(maxRunningDelegatedTasks === undefined ? {} : { maxRunningDelegatedTasks }),
     },
   );
@@ -161,6 +162,7 @@ const makeLayerTest = (
     Layer.provideMerge(layerOrchestrator),
     Layer.provideMerge(
       ServerSettings.layerTest({
+        workflows: true,
         providerInstances: Object.fromEntries(
           providers.map((provider) => [
             provider.instanceId,
@@ -248,7 +250,7 @@ const invocation: McpInvocationContext.McpInvocationScope = {
     providerInstanceId: instanceId,
   },
   client: undefined,
-  capabilities: new Set(["orchestration"]),
+  capabilities: new Set(["orchestration", "workflows"]),
   issuedAt: 1,
 };
 
