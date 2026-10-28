@@ -9,27 +9,35 @@ import type { RuntimeSubagentStatus } from "@t3tools/client-runtime/state/subage
 export interface WorkflowStatusText {
   readonly label: string;
   readonly className: string;
+  /** The dot before the word; waiting and idle agents get a ring instead of a fill. */
+  readonly dotClassName: string;
 }
 
 const GREY = "text-muted-foreground";
+const FILLED_GREY = "bg-muted-foreground/60";
+const RING_GREY = "border border-muted-foreground/70";
 
 export function workflowMemberStatusText(status: RuntimeSubagentStatus): WorkflowStatusText {
   switch (status) {
     case "completed":
-      return { label: "Done", className: "text-success-foreground" };
+      return { label: "Done", className: "text-success-foreground", dotClassName: "bg-success" };
     case "running":
-      return { label: "Running", className: "text-info-foreground" };
+      return { label: "Running", className: "text-info-foreground", dotClassName: "bg-info" };
     case "failed":
-      return { label: "Failed", className: "text-destructive-foreground" };
+      return {
+        label: "Failed",
+        className: "text-destructive-foreground",
+        dotClassName: "bg-destructive",
+      };
     case "pending":
-      return { label: "Queued", className: GREY };
+      return { label: "Queued", className: GREY, dotClassName: RING_GREY };
     case "waiting":
-      return { label: "Waiting", className: GREY };
+      return { label: "Waiting", className: GREY, dotClassName: RING_GREY };
     case "idle":
-      return { label: "Idle", className: GREY };
+      return { label: "Idle", className: GREY, dotClassName: RING_GREY };
     case "cancelled":
     case "interrupted":
-      return { label: "Stopped", className: GREY };
+      return { label: "Stopped", className: GREY, dotClassName: FILLED_GREY };
   }
 }
 

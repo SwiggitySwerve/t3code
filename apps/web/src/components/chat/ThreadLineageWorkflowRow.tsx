@@ -85,7 +85,16 @@ function WorkflowMemberRow({
           <ThreadRelationshipIcon driver={driver} provider={provider} status={member.status} />
           <span className="min-w-0 flex-1 truncate">{member.title}</span>
           <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
+            <span className={cn("font-medium", statusText.className)}>
+              <span
+                aria-hidden
+                className={cn(
+                  "me-1.5 inline-block size-1.5 rounded-full align-middle",
+                  statusText.dotClassName,
+                )}
+              />
+              {statusText.label}
+            </span>
             {member.startedAt ? (
               <>
                 {" "}
@@ -231,8 +240,7 @@ export function ThreadLineageWorkflowRow({
                         <SectionHeaderStatus>Failed</SectionHeaderStatus>
                       ) : null}
                       <span className="shrink-0 text-2xs font-normal tabular-nums">
-                        {phase.settledCount}/{phase.members.length}{" "}
-                        {phase.members.length === 1 ? "agent" : "agents"}
+                        {phase.settledCount}/{phase.members.length}
                       </span>
                       <span className="shrink-0 text-2xs font-normal tabular-nums empty:hidden">
                         <AgentElapsed agent={phaseElapsed(phase)} />
@@ -240,7 +248,7 @@ export function ThreadLineageWorkflowRow({
                     </>
                   }
                 >
-                  <span className="block max-w-26 truncate" title={phase.title}>
+                  <span className="block max-w-36 truncate" title={phase.title}>
                     {phase.title}
                   </span>
                 </CollapsibleSectionHeader>

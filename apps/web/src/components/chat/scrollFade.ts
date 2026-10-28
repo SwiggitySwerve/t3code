@@ -10,7 +10,9 @@ export interface ScrollEdges {
   readonly bottom: boolean;
 }
 
-const FADE_PX = 32;
+const FADE_PX = 28;
+/** The opacity at the very edge: faded, but the cut-off text stays readable. */
+const EDGE_ALPHA = 0.4;
 
 /**
  * Fades the edges of a scroll area that continue past the view, so a row or card cut by the edge
@@ -21,7 +23,7 @@ export function scrollFadeStyle(edges: ScrollEdges): CSSProperties | undefined {
   const solid = "linear-gradient(#000, #000)";
   const fade = (direction: string, from: boolean, to: boolean) =>
     from || to
-      ? `linear-gradient(${direction}, ${from ? `transparent, #000 ${FADE_PX}px` : "#000, #000"}, ${to ? `#000 calc(100% - ${FADE_PX}px), transparent` : "#000, #000"})`
+      ? `linear-gradient(${direction}, ${from ? `rgb(0 0 0 / ${EDGE_ALPHA}), #000 ${FADE_PX}px` : "#000, #000"}, ${to ? `#000 calc(100% - ${FADE_PX}px), rgb(0 0 0 / ${EDGE_ALPHA})` : "#000, #000"})`
       : solid;
   const image = [
     fade("to right", edges.left === true, edges.right),

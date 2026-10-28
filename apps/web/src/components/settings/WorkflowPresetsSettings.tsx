@@ -97,7 +97,6 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
         headerAction={
           <Button
             size="xs"
-            variant="outline"
             disabled={!canWrite || pending || draft !== null}
             onClick={() => {
               const selection = resolveAppModelSelectionState(settings, providers);
@@ -157,7 +156,7 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
                       void save({ ...presets, defaultPresetId: checked ? preset.id : null })
                     }
                   />
-                  <span aria-hidden>Worker default</span>
+                  <span aria-hidden>Default</span>
                   <span className="sr-only">{`Workflow worker default: ${preset.name}`}</span>
                 </label>
                 <Button

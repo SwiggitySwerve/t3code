@@ -46,6 +46,9 @@ const STATE_DOT: Readonly<Partial<Record<WorkflowGraphNodeState, string>>> = {
   passed: "bg-success",
   running: "bg-info",
   failed: "bg-destructive",
+  // Nodes still to run show a ring, so they read apart from ones that ended without running.
+  queued: "border border-muted-foreground/70",
+  waiting: "border border-muted-foreground/70",
 };
 
 type AttemptsPayload = {
@@ -443,7 +446,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
           {threadId !== null ? (
             <ChevronRightIcon
               aria-hidden
-              className="ml-auto size-3 shrink-0 text-muted-foreground group-hover/node:text-foreground"
+              className="ml-auto size-3.5 shrink-0 text-muted-foreground group-hover/node:text-foreground"
             />
           ) : null}
         </span>

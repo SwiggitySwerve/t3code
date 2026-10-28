@@ -12,7 +12,7 @@ import type {
   ProviderInstanceId,
   ServerProvider,
 } from "@t3tools/contracts";
-import { ChevronRightIcon, SquareIcon, WorkflowIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, SquareIcon, WorkflowIcon } from "lucide-react";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import { useEffect, useId, useRef, useState } from "react";
 
@@ -130,18 +130,22 @@ export function WorkflowOpeningBlock(props: {
             {props.stop.stopping ? (
               <Spinner size="xs" aria-hidden />
             ) : (
-              <SquareIcon aria-hidden className="size-3 fill-current" />
+              <SquareIcon aria-hidden className="size-3 fill-current text-destructive-foreground" />
             )}
             Stop
           </Button>
         ) : null}
       </header>
       {opening.budget === undefined ? null : <WorkflowBudgetMeter budget={opening.budget} />}
-      {props.progress ? <WorkflowProgress text={props.progress} /> : null}
-      {graphHeadline?.waitingOn ? (
-        <p className="px-2 text-2xs text-muted-foreground [overflow-wrap:anywhere]">
-          {graphHeadline.waitingOn}
-        </p>
+      {props.progress || graphHeadline?.waitingOn ? (
+        <div className="flex flex-col gap-1">
+          {props.progress ? <WorkflowProgress text={props.progress} /> : null}
+          {graphHeadline?.waitingOn ? (
+            <p className="px-2 text-2xs text-muted-foreground [overflow-wrap:anywhere]">
+              {graphHeadline.waitingOn}
+            </p>
+          ) : null}
+        </div>
       ) : null}
       {graph !== null ? (
         <WorkflowWaveCanvas
@@ -262,13 +266,17 @@ function WorkflowProgress(props: { readonly text: string }) {
         <Button
           type="button"
           size="xs"
-          variant="link"
+          variant="ghost-muted"
           aria-expanded={expanded}
           aria-controls={contentId}
           data-scroll-anchor-ignore
           onClick={() => setExpanded((value) => !value)}
         >
           {expanded ? "Show less" : "Show full result"}
+          <ChevronDownIcon
+            aria-hidden
+            className={cn("size-3 transition-transform", expanded && "rotate-180")}
+          />
         </Button>
       ) : null}
     </div>
@@ -343,7 +351,16 @@ function WorkflowMemberRow(props: {
             ) : null}
           </span>
           <span className="shrink-0 text-xs text-muted-foreground tabular-nums">
-            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
+            <span className={cn("font-medium", statusText.className)}>
+              <span
+                aria-hidden
+                className={cn(
+                  "me-1.5 inline-block size-1.5 rounded-full align-middle",
+                  statusText.dotClassName,
+                )}
+              />
+              {statusText.label}
+            </span>
             {member.startedAt ? (
               <>
                 {" "}

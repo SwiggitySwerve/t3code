@@ -128,7 +128,7 @@ export function WorkflowReviewCard(props: {
         >
           {steps.map(({ step, nodes }) => (
             <li key={step} aria-label={`Step ${step}`}>
-              <p className="px-2 pb-0.5 text-2xs font-medium text-muted-foreground">Step {step}</p>
+              <p className="px-2 pb-0.5 text-xs font-medium text-muted-foreground">Step {step}</p>
               <ul className="m-0 list-none p-0">
                 {nodes.map((node) => (
                   <ReviewNodeRow key={node.id} node={node} providers={props.providers} />
@@ -148,7 +148,7 @@ export function WorkflowReviewCard(props: {
           {presentation.approve.visible ? (
             <Button
               type="button"
-              size="xs"
+              size="sm"
               disabled={!presentation.approve.enabled}
               onClick={props.onApprove}
             >
@@ -159,7 +159,7 @@ export function WorkflowReviewCard(props: {
           {presentation.dismiss.visible ? (
             <Button
               type="button"
-              size="xs"
+              size="sm"
               variant="outline"
               disabled={!presentation.dismiss.enabled}
               onClick={props.onDismiss}
@@ -187,10 +187,10 @@ function ReviewNodeRow(props: {
       </span>
       <span className="min-w-0 break-words text-2xs text-muted-foreground">
         {/* A model name never splits across lines; the line breaks only between its parts. */}
-        {lines.runs.split(" \u00b7 ").map((part, index) => (
+        {lines.runs.split(" \u00b7 ").map((part, index, parts) => (
           <span key={index} className="whitespace-nowrap">
-            {index === 0 ? "" : " \u00b7 "}
             {part}
+            {index === parts.length - 1 ? "" : " \u00b7"}{" "}
           </span>
         ))}
       </span>
