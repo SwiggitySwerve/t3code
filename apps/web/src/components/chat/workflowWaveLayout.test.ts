@@ -1,12 +1,16 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  WAVE_NODE_HEIGHT,
+  WAVE_CARD_PADDING,
   WAVE_CARD_WIDTH,
+  WAVE_CHECKER_ROW_HEIGHT,
   WAVE_COLUMN_GAP,
   WAVE_HEADER_HEIGHT,
   WAVE_ROW_GAP,
   visibleWaveCards,
+  WAVE_CARD_MIN_WIDTH,
+  waveCardWidth,
+  waveNameLines,
   workflowWaveLayout,
 } from "./workflowWaveLayout";
 
@@ -21,22 +25,156 @@ const waves = [
 ];
 
 describe("workflowWaveLayout", () => {
-  it("keeps geometry fixed as checker histories grow across 150 nodes", () => {
-    const graph = Array.from({ length: 15 }, (_, wave) =>
-      Array.from({ length: 10 }, (_, row) => ({ key: `${wave}-${row}`, wave })),
-    );
-    const checked = graph.map((nodes) =>
-      nodes.map((node, index) => ({
-        ...node,
-        checkers: Array.from({ length: index * 4 }, () => ({})),
-      })),
-    );
-    expect(workflowWaveLayout(checked)).toEqual(workflowWaveLayout(graph));
+  it("sizes a card from its own text and adds checker rows only to nodes that have one", () => {
+    const layout = workflowWaveLayout([
+      [
+        { key: "none", wave: 0 },
+        { key: "one", wave: 0, checkers: [{}] },
+        { key: "two", wave: 0, checkers: [{}, {}] },
+        { key: "many", wave: 0, checkers: Array.from({ length: 9 }, () => ({})) },
+      ],
+    ]);
+    const height = (key: string) => layout.cards.get(key)!.height;
+    expect(layout.cards.get("none")!.checkerBand).toBe(0);
+    expect(height("one")).toBe(height("none") + WAVE_CHECKER_ROW_HEIGHT);
+    expect(height("two")).toBe(height("none") + 2 * WAVE_CHECKER_ROW_HEIGHT);
+    // Further attempts scroll inside the two rows; the card stops growing.
+    expect(height("many")).toBe(height("two"));
+    expect(height("none")).toBeGreaterThan(WAVE_CARD_PADDING);
   });
+
+  it("gives a long step name a second line and a short one a single line", () => {
+    const one = workflowWaveLayout([[{ key: "a", wave: 0, label: "Count source files" }]]);
+    const two = workflowWaveLayout([
+      [
+        {
+          key: "a",
+          wave: 0,
+          label: "Audit every package manifest, lockfile and workspace override",
+        },
+      ],
+    ]);
+    expect(one.cards.get("a")!.nameLines).toBe(1);
+    expect(two.cards.get("a")!.nameLines).toBe(2);
+    expect(two.cards.get("a")!.height).toBeGreaterThan(one.cards.get("a")!.height);
+  });
+
+  it("estimates wide glyphs, unbroken words and the history button when counting name lines", () => {
+    expect(waveNameLines("", false)).toBe(1);
+    expect(waveNameLines("日本語のステップ名ですよろしくお願いします", false)).toBe(2);
+    expect(waveNameLines("/var/lib/build/cache/workspace/generated/index.ts", false)).toBe(2);
+    // A name that just fits one line wraps once the history button takes room beside it.
+    expect(waveNameLines("Count documentation files now", false)).toBe(1);
+    expect(waveNameLines("Count documentation files now", true)).toBe(2);
+  });
+
+  it("drops the tokens line for a node that never ran and adds a band for a failure reason", () => {
+    const layout = workflowWaveLayout([
+      [
+        { key: "ran", wave: 0 },
+        { key: "idle", wave: 0, started: false },
+        { key: "short", wave: 0, failure: "docs/ was not found." },
+        {
+          key: "long",
+          wave: 0,
+          failure: "The command exited with code 1: docs/ was not found. ".repeat(4),
+        },
+      ],
+    ]);
+    const height = (key: string) => layout.cards.get(key)!.height;
+    expect(layout.cards.get("idle")!.started).toBe(false);
+    expect(height("idle")).toBeLessThan(height("ran"));
+    expect(layout.cards.get("short")!.reasonLines).toBe(1);
+    expect(layout.cards.get("long")!.reasonLines).toBe(2);
+    expect(height("long")).toBeGreaterThan(height("short"));
+    expect(height("short")).toBeGreaterThan(height("ran"));
+  });
+
+  it("shrinks cards on a narrow screen so two columns fit, and never below the minimum", () => {
+    expect(waveCardWidth(null)).toBe(WAVE_CARD_WIDTH);
+    expect(waveCardWidth(1200)).toBe(WAVE_CARD_WIDTH);
+    const narrow = waveCardWidth(352);
+    expect(narrow).toBeLessThan(WAVE_CARD_WIDTH);
+    expect(2 * narrow + WAVE_COLUMN_GAP + 8).toBeLessThanOrEqual(352);
+    expect(waveCardWidth(100)).toBe(WAVE_CARD_MIN_WIDTH);
+    const layout = workflowWaveLayout([[{ key: "a", wave: 0 }], [{ key: "b", wave: 1 }]], narrow);
+    expect(layout.cards.get("a")!.width).toBe(narrow);
+    expect(layout.cards.get("b")!.x).toBe(narrow + WAVE_COLUMN_GAP);
+    expect(layout.width).toBe(2 * narrow + WAVE_COLUMN_GAP);
+    // Narrower cards wrap a name sooner.
+    expect(waveNameLines("Count documentation files", false)).toBe(1);
+    expect(waveNameLines("Count documentation files", false, narrow)).toBe(2);
+  });
+
+  it("fits three waves in the chat column and two on a phone", () => {
+    // The scroll area of the workflow block at the normal chat width.
+    const chat = 696;
+    const three = waveCardWidth(chat, 3);
+    expect(3 * three + 2 * WAVE_COLUMN_GAP + 8).toBeLessThanOrEqual(chat);
+    expect(three).toBeGreaterThan(WAVE_CARD_MIN_WIDTH);
+    // A graph of one or two waves keeps the full card.
+    expect(waveCardWidth(chat, 2)).toBe(WAVE_CARD_WIDTH);
+    // Too narrow for three comfortable cards: two columns share the row.
+    const phone = waveCardWidth(352, 3);
+    expect(2 * phone + WAVE_COLUMN_GAP + 8).toBeLessThanOrEqual(352);
+  });
+
+  it("gives the note of a node that never ran a second line when it needs one", () => {
+    const layout = workflowWaveLayout([
+      [
+        { key: "short", wave: 0, started: false, note: "after Survey" },
+        {
+          key: "long",
+          wave: 0,
+          started: false,
+          note: "Skipped because Count documentation files failed to build",
+        },
+      ],
+    ]);
+    expect(layout.cards.get("short")!.noteLines).toBe(1);
+    expect(layout.cards.get("long")!.noteLines).toBe(2);
+    expect(layout.cards.get("long")!.height).toBeGreaterThan(layout.cards.get("short")!.height);
+  });
+
+  it("draws the history button only where the caller asks for it", () => {
+    const layout = workflowWaveLayout([
+      [
+        { key: "first", wave: 0 },
+        { key: "retried", wave: 0, historyButton: true },
+      ],
+    ]);
+    expect([...layout.cards.values()].map((box) => box.historyButton)).toEqual([false, true]);
+  });
+
+  it("keeps one row grid: a row is as tall as its tallest card, and lines meet each card's middle", () => {
+    const layout = workflowWaveLayout([
+      [
+        { key: "a", wave: 0, checkers: [{}, {}] },
+        { key: "b", wave: 0 },
+      ],
+      [
+        { key: "c", wave: 1, dependsOn: ["a"] },
+        { key: "d", wave: 1, dependsOn: ["b"] },
+      ],
+    ]);
+    const [a, b, c, d] = ["a", "b", "c", "d"].map((key) => layout.cards.get(key)!);
+    // Cards in one row start together; the next row starts below the taller card.
+    expect(c!.y).toBe(a!.y);
+    expect(d!.y).toBe(b!.y);
+    expect(b!.y).toBe(a!.y + a!.height + WAVE_ROW_GAP);
+    expect(c!.height).toBeLessThan(a!.height);
+    expect(layout.height).toBe(b!.y + b!.height);
+    const edge = layout.edges.find((entry) => entry.from === "a")!;
+    const numbers = edge.path.match(/-?\d+(\.\d+)?/g)!.map(Number);
+    expect(numbers.slice(0, 2)).toEqual([a!.x + a!.width, a!.y + a!.height / 2]);
+    expect(numbers.slice(-2)).toEqual([c!.x, c!.y + c!.height / 2]);
+  });
+
   it("sizes the canvas to its widest column and tallest wave", () => {
     const layout = workflowWaveLayout(waves);
     expect(layout.width).toBe(3 * WAVE_CARD_WIDTH + 2 * WAVE_COLUMN_GAP);
-    expect(layout.height).toBe(WAVE_HEADER_HEIGHT + 3 * WAVE_NODE_HEIGHT + 2 * WAVE_ROW_GAP);
+    const card = layout.cards.get("a")!.height;
+    expect(layout.height).toBe(WAVE_HEADER_HEIGHT + 3 * card + 2 * WAVE_ROW_GAP);
     expect(layout.columns.map((column) => column.wave)).toEqual([0, 1, 2]);
   });
 
@@ -44,11 +182,12 @@ describe("workflowWaveLayout", () => {
     const layout = workflowWaveLayout(waves);
     const boxes = [...layout.cards.entries()];
     expect(boxes.map(([key]) => key)).toEqual(["a", "b", "c", "d", "e"]);
-    expect(layout.cards.get("c")).toEqual({
+    const card = layout.cards.get("a")!.height;
+    expect(layout.cards.get("c")).toMatchObject({
       x: WAVE_CARD_WIDTH + WAVE_COLUMN_GAP,
-      y: WAVE_HEADER_HEIGHT + WAVE_NODE_HEIGHT + WAVE_ROW_GAP,
+      y: WAVE_HEADER_HEIGHT + card + WAVE_ROW_GAP,
       width: WAVE_CARD_WIDTH,
-      height: WAVE_NODE_HEIGHT,
+      height: card,
     });
     for (const [, box] of boxes) {
       expect(box.x + box.width).toBeLessThanOrEqual(layout.width);

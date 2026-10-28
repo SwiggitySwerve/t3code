@@ -165,6 +165,57 @@ describe("workflow preset settings interactions", () => {
     await expect.element(reviewer).not.toBeChecked();
     expect(state.settings.workflowPresets.defaultPresetId).toBe("writer");
   });
+  it("draws Delete in the destructive red, not in the neutral grey of a plain ghost button", async () => {
+    setup();
+    await using screen = await render(
+      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
+    );
+    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    state.settings = {
+      ...state.settings!,
+      workflowPresets: { presets: [{ id: "r", name: "Reviewer", target }], defaultPresetId: null },
+    };
+    await screen.rerender(<WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />);
+    const color = getComputedStyle(
+      screen.getByRole("button", { name: "Delete Reviewer" }).element(),
+    ).color;
+    // Computed colours may be oklab or rgb; render the colour to a canvas pixel to read its channels.
+    const canvas = document.createElement("canvas");
+    canvas.width = canvas.height = 1;
+    const context = canvas.getContext("2d")!;
+    context.fillStyle = color;
+    context.fillRect(0, 0, 1, 1);
+    const [red, green, blue] = context.getImageData(0, 0, 1, 1).data;
+    expect(red!).toBeGreaterThan(green! + 60);
+    expect(red!).toBeGreaterThan(blue! + 60);
+  });
+
+  it("labels the options picker in the editor, as Effort once the preset sets one", async () => {
+    setup();
+    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    state.settings = {
+      ...state.settings!,
+      workflowPresets: {
+        presets: [
+          { id: "plain", name: "Plain", target },
+          {
+            id: "effortful",
+            name: "Effortful",
+            target: { ...target, options: [{ id: "reasoningEffort", value: "high" }] },
+          },
+        ],
+        defaultPresetId: null,
+      },
+    };
+    await using screen = await render(
+      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
+    );
+    await userEvent.click(screen.getByRole("button", { name: "Edit Effortful" }));
+    await expect.element(screen.getByText("Effort", { exact: true })).toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    await userEvent.click(screen.getByRole("button", { name: "Edit Plain" }));
+    await expect.element(screen.getByText("Options", { exact: true })).toBeVisible();
+  });
   it("C4 creates, edits model and options, renames, toggles default and deletes through settings commands", async () => {
     setup();
     await using screen = await render(
@@ -215,7 +266,7 @@ describe("workflow preset settings interactions", () => {
       .element(reopened.getByRole("switch", { name: "Workflow worker default: Writer" }))
       .toBeChecked();
     await userEvent.click(reopened.getByRole("button", { name: "Delete Writer" }));
-    await expect.element(reopened.getByText("No agent presets yet.")).toBeVisible();
+    await expect.element(reopened.getByText(/No agent presets yet./)).toBeVisible();
     expect(decodeSettings(JSON.parse(state.disk)).workflowPresets).toEqual({
       presets: [],
       defaultPresetId: null,

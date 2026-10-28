@@ -207,7 +207,7 @@ function expectNoScript(root: HTMLElement, marker: string) {
   expect(root.textContent).not.toMatch(/show (full )?script/i);
 }
 
-it("keeps a 150-node canvas and card height stable during checks and scrolling", async () => {
+it("grows a card only by its checker rows and keeps the canvas stable while scrolling", async () => {
   const seed = retryGraph();
   const node = seed.waves[0]![0]!;
   const checker = {
@@ -257,10 +257,13 @@ it("keeps a 150-node canvas and card height stable during checks and scrolling",
       onOpenThread={() => {}}
     />,
   );
+  // Eight checker attempts show as two rows (28px each) and scroll inside them; the scroll area
+  // itself stays at its maximum height.
+  const checkedHeight = cardHeight + 2 * 28;
   expect(element.getBoundingClientRect().height).toBe(height);
   expect(
     [...element.querySelectorAll("[data-workflow-node]")].every(
-      (card) => card.getBoundingClientRect().height === cardHeight,
+      (card) => card.getBoundingClientRect().height === checkedHeight,
     ),
   ).toBe(true);
   // Only cards in view are drawn in full; the rest are placeholders that keep label and state.
@@ -289,7 +292,7 @@ it("keeps a 150-node canvas and card height stable during checks and scrolling",
   ).toBe(true);
   expect(
     [...element.querySelectorAll("[data-workflow-node]")].every(
-      (card) => card.getBoundingClientRect().height === cardHeight,
+      (card) => card.getBoundingClientRect().height === checkedHeight,
     ),
   ).toBe(true);
 });
@@ -611,9 +614,47 @@ it("lets keyboard users inspect a checker with no child thread", async () => {
   const popup = page.getByText("Audit checker: Check attempt 1: failed", { exact: false });
   await expect.element(popup).toBeVisible();
   expect(popup.element().textContent).toContain(checker.model);
-  await expect.element(page.getByRole("paragraph").filter({ hasText: reason })).toBeVisible();
+  // The failed node's own card also shows its reason; the popup's is the last in the document.
+  await expect
+    .element(page.getByRole("paragraph").filter({ hasText: reason }).last())
+    .toBeVisible();
   await userEvent.keyboard("{Escape}");
   await expect.element(popup).not.toBeInTheDocument();
+});
+
+it("states the reason of a node that failed before it started once", async () => {
+  const reason = "Count source files produced no output to pass on.";
+  const graph: WorkflowGraphView<RuntimeSubagent> = {
+    waves: [
+      [
+        {
+          key: "audit",
+          label: "Audit",
+          wave: 0,
+          dependsOn: [],
+          dependents: [],
+          state: "failed",
+          reason,
+          attempts: 1,
+          member: null,
+          checkers: [],
+        },
+      ],
+    ],
+    counts: { failed: 1 },
+    waitingOn: null,
+    otherMembers: [],
+  };
+  await using _ = await render(
+    <WorkflowWaveCanvas
+      graph={graph}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(page.getByText(reason, { exact: true })).toBeVisible();
+  const card = document.querySelector('[data-workflow-node="audit"]');
+  expect(card?.textContent?.split(reason).length).toBe(2);
 });
 
 // A card cuts a long label and model with an ellipsis, and a dependent node is dimmed. The full
@@ -674,9 +715,10 @@ it("names each card by its full label and its state, and says a dependent node w
   await expect.element(notes).toHaveAccessibleDescription(expect.stringContaining(identity));
   const combine = screen.getByRole("group", { name: "Combine the notes, waiting", exact: true });
   await expect.element(combine).toBeVisible();
-  // The state is a word on the card; the nodes it runs after follow it.
-  expect(combine.element().textContent).toContain(`waiting · after ${LONG_LABEL}`);
-  expect(notes.element().textContent).toContain("passed");
+  // The state is a word on the card; the nodes it runs after sit on their own line.
+  expect(combine.element().textContent).toContain("Waiting");
+  expect(combine.element().textContent).toContain(`after ${LONG_LABEL}`);
+  expect(notes.element().textContent).toContain("Passed");
 });
 
 it("shows a cut label, model and state in full when a card is hovered", async () => {
@@ -716,8 +758,8 @@ it("shows a cut label, model and state in full when a card takes keyboard focus"
   await expect
     .element(page.getByText(`${LONG_LABEL}: passed, ${identity}`, { exact: false }))
     .toBeVisible();
-  // Tabbing on reaches the dependent card, named with its state as well.
-  await userEvent.tab();
+  // Tabbing on reaches the dependent card, named with its state as well. A node that ran once
+  // has no history button between the two cards.
   await userEvent.tab();
   await expect
     .element(screen.getByRole("group", { name: "Combine the notes, waiting", exact: true }))
@@ -945,3 +987,44 @@ it.each(Object.entries(AGREEMENT_ROWS))(
     expect(counted("meta")).toEqual([]);
   },
 );
+
+function failedAgentGroup(fields: { progress: string | null; error: string | null }) {
+  const group = scriptGroup();
+  return {
+    ...group,
+    phases: group.phases.map((phase) => ({
+      ...phase,
+      members: phase.members.map((member) => ({
+        ...member,
+        status: "failed" as const,
+        result: null,
+        ...fields,
+      })),
+    })),
+  };
+}
+
+it("shows a failed agent's error as its subtitle and never its prompt", async () => {
+  const prompt = "Run this command exactly once: ping -n 181 127.0.0.1";
+  await using screen = await render(
+    <WorkflowOpeningBlock
+      opening={{ ...opening, group: failedAgentGroup({ progress: prompt, error: null }) }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(screen.getByRole("button", { name: "Open Read files" })).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Run this command");
+  await screen.rerender(
+    <WorkflowOpeningBlock
+      opening={{
+        ...opening,
+        group: failedAgentGroup({ progress: prompt, error: "The command exited with code 1." }),
+      }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(screen.getByText("The command exited with code 1.")).toBeVisible();
+  expect(screen.container.textContent).not.toContain("Run this command");
+});

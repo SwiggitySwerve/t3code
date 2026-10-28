@@ -28,6 +28,7 @@ import {
   Settings2Icon,
   ShieldCheckIcon,
   SmartphoneIcon,
+  WorkflowIcon,
   WrenchIcon,
   XIcon,
 } from "lucide-react";
@@ -92,7 +93,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/keybindings": KeyboardIcon,
   "/settings/snap-shot": SnapShotIcon,
   "/settings/providers": BotIcon,
-  "/settings/agents": BotIcon,
+  "/settings/agents": WorkflowIcon,
   "/settings/threads": MessagesSquareIcon,
   "/settings/browser": GlobeIcon,
   "/settings/devices": SmartphoneIcon,
@@ -384,6 +385,13 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                         const isActive = activePath === to || activePath.startsWith(`${to}/`);
                         return (
                           <SidebarMenuItem key={to}>
+                            {/* The selected entry is white on near-white in light; a bar shows it. */}
+                            {isActive ? (
+                              <span
+                                aria-hidden
+                                className="pointer-events-none absolute inset-y-1.5 start-0 z-10 w-0.5 rounded-full bg-foreground"
+                              />
+                            ) : null}
                             <SidebarMenuButton
                               isActive={isActive}
                               onClick={() => handleSectionClick(to)}

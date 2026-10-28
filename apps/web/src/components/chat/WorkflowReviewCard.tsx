@@ -10,27 +10,30 @@ import {
 } from "@t3tools/client-runtime/state/workflowReview";
 import { WorkflowIcon } from "lucide-react";
 
+import { useRef } from "react";
+
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
+import { scrollFadeStyle, useScrollEdges } from "./scrollFade";
 
 const STATUS_TONE: Record<WorkflowReviewStatus, string> = {
-  ready: "bg-accent/40 text-foreground",
-  blocked: "bg-warning/12 text-warning",
-  approving: "bg-accent/40 text-muted-foreground",
-  dismissing: "bg-accent/40 text-muted-foreground",
-  approved: "bg-success/12 text-success",
-  dismissed: "bg-muted text-muted-foreground",
-  stale: "bg-warning/12 text-warning",
-  superseded: "bg-muted text-muted-foreground",
-  info: "bg-muted text-muted-foreground",
-  "read-only": "bg-accent/40 text-foreground",
+  ready: "border-warning/30 bg-warning/8 text-warning-foreground",
+  blocked: "border-warning/30 bg-warning/8 text-warning-foreground",
+  approving: "border-border bg-accent/40 text-foreground",
+  dismissing: "border-border bg-accent/40 text-foreground",
+  approved: "border-success/30 bg-success/8 text-success-foreground",
+  dismissed: "border-border bg-muted text-muted-foreground",
+  stale: "border-warning/30 bg-warning/8 text-warning-foreground",
+  superseded: "border-border bg-muted text-muted-foreground",
+  info: "border-border bg-muted text-muted-foreground",
+  "read-only": "border-border bg-accent/40 text-foreground",
 };
 
 const NOTE_TONE = {
   info: "text-muted-foreground",
-  warning: "text-warning",
-  error: "text-destructive",
+  warning: "text-warning-foreground",
+  error: "text-destructive-foreground",
 } as const;
 
 /**
@@ -50,6 +53,15 @@ export function WorkflowReviewCard(props: {
   const title = review.name ?? "Workflow plan";
   const steps = workflowReviewSteps(review);
   const pending = presentation.status === "approving" || presentation.status === "dismissing";
+  const tasksRef = useRef<HTMLOListElement>(null);
+  const taskEdges = useScrollEdges(tasksRef);
+  // A stale plan is out of date, not broken: its note shares the pill's amber warning.
+  const noteTone =
+    presentation.note === null
+      ? null
+      : presentation.status === "stale" && presentation.note.tone === "error"
+        ? "warning"
+        : presentation.note.tone;
   return (
     <section
       aria-label={`Workflow review: ${title}`}
@@ -68,7 +80,7 @@ export function WorkflowReviewCard(props: {
         <span
           role="status"
           className={cn(
-            "shrink-0 rounded-full px-2 py-0.5 text-2xs font-medium",
+            "shrink-0 rounded-full border px-2 py-0.5 text-2xs font-medium",
             STATUS_TONE[presentation.status],
           )}
         >
@@ -78,13 +90,13 @@ export function WorkflowReviewCard(props: {
       {presentation.note ? (
         <p
           role={presentation.note.tone === "error" ? "alert" : undefined}
-          className={cn("text-xs", NOTE_TONE[presentation.note.tone])}
+          className={cn("text-xs", NOTE_TONE[noteTone ?? presentation.note.tone])}
         >
           {presentation.note.text}
         </p>
       ) : null}
       {review.blockers.length > 0 ? (
-        <ul aria-label="Blockers" className="m-0 list-disc pl-5 text-xs text-warning">
+        <ul aria-label="Blockers" className="m-0 list-disc pl-5 text-xs text-warning-foreground">
           {review.blockers.map((blocker) => (
             <li key={blocker} className="break-words">
               {blocker}
@@ -100,11 +112,19 @@ export function WorkflowReviewCard(props: {
           {summary.fanOutReasons.length > 0 ? (
             <p>One agent may do this for less: {summary.fanOutReasons.join(" ")}</p>
           ) : null}
-          {summary.writeConflicts ? <p className="text-warning">{summary.writeConflicts}</p> : null}
+          {summary.writeConflicts ? (
+            <p className="text-warning-foreground">{summary.writeConflicts}</p>
+          ) : null}
         </div>
       ) : null}
       {steps.length > 0 ? (
         <ol
+          ref={tasksRef}
+          style={scrollFadeStyle({
+            top: taskEdges.top === true,
+            right: false,
+            bottom: taskEdges.bottom,
+          })}
           aria-label="Tasks"
           // A long graph scrolls inside the card, so the decision buttons stay near the plan.
           tabIndex={0}
@@ -112,7 +132,7 @@ export function WorkflowReviewCard(props: {
         >
           {steps.map(({ step, nodes }) => (
             <li key={step} aria-label={`Step ${step}`}>
-              <p className="px-2 pb-0.5 text-2xs font-medium text-muted-foreground">Step {step}</p>
+              <p className="px-2 pb-0.5 text-xs font-medium text-muted-foreground">Step {step}</p>
               <ul className="m-0 list-none p-0">
                 {nodes.map((node) => (
                   <ReviewNodeRow key={node.id} node={node} providers={props.providers} />
@@ -132,7 +152,9 @@ export function WorkflowReviewCard(props: {
           {presentation.approve.visible ? (
             <Button
               type="button"
-              size="xs"
+              size="sm"
+              // Busy, the filled button would fade to white on pale blue; outlined it stays legible.
+              variant={presentation.status === "approving" ? "outline" : "default"}
               disabled={!presentation.approve.enabled}
               onClick={props.onApprove}
             >
@@ -143,7 +165,7 @@ export function WorkflowReviewCard(props: {
           {presentation.dismiss.visible ? (
             <Button
               type="button"
-              size="xs"
+              size="sm"
               variant="outline"
               disabled={!presentation.dismiss.enabled}
               onClick={props.onDismiss}
@@ -158,6 +180,17 @@ export function WorkflowReviewCard(props: {
   );
 }
 
+/** The parts of a "who runs it" line, each keyed by where it starts in the line. */
+function runParts(runs: string): ReadonlyArray<{ text: string; offset: number; last: boolean }> {
+  const texts = runs.split(" \u00b7 ");
+  let offset = 0;
+  return texts.map((text, index) => {
+    const part = { text, offset, last: index === texts.length - 1 };
+    offset += text.length + 3;
+    return part;
+  });
+}
+
 function ReviewNodeRow(props: {
   readonly node: WorkflowReviewNodeView;
   readonly providers: ReadonlyArray<ServerProvider> | undefined;
@@ -169,7 +202,15 @@ function ReviewNodeRow(props: {
       <span className="min-w-0 break-words text-xs font-medium text-foreground">
         {node.subject}
       </span>
-      <span className="min-w-0 break-words text-2xs text-muted-foreground">{lines.runs}</span>
+      <span className="min-w-0 break-words text-2xs text-muted-foreground">
+        {/* A model name never splits across lines; the line breaks only between its parts. */}
+        {runParts(lines.runs).map((part) => (
+          <span key={part.offset} className="whitespace-nowrap">
+            {part.text}
+            {part.last ? "" : " \u00b7"}{" "}
+          </span>
+        ))}
+      </span>
       {lines.after === null ? null : (
         <span className="min-w-0 break-words text-2xs text-muted-foreground">{lines.after}</span>
       )}

@@ -10,6 +10,7 @@ import {
   LineageRowSurface,
   WorkflowBlockSurface,
   WorkflowReviewSurface,
+  SidebarStatusSurface,
   WorkflowCanvasSurface,
   scrollWavesToNode,
 } from "../../../test/workflow-fixtures/surfaces";
@@ -120,6 +121,22 @@ describe.each(["graph", "script"] as const)("lineage row, %s", (kind) => {
   });
 });
 
+// The details panel can be dragged narrow; these frames show the row at that width.
+describe.each(["graph", "script"] as const)("lineage row, narrow panel, %s", (kind) => {
+  const surface = `lineage-row-narrow-${kind}`;
+  it.each(statesOf(surface))("%s", async (variant) => {
+    await captureSurface({
+      surface,
+      state: variant,
+      selector: "[data-workflow-expanded]",
+      frame: "[data-qa-panel]",
+      widthIndependent: true,
+      element: () => <LineageRowSurface kind={kind} variant={variant} narrow />,
+      settle: expandLineage,
+    });
+  });
+});
+
 it("lineage row, graph, running, Stop shown while the row is hovered", async () => {
   await captureSurface({
     surface: "lineage-row-graph",
@@ -170,13 +187,9 @@ describe("workflow review card", () => {
 describe("workflow fixture rows", () => {
   // Fixtures are projected rows run through the functions the timeline uses, so what a frame
   // says is what the app would say.
-  it("shows the failure summary the timeline derives, cut where production cuts it", () => {
-    expect(workflowFixture("graph", "failed").progress).toBe(
-      "Graph failed: 1 node failed, 2 skipped. Count documentation files: The command exited with code 1: docs/ was not found.",
-    );
-    const long = workflowFixture("graph", "long-labels").progress;
-    expect(long).toContain("1 node failed, 1 skipped.");
-    expect(long?.endsWith("...")).toBe(true);
+  it("says a graph's failure on its nodes and in its counts, not in a third sentence", () => {
+    expect(workflowFixture("graph", "failed").progress).toBeNull();
+    expect(workflowFixture("graph", "long-labels").progress).toBeNull();
   });
 
   it("reports what a finished run returned, and nothing for a graph that passed", () => {
@@ -203,14 +216,92 @@ describe("workflow fixture rows", () => {
     expect(workflowFixture("graph", "retrying").heading).toBe("Workflow running");
   });
 
-  it("draws the failure line and keeps the stored script out of the timeline", async () => {
+  it("draws the failure once on the node and keeps the stored script out of the timeline", async () => {
     // The block reads no location, so it renders without the test router.
     await using screen = await render(<WorkflowBlockSurface kind="graph" variant="failed" />, {
       router: false,
     });
-    await expect
-      .element(screen.getByText(/Graph failed: 1 node failed, 2 skipped\./))
-      .toBeVisible();
+    expect(screen.container.textContent).not.toContain("Graph failed:");
+    await expect.element(screen.getByText(/docs\/ was not found/).first()).toBeVisible();
     expect(screen.container.textContent).not.toContain(WORKFLOW_QA_SCRIPT_MARKER);
+  });
+
+  it("keeps a narrow Lineage panel's group counts whole", async () => {
+    await using screen = await render(<LineageRowSurface kind="script" variant="failed" narrow />);
+    await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
+    const panel = screen.container.querySelector<HTMLElement>("[data-qa-panel]")!;
+    const panelRight = panel.getBoundingClientRect().right;
+    // Nothing inside the panel runs past its edge: the group counts are never clipped.
+    for (const el of panel.querySelectorAll<HTMLElement>("li *")) {
+      if (el.children.length === 0 && (el.textContent ?? "").trim() !== "") {
+        expect(el.getBoundingClientRect().right).toBeLessThanOrEqual(panelRight + 0.5);
+      }
+    }
+    // The count itself is drawn, with its unit dropped first.
+    expect(panel.textContent).toContain("2/2");
+    expect(panel.textContent).toContain("2/2 agents");
+    // The run's time stays too: the group name gives way first.
+    expect(panel.textContent).toContain("1m");
+  });
+
+  it("gives queued, waiting and skipped nodes a glyph each, and Waiting an hourglass in the sidebar", async () => {
+    await using canvas = await render(<WorkflowCanvasSurface variant="queued" />, {
+      router: false,
+    });
+    expect(canvas.container.querySelector("svg.lucide-clock")).not.toBeNull();
+    expect(canvas.container.querySelector("svg.lucide-hourglass")).not.toBeNull();
+    await using failed = await render(<WorkflowCanvasSurface variant="failed" />, {
+      router: false,
+    });
+    expect(failed.container.querySelector("svg.lucide-minus")).not.toBeNull();
+    await using waiting = await render(<SidebarStatusSurface state="waiting-idle" />, {
+      router: false,
+    });
+    expect(waiting.container.querySelector("svg.lucide-hourglass")).not.toBeNull();
+    expect(waiting.container.querySelector("svg.lucide-circle-dot-dashed")).toBeNull();
+  });
+
+  it("says what a sidebar badge needs, and draws a queued agent's dot grey", async () => {
+    const labels = {
+      approval: "Needs approval",
+      input: "Needs input",
+      limited: "Usage limit",
+      "turn-ended-workflow-running": "Working",
+    } as const;
+    for (const [state, label] of Object.entries(labels)) {
+      await using screen = await render(
+        <SidebarStatusSurface state={state as keyof typeof labels} />,
+        { router: false },
+      );
+      expect(screen.container.textContent).toContain(label);
+    }
+    await using queued = await render(<WorkflowBlockSurface kind="script" variant="queued" />, {
+      router: false,
+    });
+    expect(queued.container.querySelector(".bg-info")).toBeNull();
+  });
+
+  it("keeps the Approve button legible while approving", async () => {
+    await using pending = await render(<WorkflowReviewSurface state="pending" />, {
+      router: false,
+    });
+    const idle = getComputedStyle(
+      pending.getByRole("button", { name: /^Approve/ }).element(),
+    ).backgroundColor;
+    await using approving = await render(<WorkflowReviewSurface state="approving" />, {
+      router: false,
+    });
+    const button = approving.getByRole("button", { name: /^Approving/ }).element();
+    // Busy it is outlined, not a filled primary button faded to white on pale blue.
+    expect(getComputedStyle(button).backgroundColor).not.toBe(idle);
+  });
+
+  it("names the run's state in the Lineage header, in words", async () => {
+    await using screen = await render(<LineageRowSurface kind="script" variant="failed" />);
+    const header = screen.getByRole("button", { name: /^State audit/ }).first();
+    // The word is drawn, not only read by a screen reader: a screen-reader-only span is 1px wide.
+    const word = header.getByText("Failed", { exact: true });
+    await expect.element(word).toBeVisible();
+    expect(word.element().getBoundingClientRect().width).toBeGreaterThan(12);
   });
 });

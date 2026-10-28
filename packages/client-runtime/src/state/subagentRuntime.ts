@@ -14,7 +14,6 @@ import {
   isProviderNativeSubagentThread,
 } from "@t3tools/contracts";
 import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript";
-import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
 import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
 import { workflowBudget } from "@t3tools/shared/workflowBudget";
@@ -183,8 +182,8 @@ export function workflowProgressText(row: {
       const outcome = row.workflow?.nodeOutcomes?.[node.key];
       return outcome === undefined ? [] : [{ ...outcome, label: node.label }];
     });
-    if (recorded.some((node) => node.status === "failed"))
-      return workflowGraphFailureSummary(recorded);
+    // The header counts and the failed node already say this; the text would say it a third time.
+    if (recorded.some((node) => node.status === "failed")) return null;
   }
   const raw = row.result.startsWith(prefix) ? row.result.slice(prefix.length) : row.result;
   let record: unknown;
@@ -232,9 +231,7 @@ export function workflowProgressText(row: {
     });
   }
   if (record.ok && nodes.every((node) => node.status === "passed")) return null;
-  return record.ok === false && nodes.some((node) => node.status === "failed")
-    ? workflowGraphFailureSummary(nodes)
-    : row.result;
+  return record.ok === false && nodes.some((node) => node.status === "failed") ? null : row.result;
 }
 
 export interface SubagentWorkflowGroup {

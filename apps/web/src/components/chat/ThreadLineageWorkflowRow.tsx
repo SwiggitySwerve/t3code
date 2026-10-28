@@ -10,6 +10,7 @@ import { AgentElapsed } from "./AgentElapsed";
 import { SubagentTooltipContent } from "./SubagentTooltipContent";
 import { ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { ThreadRelationshipIcon } from "./ThreadRelationshipIcon";
+import { workflowMemberStatusText } from "./workflowStatusText";
 import { cn } from "../../lib/utils";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { CollapsibleSectionHeader, SectionHeaderStatus } from "../ui/collapsible-section-header";
@@ -19,6 +20,28 @@ import {
   THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS,
   THREAD_DETAILS_PANEL_SPLIT_SEPARATOR_CLASS,
 } from "./threadDetailsPanelStyles";
+
+/**
+ * What the Lineage header of a workflow shows at its right: how the run stands in words, and how
+ * long it has run. Stop takes its place while the row is hovered.
+ */
+export function WorkflowLineageStatus(props: {
+  readonly workflow: RuntimeSubagent;
+  readonly className?: string | undefined;
+}) {
+  const status = workflowMemberStatusText(props.workflow.status);
+  return (
+    <span
+      className={cn(
+        "flex shrink-0 items-baseline gap-1.5 text-2xs font-normal tabular-nums text-muted-foreground",
+        props.className,
+      )}
+    >
+      <span className={cn("font-medium", status.className)}>{status.label}</span>
+      <AgentElapsed agent={props.workflow} compact />
+    </span>
+  );
+}
 
 function phaseElapsed(phase: SubagentWorkflowGroup["phases"][number]) {
   const instants = (key: "startedAt" | "completedAt") =>
@@ -66,6 +89,7 @@ function WorkflowMemberRow({
 }) {
   const threadId = member.childThreadId;
   const canOpen = threadId !== null && isThreadAvailable(threadId);
+  const statusText = workflowMemberStatusText(member.status);
   return (
     <li>
       <Tooltip>
@@ -74,6 +98,7 @@ function WorkflowMemberRow({
           render={
             <ThreadDetailsControl
               part="row"
+              multiline
               aria-label={`Open ${member.title} chat`}
               disabled={!canOpen}
               onClick={() => canOpen && onOpen(threadId)}
@@ -81,13 +106,18 @@ function WorkflowMemberRow({
           }
         >
           <ThreadRelationshipIcon driver={driver} provider={provider} status={member.status} />
-          <span className="min-w-0 flex-1 truncate">{member.title}</span>
-          <span className="sr-only">{member.status}</span>
-          {member.startedAt ? (
-            <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-              <AgentElapsed agent={member} />
-            </span>
-          ) : null}
+          <span className="line-clamp-2 min-w-0 flex-1 whitespace-normal [overflow-wrap:anywhere]">
+            {member.title}
+          </span>
+          <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
+            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
+            {member.startedAt ? (
+              <>
+                {" "}
+                <AgentElapsed agent={member} />
+              </>
+            ) : null}
+          </span>
         </TooltipTrigger>
         <ThreadHoverCardPopup side="left">
           <SubagentTooltipContent
@@ -160,7 +190,7 @@ export function ThreadLineageWorkflowRow({
           driver: member.driver ?? driver,
         };
   return (
-    <li className="group" data-workflow-expanded={expanded ? "" : undefined}>
+    <li className="group @container" data-workflow-expanded={expanded ? "" : undefined}>
       <div className={cn("relative", THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS)}>
         {header}
         {onStop ? (
@@ -226,8 +256,8 @@ export function ThreadLineageWorkflowRow({
                         <SectionHeaderStatus>Failed</SectionHeaderStatus>
                       ) : null}
                       <span className="shrink-0 text-2xs font-normal tabular-nums">
-                        {phase.settledCount}/{phase.members.length}{" "}
-                        {phase.members.length === 1 ? "agent" : "agents"}
+                        {phase.settledCount}/{phase.members.length}
+                        {phase.members.length === 1 ? " agent" : " agents"}
                       </span>
                       <span className="shrink-0 text-2xs font-normal tabular-nums empty:hidden">
                         <AgentElapsed agent={phaseElapsed(phase)} />
@@ -235,7 +265,16 @@ export function ThreadLineageWorkflowRow({
                     </>
                   }
                 >
-                  {phase.title}
+                  <Tooltip>
+                    <TooltipTrigger
+                      render={
+                        <span className="block max-w-[34cqw] truncate @max-[18rem]:max-w-[24cqw]" />
+                      }
+                    >
+                      {phase.title}
+                    </TooltipTrigger>
+                    <TooltipPopup side="left">{phase.title}</TooltipPopup>
+                  </Tooltip>
                 </CollapsibleSectionHeader>
                 {open ? (
                   <ul className="m-0 list-none p-0">

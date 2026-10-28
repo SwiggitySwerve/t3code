@@ -2,7 +2,8 @@ import {
   CircleAlertIcon,
   CircleCheckIcon,
   CircleDashedIcon,
-  CircleDotDashedIcon,
+  ClockIcon,
+  HourglassIcon,
   MessageCircleQuestionIcon,
   ShieldQuestionIcon,
   UserRoundIcon,
@@ -18,6 +19,7 @@ export interface SidebarTopStatus {
   readonly label: string;
   readonly icon:
     | "working"
+    | "queued"
     | "waiting"
     | "approval"
     | "input"
@@ -41,28 +43,33 @@ export function sidebarThreadTopStatus(input: {
       return {
         label: input.goalActive ? "Goal" : "Working",
         icon: "working",
-        className: "text-info",
+        className: "text-info-foreground",
       };
+    case "queued":
+      return { label: "Queued", icon: "queued", className: "text-muted-foreground" };
+    case "background":
+      // The turn ended but a workflow or other background work keeps running.
+      return { label: "Working", icon: "working", className: "text-info-foreground" };
     case "waiting":
       return { label: "Waiting", icon: "waiting", className: "text-muted-foreground" };
     case "approval":
-      return { label: "Approval", icon: "approval", className: "text-warning-foreground" };
+      return { label: "Needs approval", icon: "approval", className: "text-warning-foreground" };
     case "input":
       return {
-        label: "Input",
+        label: "Needs input",
         icon: "input",
         className: "text-indigo-600 dark:text-indigo-300",
       };
     case "request":
       return { label: "Request", icon: "request", className: "text-guest-foreground" };
     case "limited":
-      return { label: "Limited", icon: "failed", className: "text-warning" };
+      return { label: "Usage limit", icon: "failed", className: "text-warning-foreground" };
     case "failed":
-      return { label: "Failed", icon: "failed", className: "text-error" };
+      return { label: "Failed", icon: "failed", className: "text-error-foreground" };
     case "woke":
-      return { label: "Woke", icon: "woke", className: "text-warning" };
+      return { label: "Woke", icon: "woke", className: "text-warning-foreground" };
     case "done":
-      return { label: "Done", icon: "done", className: "text-success" };
+      return { label: "Done", icon: "done", className: "text-success-foreground" };
     case null:
       return null;
   }
@@ -97,8 +104,10 @@ export function SidebarTopStatusBadge(props: {
     <span className={`inline-flex items-center gap-1 font-medium ${topStatus.className}`}>
       {topStatus.icon === "working" ? (
         <CircleDashedIcon aria-hidden className="size-4 shrink-0" />
+      ) : topStatus.icon === "queued" ? (
+        <ClockIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "waiting" ? (
-        <CircleDotDashedIcon aria-hidden className="size-4 shrink-0" />
+        <HourglassIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "input" ? (
         <MessageCircleQuestionIcon aria-hidden className="size-4 shrink-0" />
       ) : topStatus.icon === "request" ? (

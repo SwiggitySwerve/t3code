@@ -4,17 +4,15 @@
  * only the surrounding chrome (the column, the panel card, the sidebar row) is drawn here.
  * Tests mount these inside `captureSurface`.
  */
-import { AgentElapsed } from "../../src/components/chat/AgentElapsed";
+import { cn } from "../../src/lib/utils";
 import { ThreadDetailsControl } from "../../src/components/chat/ThreadDetailsControl";
 import {
   ThreadLineageWorkflowRow,
+  WorkflowLineageStatus,
   workflowLineageLabel,
 } from "../../src/components/chat/ThreadLineageWorkflowRow";
 import { ThreadLineageRowList } from "../../src/components/chat/ThreadRelationshipsControl";
-import {
-  ThreadRelationshipIcon,
-  threadRelationshipStatusLabel,
-} from "../../src/components/chat/ThreadRelationshipIcon";
+import { ThreadRelationshipIcon } from "../../src/components/chat/ThreadRelationshipIcon";
 import { WorkflowOpeningBlock } from "../../src/components/chat/WorkflowOpeningBlock";
 import { WorkflowReviewCard } from "../../src/components/chat/WorkflowReviewCard";
 import { WorkflowWaveCanvas } from "../../src/components/chat/WorkflowWaveCanvas";
@@ -101,10 +99,11 @@ export function WorkflowCanvasSurface(props: { readonly variant: WorkflowQaVaria
 export function LineageRowSurface(props: {
   readonly kind: WorkflowQaKind;
   readonly variant: WorkflowQaVariant;
+  /** A narrow right panel, as at the smallest width the details panel is dragged to. */
+  readonly narrow?: boolean;
 }) {
   const { group, running } = workflowFixture(props.kind, props.variant);
   const { workflow } = group;
-  const failed = workflow.status === "failed";
   // Mirrors the header ThreadRelationshipsControl passes to the row.
   const header = (
     <ThreadDetailsControl size="sm" variant="ghost" part="primary">
@@ -114,17 +113,23 @@ export function LineageRowSurface(props: {
           {workflowLineageLabel(workflow)}
         </span>
       </span>
-      {failed ? null : (
-        <span className="min-w-6 shrink-0 text-end text-2xs font-normal tabular-nums text-muted-foreground">
-          <AgentElapsed agent={workflow} compact />
-        </span>
-      )}
-      <span className="sr-only">{threadRelationshipStatusLabel(workflow.status)}</span>
+      <WorkflowLineageStatus
+        workflow={workflow}
+        // Stop takes the status's place while the row is hovered, focused or on a touch screen.
+        className={
+          running
+            ? "group-hover:opacity-0 group-focus-within:opacity-0 pointer-coarse:opacity-0 [@media(hover:none)]:opacity-0"
+            : undefined
+        }
+      />
     </ThreadDetailsControl>
   );
   return (
     <div
-      className="w-full max-w-80 rounded-xl border border-border bg-popover p-1.5 text-popover-foreground"
+      className={cn(
+        "w-full rounded-xl border border-border bg-popover p-1.5 text-popover-foreground",
+        props.narrow === true ? "max-w-60" : "max-w-80",
+      )}
       data-qa-panel
     >
       <p className="px-2.5 pb-1 text-2xs font-medium text-muted-foreground">Lineage</p>

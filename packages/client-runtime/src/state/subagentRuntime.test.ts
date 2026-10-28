@@ -595,10 +595,8 @@ describe("workflow progress text", () => {
     workflow: { plan, phases: [], agents: [] },
   };
 
-  it("summarizes old graph errors with labels, reasons and skipped context", () => {
-    expect(workflowProgressText(row)).toBe(
-      "Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable",
-    );
+  it("says nothing for a failed graph, whose counts and failed node already say it", () => {
+    expect(workflowProgressText(row)).toBeNull();
     expect(
       workflowProgressText({
         ...row,
@@ -607,7 +605,7 @@ describe("workflow progress text", () => {
           nodeOutcomes: { build: { status: "failed", reason: "Recorded reason" } },
         },
       }),
-    ).toContain("Build API: Recorded reason");
+    ).toBeNull();
     expect(
       workflowProgressText({
         ...row,
@@ -620,7 +618,7 @@ describe("workflow progress text", () => {
           },
         },
       }),
-    ).toBe("Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable");
+    ).toBeNull();
   });
 
   it("preserves unknown errors and script results and hides only graph success records", () => {
@@ -692,7 +690,7 @@ describe("workflow progress text", () => {
           },
         },
       }),
-    ).toBe("Graph failed: 1 node failed, 1 skipped. Build API: Provider unavailable");
+    ).toBeNull();
   });
 });
 
