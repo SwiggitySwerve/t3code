@@ -7,6 +7,7 @@ import type {
   OrchestrationV2TurnItem,
   OrchestrationV2WorkflowNodeOutcome,
   OrchestrationV2WorkflowPlan,
+  OrchestrationV2WorkflowPhase,
 } from "@t3tools/contracts";
 import {
   isOrchestrationV2ActiveWorkflowMember,
@@ -39,6 +40,8 @@ export {
   deriveWorkflowProgress,
   workflowCountsText,
   workflowSettledText,
+  workflowSettledFraction,
+  workflowPhaseStatus,
   type WorkflowPhaseProgress,
   type WorkflowProgressCounts,
   type WorkflowTaskProgress,
@@ -69,10 +72,7 @@ export interface SubagentActivityEntry {
   readonly summary: string;
 }
 
-export interface SubagentWorkflowPhase {
-  readonly index: number;
-  readonly title: string;
-}
+export type SubagentWorkflowPhase = OrchestrationV2WorkflowPhase;
 
 export interface SubagentRunHandles {
   readonly runId?: string | undefined;
@@ -251,9 +251,8 @@ export interface SubagentWorkflowGroup {
   readonly phases: ReadonlyArray<{
     readonly index: number;
     readonly title: string;
+    readonly progress?: OrchestrationV2WorkflowPhase["progress"];
     readonly members: ReadonlyArray<RuntimeSubagent>;
-    readonly state: "pending" | "running" | "done";
-    readonly settledCount: number;
   }>;
   readonly unphasedMembers: ReadonlyArray<RuntimeSubagent>;
   /** Node by node, for a workflow started from a reviewed graph; null for scripts. */
@@ -432,22 +431,11 @@ export function deriveWorkflowGroups(
       const phaseMembers = workflowMembers
         .filter((member) => member.phaseIndex === phase.index)
         .sort((a, b) => (a.agentIndex ?? 0) - (b.agentIndex ?? 0));
-      const hasActiveMember = phaseMembers.some(
-        // Idle members count as active for phase-liveness: a resumable Codex
-        // member has not finished the phase.
-        (member) => isActiveSubagentStatus(member.status) || member.status === "idle",
-      );
-      const settledCount = phaseMembers.filter((member) =>
-        isTerminalSubagentStatus(member.status),
-      ).length;
-      const state: "pending" | "running" | "done" =
-        phaseMembers.length === 0 ? "pending" : hasActiveMember ? "running" : "done";
       return {
         index: phase.index,
         title: phase.title,
+        progress: workflow.phases.find((declared) => declared.index === phase.index)?.progress,
         members: phaseMembers,
-        state,
-        settledCount,
       };
     });
 

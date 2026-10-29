@@ -783,6 +783,12 @@ export type OrchestrationV2ExecutionNode = typeof OrchestrationV2ExecutionNode.T
 export const OrchestrationV2WorkflowPhase = Schema.Struct({
   index: NonNegativeInt,
   title: TrimmedNonEmptyString,
+  progress: Schema.optional(
+    Schema.Struct({
+      total: NonNegativeInt,
+      state: Schema.Literals(["planned", "running", "completed", "failed"]),
+    }),
+  ),
 });
 export type OrchestrationV2WorkflowPhase = typeof OrchestrationV2WorkflowPhase.Type;
 
@@ -836,6 +842,8 @@ export type OrchestrationV2WorkflowNodeOutcome = typeof OrchestrationV2WorkflowN
 
 /** Nested timestamps use epoch milliseconds; only top-level DateTimeUtc fields are remapped for JSON. */
 export const OrchestrationV2WorkflowAgent = Schema.Struct({
+  /** Content-based logical call identity, independent of replay order and retry attempt. */
+  requestKey: Schema.optional(TrimmedNonEmptyString),
   /** The graph node this agent runs, for workflows started from a reviewed graph. */
   graphNodeKey: Schema.optional(TrimmedNonEmptyString),
   /** The worker and attempt judged by this member, independent of display labels. */
@@ -1014,6 +1022,8 @@ export const OrchestrationV2WorkflowPatch = Schema.Struct({
   kind: Schema.Literal("patch"),
   name: Schema.optional(TrimmedNonEmptyString),
   phases: Schema.optional(Schema.Array(OrchestrationV2WorkflowPhase)),
+  /** Absolute phase entries replaced by index; legacy `phases` still replaces the whole list. */
+  phaseUpdates: Schema.optional(Schema.Array(OrchestrationV2WorkflowPhase)),
   plan: Schema.optional(OrchestrationV2WorkflowPlan),
   agents: Schema.optional(Schema.Array(OrchestrationV2WorkflowAgent)),
   nodeOutcomes: Schema.optional(

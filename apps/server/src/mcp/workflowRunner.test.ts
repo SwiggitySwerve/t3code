@@ -3,6 +3,11 @@ import { describe, expect, it } from "@effect/vitest";
 import * as NodeFS from "node:fs";
 import { mergeWorkflowPatch } from "@t3tools/shared/workflowUpdate";
 import {
+  projectedSubagentsToRuntime,
+  deriveWorkflowGroups,
+  deriveWorkflowProgress,
+} from "../../../../packages/client-runtime/src/state/subagentRuntime.ts";
+import {
   NodeId,
   type OrchestrationV2SubagentWorkflow,
   type OrchestrationV2WorkflowPlan,
@@ -28,16 +33,42 @@ import {
   type WorkflowAgentOutcome,
 } from "./workflowRunner.ts";
 import { aggregateWorkflowUsage } from "./workflowUsage.ts";
+import { agentRequestKey } from "./workflowAgentAttempts.ts";
 
 const threadId = ThreadId.make("thread:workflow-runner");
 const workflowId = NodeId.make("workflow:runner-test");
 /** Where the fake host keeps a checker's file: an absolute path, as the real one is. */
 const CHECKER_FOLDER = "/server-state/workflow-results";
 
+function clientCounts(workflow: OrchestrationV2SubagentWorkflow) {
+  const instant = DateTime.makeUnsafe(0);
+  const runtime = projectedSubagentsToRuntime([
+    {
+      id: workflowId,
+      title: "Identity replay",
+      prompt: "Identity replay",
+      model: null,
+      status: "running",
+      result: null,
+      startedAt: instant,
+      completedAt: null,
+      updatedAt: instant,
+      workflow,
+    },
+  ]);
+  return deriveWorkflowProgress(deriveWorkflowGroups(runtime)[0]!).phases[0]!.counts;
+}
+
 interface HarnessOptions {
+  readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
+  readonly beforeAwait?: (taskId: NodeId) => Effect.Effect<void>;
   readonly onAwaitRelease?: () => Effect.Effect<unknown>;
   readonly finalization?: Effect.Effect<void>;
-  readonly taskId?: (spawned: number) => string;
+  readonly taskId?: (spawned: number, prompt: string) => string;
+  readonly taskIds?: Map<string, NodeId>;
+  readonly agentTaskId?: WorkflowRunnerDeps["agentTaskId"];
+  readonly failSpawn?: boolean;
+  readonly fileHash?: string;
   readonly onWorkflowUpdate?: (workflow: OrchestrationV2SubagentWorkflow) => Effect.Effect<unknown>;
   readonly usage?: (spawned: number) => ReturnType<typeof aggregateWorkflowUsage>;
   readonly timing?: (spawned: number) => WorkflowAgentOutcome["timing"];
@@ -87,6 +118,7 @@ interface HarnessOptions {
 /** A runner whose agents finish as told, recording what it dispatches and stops. */
 const makeHarness = (options: HarnessOptions = {}) =>
   Effect.gen(function* () {
+    const taskIds = options.taskIds ?? new Map<string, NodeId>();
     // Like the event store: every subscription replays the log, then follows it, and honors its
     // event-type filter, so a runner listening for the wrong type misses the event as in production.
     const log: Array<OrchestrationV2StoredEvent> = [];
@@ -161,7 +193,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
           const workflow =
             "kind" in command.workflow
               ? mergeWorkflowPatch(
-                  workflowUpdates.at(-1) ?? { phases: [], agents: [] },
+                  workflowUpdates.at(-1) ?? options.previousWorkflow ?? { phases: [], agents: [] },
                   command.workflow,
                 )
               : command.workflow;
@@ -245,10 +277,20 @@ const makeHarness = (options: HarnessOptions = {}) =>
         Effect.gen(function* () {
           spawned += 1;
           keys.set(item.task, requestKey);
+          if (options.failSpawn)
+            return yield* Effect.fail({
+              code: "orchestration_error",
+              message: "Synthetic reattach failure",
+            } as never);
           if (item.task.includes("independent checker"))
             readableByChecker.push(new Map(checkerFiles));
           yield* Deferred.succeed(firstSpawn, undefined);
-          const taskId = NodeId.make(options.taskId?.(spawned) ?? `node:agent-${spawned}`);
+          const taskId = NodeId.make(
+            taskIds.get(requestKey) ??
+              options.taskId?.(spawned, item.task) ??
+              `node:agent-${spawned}`,
+          );
+          taskIds.set(requestKey, taskId);
           const finish = options.finish?.(spawned) ?? "completed";
           if (finish !== "hang") yield* update(taskId, finish);
           return {
@@ -261,6 +303,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
         }),
       awaitAgent: (_workflow, taskId, onUpdate) =>
         Effect.gen(function* () {
+          if (options.beforeAwait !== undefined) yield* options.beforeAwait(taskId);
           const queue = yield* Queue.unbounded<void>();
           taskUpdates.set(taskId, queue);
           const read = (): WorkflowAgentOutcome => ({
@@ -308,6 +351,12 @@ const makeHarness = (options: HarnessOptions = {}) =>
           ),
         ),
       agentStarted: () => Effect.succeed(false),
+      agentTaskId:
+        options.agentTaskId ?? ((_workflow, key) => taskIds.get(key) ?? NodeId.make(`task:${key}`)),
+      agentRequestKey: (_workflow, id) => {
+        const key = [...taskIds].find(([, taskId]) => taskId === id)?.[0];
+        return key === undefined ? undefined : agentRequestKey(key);
+      },
       canRunCommands: () => Effect.succeed(options.runCommandCheck !== undefined),
       runCommandCheck: options.runCommandCheck ?? (() => Effect.die("unused")),
       readWorkspaceFile: (_workflow, path) => {
@@ -315,7 +364,12 @@ const makeHarness = (options: HarnessOptions = {}) =>
         return Effect.succeed(
           text === undefined
             ? ({ status: "missing" } as const)
-            : ({ status: "found", sha256: "0".repeat(64), sizeBytes: text.length, text } as const),
+            : ({
+                status: "found",
+                sha256: options.fileHash ?? "0".repeat(64),
+                sizeBytes: text.length,
+                text,
+              } as const),
         );
       },
       writeCheckerResult: (_workflow, taskId, text) =>
@@ -346,6 +400,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
     };
     return {
       runner: makeWorkflowRunner(deps),
+      taskIds,
       completed,
       spawned: () => spawned,
       stops,
@@ -423,6 +478,558 @@ const twoNodePlan: OrchestrationV2WorkflowPlan = {
 };
 
 describe("workflow runner", () => {
+  it.effect.each([
+    [
+      'phase("Audit"); await agent("old"); return progress.phase("Audit", { total: 0 }, () => {});',
+      "must start before its agents",
+    ],
+    [
+      'return progress.phase("Audit", { total: 1 }, () => agent("unbound", { phase: "Audit" }));',
+      "Use bar.agent()",
+    ],
+    [
+      'progress.phase("Audit", { total: 1 }, (bar) => bar.agent("forgotten")); return 42;',
+      "Await every progress.phase()",
+    ],
+  ] as const)("refuses ambiguous or unawaited phase work: %s", ([source, message]) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      yield* launch(h.runner, source);
+      expect(yield* Deferred.await(h.completed)).toContain(message);
+      expect(h.workflowUpdates.at(-1)?.phases[0]?.progress?.state).toBe(
+        message === "must start before its agents" ? undefined : "failed",
+      );
+    }),
+  );
+  it.effect.each([1, 12])(
+    "keeps planned totals through retries and sizes only the next phase to %i",
+    (nextTotal) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness({ finish: (n) => (n === 1 ? "failed" : "completed") });
+        yield* launch(
+          h.runner,
+          `
+        export const meta = { phases: [{ title: "Audit", total: 10 }, { title: "Follow up", total: 8 }, { title: "Later", total: 7 }] };
+        const answers = await progress.phase("Audit", { total: 10 }, async (bar) => [await bar.agent("audit")]);
+        return progress.phase("Follow up", { total: answers.length * ${nextTotal} }, async (bar) => bar.agent("follow up"));
+      `,
+        );
+        expect(yield* Deferred.await(h.completed)).toContain("ok");
+        expect(h.spawned()).toBe(3);
+        const workflow = h.workflowUpdates.at(-1)!;
+        expect(workflow.phases.map((phase) => phase.progress)).toEqual([
+          { total: 10, state: "completed" },
+          { total: nextTotal, state: "completed" },
+          { total: 7, state: "planned" },
+        ]);
+        expect(workflow.agents).toHaveLength(2);
+        expect(workflow.agents[0]).toMatchObject({ phaseIndex: 0, attempt: 1, state: "completed" });
+        expect(
+          h.workflowUpdates.every(
+            (update) =>
+              update.phases.find((phase) => phase.title === "Audit")?.progress?.total === 10,
+          ),
+        ).toBe(true);
+      }),
+  );
+
+  it.effect("records failed members even when a phase callback resolves", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ finish: () => "failed" });
+      yield* launch(
+        h.runner,
+        'return progress.phase("Audit", { total: 1 }, (bar) => bar.agent("audit"))',
+      );
+      yield* Deferred.await(h.completed);
+      expect(h.workflowUpdates.at(-1)).toMatchObject({
+        phases: [{ progress: { total: 1, state: "completed" } }],
+        agents: [{ state: "failed", phaseIndex: 0 }],
+      });
+      expect(h.spawned()).toBe(3);
+    }),
+  );
+
+  it.effect.each([0, 1])("rejects work beyond a fixed total of %i", (total) =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness();
+      yield* launch(
+        h.runner,
+        `return progress.phase("Audit", { total: ${total} }, async (bar) => {
+        for (let i = 0; i <= ${total}; i++) await bar.agent("audit " + i);
+      })`,
+      );
+      expect(yield* Deferred.await(h.completed)).toContain("capacity exceeded");
+      expect(h.spawned()).toBe(total);
+      expect(h.workflowUpdates.at(-1)?.phases[0]?.progress).toEqual({ total, state: "failed" });
+    }),
+  );
+
+  it.effect("keeps judgment agents outside their worker's progress capacity", () =>
+    Effect.gen(function* () {
+      const h = yield* makeHarness({ judgment: () => true });
+      yield* launch(
+        h.runner,
+        'return progress.phase("Audit", { total: 1 }, (bar) => bar.agent("audit", { verify: { type: "judgment", rubric: ["Correct"] } }))',
+      );
+      yield* Deferred.await(h.completed);
+      expect(h.spawned()).toBe(2);
+      expect(
+        h.workflowUpdates.at(-1)?.agents.filter((agent) => agent.judgmentFor === undefined),
+      ).toHaveLength(1);
+      expect(h.workflowUpdates.at(-1)?.phases[0]?.progress).toEqual({
+        total: 1,
+        state: "completed",
+      });
+    }),
+  );
+
+  it.effect("preserves entered phase totals while metadata and earlier work replay", () =>
+    Effect.gen(function* () {
+      const previousWorkflow: OrchestrationV2SubagentWorkflow = {
+        phases: [
+          { index: 0, title: "Audit", progress: { total: 10, state: "completed" } },
+          { index: 1, title: "Follow up", progress: { total: 2, state: "running" } },
+        ],
+        agents: [],
+      };
+      const blocked = yield* Deferred.make<void>();
+      const h = yield* makeHarness({
+        previousWorkflow,
+        finish: () => "hang",
+        onWorkflowUpdate: (workflow) =>
+          workflow.agents.some((agent) => agent.state === "running")
+            ? Deferred.succeed(blocked, undefined)
+            : Effect.void,
+      });
+      yield* h.runner.launch({
+        workflowId,
+        threadId,
+        args: null,
+        afterSequence: 0,
+        previousWorkflow,
+        source: `export const meta = { phases: [{ title: "Audit", total: 10 }, { title: "Follow up", total: 10 }] };
+          await progress.phase("Audit", { total: 10 }, bar => bar.agent("audit"));
+          return progress.phase("Follow up", { total: 2 }, bar => bar.agent("follow up"));`,
+      });
+      yield* Deferred.await(blocked);
+      yield* h.runner.detachAll;
+      expect(h.workflowUpdates.length).toBeGreaterThan(0);
+      for (const update of h.workflowUpdates) {
+        expect(update.phases[0]?.progress?.state).not.toBe("planned");
+        expect(update.phases[1]?.progress).toEqual({ total: 2, state: "running" });
+      }
+    }),
+  );
+
+  it.effect.each([false, true])(
+    "preserves logical membership in every crossed replay update (legacy rows: %s)",
+    (legacy) =>
+      Effect.gen(function* () {
+        const source = `return Promise.all([
+        progress.phase("First", { total: 2 }, async bar => { await bar.agent("first gate"); return bar.agent("first work"); }),
+        progress.phase("Second", { total: 2 }, async bar => { await bar.agent("second gate"); return bar.agent("second work"); })
+      ]);`;
+        const taskId = (_spawned: number, prompt: string) => `task:${prompt}`;
+        const first = yield* makeHarness({ taskId });
+        yield* launch(first.runner, source);
+        yield* Deferred.await(first.completed);
+        const previous = first.workflowUpdates.at(-1)!;
+        const previousWorkflow: OrchestrationV2SubagentWorkflow = {
+          ...previous,
+          phases: previous.phases.map((phase) => ({
+            ...phase,
+            progress: { total: 2, state: "running" },
+          })),
+          agents: previous.agents.map((agent) => {
+            const row = { ...agent, state: "running" as const };
+            if (legacy) Reflect.deleteProperty(row, "requestKey");
+            return row;
+          }),
+        };
+        const crossed = yield* Deferred.make<void>();
+        const h = yield* makeHarness({
+          taskId,
+          taskIds: first.taskIds,
+          previousWorkflow,
+          beforeAwait: (id) => (id === "task:first gate" ? Deferred.await(crossed) : Effect.void),
+          onWorkflowUpdate: (workflow) =>
+            workflow.agents.some(
+              (agent) => agent.agentId === "task:second work" && agent.state === "completed",
+            )
+              ? Deferred.succeed(crossed, undefined)
+              : Effect.void,
+        });
+        yield* h.runner.launch({
+          workflowId,
+          threadId,
+          args: null,
+          afterSequence: 0,
+          source,
+          previousWorkflow,
+        });
+        yield* Deferred.await(h.completed);
+        for (const update of h.workflowUpdates) {
+          const ids = update.agents.flatMap((agent) =>
+            agent.agentId === undefined ? [] : [agent.agentId],
+          );
+          expect(new Set(ids).size).toBe(ids.length);
+          for (const phase of update.phases) {
+            expect(update.agents.filter((agent) => agent.phaseIndex === phase.index)).toHaveLength(
+              2,
+            );
+          }
+        }
+        expect(
+          h.workflowUpdates.at(-1)?.agents.map((agent) => [agent.index, agent.agentId]),
+        ).toEqual(previous.agents.map((agent) => [agent.index, agent.agentId]));
+      }),
+  );
+
+  it.effect.each(
+    (["keyed", "latest", "ids", "history"] as const).flatMap((identity) =>
+      [false, true].map((callback) => ({ identity, callback })),
+    ),
+  )(
+    "resumes partial concurrent work with new calls before old calls: %j",
+    ({ identity, callback }) =>
+      Effect.gen(function* () {
+        const calls = `Promise.all([
+        (async () => { await call("A gate"); return call("A followup"); })(),
+        (async () => { await call("B gate"); return call("B followup"); })()
+      ])`;
+        const source = callback
+          ? `return progress.phase("Work", { total: 4 }, async bar => { const call = bar.agent; return ${calls}; });`
+          : `phase("Work"); const call = agent; return ${calls};`;
+        const interrupted = yield* Deferred.make<OrchestrationV2SubagentWorkflow>();
+        const taskId = (_spawned: number, prompt: string) => `task:${prompt}`;
+        const first = yield* makeHarness({
+          taskId,
+          beforeAwait: (id) =>
+            id === "task:B gate" || id === "task:A followup" ? Effect.never : Effect.void,
+          onWorkflowUpdate: (workflow) =>
+            workflow.agents.some(
+              (agent) => agent.agentId === "task:A followup" && agent.state === "running",
+            )
+              ? Deferred.succeed(interrupted, workflow)
+              : Effect.void,
+        });
+        yield* launch(first.runner, source);
+        const previous = yield* Deferred.await(interrupted);
+        yield* first.runner.detachAll;
+        expect(previous.agents.map((agent) => agent.agentId)).toEqual([
+          "task:A gate",
+          "task:B gate",
+          "task:A followup",
+        ]);
+        const previousWorkflow = {
+          ...previous,
+          agents: previous.agents.map((agent) => {
+            const row = { ...agent };
+            if (identity !== "keyed") delete row.requestKey;
+            if (identity === "latest" || identity === "history") delete row.attemptTaskIds;
+            if (identity === "latest" || identity === "ids") delete row.attemptHistory;
+            if (identity === "ids" || identity === "history") delete row.agentId;
+            return row;
+          }),
+        };
+        const crossed = yield* Deferred.make<void>();
+        const second = yield* makeHarness({
+          taskId,
+          taskIds: first.taskIds,
+          previousWorkflow,
+          beforeAwait: (id) =>
+            id === "task:A gate"
+              ? Deferred.await(crossed)
+              : id === "task:B followup"
+                ? Deferred.succeed(crossed, undefined).pipe(Effect.asVoid)
+                : Effect.void,
+        });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          args: null,
+          afterSequence: 0,
+          source,
+          previousWorkflow,
+        });
+        const result = yield* Deferred.await(second.completed);
+        yield* second.runner.detachAll;
+        expect(result).not.toContain("workflow failed");
+        expect(JSON.parse(result)).toEqual(["ok", "ok"]);
+        for (const update of second.workflowUpdates) {
+          const ids = update.agents.flatMap((agent) =>
+            agent.agentId === undefined ? [] : [agent.agentId],
+          );
+          expect(new Set(ids).size).toBe(ids.length);
+          expect(update.agents.map((agent) => agent.index)).toEqual(
+            update.agents.length === 3 ? [0, 1, 2] : [0, 1, 2, 3],
+          );
+          expect(clientCounts(update).observed).toBe(update.agents.length);
+          expect(clientCounts(update).total).toBe(callback ? 4 : null);
+        }
+        expect(
+          second.workflowUpdates.at(-1)?.agents.map((agent) => [agent.index, agent.agentId]),
+        ).toEqual([
+          [0, "task:A gate"],
+          [1, "task:B gate"],
+          [2, "task:A followup"],
+          [3, "task:B followup"],
+        ]);
+      }),
+  );
+
+  it.effect.each(["input", "permission", "attachment"] as const)(
+    "keeps legacy member identity before a replay %s failure",
+    (failure) =>
+      Effect.gen(function* () {
+        const source = `return progress.phase("Pinned", { total: 1 }, bar => bar.agent("audit", {
+          inputs: [{ id: "input", path: "input.txt", sha256: "0".repeat(64) }],
+          verify: { type: "process", argv: ["check"] }
+        }));`;
+        const allowed = () => Effect.succeed({ outcome: "passed" as const, detail: "ok" });
+        const first = yield* makeHarness({ files: { "input.txt": "x" }, runCommandCheck: allowed });
+        yield* launch(first.runner, source);
+        yield* Deferred.await(first.completed);
+        const previous = first.workflowUpdates.at(-1)!;
+        const previousWorkflow = {
+          ...previous,
+          agents: previous.agents.map(({ requestKey: _key, ...agent }) => ({
+            ...agent,
+            label: "Legacy display label",
+            prompt: "Legacy display preview",
+          })),
+        };
+        const second = yield* makeHarness({
+          previousWorkflow,
+          taskIds: first.taskIds,
+          files: { "input.txt": "x" },
+          fileHash: (failure === "input" ? "1" : "0").repeat(64),
+          ...(failure === "permission" ? {} : { runCommandCheck: allowed }),
+          failSpawn: failure === "attachment",
+        });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          source,
+          args: null,
+          afterSequence: 0,
+          previousWorkflow,
+        });
+        yield* Deferred.await(second.completed);
+        expect(second.spawned()).toBe(failure === "attachment" ? 1 : 0);
+        expect(second.workflowUpdates.length).toBeGreaterThan(0);
+        for (const update of second.workflowUpdates) {
+          expect(update.agents.map((agent) => agent.index)).toEqual([previous.agents[0]!.index]);
+          expect(clientCounts(update)).toMatchObject({ observed: 1, total: 1 });
+          expect(clientCounts(update).settled).toBeLessThanOrEqual(1);
+        }
+        expect(clientCounts(second.workflowUpdates.at(-1)!)).toMatchObject({
+          done: 0,
+          failed: 1,
+          settled: 1,
+          observed: 1,
+          total: 1,
+        });
+        expect(second.workflowUpdates.at(-1)!.agents[0]!.result).toContain(
+          failure === "input"
+            ? "changed"
+            : failure === "permission"
+              ? "full-access"
+              : "reattach failure",
+        );
+      }),
+  );
+
+  it.effect.each([1, 2])(
+    "resolves a legacy latest-task-only retry %s before publishing workers or judges",
+    (retry) =>
+      Effect.gen(function* () {
+        const source =
+          'return progress.phase("Judged", { total: 1 }, bar => bar.agent("worker", { verify: { type: "judgment", rubric: ["Correct"] } }));';
+        const finish = (spawned: number) =>
+          spawned <= retry ? ("failed" as const) : ("completed" as const);
+        const first = yield* makeHarness({ finish, judgment: () => true });
+        yield* launch(first.runner, source);
+        yield* Deferred.await(first.completed);
+        const previous = first.workflowUpdates.at(-1)!;
+        const previousWorkflow = {
+          ...previous,
+          agents: previous.agents.map(
+            ({ requestKey: _key, attemptTaskIds: _ids, attemptHistory: _history, ...agent }) =>
+              agent,
+          ),
+        };
+        const second = yield* makeHarness({
+          previousWorkflow,
+          taskIds: first.taskIds,
+          finish,
+          judgment: () => true,
+        });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          source,
+          args: null,
+          afterSequence: 0,
+          previousWorkflow,
+        });
+        yield* Deferred.await(second.completed);
+        expect(second.workflowUpdates.length).toBeGreaterThan(0);
+        for (const update of second.workflowUpdates) {
+          expect(update.agents.map((agent) => agent.index)).toEqual(
+            previous.agents.map((agent) => agent.index),
+          );
+          expect(clientCounts(update)).toMatchObject({ observed: 1, total: 1 });
+          expect(clientCounts(update).settled).toBeLessThanOrEqual(1);
+          expect(update.agents.find((agent) => agent.judgmentFor)?.judgmentFor).toEqual({
+            agentIndex: 0,
+            attempt: retry,
+          });
+        }
+        expect(
+          second.workflowUpdates.at(-1)!.agents.map((agent) => [agent.index, agent.agentId]),
+        ).toEqual(previous.agents.map((agent) => [agent.index, agent.agentId]));
+        expect(clientCounts(second.workflowUpdates.at(-1)!)).toMatchObject({
+          done: 1,
+          failed: 0,
+          settled: 1,
+          observed: 1,
+          total: 1,
+        });
+      }),
+  );
+
+  it.effect.each(["unavailable", "ambiguous", "unmatched"] as const)(
+    "refuses %s legacy identity before side effects or member publication",
+    (identity) =>
+      Effect.gen(function* () {
+        const source =
+          'return progress.phase("Identity", { total: 1 }, bar => bar.agent("worker"));';
+        const first = yield* makeHarness();
+        yield* launch(first.runner, source);
+        yield* Deferred.await(first.completed);
+        const previous = first.workflowUpdates.at(-1)!;
+        const { requestKey: _key, ...legacy } = previous.agents[0]!;
+        const previousWorkflow = {
+          ...previous,
+          agents: identity === "ambiguous" ? [legacy, { ...legacy, index: 1 }] : [legacy],
+        };
+        const second = yield* makeHarness({
+          previousWorkflow,
+          taskIds: identity === "unmatched" ? new Map() : first.taskIds,
+          ...(identity === "unavailable" ? { agentTaskId: () => undefined } : {}),
+        });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          source,
+          args: null,
+          afterSequence: 0,
+          previousWorkflow,
+        });
+        expect(yield* Deferred.await(second.completed)).toContain("workflow agent identity");
+        expect(second.spawned()).toBe(0);
+        expect(second.workflowUpdates.length).toBeGreaterThan(0);
+        for (const update of second.workflowUpdates)
+          expect(update.agents).toEqual(previousWorkflow.agents);
+      }),
+  );
+
+  it.effect.each([false, true])(
+    "releases legacy write reservations with fixed member indices (attachment fails: %s)",
+    (failSpawn) =>
+      Effect.gen(function* () {
+        const source = `return progress.phase("Writes", { total: 2 }, bar => Promise.all([
+          bar.agent("one", { scopes: { write: ["shared.txt"] } }),
+          bar.agent("two", { scopes: { write: ["shared.txt"] } })
+        ]));`;
+        const first = yield* makeHarness();
+        yield* launch(first.runner, source);
+        yield* Deferred.await(first.completed);
+        const previous = first.workflowUpdates.at(-1)!;
+        const previousWorkflow = {
+          ...previous,
+          agents: previous.agents.map(({ requestKey: _key, ...agent }) => agent),
+        };
+        const second = yield* makeHarness({ previousWorkflow, taskIds: first.taskIds, failSpawn });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          source,
+          args: null,
+          afterSequence: 0,
+          previousWorkflow,
+        });
+        yield* Deferred.await(second.completed);
+        expect(second.spawned()).toBe(2);
+        for (const update of second.workflowUpdates) {
+          expect(update.agents.map((agent) => agent.index)).toEqual([0, 1]);
+          expect(clientCounts(update)).toMatchObject({ observed: 2, total: 2 });
+        }
+        expect(clientCounts(second.workflowUpdates.at(-1)!)).toMatchObject({
+          settled: 2,
+          done: failSpawn ? 0 : 2,
+          failed: failSpawn ? 2 : 0,
+        });
+      }),
+  );
+
+  it.effect("reuses a legacy placeholder whose invalid agent never started", () =>
+    Effect.gen(function* () {
+      const source = 'phase("Audit"); return agent("audit", { attemptTimeoutMs: 1 });';
+      const first = yield* makeHarness();
+      yield* launch(first.runner, source);
+      yield* Deferred.await(first.completed);
+      const previous = first.workflowUpdates.at(-1)!;
+      const previousWorkflow = {
+        ...previous,
+        agents: previous.agents.map((agent) => {
+          const row = { ...agent };
+          Reflect.deleteProperty(row, "requestKey");
+          return row;
+        }),
+      };
+      const second = yield* makeHarness({ previousWorkflow, agentTaskId: () => undefined });
+      yield* second.runner.launch({
+        workflowId,
+        threadId,
+        args: null,
+        afterSequence: 0,
+        source,
+        previousWorkflow,
+      });
+      yield* Deferred.await(second.completed);
+      expect(second.spawned()).toBe(0);
+      expect(second.workflowUpdates.at(-1)?.agents).toHaveLength(1);
+    }),
+  );
+
+  it.effect("replays absolute phase state with stable indices and agent request keys", () =>
+    Effect.gen(function* () {
+      const source =
+        'await progress.phase("First", { total: 1 }, (bar) => bar.agent("first")); return progress.phase("Second", { total: 1 }, (bar) => bar.agent("second"));';
+      const first = yield* makeHarness();
+      yield* launch(first.runner, source);
+      yield* Deferred.await(first.completed);
+      const previousWorkflow = first.workflowUpdates.at(-1)!;
+      const second = yield* makeHarness();
+      yield* second.runner.launch({
+        workflowId,
+        threadId,
+        source,
+        args: null,
+        afterSequence: 0,
+        previousWorkflow,
+      });
+      yield* Deferred.await(second.completed);
+      expect(second.workflowUpdates.at(-1)?.phases).toEqual(previousWorkflow.phases);
+      expect(second.workflowUpdates.at(-1)?.agents.map((agent) => agent.phaseIndex)).toEqual([
+        0, 1,
+      ]);
+      expect(second.keys).toEqual(first.keys);
+    }),
+  );
+
   it.effect(
     "stops new starts at zero and after parallel overshoot without charging replay twice",
     () =>
@@ -474,7 +1081,14 @@ describe("workflow runner", () => {
         previousWorkflow: {
           phases: [],
           agents: [
-            { index: 0, label: "Old", state: "completed", agentId: "old-task", totalTokens: 60 },
+            {
+              index: 0,
+              requestKey: "prior-budget-member",
+              label: "Old",
+              state: "completed",
+              agentId: "old-task",
+              totalTokens: 60,
+            },
           ],
         },
       });
@@ -690,12 +1304,19 @@ describe("workflow runner", () => {
     );
     it.effect("fails once every attempt passes its deadline", () =>
       Effect.gen(function* () {
-        const { runner, completed, spawned } = yield* makeHarness({ finish: () => "hang" });
+        const attempts = yield* Queue.unbounded<NodeId>();
+        const { runner, completed, spawned } = yield* makeHarness({
+          finish: () => "hang",
+          beforeAwait: (taskId) => Queue.offer(attempts, taskId).pipe(Effect.asVoid),
+        });
         yield* launch(
           runner,
           'return await agent("x", { attemptTimeoutMs: 60000, stallTimeoutMs: 3600000, report: true })',
         );
-        yield* sweepUntilDone(completed);
+        for (const attempt of [1, 2, 3]) {
+          expect(yield* Queue.take(attempts)).toBe(`node:agent-${attempt}`);
+          yield* TestClock.adjust("90 seconds");
+        }
         const report = JSON.parse(yield* Deferred.await(completed));
         expect(report).toMatchObject({ ok: false, attempts: 3 });
         expect(report.reason).toBe(

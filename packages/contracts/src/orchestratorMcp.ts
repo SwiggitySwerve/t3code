@@ -41,6 +41,7 @@ import {
   OrchestrationV2RunStatus,
   OrchestrationV2TurnItemStatus,
   OrchestrationV2WorkflowNodeOutcome,
+  OrchestrationV2WorkflowPhase,
   OrchestrationV2WorkflowReviewDigest,
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
@@ -360,7 +361,7 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   }),
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), log(...values), budget. agent options: label, phase, model or target, preset (a saved agent preset id), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), progress.phase(title, { total }, callback), log(...values), budget. agent options: label, phase, model or target, preset (a saved agent preset id), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -623,6 +624,7 @@ export const OrchestratorMcpWorkflowResult = Schema.Struct({
   status: Schema.Literals(["running", "completed", "failed", "cancelled", "interrupted"]),
   name: Schema.NullOr(Schema.String),
   phases: Schema.Array(Schema.String),
+  phaseProgress: Schema.optional(Schema.Array(OrchestrationV2WorkflowPhase)),
   agents: Schema.Array(OrchestratorMcpWorkflowAgent),
   progress: Schema.NullOr(Schema.String).annotate({ description: "The script's latest log line." }),
   usage: OrchestratorMcpWorkflowUsage,

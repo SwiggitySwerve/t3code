@@ -16,9 +16,14 @@ export interface WorkflowScriptHost {
   readonly agent: (request: {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
+    readonly phaseIndex?: number;
   }) => Promise<unknown>;
   readonly log: (message: string) => void;
   readonly phase: (title: string) => void;
+  readonly progress?: {
+    readonly start: (title: unknown, total: unknown) => number;
+    readonly close: (index: number, state: "completed" | "failed") => void;
+  };
   readonly meta: (meta: unknown) => void;
   /** `total` is null when the workflow has no token budget. */
   readonly budget: () => { readonly total: number | null; readonly spent: number };
@@ -40,7 +45,7 @@ const META_EXPORT = /^[ \t]*export\s+const\s+meta\s*=/m;
 
 function wrap(source: string, graph = false): string {
   // The wrapper shares the script's first line, so error line numbers match the script.
-  return `(async function (args, agent, parallel, pipeline, phase, log, budget${graph ? ", node" : ""}) {${source.replace(
+  return `(async function (args, agent, parallel, pipeline, phase, log, budget, progress${graph ? ", node" : ""}) {${source.replace(
     META_EXPORT,
     "const meta = globalThis.__t3meta =",
   )}\n})`;
@@ -49,8 +54,8 @@ function wrap(source: string, graph = false): string {
 const PRELUDE = `
 "use strict";
 (() => {
-  const host = { agent: __host_agent, log: __host_log, phase: __host_phase, meta: __host_meta, budget: __host_budget, node: globalThis.__host_node };
-  for (const name of ["__host_agent", "__host_log", "__host_phase", "__host_meta", "__host_budget", "__host_node"]) delete globalThis[name];
+  const host = { agent: __host_agent, log: __host_log, phase: __host_phase, meta: __host_meta, budget: __host_budget, node: globalThis.__host_node, startPhase: __host_startPhase, closePhase: __host_closePhase };
+  for (const name of ["__host_agent", "__host_log", "__host_phase", "__host_meta", "__host_budget", "__host_node", "__host_startPhase", "__host_closePhase"]) delete globalThis[name];
   const unavailable = (name) => () => {
     throw new Error(name + " is unavailable in workflows: runs must be deterministic to resume.");
   };
@@ -74,14 +79,43 @@ const PRELUDE = `
     set(value) { host.meta(JSON.stringify(value) ?? "null"); },
   });
   const message = (error) => (error && error.message) || String(error);
-  const agent = (prompt, options) => {
+  const runAgent = (prompt, options, phaseIndex) => {
     if (typeof prompt !== "string" || prompt.trim().length === 0) {
       return Promise.reject(new Error("agent() needs a non-empty prompt string."));
     }
     return host
-      .agent(JSON.stringify({ prompt, options: options === undefined ? {} : options }))
+      .agent(JSON.stringify({ prompt, options: options === undefined ? {} : options, phaseIndex }))
       .then((text) => JSON.parse(text));
   };
+  const agent = (prompt, options) => runAgent(prompt, options);
+  const progress = Object.freeze({
+    phase: async (title, options, callback) => {
+      if (typeof callback !== "function") throw new Error("progress.phase() needs a callback.");
+      const index = host.startPhase(JSON.stringify([title, options && options.total]));
+      let closed = false;
+      let pending = 0;
+      const bar = Object.freeze({
+        agent: async (prompt, options) => {
+          if (closed) throw new Error("This progress phase is closed.");
+          if (options && options.phase !== undefined) throw new Error("bar.agent() owns its phase; omit options.phase.");
+          pending++;
+          try { return await runAgent(prompt, options, index); }
+          finally { pending--; }
+        },
+      });
+      let value;
+      try { value = await callback(bar); }
+      catch (error) {
+        closed = true;
+        try { host.closePhase(index, "failed"); }
+        finally { throw error; }
+      }
+      closed = true;
+      host.closePhase(index, pending > 0 ? "failed" : "completed");
+      if (pending > 0) throw new Error("Await every bar.agent() before its progress phase closes.");
+      return value;
+    },
+  });
   const settle = (start) => {
     let promise;
     try { promise = Promise.resolve(start()); } catch (error) { promise = Promise.reject(error); }
@@ -128,7 +162,7 @@ const PRELUDE = `
   const node = host.node === undefined
     ? undefined
     : (key, outcome) => { host.node(String(key), JSON.stringify(outcome ?? null)); };
-  globalThis.__t3 = Object.freeze({ agent, parallel, pipeline, phase, log, budget, node });
+  globalThis.__t3 = Object.freeze({ agent, parallel, pipeline, phase, log, budget, progress, node });
 })();
 `;
 
@@ -173,7 +207,9 @@ export async function runWorkflowScript(input: {
   readonly host: WorkflowScriptHost;
   readonly signal: AbortSignal;
 }): Promise<unknown> {
+  if (input.signal.aborted) throw new Error("The workflow was stopped.");
   const module = await newQuickJSWASMModule();
+  if (input.signal.aborted) throw new Error("The workflow was stopped.");
   const runtime: QuickJSRuntime = module.newRuntime();
   runtime.setMemoryLimit(MEMORY_LIMIT_BYTES);
   runtime.setMaxStackSize(MAX_STACK_BYTES);
@@ -209,6 +245,18 @@ export async function runWorkflowScript(input: {
   define("__host_phase", (title) => {
     input.host.phase(context.getString(title));
   });
+  define("__host_startPhase", (request) => {
+    const [title, total] = JSON.parse(context.getString(request));
+    if (input.host.progress === undefined)
+      throw new Error("Progress phases are unavailable on this host.");
+    return context.newNumber(input.host.progress.start(title, total));
+  });
+  define("__host_closePhase", (index, state) => {
+    input.host.progress?.close(
+      context.getNumber(index),
+      context.getString(state) as "completed" | "failed",
+    );
+  });
   define("__host_budget", () => context.newString(JSON.stringify(input.host.budget())));
   define("__host_meta", (meta) => {
     input.host.meta(JSON.parse(context.getString(meta)));
@@ -223,6 +271,7 @@ export async function runWorkflowScript(input: {
     const request = JSON.parse(context.getString(requestHandle)) as {
       prompt: string;
       options: Record<string, unknown>;
+      phaseIndex?: number;
     };
     const deferred = context.newPromise();
     deferreds.add(deferred);
@@ -261,7 +310,7 @@ export async function runWorkflowScript(input: {
     argsHandle.dispose();
     setSliceDeadline();
     const started = context.evalCode(
-      `${wrap(input.source, recordNode !== undefined)}.call(undefined, JSON.parse(__t3_args), __t3.agent, __t3.parallel, __t3.pipeline, __t3.phase, __t3.log, __t3.budget, __t3.node).then((value) => JSON.stringify(value) ?? "null")`,
+      `${wrap(input.source, recordNode !== undefined)}.call(undefined, JSON.parse(__t3_args), __t3.agent, __t3.parallel, __t3.pipeline, __t3.phase, __t3.log, __t3.budget, __t3.progress, __t3.node).then((value) => JSON.stringify(value) ?? "null")`,
       "workflow.js",
     );
     if (started.error !== undefined) {

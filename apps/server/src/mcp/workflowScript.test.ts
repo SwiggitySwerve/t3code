@@ -5,17 +5,20 @@ import {
   runWorkflowScript,
   type WorkflowScriptHost,
 } from "./workflowScript.ts";
+import { WorkflowPhases } from "./workflowPhases.ts";
 
 const host = (overrides: Partial<WorkflowScriptHost> = {}) => {
   const calls: Array<{ prompt: string; options: Record<string, unknown> }> = [];
   const logs: Array<string> = [];
   const phases: Array<string> = [];
   const metas: Array<unknown> = [];
+  const progress = new WorkflowPhases();
   return {
     calls,
     logs,
     phases,
     metas,
+    progress,
     host: {
       agent: async (request) => {
         calls.push({ prompt: request.prompt, options: { ...request.options } });
@@ -24,6 +27,10 @@ const host = (overrides: Partial<WorkflowScriptHost> = {}) => {
       },
       log: (message) => logs.push(message),
       phase: (title) => phases.push(title),
+      progress: {
+        start: (title, total) => progress.start(title, total),
+        close: (index, state) => progress.close(index, state),
+      },
       meta: (meta) => metas.push(meta),
       budget: () => ({ total: 100, spent: 40 }),
       ...overrides,
@@ -35,6 +42,150 @@ const run = (source: string, input: ReturnType<typeof host>, args: unknown = nul
   runWorkflowScript({ source, args, host: input.host, signal: new AbortController().signal });
 
 describe("workflow scripts", () => {
+  it("preserves callback values and thrown identity, with independent nested and overlapping bars", async () => {
+    const calls: Array<{ prompt: string; phaseIndex?: number }> = [];
+    const h = host({
+      agent: async (request) => {
+        calls.push(request);
+        return request.prompt;
+      },
+    });
+    const result = await run(
+      `
+      const error = { original: true };
+      let caught;
+      try { await progress.phase("Failed", { total: 0 }, async () => { throw error; }); }
+      catch (value) { caught = value === error; }
+      const values = await Promise.all([
+        progress.phase("Outer", { total: 2 }, async (bar) => {
+          await bar.agent("outer first");
+          await progress.phase("Inner", { total: 1 }, (inner) => inner.agent("inner"));
+          return bar.agent("outer last");
+        }),
+        progress.phase("Sibling", { total: 1 }, async (bar) => {
+          await Promise.resolve(); return bar.agent("sibling");
+        }),
+      ]);
+      return { caught, values };`,
+      h,
+    );
+    expect(result).toEqual({ caught: true, values: ["outer last", "sibling"] });
+    const titles = new Map(h.progress.snapshot().map((phase) => [phase.index, phase.title]));
+    expect(calls.map((call) => [call.prompt, titles.get(call.phaseIndex!)]).toSorted()).toEqual([
+      ["inner", "Inner"],
+      ["outer first", "Outer"],
+      ["outer last", "Outer"],
+      ["sibling", "Sibling"],
+    ]);
+    expect(h.progress.snapshot().map((phase) => phase.progress?.state)).toEqual([
+      "failed",
+      "completed",
+      "completed",
+      "completed",
+    ]);
+  });
+
+  it.each(["-1", "1.5", "NaN", "Infinity", "1001", '"2"', "null", "undefined"])(
+    "rejects an invalid phase total %s before invoking its callback",
+    async (total) => {
+      const h = host();
+      await expect(
+        run(`return progress.phase("Bad", { total: ${total} }, () => agent("never"))`, h),
+      ).rejects.toThrow();
+      expect(h.calls).toEqual([]);
+      expect(h.progress.snapshot()).toEqual([]);
+    },
+  );
+
+  it.each([
+    [
+      'let saved; await progress.phase("Empty", { total: 0 }, (bar) => { saved = bar; }); return saved.agent("late");',
+      "closed",
+    ],
+    [
+      'return progress.phase("Pending", { total: 1 }, (bar) => { bar.agent("pending"); });',
+      "Await every bar.agent()",
+    ],
+    [
+      'return progress.phase("Bound", { total: 1 }, (bar) => bar.agent("wrong", { phase: "Other" }));',
+      "owns its phase",
+    ],
+    [
+      'await progress.phase("Once", { total: 0 }, () => {}); return progress.phase("Once", { total: 0 }, () => {});',
+      "only once",
+    ],
+  ])("rejects invalid phase lifetimes: %s", async (source, message) => {
+    const h = host({ agent: () => new Promise(() => {}) });
+    await expect(run(source, h)).rejects.toThrow(message);
+  });
+
+  it("closes a zero-agent phase without disposal syntax and preserves legacy phase()", async () => {
+    const h = host();
+    expect(
+      await run('phase("Legacy"); return progress.phase("Empty", { total: 0 }, () => 42)', h),
+    ).toBe(42);
+    expect(h.phases).toEqual(["Legacy"]);
+    expect(h.progress.snapshot()[0]?.progress).toEqual({ total: 0, state: "completed" });
+    expect(await checkWorkflowScript("using bar = {};")).toContain("expecting");
+    expect(await run("return typeof Symbol.dispose", h)).toBe("undefined");
+  });
+
+  it("retains phase identity when resumed callbacks enter in a different order", async () => {
+    const phases = new WorkflowPhases([
+      { index: 0, title: "First", progress: { total: 4, state: "completed" } },
+      { index: 1, title: "Second", progress: { total: 3, state: "running" } },
+    ]);
+    const h = host({
+      progress: {
+        start: (title, total) => phases.start(title, total),
+        close: (index, state) => phases.close(index, state),
+      },
+    });
+    await run(
+      'await progress.phase("Second", { total: 3 }, () => {}); await progress.phase("First", { total: 4 }, () => {});',
+      h,
+    );
+    expect(phases.snapshot()).toEqual([
+      { index: 0, title: "First", progress: { total: 4, state: "completed" } },
+      { index: 1, title: "Second", progress: { total: 3, state: "completed" } },
+    ]);
+  });
+
+  it("abandons a stopped callback without reporting success when its agent finishes late", async () => {
+    const controller = new AbortController();
+    const started = Promise.withResolvers<void>();
+    const agent = Promise.withResolvers<unknown>();
+    const h = host({
+      agent: () => {
+        started.resolve();
+        return agent.promise;
+      },
+    });
+    const pending = runWorkflowScript({
+      source: 'return progress.phase("Audit", { total: 1 }, (bar) => bar.agent("audit"))',
+      args: null,
+      host: h.host,
+      signal: controller.signal,
+    });
+    await started.promise;
+    controller.abort();
+    await expect(pending).rejects.toThrow("The workflow was stopped.");
+    agent.resolve("late answer");
+    await agent.promise;
+    expect(h.progress.snapshot()[0]?.progress?.state).toBe("running");
+  });
+
+  it.each(['""', '" \\t "', '"x".repeat(501)', "123"])(
+    "rejects invalid progress titles: %s",
+    async (title) => {
+      const h = host();
+      await expect(
+        run(`return progress.phase(${title}, { total: 0 }, () => 1)`, h),
+      ).rejects.toThrow();
+      expect(h.progress.snapshot()).toEqual([]);
+    },
+  );
+
   it("runs a Claude-format script with meta, args, parallel, pipeline and return", async () => {
     const h = host();
     const result = await run(

@@ -6,8 +6,10 @@ import {
   ThreadId,
   type OrchestrationV2Subagent,
   type OrchestrationV2SubagentWorkflow,
+  OrchestrationV2WorkflowPatch,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
+import * as Schema from "effect/Schema";
 import {
   applyWorkflowUpdate,
   workflowLifecycleUpdate,
@@ -40,6 +42,70 @@ const task = (workflow = empty): OrchestrationV2Subagent => ({
   workflow,
 });
 describe("workflow updates", () => {
+  it("roundtrips thousands of phases and sends one absolute phase update without a growing snapshot", () => {
+    const next: OrchestrationV2SubagentWorkflow = {
+      phases: Array.from({ length: 4096 }, (_, index) => ({
+        index,
+        title: `Phase ${index}`,
+        progress: { total: 1000, state: "planned" },
+      })),
+      agents: [],
+    };
+    const decode = Schema.decodeUnknownSync(OrchestrationV2WorkflowPatch);
+    const patches = workflowPatches(empty, next).map((patch) =>
+      decode(JSON.parse(JSON.stringify(patch))),
+    );
+    for (const patch of patches) {
+      expect(workflowJsonBytes(patch)).toBeLessThanOrEqual(32 * 1024);
+      expect(
+        workflowJsonBytes({
+          type: "workflow.update",
+          commandId: "command",
+          threadId: "thread",
+          workflowId: "workflow",
+          workflow: patch,
+        }),
+      ).toBeLessThan(64 * 1024);
+    }
+    expect(patches.reduce(mergeWorkflowPatch, empty)).toEqual(next);
+    const updated = {
+      ...next,
+      phases: next.phases.map((phase) =>
+        phase.index === 0
+          ? { ...phase, progress: { total: 10, state: "running" as const } }
+          : phase,
+      ),
+    };
+    const [patch] = workflowPatches(next, updated);
+    expect(patch).toEqual({ kind: "patch", phaseUpdates: [updated.phases[0]] });
+    expect(workflowJsonBytes(patch)).toBe(105);
+    const merged = mergeWorkflowPatch(next, decode(JSON.parse(JSON.stringify(patch))));
+    expect(merged).toEqual(updated);
+    expect(mergeWorkflowPatch(merged, patch!)).toEqual(updated);
+    const active = {
+      ...updated,
+      agents: Array.from({ length: 1000 }, (_, index) => ({
+        index,
+        requestKey: `wf-${index.toString(16).padStart(24, "0")}-0`,
+        label: `Agent ${index}`,
+        state: "queued" as const,
+      })),
+    };
+    const settled = { ...active.agents[0]!, state: "completed" as const };
+    const counterUpdate = workflowPatches(active, {
+      ...active,
+      agents: [settled, ...active.agents.slice(1)],
+    });
+    expect(counterUpdate).toEqual([{ kind: "patch", agents: [settled] }]);
+    expect(workflowJsonBytes(counterUpdate[0])).toBeLessThan(128);
+    expect(
+      mergeWorkflowPatch(updated, { kind: "patch", phases: [{ index: 0, title: "Legacy" }] })
+        .phases,
+    ).toEqual([{ index: 0, title: "Legacy" }]);
+    expect(() =>
+      mergeWorkflowPatch(next, { kind: "patch", phaseUpdates: [next.phases[0]!, next.phases[0]!] }),
+    ).toThrow("Duplicate workflow phase");
+  });
   it.each([
     { progress: "Working" },
     { completionDelivery: { state: "pending" as const, observedByRunId: null } },

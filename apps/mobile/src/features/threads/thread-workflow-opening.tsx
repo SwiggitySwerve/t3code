@@ -3,6 +3,8 @@ import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   appWorkflowHeading,
   canStopWorkflow,
+  deriveWorkflowProgress,
+  workflowSettledText,
   resolveWorkflowOpening,
   workflowOpeningHeadline,
   workflowOpeningParentThreadId,
@@ -96,8 +98,7 @@ export function ThreadWorkflowOpening(props: {
     workflow !== null &&
     canStopWorkflow({ status: workflow.status, origin: "provider_native", driver: opening.driver });
   const canListMembers = opening.driver !== null && opening.providerInstanceId !== null;
-  const phases = (opening.group?.phases ?? []).filter((phase) => phase.members.length > 0);
-  const unphased = opening.group?.unphasedMembers ?? [];
+  const phases = opening.group === null ? [] : deriveWorkflowProgress(opening.group).phases;
   const renderMember = (member: RuntimeSubagent) => {
     const threadId = member.childThreadId;
     return (
@@ -151,15 +152,17 @@ export function ThreadWorkflowOpening(props: {
         ) : null}
         {canListMembers
           ? phases.map((phase) => (
-              <View key={phase.index} className="gap-px">
+              <View key={phase.id} className="gap-px">
                 <Text className="px-1 pt-1 font-t3-medium text-2xs text-foreground-muted">
-                  {phase.title} · {phase.settledCount}/{phase.members.length}
+                  {phase.title} · {workflowSettledText(phase.counts)}
+                  {phase.state === null ? "" : ` · ${phase.state}`}
                 </Text>
-                {phase.members.map(renderMember)}
+                {phase.tasks.flatMap((task) =>
+                  task.member === null ? [] : [renderMember(task.member)],
+                )}
               </View>
             ))
           : null}
-        {canListMembers ? unphased.map(renderMember) : null}
         <WorkflowScript script={opening.script} />
       </View>
     </WorkLogBlock>

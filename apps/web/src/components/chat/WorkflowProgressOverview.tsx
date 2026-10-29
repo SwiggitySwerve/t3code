@@ -60,7 +60,10 @@ export function WorkflowProgressOverview(props: {
           className="min-w-0 rounded-md border border-border/60 p-2"
           data-workflow-phase
         >
-          <h4 className="mb-1 text-xs font-medium [overflow-wrap:anywhere]">{phase.title}</h4>
+          <h4 className="mb-1 text-xs font-medium [overflow-wrap:anywhere]">
+            {phase.title}
+            {phase.state === null ? "" : ` · ${phase.state}`}
+          </h4>
           <ProgressCounts counts={phase.counts} label={`${phase.title} tasks settled`} />
           <TaskDetails
             key={`${phase.id}:${filtering}`}

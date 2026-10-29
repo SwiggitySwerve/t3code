@@ -40,7 +40,7 @@ import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAda
 import { storedWorkflowScript } from "@t3tools/shared/storedWorkflowScript";
 import { subscribeOrchestrationV2Thread } from "../ws.ts";
 import * as OrchestrationEventStore from "../persistence/OrchestrationEventStore.ts";
-import { workflowPatches } from "@t3tools/shared/workflowUpdate";
+import { mergeWorkflowPatch, workflowPatches } from "@t3tools/shared/workflowUpdate";
 import { applyOrchestrationV2ProjectionEvent } from "../../../../packages/client-runtime/src/state/orchestrationV2Projection.ts";
 import {
   projectDomainEventForWire,
@@ -796,7 +796,7 @@ it.effect(
         sequence: number;
       }>`SELECT max(sequence) AS sequence FROM orchestration_events`;
       const workflow: OrchestrationV2SubagentWorkflow = {
-        phases: [{ index: 0, title: "Audit 日本語" }],
+        phases: [{ index: 0, title: "Audit 日本語", progress: { total: 150, state: "running" } }],
         budget: { limit: 100000, exhausted: true },
         plan: {
           nodes: Array.from({ length: 150 }, (_, i) => ({
@@ -1621,55 +1621,71 @@ describe("workflow_start", () => {
       }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("runs phases of parallel and pipelined agents and wakes the caller once", () =>
-    Effect.gen(function* () {
-      yield* startParent;
-      yield* answerWorkflowAgents((prompt) => `done(${prompt})`);
-      const started = yield* startWorkflow(
-        `export const meta = { name: "review", phases: [{ title: "Scan" }, { title: "Review" }] }
+  it.effect.each([false, true])(
+    "runs phases of parallel and pipelined agents and wakes the caller once, planned=%s",
+    (planned) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents((prompt) => `done(${prompt})`);
+        const started = yield* startWorkflow(
+          planned
+            ? `export const meta = { name: "review", phases: [{ title: "Scan", total: 5 }, { title: "Review", total: 8 }] }
+const scanned = await progress.phase("Scan", { total: 5 }, (bar) => parallel(args.files.map((file) => () => bar.agent("scan " + file, { label: file }))))
+log("scanned", scanned.length)
+const reviewed = await progress.phase("Review", { total: scanned.length }, (bar) => pipeline(scanned, (text) => bar.agent("review " + text, { label: "review" })))
+return { scanned, reviewed }`
+            : `export const meta = { name: "review", phases: [{ title: "Scan" }, { title: "Review" }] }
 const scanned = await parallel(args.files.map((file) => () => agent("scan " + file, { label: file, phase: "Scan" })))
 log("scanned", scanned.length)
 const reviewed = await pipeline(scanned, (text) => agent("review " + text, { label: "review", phase: "Review" }))
 return { scanned, reviewed }`,
-        { files: ["a", "b", "c"] },
-      );
-      expect(started.status).toBe("running");
-      const ended = yield* awaitWorkflowEnd(started.workflowId);
-      expect(ended).toMatchObject({
-        status: "completed",
-        name: "review",
-        phases: ["Scan", "Review"],
-      });
-      expect(JSON.parse(ended.result!)).toEqual({
-        scanned: ["done(scan a)", "done(scan b)", "done(scan c)"],
-        reviewed: [
-          "done(review done(scan a))",
-          "done(review done(scan b))",
-          "done(review done(scan c))",
-        ],
-      });
-      expect(ended.agents).toHaveLength(6);
-      expect(new Set(ended.agents.map((agent) => agent.status))).toEqual(new Set(["completed"]));
-      expect(ended.agents.filter((agent) => agent.phase === "Review")).toHaveLength(3);
+          { files: ["a", "b", "c"] },
+        );
+        expect(started.status).toBe("running");
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(ended).toMatchObject({
+          status: "completed",
+          name: "review",
+          phases: ["Scan", "Review"],
+        });
+        expect(JSON.parse(ended.result!)).toEqual({
+          scanned: ["done(scan a)", "done(scan b)", "done(scan c)"],
+          reviewed: [
+            "done(review done(scan a))",
+            "done(review done(scan b))",
+            "done(review done(scan c))",
+          ],
+        });
+        expect(ended.agents).toHaveLength(6);
+        expect(ended.phaseProgress).toEqual(
+          planned
+            ? [
+                { index: 0, title: "Scan", progress: { total: 5, state: "completed" } },
+                { index: 1, title: "Review", progress: { total: 3, state: "completed" } },
+              ]
+            : undefined,
+        );
+        expect(new Set(ended.agents.map((agent) => agent.status))).toEqual(new Set(["completed"]));
+        expect(ended.agents.filter((agent) => agent.phase === "Review")).toHaveLength(3);
 
-      const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const parent = yield* orchestrator.getThreadProjection(parentThreadId);
-      const members = parent.subagents.filter((task) => task.parentNodeId === started.workflowId);
-      expect(members).toHaveLength(6);
-      expect(new Set(members.map((task) => task.completionDelivery?.state))).toEqual(
-        new Set(["disposed"]),
-      );
-      // One timeline item for the workflow, none for its members.
-      expect(
-        parent.turnItems
-          .filter((item) => item.type === "subagent")
-          .map((item) => item.type === "subagent" && item.subagentId),
-      ).toEqual([started.workflowId]);
-      const deliveries = parent.runs.flatMap(
-        (run) => run.delegatedCompletion?.delivery?.taskIds ?? [],
-      );
-      expect(deliveries).toEqual([started.workflowId]);
-    }).pipe(Effect.provide(layerTest)),
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const parent = yield* orchestrator.getThreadProjection(parentThreadId);
+        const members = parent.subagents.filter((task) => task.parentNodeId === started.workflowId);
+        expect(members).toHaveLength(6);
+        expect(new Set(members.map((task) => task.completionDelivery?.state))).toEqual(
+          new Set(["disposed"]),
+        );
+        // One timeline item for the workflow, none for its members.
+        expect(
+          parent.turnItems
+            .filter((item) => item.type === "subagent")
+            .map((item) => item.type === "subagent" && item.subagentId),
+        ).toEqual([started.workflowId]);
+        const deliveries = parent.runs.flatMap(
+          (run) => run.delegatedCompletion?.delivery?.taskIds ?? [],
+        );
+        expect(deliveries).toEqual([started.workflowId]);
+      }).pipe(Effect.provide(layerTest)),
   );
 
   it.effect("returns structured results for agents given a schema", () =>
@@ -2785,6 +2801,7 @@ describe("workflow resume", () => {
         const workflowId = yield* withServerProcess((service) =>
           Effect.gen(function* () {
             const started = yield* service.workflowStart(invocation, { script: twoStepScript });
+            yield* awaitMember(started.workflowId, 1);
             return started.workflowId;
           }),
         );
@@ -2817,23 +2834,81 @@ describe("workflow resume", () => {
       }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect(
-    "replays persisted retry history without losing usage or duplicating child identity",
-    () =>
+  it.effect.each(["keyed", "latest", "history", "ids"] as const)(
+    "replays persisted retry history without losing usage or duplicating child identity (%s)",
+    (identity) =>
       Effect.gen(function* () {
         yield* startParent;
         const workflowId = yield* withServerProcess((service) =>
           Effect.gen(function* () {
             const started = yield* service.workflowStart(invocation, {
-              script: 'return await agent("retry")',
+              script: 'return progress.phase("Retry", { total: 1 }, bar => bar.agent("retry"))',
             });
             const first = yield* awaitMember(started.workflowId, 1);
             yield* completeChild(first.childThreadId!, "failed", { status: "failed" }, 30);
-            yield* awaitMember(started.workflowId, 2);
+            const retry = yield* awaitMember(started.workflowId, 2);
+            yield* (yield* Orchestrator.OrchestratorV2)
+              .streamStoredEventsFrom({
+                threadId: parentThreadId,
+                afterSequence: 0,
+                eventType: "workflow.updated",
+              })
+              .pipe(
+                Stream.filter(
+                  (stored) =>
+                    stored.event.type === "workflow.updated" &&
+                    stored.event.payload.id === started.workflowId &&
+                    stored.event.payload.patch?.agents?.some(
+                      (agent) => agent.agentId === retry.id,
+                    ) === true,
+                ),
+                Stream.runHead,
+              );
             return started.workflowId;
           }),
         );
         const second = yield* awaitMember(workflowId, 2);
+        const orchestrator = yield* Orchestrator.OrchestratorV2;
+        const sink = yield* EventSink.EventSinkV2;
+        const before = (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.find(
+          (task) => task.id === workflowId,
+        )!;
+        const previousWorkflow = {
+          ...before.workflow!,
+          agents: before.workflow!.agents.map((agent) => {
+            const legacy = { ...agent };
+            if (identity !== "keyed") delete legacy.requestKey;
+            if (identity === "latest" || identity === "history") delete legacy.attemptTaskIds;
+            if (identity === "latest" || identity === "ids") delete legacy.attemptHistory;
+            if (identity === "history" || identity === "ids") delete legacy.agentId;
+            return legacy;
+          }),
+        };
+        const namespace = { requestNamespace: `workflow:${workflowId}` };
+        expect(OrchestratorMcpService.workflowAgentRequestKey(namespace, second.id)).toBe(
+          before.workflow!.agents[0]!.requestKey,
+        );
+        expect(
+          OrchestratorMcpService.workflowAgentRequestKey(
+            { requestNamespace: `workflow:${workflowId}:other` },
+            second.id,
+          ),
+        ).toBeUndefined();
+        expect(
+          OrchestratorMcpService.workflowAgentRequestKey(namespace, `${second.id}%`),
+        ).toBeUndefined();
+        yield* sink.write({
+          events: [
+            {
+              id: EventId.make(`event:legacy-retry-${identity}`),
+              type: "subagent.updated",
+              threadId: parentThreadId,
+              occurredAt: yield* DateTime.now,
+              payload: { ...before, workflow: previousWorkflow },
+            },
+          ],
+        });
+        const afterSequence = yield* sink.latestSequence({ threadId: parentThreadId });
         yield* withServerProcess((service) =>
           Effect.gen(function* () {
             expect(yield* service.resumeWorkflows).toBe(1);
@@ -2841,6 +2916,33 @@ describe("workflow resume", () => {
             yield* awaitWorkflowEnd(workflowId);
           }),
         );
+        const updates = yield* orchestrator
+          .streamStoredEventsFrom({
+            threadId: parentThreadId,
+            afterSequence,
+            eventType: "workflow.updated",
+          })
+          .pipe(
+            Stream.filter(
+              (stored) =>
+                stored.event.type === "workflow.updated" && stored.event.payload.id === workflowId,
+            ),
+            Stream.takeUntil(
+              (stored) =>
+                stored.event.type === "workflow.updated" &&
+                stored.event.payload.status === "completed",
+            ),
+            Stream.runCollect,
+          );
+        let replayed: OrchestrationV2SubagentWorkflow = previousWorkflow;
+        expect(updates.length).toBeGreaterThan(0);
+        for (const stored of updates) {
+          if (stored.event.type !== "workflow.updated" || stored.event.payload.patch === undefined)
+            continue;
+          replayed = mergeWorkflowPatch(replayed, stored.event.payload.patch);
+          expect(replayed.agents.map((agent) => agent.index)).toEqual([0]);
+          expect(replayed.agents[0]?.judgmentFor).toBeUndefined();
+        }
         const parent = yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
           parentThreadId,
         );

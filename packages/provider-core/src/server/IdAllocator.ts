@@ -193,6 +193,15 @@ const encodePart = (part: string | number): string => encodeURIComponent(String(
 const joinId = (prefix: string, ...parts: ReadonlyArray<string | number>): string =>
   [prefix, ...parts.map(encodePart)].join(":");
 
+export function delegatedTaskCommandId(taskId: string): CommandId | undefined {
+  try {
+    const commandId = CommandId.make(decodeURIComponent(taskId.split(":").at(-1) ?? ""));
+    return derive.delegatedTaskNode({ commandId }) === taskId ? commandId : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function deriveThreadFromProviderThread(input: {
   readonly driver: ProviderDriverKind;
   readonly providerInstanceId?: ProviderInstanceId;

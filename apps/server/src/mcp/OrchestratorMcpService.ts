@@ -1,5 +1,9 @@
 // @effect-diagnostics nodeBuiltinImport:off -- workflow inputs and outputs are hashed with node:crypto, as attachments are.
 import * as NodeCrypto from "node:crypto";
+import {
+  delegatedTaskCommandId,
+  derive as deriveIds,
+} from "@t3tools/provider-core/server/IdAllocator";
 
 import {
   CommandId,
@@ -151,6 +155,7 @@ import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import { readStructuredResult, resultSchemaOf } from "./delegatedTaskResultFormat.ts";
 import { validateJsonSchema } from "./jsonSchemaValidation.ts";
 import { makeCheckerResults } from "./workflowCheckerResults.ts";
+import { agentRequestKey } from "./workflowAgentAttempts.ts";
 import {
   makeWorkflowRunner,
   presetPreference,
@@ -782,7 +787,7 @@ function stablePart(value: string): string {
 }
 
 function stableCommandId(input: {
-  readonly scope: McpInvocationScope;
+  readonly scope: Pick<McpInvocationScope, "requestNamespace">;
   readonly requestKey: string;
   readonly operation: string;
   readonly index?: number;
@@ -797,6 +802,22 @@ function stableCommandId(input: {
       ...(input.index === undefined ? [] : [String(input.index)]),
     ].join(":"),
   );
+}
+
+export function workflowAgentRequestKey(
+  scope: Pick<McpInvocationScope, "requestNamespace">,
+  taskId: string,
+): string | undefined {
+  const commandId = delegatedTaskCommandId(taskId);
+  if (commandId === undefined) return undefined;
+  try {
+    const requestKey = decodeURIComponent(commandId.split(":").at(-1) ?? "");
+    return stableCommandId({ scope, requestKey, operation: "delegate-task" }) === commandId
+      ? agentRequestKey(requestKey)
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function stableThreadId(input: {
@@ -2260,6 +2281,18 @@ const make = Effect.gen(function* () {
 
   const workflowRunner = makeWorkflowRunner({
     threads: threadManagement,
+    agentRequestKey: (workflow, taskId) => {
+      const scope = workflowScopes.get(workflow.workflowId);
+      return scope === undefined ? undefined : workflowAgentRequestKey(scope, taskId);
+    },
+    agentTaskId: (workflow, requestKey) => {
+      const scope = workflowScopes.get(workflow.workflowId);
+      return scope === undefined
+        ? undefined
+        : deriveIds.delegatedTaskNode({
+            commandId: stableCommandId({ scope, requestKey, operation: "delegate-task" }),
+          });
+    },
     spawnAgent: Effect.fn("OrchestratorMcpService.spawnWorkflowAgent")(
       function* (workflow, item, key) {
         const scope = workflowScopes.get(workflow.workflowId);
@@ -3060,6 +3093,8 @@ const make = Effect.gen(function* () {
     );
     const usage = aggregateWorkflowUsage(records.flatMap((record) => record.usage));
     const nodes = workflow.workflow?.nodeOutcomes;
+    const phaseProgress =
+      workflow.workflow?.phases.filter((phase) => phase.progress !== undefined) ?? [];
     const epoch = (value: DateTime.Utc | null | undefined) =>
       value == null ? null : DateTime.toEpochMillis(value);
     const edge = (values: ReadonlyArray<number | null>, latest = false) => {
@@ -3077,6 +3112,7 @@ const make = Effect.gen(function* () {
           : "running",
       name: workflow.workflow?.name ?? workflow.title,
       phases: (workflow.workflow?.phases ?? []).map((phase) => phase.title),
+      ...(phaseProgress.length === 0 ? {} : { phaseProgress }),
       agents: agents.map((agent) => {
         const member = agent.agentId === undefined ? undefined : members.get(agent.agentId);
         // A task can finish and still fail its check; the workflow's own record decides.

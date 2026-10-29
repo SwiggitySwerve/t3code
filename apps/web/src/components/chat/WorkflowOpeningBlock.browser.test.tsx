@@ -30,7 +30,10 @@ import type ChatMarkdown from "../ChatMarkdown";
 import { collectThreadFindRanges } from "./threadFindHighlights";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
-import { workflowScaleFixture } from "../../../test/workflow-fixtures/workflowFixtures";
+import {
+  workflowScaleFixture,
+  workflowScriptProgressFixture,
+} from "../../../test/workflow-fixtures/workflowFixtures";
 
 vi.mock(import("@effect/atom-react"), async (original) => ({
   ...(await original()),
@@ -188,6 +191,37 @@ it("coalesces continuing workflow updates into one polite announcement and prese
   expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).not.toContain(
     "Checking types",
   );
+});
+
+it("renders fixed script capacity and resizes only the phase being entered", async () => {
+  const view = (entered: boolean) => {
+    const { opening } = workflowScriptProgressFixture(entered);
+    return (
+      <WorkflowOpeningBlock
+        opening={opening}
+        environmentId={EnvironmentId.make("test")}
+        onOpenThread={() => {}}
+      />
+    );
+  };
+  await using screen = await render(view(false));
+  using _timers = fakeTimers();
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Package audits tasks settled", exact: true }))
+    .toHaveAttribute("max", "10");
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Follow up tasks settled", exact: true }))
+    .toHaveAttribute("max", "4");
+  await screen.rerender(view(true));
+  await act(() => vi.advanceTimersByTime(1000));
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Package audits tasks settled", exact: true }))
+    .toHaveAttribute("max", "10");
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Follow up tasks settled", exact: true }))
+    .toHaveAttribute("max", "2");
+  expect(screen.container.textContent).toContain("1 failed");
+  expect(screen.container.textContent).toContain("Follow up · running");
 });
 
 it("reveals a declaration search match while keeping the graph unmounted", async () => {

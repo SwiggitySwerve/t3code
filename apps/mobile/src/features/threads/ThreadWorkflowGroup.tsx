@@ -110,17 +110,13 @@ export function ThreadWorkflowGroup(props: {
             contentContainerClassName="gap-2 px-4 pb-3"
           >
             {rail.map((item) => {
-              const count =
-                item.tone === "working" || item.tone === "failed"
-                  ? `${item.completedCount}/${item.members.length}`
-                  : null;
               return (
                 <Chip
                   key={item.key}
                   icon={RAIL_ICON[item.tone]}
-                  label={count ? `${count} ${item.title}` : item.title}
+                  label={`${item.title} · ${item.progressText}`}
                   selected={item.key === selected}
-                  accessibilityLabel={`${item.title} phase, ${item.tone}${count ? `, ${count} completed` : ""}`}
+                  accessibilityLabel={`${item.title} phase, ${item.tone}, ${item.progressText}`}
                   onPress={() => setSelected(nextWorkflowSelection(rail, selected, item.key))}
                 />
               );

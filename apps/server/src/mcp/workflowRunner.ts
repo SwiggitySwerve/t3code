@@ -67,11 +67,13 @@ import {
 import {
   type AgentAttemptHost,
   type MutableAgent,
+  agentAttemptKey,
   runAttempts,
   TERMINAL_TASK_STATUSES,
 } from "./workflowAgentAttempts.ts";
 import { GRAPH_DRIVER_SCRIPT } from "./workflowGraph.ts";
-import { MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
+import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
+import { WorkflowPhases } from "./workflowPhases.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
 
@@ -245,6 +247,10 @@ interface AgentReport {
 
 export interface WorkflowRunnerDeps {
   readonly threads: ThreadManagementService.ThreadManagementService["Service"];
+  /** Derives the dispatcher's task identity without preparing or starting the delegation. */
+  readonly agentTaskId: (workflow: WorkflowContext, requestKey: string) => NodeId | undefined;
+  /** Recovers a logical request key only from a canonical task ID in this workflow's namespace. */
+  readonly agentRequestKey: (workflow: WorkflowContext, taskId: string) => string | undefined;
   readonly spawnAgent: (
     workflow: WorkflowContext,
     item: OrchestratorMcpDelegateTasksItem,
@@ -323,6 +329,14 @@ function stringOption(options: Readonly<Record<string, unknown>>, key: string) {
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
+function hasRecordedTask(agent: OrchestrationV2WorkflowAgent): boolean {
+  return (
+    agent.agentId !== undefined ||
+    (agent.attemptTaskIds?.length ?? 0) > 0 ||
+    (agent.attemptHistory?.length ?? 0) > 0
+  );
+}
+
 const decodeNodeOutcome = Schema.decodeUnknownExit(OrchestrationV2WorkflowNodeOutcome);
 
 /** The command that settles the workflow row with the script's outcome. */
@@ -335,9 +349,10 @@ type WorkflowCompletion = Extract<
 class WorkflowSession {
   readonly abort = new AbortController();
   private name: string | undefined;
-  private readonly phases: Array<string> = [];
+  private readonly phases: WorkflowPhases;
   private currentPhase: string | undefined;
   private readonly agents: Array<MutableAgent> = [];
+  private nextAgentIndex: number;
   private progress: string | undefined;
   private readonly occurrences = new Map<string, number>();
   private readonly nodeOutcomes: Record<string, OrchestrationV2WorkflowNodeOutcome> = {};
@@ -358,6 +373,9 @@ class WorkflowSession {
 
   constructor(workflow: WorkflowContext, deps: WorkflowRunnerDeps) {
     this.workflow = workflow;
+    this.phases = new WorkflowPhases(workflow.previousWorkflow?.phases);
+    this.nextAgentIndex =
+      Math.max(-1, ...(workflow.previousWorkflow?.agents ?? []).map((agent) => agent.index)) + 1;
     this.deps = deps;
     this.sent = workflow.previousWorkflow ?? this.sent;
     this.budgetExhausted = workflow.previousWorkflow?.budget?.exhausted ?? false;
@@ -431,6 +449,8 @@ class WorkflowSession {
     );
     // Stopped by Stop or the thread's own stop: the row is already final.
     if (this.abort.signal.aborted) return undefined;
+    if (this.phases.failOpen() && outcome.ok)
+      outcome = { ok: false, message: "Await every progress.phase() before the script returns." };
     try {
       await this.flush();
     } catch (error) {
@@ -460,8 +480,27 @@ class WorkflowSession {
       },
       phase: (title) => {
         this.currentPhase = title;
-        this.addPhase(title);
+        this.phases.declare(title);
         this.scheduleUpdate();
+      },
+      progress: {
+        start: (title, total) => {
+          const index = this.phases.start(
+            title,
+            total,
+            this.agents.flatMap((agent) =>
+              agent.judgmentFor === undefined && agent.phaseIndex !== undefined
+                ? [agent.phaseIndex]
+                : [],
+            ),
+          );
+          this.scheduleUpdate();
+          return index;
+        },
+        close: (index, state) => {
+          this.phases.close(index, state);
+          this.scheduleUpdate();
+        },
       },
       budget: () => ({
         total: this.workflow.budgetTokens ?? null,
@@ -473,7 +512,8 @@ class WorkflowSession {
         if (Array.isArray(record.phases)) {
           for (const phase of record.phases) {
             const title = asRecord(phase).title;
-            if (typeof title === "string" && title.trim().length > 0) this.addPhase(title.trim());
+            if (typeof title === "string" && title.trim().length > 0)
+              this.phases.declare(title.trim(), asRecord(phase).total);
           }
         }
         this.scheduleUpdate();
@@ -526,6 +566,7 @@ class WorkflowSession {
   private async agent(request: {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
+    readonly phaseIndex?: number;
     readonly keyLabel?: string | null;
     readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
   }): Promise<unknown> {
@@ -554,6 +595,7 @@ class WorkflowSession {
   private async runAgent(request: {
     readonly prompt: string;
     readonly options: Readonly<Record<string, unknown>>;
+    readonly phaseIndex?: number;
     /** The label its retry key uses, when not the script's own; null keys it by content alone. */
     readonly keyLabel?: string | null;
     readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
@@ -569,8 +611,24 @@ class WorkflowSession {
     // Kept out of the retry key: the node a call runs does not change what it asks for.
     const graphNodeKey =
       options.node === undefined ? undefined : this.planNodeKey(options.node, "agent()");
-    const phase = stringOption(options, "phase") ?? this.currentPhase;
-    if (phase !== undefined) this.addPhase(phase);
+    if (this.abort.signal.aborted) throw new Error("The workflow was stopped.");
+    const boundPhase =
+      request.phaseIndex === undefined
+        ? undefined
+        : this.phases.member(
+            request.phaseIndex,
+            this.agents.filter(
+              (agent) => agent.phaseIndex === request.phaseIndex && agent.judgmentFor === undefined,
+            ).length,
+          );
+    const phase = boundPhase?.title ?? stringOption(options, "phase") ?? this.currentPhase;
+    const phaseRow = phase === undefined ? undefined : this.phases.declare(phase);
+    if (
+      boundPhase === undefined &&
+      request.judgmentFor === undefined &&
+      phaseRow?.progress !== undefined
+    )
+      throw new Error("Use bar.agent() to join a progress phase.");
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
     const { target, source, error } = selectWorkflowTarget(
@@ -642,14 +700,76 @@ class WorkflowSession {
       .slice(0, 24);
     const occurrence = this.occurrences.get(digest) ?? 0;
     this.occurrences.set(digest, occurrence + 1);
+    const requestKey = `wf-${digest}-${occurrence}`;
+    const promptPreview = truncate(request.prompt, PREVIEW_LIMIT);
+    const previousAgents = this.workflow.previousWorkflow?.agents ?? [];
+    const legacyTasks = previousAgents.filter(
+      (agent) => agent.requestKey === undefined && hasRecordedTask(agent),
+    );
+    const taskIds = new Set<string>();
+    if (legacyTasks.length > 0) {
+      for (let attempt = 0; attempt < MAX_AGENT_ATTEMPTS; attempt += 1) {
+        const taskId = this.deps.agentTaskId(this.workflow, agentAttemptKey(requestKey, attempt));
+        if (taskId === undefined)
+          throw new Error(`Cannot establish workflow agent identity for "${label}".`);
+        taskIds.add(taskId);
+      }
+    }
+    const matches = previousAgents.filter(
+      (agent) =>
+        agent.requestKey === requestKey ||
+        (agent.agentId !== undefined && taskIds.has(agent.agentId)) ||
+        agent.attemptTaskIds?.some((id) => taskIds.has(id)) ||
+        agent.attemptHistory?.some((attempt) => taskIds.has(attempt.taskId)),
+    );
+    if (
+      matches.length > 1 ||
+      matches.some(
+        (agent) =>
+          (agent.requestKey !== undefined && agent.requestKey !== requestKey) ||
+          this.agents.some((claimed) => claimed.index === agent.index),
+      )
+    )
+      throw new Error(`Ambiguous workflow agent identity for "${label}".`);
+    const previous =
+      matches[0] ??
+      // Legacy placeholders have no task to reattach; reuse an unclaimed matching display slot.
+      previousAgents.find(
+        (agent) =>
+          agent.requestKey === undefined &&
+          !hasRecordedTask(agent) &&
+          agent.phaseIndex === phaseRow?.index &&
+          agent.graphNodeKey === graphNodeKey &&
+          agent.prompt === promptPreview &&
+          (stringOption(options, "label") === undefined || agent.label === label) &&
+          agent.judgmentFor?.agentIndex === request.judgmentFor?.agentIndex &&
+          agent.judgmentFor?.attempt === request.judgmentFor?.attempt &&
+          !this.agents.some((claimed) => claimed.index === agent.index),
+      );
+    if (
+      previous === undefined &&
+      legacyTasks.some((agent) => {
+        if (this.agents.some((claimed) => claimed.index === agent.index)) return false;
+        const keys = new Set(
+          [
+            ...(agent.agentId === undefined ? [] : [agent.agentId]),
+            ...(agent.attemptTaskIds ?? []),
+            ...(agent.attemptHistory?.map((attempt) => attempt.taskId) ?? []),
+          ].map((id) => this.deps.agentRequestKey(this.workflow, id)),
+        );
+        return keys.size !== 1 || keys.has(undefined) || keys.has(requestKey);
+      })
+    )
+      throw new Error(`Cannot establish workflow agent identity for "${label}".`);
     const entry: MutableAgent = {
-      index: this.agents.length,
+      index: previous?.index ?? this.nextAgentIndex++,
+      requestKey,
       label,
       ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
       ...(request.judgmentFor === undefined ? {} : { judgmentFor: request.judgmentFor }),
       state: "queued",
-      ...(phase === undefined ? {} : { phaseIndex: this.phases.indexOf(phase), phaseTitle: phase }),
-      prompt: truncate(request.prompt, PREVIEW_LIMIT),
+      ...(phaseRow === undefined ? {} : { phaseIndex: phaseRow.index, phaseTitle: phaseRow.title }),
+      prompt: promptPreview,
     };
     this.agents.push(entry);
     this.scheduleUpdate();
@@ -729,8 +849,7 @@ class WorkflowSession {
           label,
           phase,
           target,
-          digest,
-          occurrence,
+          requestKey,
           check,
           inputs,
           outputs,
@@ -776,14 +895,10 @@ class WorkflowSession {
     for (const wake of waiters) wake();
   }
 
-  private addPhase(title: string): void {
-    if (!this.phases.includes(title)) this.phases.push(title);
-  }
-
   private snapshot(): OrchestrationV2SubagentWorkflow {
     return {
       ...(this.name === undefined ? {} : { name: this.name }),
-      phases: this.phases.map((title, index) => ({ index, title })),
+      phases: this.phases.snapshot(),
       agents: this.agents.map((agent) => ({ ...agent })),
       ...(this.workflow.budgetTokens === undefined
         ? {}

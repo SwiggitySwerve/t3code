@@ -419,6 +419,57 @@ may `await` and `return`. The script reads `args` (the JSON value passed to
   passed as `budgetTokens`, or `null` and `Infinity` without one.
 - `phase(title)` and `log(...values)`: progress shown in `workflow_status` and the
   workflow row.
+- `await progress.phase(title, { total }, async (bar) => { ... })`: a planned
+  phase of logical agents. Use `bar.agent(prompt, options)` with the same agent
+  options above, except `phase`, and await every call. Its results and failures
+  behave exactly like `agent()`; retries count as one member. Native nested
+  agents and independent judgment agents do not consume the phase's total.
+
+```js
+export const meta = {
+  phases: [
+    { title: "Package audits", total: 10 },
+    { title: "Follow up", total: 10 },
+  ],
+};
+const answers = await progress.phase("Package audits", { total: 10 }, async (bar) => {
+  return Promise.all(args.packages.map((name) => bar.agent("Audit " + name)));
+});
+const followups = answers.filter((answer) => answer !== null);
+return await progress.phase("Follow up", { total: followups.length }, async (bar) => {
+  return Promise.all(followups.map((answer) => bar.agent("Follow up: " + answer)));
+});
+```
+
+`total` is an integer from 0 to 1,000. The entry value is authoritative: the
+example retains the first phase's size of 10 even if fewer agents run, and sizes
+the next phase from the usable answers. Optional `meta.phases[].total` values
+show planned future sizes until those phases start. Undeclared sizes stay
+unknown. An active phase never grows to match observed starts; exceeding its
+capacity rejects that agent call before starting work. Put newly discovered
+work in another phase with its own entry total. The workflow's 1,000-agent
+ceiling still includes judgment agents.
+
+The callback's return value passes through unchanged. Resolving closes the
+phase as completed; throwing closes it as failed and rethrows the original
+value, even when the script catches it. Closing never changes a member's
+outcome: failed agents remain failed, and unused capacity remains visible.
+There is no manual increment, counter setter, or total setter. Progress is the
+absolute state of the phase's logical agents, so retries and replay cannot add
+completion twice. Await the phase itself too; returning with open phases fails
+the script. Returning from a callback with pending agents fails that phase.
+
+`bar.agent` binds the phase across awaits, overlap, and nesting. Give each
+callback phase a unique title (1–500 characters); its index is retained on
+resume, and replaying metadata preserves entered totals. Member indices follow
+their request keys even when concurrent awaits resume in another order.
+References to a closed bar reject new calls. Bare `agent()` continues
+to use legacy `phase(title)`/`options.phase`; it does not implicitly join a
+callback. Use `bar.agent` for every member of a callback phase. There may be at
+most 4,096 phases. A stopped workflow overrides any unfinished phase in clients;
+abort does not report callback success. Existing phases without totals remain
+readable with unknown totals. Use callbacks, not `using` or `Symbol.dispose`,
+which this QuickJS build does not support.
 
 Every `agent()` call is an ordinary delegated task under the workflow, so model
 options, worktree isolation, mode ceilings, the running limit and structured
@@ -440,7 +491,9 @@ Member tasks hang under that row, and their own completion deliveries are
 disposed, so only `workflow.complete` delivers to the caller. `workflow_status`
 returns the status, phases, each agent's status, model and summary, the latest
 log line, and the script's return value as JSON or why it failed. For a workflow
-started from a graph it also returns `nodes`, the stored outcome of each node
+using planned phases, `phaseProgress` adds their indices, titles, totals and
+callback states; legacy results omit it. Agent records remain the outcome truth.
+For a workflow started from a graph it also returns `nodes`, the stored outcome of each node
 (see Graphs, below).
 
 Each agent also reports cumulative `usage`, `outcomeCategory`, and `timings`. Usage

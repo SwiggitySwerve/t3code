@@ -54,9 +54,20 @@ const MIN_STALL_MS = 60_000;
 
 export const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
-export type MutableAgent = {
-  -readonly [Key in keyof OrchestrationV2WorkflowAgent]: OrchestrationV2WorkflowAgent[Key];
+export type MutableAgent = Pick<OrchestrationV2WorkflowAgent, "index"> & {
+  -readonly [
+    Key in keyof Omit<OrchestrationV2WorkflowAgent, "index">
+  ]: OrchestrationV2WorkflowAgent[Key];
 };
+
+export function agentAttemptKey(requestKey: string, attempt: number): string {
+  return `${requestKey}${attempt === 0 ? "" : `-r${attempt}`}`;
+}
+
+export function agentRequestKey(attemptKey: string): string | undefined {
+  const match = /^(wf-[0-9a-f]{24}-(?:0|[1-9][0-9]*))(?:-r([1-9][0-9]*))?$/.exec(attemptKey);
+  return match !== null && Number(match[2] ?? 0) < MAX_AGENT_ATTEMPTS ? match[1] : undefined;
+}
 
 function numberOption(options: Readonly<Record<string, unknown>>, key: string) {
   const value = options[key];
@@ -116,8 +127,7 @@ export interface AgentAttemptInput {
   readonly label: string;
   readonly phase: string | undefined;
   readonly target: unknown;
-  readonly digest: string;
-  readonly occurrence: number;
+  readonly requestKey: string;
   readonly check: WorkflowCheck | undefined;
   readonly inputs: ReadonlyArray<FileRef>;
   readonly outputs: ReadonlyArray<FileRef>;
@@ -144,8 +154,7 @@ export async function runAttempts(
     label,
     phase,
     target,
-    digest,
-    occurrence,
+    requestKey,
     check,
     inputs,
     outputs,
@@ -164,7 +173,7 @@ export async function runAttempts(
       settle("failed", `agent "${label}" has invalid options.`);
       return null;
     }
-    const key = `wf-${digest}-${occurrence}${attempt === 0 ? "" : `-r${attempt}`}`;
+    const key = agentAttemptKey(requestKey, attempt);
     const budget = host.workflow.budgetTokens;
     // An agent the budget allowed before a restart is re-attached, not refused.
     if (
