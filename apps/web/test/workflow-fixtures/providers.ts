@@ -10,7 +10,7 @@ export const QA_ENVIRONMENT = EnvironmentId.make("qa");
 export const QA_PROVIDER_INSTANCE = ProviderInstanceId.make("cliproxy");
 export const QA_DRIVER = ProviderDriverKind.make("codex");
 
-/** The lane's worker provider, with the two models the QA profiles use. */
+/** Provider-scoped catalog entries and aliases used by the QA profiles and identity fixtures. */
 export const QA_PROVIDERS: ReadonlyArray<ServerProvider> = [
   {
     instanceId: QA_PROVIDER_INSTANCE,
@@ -44,6 +44,21 @@ export const QA_PROVIDERS: ReadonlyArray<ServerProvider> = [
         },
       },
       { slug: "claude-opus-5-5", name: "Claude Opus 5.5", isCustom: false, capabilities: null },
+      {
+        slug: "gpt-6.1-sol",
+        name: "GPT-6.1 Sol",
+        aliases: ["openai.gpt-6.1-sol"],
+        isCustom: false,
+        capabilities: null,
+      },
+      { slug: "gpt-6-astra", name: "GPT-6 Astra", isCustom: false, capabilities: null },
+      {
+        slug: "claude-sonnet-4-6",
+        name: "Claude Sonnet 4.6",
+        aliases: ["anthropic/claude-sonnet-4-6"],
+        isCustom: false,
+        capabilities: null,
+      },
     ],
     slashCommands: [],
     skills: [],
@@ -59,7 +74,12 @@ export const QA_PROVIDERS: ReadonlyArray<ServerProvider> = [
     status: "ready",
     auth: { status: "authenticated" },
     checkedAt: "2026-10-24T12:00:00Z",
-    models: [],
+    models: [
+      { slug: "openai/gpt-6.1-terra", name: "GPT-6.1 Terra", isCustom: false, capabilities: null },
+      { slug: "gpt-6-luna", name: "GPT-6 Luna", isCustom: false, capabilities: null },
+      { slug: "claude-fable-5-1", name: "Claude Fable 5.1", isCustom: false, capabilities: null },
+      { slug: "claude-haiku-5-5", name: "Claude Haiku 5.5", isCustom: false, capabilities: null },
+    ],
     slashCommands: [],
     skills: [],
   },

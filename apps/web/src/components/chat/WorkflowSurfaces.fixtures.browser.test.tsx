@@ -68,6 +68,19 @@ it.each([false, true])("planned script phase transition, entered=%s", async (ent
   });
 });
 
+it.each(["running", "completed", "failed", "stopped"] as const)(
+  "callback phase lifecycle, state=%s",
+  async (state) => {
+    await captureSurface({
+      surface: "workflow-script-progress",
+      state: `callback-${state}`,
+      selector: "[data-workflow-opening]",
+      frame: "[data-qa-column]",
+      element: () => <WorkflowScriptProgressSurface state={state} />,
+    });
+  },
+);
+
 describe.each(["graph", "script"] as const)("workflow block, %s", (kind) => {
   const surface = `workflow-block-${kind}`;
   it.each(statesOf(surface))("%s", async (variant) => {

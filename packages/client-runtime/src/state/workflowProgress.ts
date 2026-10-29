@@ -2,7 +2,6 @@ import type {
   RuntimeSubagent,
   RuntimeSubagentStatus,
   SubagentWorkflowGroup,
-  SubagentWorkflowPhase,
 } from "./subagentRuntime.ts";
 import type { WorkflowGraphNodeState } from "./workflowGraphView.ts";
 
@@ -35,6 +34,7 @@ export interface WorkflowPhaseProgress {
   readonly tasks: ReadonlyArray<WorkflowTaskProgress>;
   readonly counts: WorkflowProgressCounts;
   readonly state: "planned" | "running" | "completed" | "failed" | "stopped" | null;
+  readonly allDone: boolean;
 }
 
 export function appWorkflowHeading(status: RuntimeSubagentStatus): string {
@@ -102,23 +102,43 @@ function memberTask(member: RuntimeSubagent): WorkflowTaskProgress {
   };
 }
 
-function scriptPhase(
+function phaseProgress(
   id: string,
   title: string,
-  members: ReadonlyArray<RuntimeSubagent>,
-  progress?: SubagentWorkflowPhase["progress"],
+  tasks: ReadonlyArray<WorkflowTaskProgress>,
+  total: number | null,
+  declaredState: WorkflowPhaseProgress["state"] = null,
   workflowStatus?: RuntimeSubagentStatus,
 ): WorkflowPhaseProgress {
-  const tasks = members.map(memberTask);
   const state =
-    progress?.state === "running" &&
+    declaredState === "running" &&
     workflowStatus !== undefined &&
     ["completed", "failed", "cancelled", "interrupted"].includes(workflowStatus)
       ? workflowStatus === "failed"
         ? "failed"
         : "stopped"
-      : (progress?.state ?? null);
-  return { id, title, tasks, counts: countTasks(tasks, progress?.total ?? null), state };
+      : declaredState;
+  const counts = countTasks(tasks, total);
+  const allDone =
+    (state === null ? tasks.length > 0 : state === "completed") && counts.done === tasks.length;
+  return { id, title, tasks, counts, state, allDone };
+}
+
+function latestStartedOrFinishedMember(
+  tasks: ReadonlyArray<WorkflowTaskProgress>,
+): RuntimeSubagent | null {
+  let latest: { task: WorkflowTaskProgress; at: number } | null = null;
+  for (const task of tasks) {
+    const member = task.member;
+    if (member === null) continue;
+    for (const timestamp of [member.startedAt, member.completedAt]) {
+      const at = timestamp === null ? NaN : Date.parse(timestamp);
+      if (!Number.isFinite(at)) continue;
+      if (latest === null || at > latest.at || (at === latest.at && task.id < latest.task.id))
+        latest = { task, at };
+    }
+  }
+  return latest?.task.member ?? null;
 }
 
 /** Graph nodes own retry identity; script agents keep their index across attempts. */
@@ -126,11 +146,12 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
   const phases: WorkflowPhaseProgress[] =
     group.graph === null
       ? group.phases.map((phase) =>
-          scriptPhase(
+          phaseProgress(
             `phase:${phase.index}`,
             phase.title,
-            phase.members.filter((member) => member.judgmentFor === undefined),
-            phase.progress,
+            phase.members.filter((member) => member.judgmentFor === undefined).map(memberTask),
+            phase.progress?.total ?? null,
+            phase.progress?.state ?? null,
             group.workflow.status,
           ),
         )
@@ -148,13 +169,7 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
               null,
           }));
           const index = wave[0]!.wave;
-          return {
-            id: `wave:${index}`,
-            title: `Phase ${index + 1}`,
-            tasks,
-            counts: countTasks(tasks, tasks.length),
-            state: null,
-          };
+          return phaseProgress(`wave:${index}`, `Phase ${index + 1}`, tasks, tasks.length);
         });
   const plannedTasks = phases.flatMap((phase) => phase.tasks);
   const other = group.graph?.otherMembers ?? [
@@ -169,7 +184,8 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     group.unphasedMembers.every((member) => member.judgmentFor !== undefined)
       ? phases.reduce((sum, phase) => sum + phase.counts.total!, 0)
       : null;
-  if (other.length > 0) phases.push(scriptPhase("other", "Other agents", other));
+  if (other.length > 0)
+    phases.push(phaseProgress("other", "Other agents", other.map(memberTask), null));
   const tasks = phases.flatMap((phase) => phase.tasks);
   const counts = countTasks(
     group.graph === null
@@ -178,31 +194,47 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     group.graph === null ? scriptTotal : plannedTasks.length,
   );
   const failure = tasks.find((task) => task.state === "failed");
+  const failedPhase = phases.find((phase) => phase.state === "failed");
+  const failedCount = tasks.filter((task) => task.state === "failed").length;
   const current =
     phases.find((phase) => phase.state === "running") ??
     phases.find((phase) => phase.counts.running > 0) ??
     phases.find((phase) => phase.counts.queued > 0) ??
     phases.at(-1);
+  const terminal =
+    group.workflow.status === "failed" ||
+    group.workflow.status === "completed" ||
+    group.workflow.status === "cancelled" ||
+    group.workflow.status === "interrupted";
+  const activity = group.workflow.progress?.trim();
+  const headlineMember =
+    failure === undefined && failedPhase === undefined && !terminal && !activity
+      ? latestStartedOrFinishedMember(tasks)
+      : null;
   const headline =
     failure !== undefined
-      ? `${failure.label} failed${failure.detail ? `: ${failure.detail}` : ""}`
-      : phases.some((phase) => phase.state === "failed")
-        ? `${phases.find((phase) => phase.state === "failed")!.title} failed`
+      ? `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`
+      : failedPhase !== undefined
+        ? `${failedPhase.title} failed`
         : group.workflow.status === "failed"
           ? (group.workflow.error ?? "Workflow failed")
-          : group.workflow.status === "completed" ||
-              group.workflow.status === "cancelled" ||
-              group.workflow.status === "interrupted"
+          : terminal
             ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
-            : group.workflow.progress?.trim() ||
-              `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running · ${workflowSettledText(current?.counts ?? counts)}`;
+            : activity ||
+              `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
   const successful =
     group.workflow.status === "completed" &&
-    (tasks.length > 0 || phases.some((phase) => phase.state === "completed")) &&
-    phases.every((phase) => phase.state === null || phase.state === "completed") &&
-    tasks.every((task) => task.state === "done");
-  const failedCount = tasks.filter((task) => task.state === "failed").length;
-  return { phases, counts, headline, successful, failedCount, agentCount: tasks.length };
+    phases.some((phase) => phase.allDone) &&
+    phases.every((phase) => phase.allDone || (phase.state === null && phase.tasks.length === 0));
+  return {
+    phases,
+    counts,
+    headline,
+    headlineMember,
+    successful,
+    failedCount,
+    agentCount: tasks.length,
+  };
 }
 
 export function workflowSettledText(counts: WorkflowProgressCounts): string {
@@ -227,8 +259,13 @@ export function workflowPhaseStatus(phase: WorkflowPhaseProgress) {
 }
 
 export function workflowCountsText(counts: WorkflowProgressCounts): string {
-  return (["done", "running", "failed", "queued", "stopped", "skipped"] as const)
-    .filter((state) => counts[state] > 0)
-    .map((state) => `${counts[state]} ${state}`)
+  return workflowCountEntries(counts)
+    .map(({ state, count }) => `${count} ${state}`)
     .join(" · ");
+}
+
+export function workflowCountEntries(counts: WorkflowProgressCounts) {
+  return (["done", "failed", "running", "queued", "stopped", "skipped"] as const)
+    .filter((state) => counts[state] > 0)
+    .map((state) => ({ state, count: counts[state] }));
 }

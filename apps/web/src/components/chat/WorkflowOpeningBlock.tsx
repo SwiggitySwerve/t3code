@@ -6,10 +6,11 @@ import {
   type WorkflowGraphView,
   type RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import { workflowOpeningTitles } from "@t3tools/shared/workflowOpeningText";
-import { ChevronDownIcon, SquareIcon, WorkflowIcon } from "lucide-react";
+import { ChevronDownIcon, ChevronRightIcon, SquareIcon, WorkflowIcon } from "lucide-react";
 import { useEffect, useEffectEvent, useId, useRef, useState } from "react";
 import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
@@ -19,6 +20,8 @@ import { PROGRESS_CLASS_NAME } from "../ui/progress";
 import { WorkflowDeclaration } from "./WorkflowDeclaration";
 import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
+import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
+import { providersIgnoringCheckedAtAtom } from "../../state/server";
 
 type WorkflowOpeningProps = {
   readonly opening: WorkflowOpening;
@@ -39,18 +42,29 @@ export function WorkflowOpeningBlock(props: WorkflowOpeningProps) {
   return <WorkflowOpeningContent key={props.opening.messageId} {...props} />;
 }
 
-function useWorkflowSnapshot(opening: WorkflowOpening, progress: string | null | undefined) {
-  const [snapshot, setSnapshot] = useState({ opening, progress });
+function useWorkflowSnapshot(
+  opening: WorkflowOpening,
+  progress: string | null | undefined,
+  heading: string | undefined,
+  providers: ReadonlyArray<ServerProvider>,
+) {
+  const [snapshot, setSnapshot] = useState({ opening, progress, heading, providers });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flush = useEffectEvent(() => {
     timer.current = null;
-    setSnapshot({ opening, progress });
+    setSnapshot({ opening, progress, heading, providers });
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- coalesces external workflow events without postponing a flush during continuous streaming.
   useEffect(() => {
-    if (snapshot.opening === opening && snapshot.progress === progress) return;
+    if (
+      snapshot.opening === opening &&
+      snapshot.progress === progress &&
+      snapshot.heading === heading &&
+      snapshot.providers === providers
+    )
+      return;
     if (timer.current === null) timer.current = setTimeout(flush, 1000);
-  }, [opening, progress, snapshot]);
+  }, [opening, progress, heading, providers, snapshot]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the pending publication timer on unmount.
   useEffect(
     () => () => {
@@ -63,10 +77,17 @@ function useWorkflowSnapshot(opening: WorkflowOpening, progress: string | null |
 }
 
 function WorkflowOpeningContent(props: WorkflowOpeningProps) {
-  const { opening, progress } = useWorkflowSnapshot(props.opening, props.progress);
+  const currentProviders = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
+  const {
+    opening,
+    progress,
+    heading: suppliedHeading,
+    providers,
+  } = useWorkflowSnapshot(props.opening, props.progress, props.heading, currentProviders);
   const [detailOpen, setDetailOpen] = useState(false);
+  const [resultOpen, setResultOpen] = useState(false);
   const heading =
-    props.heading ??
+    suppliedHeading ??
     (opening.group === null
       ? "Workflow started"
       : appWorkflowHeading(opening.group.workflow.status));
@@ -76,7 +97,12 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
   const overview = group === null ? null : deriveWorkflowProgress(group);
   const graph = group?.graph ?? null;
   const waitingOn = graph === null ? null : workflowGraphHeadline(graph).waitingOn;
-  const liveHeadline = overview?.headline;
+  const liveHeadline = overview?.headline ?? progress;
+  const headlineMember = overview?.headlineMember ?? null;
+  const terminalResult =
+    group?.workflow.result && group.workflow.status !== "running" && progress !== liveHeadline
+      ? progress
+      : null;
   const declaration =
     graph !== null
       ? graph.waves.flatMap((wave) => wave.map((node) => node.label))
@@ -94,7 +120,7 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           <p
             className={cn(
               "text-2xs font-medium text-muted-foreground",
-              overview?.failedCount && "text-destructive-foreground",
+              group?.workflow.status === "failed" && "text-destructive-foreground",
             )}
           >
             {heading}
@@ -102,6 +128,25 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text={find}>
             {headline.title}
           </h3>
+          <div
+            aria-live="polite"
+            aria-atomic="true"
+            className="flex min-w-0 items-start gap-1 text-xs text-muted-foreground [overflow-wrap:anywhere]"
+          >
+            {headlineMember === null ? null : (
+              <WorkflowAgentIdentity
+                member={headlineMember}
+                provider={providers.find(
+                  (provider) => provider.instanceId === headlineMember.providerInstanceId,
+                )}
+              />
+            )}
+            {liveHeadline ? (
+              <div className="min-w-0 flex-1">
+                <WorkflowProgress text={liveHeadline} />
+              </div>
+            ) : null}
+          </div>
           {headline.description ? (
             <p className="text-xs text-muted-foreground" data-thread-find-text={find}>
               {headline.description}
@@ -123,13 +168,6 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
         ) : null}
       </header>
       {opening.budget === undefined ? null : <WorkflowBudgetMeter budget={opening.budget} />}
-      <div
-        aria-live="polite"
-        aria-atomic="true"
-        className="text-xs text-muted-foreground [overflow-wrap:anywhere]"
-      >
-        {liveHeadline ? <WorkflowProgress text={liveHeadline} /> : null}
-      </div>
       {overview === null ? null : (
         <WorkflowProgressOverview
           progress={overview}
@@ -140,13 +178,24 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
       {waitingOn ? (
         <p className="text-2xs text-muted-foreground [overflow-wrap:anywhere]">{waitingOn}</p>
       ) : null}
-      {progress && progress !== liveHeadline ? <WorkflowProgress text={progress} /> : null}
+      {terminalResult ? (
+        <Collapsible open={resultOpen} onOpenChange={setResultOpen}>
+          <CollapsibleTrigger render={<Button size="xs" variant="ghost" />}>
+            <ChevronRightIcon aria-hidden className={cn("size-3", resultOpen && "rotate-90")} />
+            Workflow result
+          </CollapsibleTrigger>
+          <CollapsiblePanel animate={false}>
+            {resultOpen ? <WorkflowProgress text={terminalResult} /> : null}
+          </CollapsiblePanel>
+        </Collapsible>
+      ) : null}
       {props.findable && declaration.length > 0 ? (
         <WorkflowDeclaration segments={declaration} />
       ) : null}
       {group !== null ? (
         <Collapsible open={detailOpen} onOpenChange={setDetailOpen}>
           <CollapsibleTrigger render={<Button size="xs" variant="ghost" />}>
+            <ChevronRightIcon aria-hidden className={cn("size-3", detailOpen && "rotate-90")} />
             {graph === null ? "Script details" : "Graph details"}
           </CollapsibleTrigger>
           <CollapsiblePanel animate={false}>
@@ -265,7 +314,7 @@ function WorkflowProgress(props: { readonly text: string }) {
         ref={textRef}
         id={contentId}
         className={cn(
-          "break-words whitespace-pre-wrap px-2 text-xs text-muted-foreground",
+          "break-words whitespace-pre-wrap text-xs text-muted-foreground",
           !expanded && "line-clamp-3",
         )}
       >

@@ -4,6 +4,7 @@ import type {
   WorkflowOpening,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
+  appWorkflowHeading,
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
@@ -33,14 +34,19 @@ import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
 import {
   workflowScaleFixture,
   workflowScriptProgressFixture,
+  workflowCallbackLifecycleFixture,
+  type WorkflowCallbackState,
 } from "../../../test/workflow-fixtures/workflowFixtures";
 
-vi.mock(import("@effect/atom-react"), async (original) => ({
-  ...(await original()),
-  // Applies the selector to no providers, as the avatar reads its name and icon through one.
-  useAtomValue: ((_atom: unknown, select?: (value: unknown) => unknown) =>
-    select === undefined ? [] : select([])) as never,
-}));
+vi.mock(import("@effect/atom-react"), async (original) => {
+  const providers: ReadonlyArray<never> = [];
+  return {
+    ...(await original()),
+    // Applies the selector to no providers, as the avatar reads its name and icon through one.
+    useAtomValue: ((_atom: unknown, select?: (value: unknown) => unknown) =>
+      select === undefined ? providers : select(providers)) as never,
+  };
+});
 vi.mock(import("../ChatMarkdown"), async () => {
   const { memo } = await import("react");
   return {
@@ -71,18 +77,35 @@ it.each([4, 40, 256] as const)(
         findable
       />,
     );
-    expect(screen.container.querySelectorAll("[data-workflow-phase]").length).toBeLessThanOrEqual(
-      8,
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(
+      count === 256 ? 16 : count === 40 ? 4 : 2,
     );
     expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
-      count === 4 ? 4 : 0,
+      count === 4 ? 2 : 0,
     );
     expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
     expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
     expect(screen.container.textContent).not.toContain("These are task instructions");
+    expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toBe(
+      `1 agent failed · Agent ${count}: Access denied. Check workspace permissions.`,
+    );
     await expect
       .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
       .toHaveAttribute("max", String(count));
+    await expect
+      .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
+      .toHaveAttribute("value", String(count / 2 + 1));
+    if (count === 4) {
+      const completedPhase = screen.getByRole("button", { name: "Phase 1 agents", exact: true });
+      await expect.element(completedPhase).toHaveAttribute("aria-expanded", "false");
+      await userEvent.tab();
+      await userEvent.tab();
+      await expect.element(completedPhase).toHaveFocus();
+      await userEvent.keyboard("{Enter}");
+      expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(4);
+      await userEvent.keyboard(" ");
+      await expect.element(completedPhase).toHaveAttribute("aria-expanded", "false");
+    }
     await userEvent.click(screen.getByRole("button", { name: "Show failures (1)", exact: true }));
     expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(1);
     await userEvent.click(screen.getByRole("button", { name: `Open Agent ${count}`, exact: true }));
@@ -109,7 +132,9 @@ it.each([4, 40, 256] as const)(
       await expect
         .element(screen.getByRole("button", { name: "Open Agent 41, passed", exact: true }))
         .toHaveAccessibleDescription(expect.stringContaining("after Agent 17"));
-      await userEvent.click(screen.getByRole("button", { name: "More phases", exact: true }));
+      await expect
+        .element(screen.getByRole("button", { name: "More phases", exact: true }))
+        .not.toBeInTheDocument();
       await expect
         .element(screen.getByRole("region", { name: "Phase 16 phase", exact: true }))
         .toBeVisible();
@@ -117,16 +142,25 @@ it.each([4, 40, 256] as const)(
   },
 );
 
-it("pages a large phase without mounting every agent", async () => {
+it.each(["agents", "phases"] as const)("pages %s without mounting every detail", async (paging) => {
   const fixture = workflowScaleFixture("script", 40);
+  const members = fixture.group.phases.flatMap((phase) => phase.members);
   const group = {
     ...fixture.group,
-    phases: [
-      {
-        ...fixture.group.phases[0]!,
-        members: fixture.group.phases.flatMap((phase) => phase.members),
-      },
-    ],
+    phases:
+      paging === "phases"
+        ? members.map((member, index) => ({
+            ...fixture.group.phases[0]!,
+            index,
+            title: `Phase ${index + 1}`,
+            members: [member],
+          }))
+        : [
+            {
+              ...fixture.group.phases[0]!,
+              members,
+            },
+          ],
   };
   await using screen = await render(
     <WorkflowOpeningBlock
@@ -135,7 +169,26 @@ it("pages a large phase without mounting every agent", async () => {
       onOpenThread={() => {}}
     />,
   );
-  await userEvent.click(screen.getByRole("button", { name: "Show agents (40)", exact: true }));
+  if (paging === "phases") {
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(24);
+    expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "More phases", exact: true }));
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(16);
+    await expect
+      .element(screen.getByRole("region", { name: "Phase 40 phase", exact: true }))
+      .toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Show failures (1)", exact: true }));
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(1);
+    await expect
+      .element(screen.getByRole("button", { name: "Open Agent 40", exact: true }))
+      .toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Show all agents", exact: true }));
+    await expect
+      .element(screen.getByRole("region", { name: "Phase 1 phase", exact: true }))
+      .toBeVisible();
+    return;
+  }
+  await userEvent.click(screen.getByRole("button", { name: "Phase 1 agents", exact: true }));
   expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(20);
   await expect
     .element(screen.getByRole("button", { name: "Open Agent 1", exact: true }))
@@ -152,7 +205,13 @@ it("pages a large phase without mounting every agent", async () => {
 
 it("coalesces continuing workflow updates into one polite announcement and preserves unknown totals", async () => {
   const fixture = workflowScaleFixture("script", 4);
-  const view = (log: string, status: RuntimeSubagent["status"] = "running") => (
+  // Elapsed labels read the shared clock on their first mount.
+  using _timers = fakeTimers({ now: 10_000 });
+  const view = (
+    log: string,
+    status: RuntimeSubagent["status"] = "running",
+    model: string | null = "gpt-6.1-sol",
+  ) => (
     <WorkflowOpeningBlock
       opening={{
         ...fixture.opening,
@@ -161,16 +220,34 @@ it("coalesces continuing workflow updates into one polite announcement and prese
           workflow: { ...fixture.group.workflow, progress: log, status },
           phases: fixture.group.phases.map((phase) => ({
             ...phase,
-            members: phase.members.filter((member) => member.status !== "failed"),
+            members: phase.members
+              .filter((member) => member.status !== "failed")
+              .map((member) => ({
+                ...member,
+                startedAt:
+                  member.status === "running"
+                    ? "1970-01-01T00:00:00.000Z"
+                    : "1969-12-31T23:59:59.000Z",
+                completedAt: null,
+                model: member.status === "running" ? model : member.model,
+                status: member.status === "running" ? status : member.status,
+              })),
           })),
         },
       }}
       environmentId={EnvironmentId.make("test")}
+      progress={log}
+      heading={appWorkflowHeading(status)}
       onOpenThread={() => {}}
     />
   );
   await using screen = await render(view("Inspecting packages"));
-  using _timers = fakeTimers();
+  expect(screen.getByText("Inspecting packages", { exact: true }).elements()).toHaveLength(1);
+  expect(screen.container.querySelector("h3")?.nextElementSibling).toBe(
+    screen.container.querySelector('[aria-live="polite"]'),
+  );
+  const active = screen.getByRole("button", { name: "Open Agent 3", exact: true });
+  expect(active.element().textContent).toContain("10s");
   await screen.rerender(view("Reading exports"));
   await act(() => vi.advanceTimersByTime(500));
   await screen.rerender(view("Checking types"));
@@ -181,16 +258,46 @@ it("coalesces continuing workflow updates into one polite announcement and prese
   expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toBe(
     "Checking types",
   );
+  expect(active.element().textContent).toContain("11s");
   expect(screen.container.querySelector("progress")).toBeNull();
   expect(screen.container.textContent).toContain("total unknown");
-  await screen.rerender(view("Checking types", "cancelled"));
+  const live = screen.container.querySelector('[aria-live="polite"]')!;
+  expect(live.querySelector("[data-model-glyph]")).toBeNull();
+  await screen.rerender(view(""));
+  await act(() => vi.advanceTimersByTime(999));
+  expect(live.textContent).toBe("Checking types");
+  expect(live.querySelector("[data-model-glyph]")).toBeNull();
+  await act(() => vi.advanceTimersByTime(1));
+  expect(live.querySelector("[data-model-glyph]")?.getAttribute("data-model-glyph")).toBe(
+    "gpt-6.1-sol",
+  );
+  expect(live.textContent).toContain("Phase 2 · 1 running");
+  await screen.rerender(view("", "running", "gpt-6-luna"));
+  await act(() => vi.advanceTimersByTime(500));
+  expect(live.querySelector("[data-model-glyph]")?.getAttribute("data-model-glyph")).toBe(
+    "gpt-6.1-sol",
+  );
+  await screen.rerender(view("", "running", null));
+  await act(() => vi.advanceTimersByTime(500));
+  expect(live.querySelector("[data-model-glyph]")).toBeNull();
+  expect(live.querySelector("svg")).not.toBeNull();
+  expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
+  await screen.rerender(view("Coordinator resumed"));
   await act(() => vi.advanceTimersByTime(1000));
+  expect(live.textContent).toBe("Coordinator resumed");
+  expect(live.querySelector('[role="img"]')).toBeNull();
+  await screen.rerender(view("Checking types", "cancelled"));
+  await expect.element(screen.getByText("Workflow running", { exact: true })).toBeVisible();
+  await act(() => vi.advanceTimersByTime(1000));
+  await expect.element(screen.getByText("Workflow stopped", { exact: true })).toBeVisible();
   expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toContain(
     "Workflow stopped",
   );
   expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).not.toContain(
     "Checking types",
   );
+  expect(screen.container.textContent).not.toContain("Checking types");
+  expect(active.element().textContent).not.toContain("15s");
 });
 
 it("renders fixed script capacity and resizes only the phase being entered", async () => {
@@ -206,6 +313,11 @@ it("renders fixed script capacity and resizes only the phase being entered", asy
   };
   await using screen = await render(view(false));
   using _timers = fakeTimers();
+  const audits = screen.getByRole("button", { name: "Package audits agents", exact: true });
+  const followup = screen.getByRole("button", { name: "Follow up agents", exact: true });
+  await expect.element(audits).toHaveAttribute("aria-expanded", "false");
+  await expect.element(audits).toHaveAccessibleDescription("completed · 2/10 settled · 2 done");
+  await expect.element(followup).toHaveAccessibleDescription("planned · 0/4 settled");
   await expect
     .element(screen.getByRole("progressbar", { name: "Package audits tasks settled", exact: true }))
     .toHaveAttribute("max", "10");
@@ -213,7 +325,9 @@ it("renders fixed script capacity and resizes only the phase being entered", asy
     .element(screen.getByRole("progressbar", { name: "Follow up tasks settled", exact: true }))
     .toHaveAttribute("max", "4");
   await screen.rerender(view(true));
-  await act(() => vi.advanceTimersByTime(1000));
+  await act(() => vi.advanceTimersByTime(999));
+  await expect.element(followup).toHaveAccessibleDescription("planned · 0/4 settled");
+  await act(() => vi.advanceTimersByTime(1));
   await expect
     .element(screen.getByRole("progressbar", { name: "Package audits tasks settled", exact: true }))
     .toHaveAttribute("max", "10");
@@ -221,7 +335,77 @@ it("renders fixed script capacity and resizes only the phase being entered", asy
     .element(screen.getByRole("progressbar", { name: "Follow up tasks settled", exact: true }))
     .toHaveAttribute("max", "2");
   expect(screen.container.textContent).toContain("1 failed");
-  expect(screen.container.textContent).toContain("Follow up · running");
+  await expect.element(followup.getByText("Follow up · running", { exact: true })).toBeVisible();
+  await expect
+    .element(followup)
+    .toHaveAccessibleDescription("running · 1/2 settled · 1 failed · 1 running");
+  await expect.element(audits).toHaveAttribute("aria-expanded", "false");
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Report tasks settled", exact: true }))
+    .toHaveAttribute("max", "1");
+  await expect
+    .element(screen.getByRole("button", { name: "Open Agent 4", exact: true }))
+    .toBeVisible();
+});
+
+it.each(["completed", "failed", "stopped"] as const)(
+  "waits for callback %s before changing the compact phase disclosure",
+  async (state) => {
+    const view = (state: WorkflowCallbackState) => (
+      <WorkflowOpeningBlock
+        opening={workflowCallbackLifecycleFixture(state).opening}
+        environmentId={EnvironmentId.make("test")}
+        onOpenThread={() => {}}
+      />
+    );
+    await using screen = await render(view("running"));
+    using _timers = fakeTimers();
+    const phase = screen.getByRole("button", { name: "Audit agents", exact: true });
+    const track = screen.getByRole("progressbar", { name: "Audit tasks settled", exact: true });
+    await expect.element(phase).toHaveAttribute("aria-expanded", "true");
+    await expect.element(phase).toHaveAccessibleDescription("running · 1/1 settled · 1 done");
+    await expect.element(track).toHaveAttribute("value", "1");
+    await expect.element(track).toHaveAttribute("max", "1");
+    await screen.rerender(view(state));
+    await act(() => vi.advanceTimersByTime(999));
+    await expect.element(phase).toHaveAccessibleDescription("running · 1/1 settled · 1 done");
+    await act(() => vi.advanceTimersByTime(1));
+    await expect.element(phase.getByText(`Audit · ${state}`, { exact: true })).toBeVisible();
+    await expect.element(phase).toHaveAccessibleDescription(`${state} · 1/1 settled · 1 done`);
+    await expect.element(phase).toHaveAttribute("aria-expanded", String(state !== "completed"));
+    expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
+      state === "completed" ? 0 : 1,
+    );
+    if (state === "failed") {
+      const live = screen.container.querySelector('[aria-live="polite"]')!;
+      expect(live.textContent).toBe("Audit failed");
+      expect(live.querySelector("[data-model-glyph]")).toBeNull();
+    }
+  },
+);
+
+it("retains an explicit phase disclosure choice after the callback completes", async () => {
+  const view = (state: WorkflowCallbackState) => (
+    <WorkflowOpeningBlock
+      opening={workflowCallbackLifecycleFixture(state).opening}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />
+  );
+  await using screen = await render(view("running"));
+  using _timers = fakeTimers();
+  const phase = screen.getByRole("button", { name: "Audit agents", exact: true });
+  await userEvent.click(phase);
+  await expect.element(phase).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(phase);
+  await expect.element(phase).toHaveAttribute("aria-expanded", "true");
+  await screen.rerender(view("completed"));
+  await act(() => vi.advanceTimersByTime(1000));
+  await expect.element(phase).toHaveAttribute("aria-expanded", "true");
+  await expect.element(phase).toHaveAccessibleDescription("completed · 1/1 settled · 1 done");
+  await expect
+    .element(screen.getByRole("button", { name: "Open Agent 1", exact: true }))
+    .toBeVisible();
 });
 
 it("reveals a declaration search match while keeping the graph unmounted", async () => {
@@ -690,22 +874,28 @@ it("shows no script before the workflow's agents have loaded", async () => {
   expectNoScript(screen.container, marker);
 });
 
-it.each([false, true])(
-  "reveals and refolds the complete long result with the keyboard, coordinator failure=%s",
-  async (failed) => {
+it.each(["unloaded", "failed", "completed"] as const)(
+  "reveals and refolds the complete long result with the keyboard, coordinator=%s",
+  async (status) => {
     const progress = `Script output\n${"  untouched <data> & `code`\n".repeat(500)}FINAL RESULT`;
     const container = document.createElement("div");
     container.style.width = "400px";
     await using screen = await render(
       <WorkflowOpeningBlock
         opening={
-          failed
+          status !== "unloaded"
             ? {
                 ...opening,
                 group: {
                   ...scriptGroup(),
                   phases: [],
-                  workflow: { ...scriptGroup().workflow, status: "failed", error: progress },
+                  workflow: {
+                    ...scriptGroup().workflow,
+                    status,
+                    error: status === "failed" ? progress : null,
+                    result: progress,
+                    progress: "Old running log",
+                  },
                 },
               }
             : opening
@@ -716,6 +906,17 @@ it.each([false, true])(
       />,
       { container },
     );
+    if (status === "completed") {
+      expect(screen.container.textContent).not.toContain("FINAL RESULT");
+      expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toContain(
+        "Workflow finished",
+      );
+      expect(screen.container.textContent).not.toContain("Old running log");
+      const result = screen.getByRole("button", { name: "Workflow result", exact: true });
+      await userEvent.tab();
+      await expect.element(result).toHaveFocus();
+      await userEvent.keyboard("{Enter}");
+    }
     const reveal = screen.getByRole("button", { name: "Show full result" });
     await expect.element(reveal).toBeVisible();
     const content = screen.getByText(progress, { exact: true }).element();

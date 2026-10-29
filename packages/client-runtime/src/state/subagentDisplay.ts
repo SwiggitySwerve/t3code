@@ -48,6 +48,32 @@ export function formatSubagentDisplayTitle(title: string): string {
   return name.replace(/(^|\s)\S/gu, (letter) => letter.toUpperCase()) || displayTitle;
 }
 
+/** Registry labels only; each surface owns how an unresolved raw model is presented. */
+export function resolveSubagentModelLabel(input: {
+  readonly model: string | null;
+  readonly provider?: Pick<ServerProvider, "driver" | "models"> | null | undefined;
+}): string | null {
+  const slug = input.provider
+    ? resolveSelectableModel(input.provider.driver, input.model, input.provider.models)
+    : null;
+  const catalogModel = input.provider?.models.find((candidate) => candidate.slug === slug);
+  if (!catalogModel) return null;
+  const reportedLabel =
+    resolveModelShortName(catalogModel, input.provider?.driver) ?? catalogModel.name;
+  const qualifier = catalogModel.subProvider?.trim();
+  return qualifier
+    ? reportedLabel
+        .replace(
+          new RegExp(
+            `^${qualifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s*[.:/-]\\s*|\\s+)`,
+            "iu",
+          ),
+          "",
+        )
+        .trim() || reportedLabel
+    : reportedLabel;
+}
+
 export function resolveSubagentMetadata(input: {
   readonly model: string | null;
   readonly provider?: Pick<ServerProvider, "driver" | "models"> | null | undefined;
@@ -66,27 +92,8 @@ export function resolveSubagentMetadata(input: {
     | undefined;
 }) {
   const model = input.model?.trim();
-  const slug = input.provider
-    ? resolveSelectableModel(input.provider.driver, model, input.provider.models)
-    : model;
-  const catalogModel = input.provider?.models.find((candidate) => candidate.slug === slug);
-  const reportedLabel = catalogModel
-    ? (resolveModelShortName(catalogModel, input.provider?.driver) ?? catalogModel.name)
-    : model
-      ? formatModelSlugName(model)
-      : "Not reported";
-  const qualifier = catalogModel?.subProvider?.trim();
-  const modelLabel = qualifier
-    ? reportedLabel
-        .replace(
-          new RegExp(
-            `^${qualifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}(?:\\s*[.:/-]\\s*|\\s+)`,
-            "iu",
-          ),
-          "",
-        )
-        .trim() || reportedLabel
-    : reportedLabel;
+  const modelLabel =
+    resolveSubagentModelLabel(input) ?? (model ? formatModelSlugName(model) : "Not reported");
   const parentWorkspace = input.parentThread?.worktreePath ?? input.parentProject?.workspaceRoot;
   const childWorkspace = input.childThread?.worktreePath ?? input.childProject?.workspaceRoot;
   const workspace = [

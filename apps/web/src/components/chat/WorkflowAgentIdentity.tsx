@@ -4,10 +4,11 @@ import { ProviderDriverKind, type ServerProvider } from "@t3tools/contracts";
 import { resolveModelGlyph } from "@t3tools/shared/model";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
 
+/** Without a label, show only the model glyph or provider icon. */
 export function WorkflowAgentIdentity(props: {
   readonly member: RuntimeSubagent | null;
   readonly provider: ServerProvider | undefined;
-  readonly label: string;
+  readonly label?: string;
 }) {
   const { member, provider } = props;
   const driver = provider?.driver ?? member?.driver;
@@ -29,16 +30,20 @@ export function WorkflowAgentIdentity(props: {
       badgeClassName="right-0 bottom-0 size-1 min-w-1 p-0 forced-colors:border-foreground"
     />
   );
+  const glyph = (
+    <span
+      role="img"
+      aria-label={model?.label ?? identity}
+      className="flex size-3.5 shrink-0 items-center justify-center text-xs"
+      data-model-glyph={model?.family}
+    >
+      <span aria-hidden>{model?.glyph ?? icon}</span>
+    </span>
+  );
+  if (props.label === undefined) return glyph;
   return (
     <span className="flex min-w-0 items-center gap-1 leading-3.5" data-workflow-agent-identity>
-      <span
-        role="img"
-        aria-label={model?.label ?? identity}
-        className="flex size-3.5 shrink-0 items-center justify-center text-xs"
-        data-model-glyph={model?.family}
-      >
-        <span aria-hidden>{model?.glyph ?? icon}</span>
-      </span>
+      {glyph}
       <span className="min-w-0 flex-1 truncate">{props.label}</span>
       <span
         role="img"

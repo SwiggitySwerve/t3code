@@ -18,7 +18,7 @@ import {
   MinusIcon,
   type LucideIcon,
 } from "lucide-react";
-import { formatModelSlugName } from "@t3tools/shared/model";
+import { resolveSubagentModelLabel } from "@t3tools/client-runtime/state/subagent-display";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { formatTokens } from "@t3tools/shared/usageFormat";
@@ -408,25 +408,6 @@ const STATE_TEXT: Readonly<Partial<Record<WorkflowGraphNodeState, string>>> = {
 
 const sentenceCase = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
-/**
- * The agent line of a card: the model's short name from the provider catalog, else its slug
- * tidied. The provider instance and raw model id stay in the tooltip and the accessible
- * description.
- */
-function workflowNodeAgent(
-  member: RuntimeSubagent | null,
-  provider: ServerProvider | undefined,
-): string {
-  const identity = workflowMemberIdentity(member);
-  if (member === null || identity === "Not started") return identity;
-  if (member.model === null) return "Unknown model";
-  const model = provider?.models.find((entry) => entry.slug === member.model);
-  // A model the catalog lacks shows its tidied slug, without a build date stamp.
-  return (
-    model?.shortName ?? model?.name ?? formatModelSlugName(member.model).replace(/ \d{8}\b/, "")
-  );
-}
-
 function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   const accounting = workflowNodeAccounting(props.node);
   const { node, box } = props;
@@ -437,6 +418,10 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   const threadId = node.member?.childThreadId ?? null;
   const state = WORKFLOW_GRAPH_STATE_LABEL[node.state];
   const identity = workflowMemberIdentity(node.member);
+  const modelLabel =
+    resolveSubagentModelLabel({ model: node.member?.model ?? null, provider }) ??
+    node.member?.model ??
+    "Unknown model";
   const totals =
     accounting.tokens.value === null && accounting.elapsed.value === null
       ? "Usage unknown"
@@ -508,11 +493,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
         {box.started ? (
           <>
             <span className="text-2xs leading-3.5 text-muted-foreground">
-              <WorkflowAgentIdentity
-                member={node.member}
-                provider={provider}
-                label={workflowNodeAgent(node.member, provider)}
-              />
+              <WorkflowAgentIdentity member={node.member} provider={provider} label={modelLabel} />
             </span>
             <span className="truncate text-2xs leading-3.5 text-muted-foreground tabular-nums">
               {totals}
