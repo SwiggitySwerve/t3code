@@ -73,7 +73,7 @@ function memberRowSubagent(
     driver: opening.driver!,
     providerInstanceId: opening.providerInstanceId!,
     title: member.title,
-    prompt: member.progress ?? member.title,
+    prompt: member.intent ?? member.title,
     status: member.status,
     progress: undefined,
     result: member.result ?? member.error,

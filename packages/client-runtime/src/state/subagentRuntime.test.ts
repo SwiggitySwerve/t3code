@@ -17,6 +17,7 @@ import {
   workflowGraphHeadline,
   workflowGraphNodeDetail,
   deriveWorkflowGroups,
+  deriveWorkflowProgress,
   resolveAppWorkflowView,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
@@ -89,7 +90,8 @@ describe("projectedSubagentsToRuntime workflow expansion", () => {
     expect(settled?.model).toBe("claude-opus-5[1m]");
     expect(settled?.effort).toBe("xhigh");
     expect(settled?.speed).toBe("standard");
-    expect(settled?.progress).toBe("Reply with exactly: A1");
+    expect(settled?.intent).toBe("Reply with exactly: A1");
+    expect(settled?.progress).toBeNull();
     expect(settled?.usage).toEqual({ totalTokens: 71_141, toolUses: 3, durationMs: 1500 });
   });
 
@@ -117,7 +119,9 @@ describe("projectedSubagentsToRuntime workflow expansion", () => {
       ]);
       expect(groups[0]?.workflow.status).toBe(status);
       const members = groups[0]?.phases.flatMap((phase) => phase.members);
-      expect(members?.map((agent) => agent.status)).toEqual([status, status, "completed"]);
+      const unfinished = status === "completed" ? "interrupted" : status;
+      expect(members?.map((agent) => agent.status)).toEqual([unfinished, unfinished, "completed"]);
+      if (status === "completed") expect(deriveWorkflowProgress(groups[0]!).successful).toBe(false);
       expect(members?.map((agent) => agent.completedAt)).toEqual([
         "2026-08-01T10:00:09.000Z",
         "2026-08-01T10:00:09.000Z",
@@ -163,6 +167,22 @@ describe("deriveWorkflowGroups over a dynamic workflow", () => {
     expect(group?.phases.map((phase) => phase.settledCount)).toEqual([2, 0]);
     expect(group?.phases.flatMap((phase) => phase.members)).toHaveLength(4);
     expect(group?.unphasedMembers).toEqual([]);
+    const progress = deriveWorkflowProgress(group!);
+    expect(progress.counts).toEqual({
+      done: 1,
+      failed: 1,
+      running: 1,
+      queued: 1,
+      stopped: 0,
+      skipped: 0,
+      settled: 2,
+      observed: 4,
+      total: null,
+    });
+    expect(progress.phases.map((phase) => phase.counts.total)).toEqual([null, null]);
+    expect(progress.phases.map((phase) => phase.allDone)).toEqual([false, false]);
+    expect(progress.successful).toBe(false);
+    expect(progress.headline).toBe("1 agent failed · alpha:two");
   });
 
   it.each([false, true])("keeps a reported phase title, missing title first=%s", (missingFirst) => {
@@ -192,6 +212,159 @@ describe("deriveWorkflowGroups over a dynamic workflow", () => {
     expect(groups[0]?.unphasedMembers.map((agent) => agent.title)).toEqual(["alpha:one"]);
     expect(groups[1]?.phases).toEqual([]);
     expect(groups[1]?.unphasedMembers).toEqual([]);
+  });
+});
+
+describe("workflow progress aggregation", () => {
+  it.each(["completed", "cancelled", "interrupted"] as const)(
+    "announces %s instead of the retained activity log",
+    (status) => {
+      const group = groupsOf([
+        subagent({
+          status,
+          progress: "Dispatching audit agents",
+          workflow: { phases: [], agents: [member({ state: "completed" })] },
+        }),
+      ])[0]!;
+      const progress = deriveWorkflowProgress(group);
+      expect(progress.headline).toBe(
+        `${appWorkflowHeading(status)} · 1 settled · 1 discovered · total unknown`,
+      );
+      expect(progress.successful).toBe(status === "completed");
+      expect(progress.phases[0]?.allDone).toBe(true);
+    },
+  );
+
+  it.each([1, 2])(
+    "keeps %i auxiliary failures separate from the fixed graph denominator",
+    (failures) => {
+      const workflow = {
+        phases: [],
+        plan: { nodes: [{ key: "a", label: "Audit", wave: 0, dependsOn: [] }] },
+        agents: [member({ graphNodeKey: "a", state: "completed" })],
+        nodeOutcomes: { a: { status: "passed" as const } },
+      };
+      const before = deriveWorkflowProgress(
+        groupsOf([subagent({ workflow, status: "completed" })])[0]!,
+      );
+      const after = deriveWorkflowProgress(
+        groupsOf([
+          subagent({
+            status: "completed",
+            workflow: {
+              ...workflow,
+              agents: [
+                ...workflow.agents,
+                ...Array.from({ length: failures }, (_, index) =>
+                  member({
+                    index: index + 2,
+                    label: "Auxiliary check",
+                    state: "failed",
+                    result: "Permission denied",
+                  }),
+                ),
+              ],
+            },
+          }),
+        ])[0]!,
+      );
+      expect(after.counts).toEqual(before.counts);
+      expect(before.successful).toBe(true);
+      expect(after.counts).toMatchObject({ total: 1, observed: 1, done: 1, settled: 1 });
+      expect(after.phases.at(-1)?.counts).toMatchObject({
+        total: null,
+        observed: failures,
+        failed: failures,
+      });
+      expect(after.failedCount).toBe(failures);
+      expect(after.agentCount).toBe(1 + failures);
+      expect(after.headline).toBe(
+        `${failures} ${failures === 1 ? "agent" : "agents"} failed · Auxiliary check: Permission denied`,
+      );
+      expect(after.successful).toBe(false);
+    },
+  );
+
+  it("counts a logical agent once across retries and excludes native descendants", () => {
+    const runtime = projectedSubagentsToRuntime([
+      subagent({
+        workflow: {
+          phases: [],
+          agents: [member({ state: "failed" }), member({ state: "running", attempt: 2 })],
+        },
+      }),
+    ]);
+    const native = {
+      ...runtime[1]!,
+      id: "native-child",
+      kind: "subagent" as const,
+      parentAgentId: "coordinator",
+      agentIndex: null,
+    };
+    const progress = deriveWorkflowProgress(deriveWorkflowGroups([...runtime, native])[0]!);
+    expect(progress.counts).toMatchObject({ observed: 1, running: 1, failed: 0, total: null });
+    expect(progress.phases[0]?.tasks[0]?.member?.attempt).toBe(2);
+  });
+
+  it.each([4, 40, 256])("preserves unknown script totals as %i agents are discovered", (count) => {
+    const group = groupsOf([
+      subagent({
+        progress: "Inspecting exports",
+        workflow: {
+          phases: [],
+          agents: Array.from({ length: count }, (_, index) =>
+            member({ index, prompt: "Static instructions" }),
+          ),
+        },
+      }),
+    ])[0]!;
+    expect(deriveWorkflowProgress(group).counts).toMatchObject({ observed: count, total: null });
+    expect(deriveWorkflowProgress(group).headline).toBe("Inspecting exports");
+    expect(
+      deriveWorkflowProgress({ ...group, workflow: { ...group.workflow, progress: " " } }).headline,
+    ).toBe(`Alpha · ${count} running`);
+  });
+
+  it("keeps graph totals fixed across retries and distinguishes settlement from success", () => {
+    const workflow = {
+      phases: [],
+      plan: {
+        nodes: [
+          { key: "a", label: "Audit", wave: 0, dependsOn: [] },
+          { key: "b", label: "Build", wave: 1, dependsOn: ["a"] },
+        ],
+      },
+      agents: [
+        member({ graphNodeKey: "a", state: "failed" }),
+        member({ index: 2, graphNodeKey: "a", state: "running", attempt: 1 }),
+      ],
+    };
+    const running = deriveWorkflowProgress(groupsOf([subagent({ workflow })])[0]!);
+    expect(running.counts).toMatchObject({
+      total: 2,
+      observed: 2,
+      running: 1,
+      failed: 0,
+      queued: 1,
+    });
+    const failed = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          status: "failed",
+          progress: "Old log",
+          workflow: {
+            ...workflow,
+            nodeOutcomes: {
+              a: { status: "failed", reason: "Permission denied" },
+              b: { status: "skipped" },
+            },
+          },
+        }),
+      ])[0]!,
+    );
+    expect(failed.counts).toMatchObject({ total: 2, settled: 2, done: 0, failed: 1, skipped: 1 });
+    expect(failed.successful).toBe(false);
+    expect(failed.headline).toBe("1 agent failed · Audit: Permission denied");
   });
 });
 
@@ -480,6 +653,11 @@ describe("graph workflows", () => {
   });
 
   it("uses the latest agent for a node, and shows a node retrying as running", () => {
+    const failed = graphOf("running", {
+      plan,
+      agents: [member({ state: "failed", graphNodeKey: "a" })],
+    });
+    expect(failed?.waves[0]?.[0]?.state).toBe("failed");
     const graph = graphOf("running", {
       plan,
       agents: [

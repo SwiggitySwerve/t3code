@@ -57,6 +57,8 @@ interface GraphMember {
 
 function stateWithoutOutcome(member: GraphMember | null, active: boolean): WorkflowGraphNodeState {
   if (member === null) return active ? "waiting" : "not_run";
+  if (member.status === "failed") return "failed";
+  if (member.status === "cancelled" || member.status === "interrupted") return "interrupted";
   if (!active) return "interrupted";
   return member.status === "pending" ? "queued" : "running";
 }

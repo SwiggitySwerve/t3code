@@ -16,6 +16,7 @@ import {
 import { storedWorkflowScriptSource } from "@t3tools/shared/storedWorkflowScript";
 
 import { deriveWorkflowGraph, type WorkflowGraphView } from "./workflowGraphView.ts";
+import { deriveWorkflowProgress, workflowCountsText } from "./workflowProgress.ts";
 import { workflowBudget } from "@t3tools/shared/workflowBudget";
 import {
   isWorkflowScriptMessage,
@@ -33,6 +34,16 @@ export {
   type WorkflowGraphView,
 } from "./workflowGraphView.ts";
 export { workflowNodeAccounting } from "./workflowAttempts.ts";
+export {
+  appWorkflowHeading,
+  deriveWorkflowProgress,
+  workflowCountEntries,
+  workflowCountsText,
+  workflowSettledText,
+  type WorkflowPhaseProgress,
+  type WorkflowProgressCounts,
+  type WorkflowTaskProgress,
+} from "./workflowProgress.ts";
 
 export type RuntimeSubagentStatus =
   | "pending"
@@ -83,6 +94,7 @@ export interface RuntimeSubagent {
   readonly activationCount: number;
   readonly usage: SubagentUsage | null;
   readonly progress: string | null;
+  readonly intent?: string | null;
   readonly lastToolName: string | null;
   readonly result: string | null;
   readonly error: string | null;
@@ -274,7 +286,9 @@ function workflowMembersToRuntime(
     const status =
       (agent.state === "queued" || agent.state === "running") &&
       isTerminalSubagentStatus(coordinator.status)
-        ? coordinator.status
+        ? coordinator.status === "completed"
+          ? "interrupted"
+          : coordinator.status
         : agent.state === "queued"
           ? "pending"
           : agent.state;
@@ -297,7 +311,8 @@ function workflowMembersToRuntime(
       status,
       activationCount: agent.attempt ?? 1,
       usage: workflowUsage(agent),
-      progress: agent.prompt ?? null,
+      intent: agent.prompt ?? null,
+      progress: null,
       result: failed ? null : (agent.result ?? null),
       error: failed ? (agent.result ?? null) : null,
       parentAgentId: coordinator.id,
@@ -396,12 +411,19 @@ export function deriveWorkflowGroups(
     .filter((agent) => agent.kind === "workflow")
     .sort((a, b) => a.firstSeenAt.localeCompare(b.firstSeenAt) || a.id.localeCompare(b.id));
   const members = groupBy(
-    agents.filter((agent) => agent.kind !== "workflow" && agent.parentAgentId !== null),
+    agents.filter((agent) => agent.kind === "workflow_agent" && agent.parentAgentId !== null),
     (agent) => agent.parentAgentId!,
   );
 
   return workflows.map((workflow) => {
-    const workflowMembers = Object.hasOwn(members, workflow.id) ? members[workflow.id]! : [];
+    const workflowMembers = [
+      ...new Map(
+        (Object.hasOwn(members, workflow.id) ? members[workflow.id]! : []).map((member) => [
+          member.agentIndex ?? member.id,
+          member,
+        ]),
+      ).values(),
+    ];
     const knownPhases = workflowPhaseTitles({
       declared: workflow.phases,
       members: workflowMembers,
@@ -514,36 +536,11 @@ export function workflowOpeningHeadline(opening: WorkflowOpening): {
     name: opening.name,
     description: opening.description,
   });
-  const members =
-    opening.group === null
-      ? []
-      : [
-          ...opening.group.phases.flatMap((phase) => phase.members),
-          ...opening.group.unphasedMembers,
-        ];
-  const counts = new Map<string, number>();
-  for (const member of members) {
-    const key = isTerminalSubagentStatus(member.status)
-      ? member.status === "completed"
-        ? "done"
-        : member.status === "failed"
-          ? "failed"
-          : "stopped"
-      : "working";
-    counts.set(key, (counts.get(key) ?? 0) + 1);
-  }
+  const counts = opening.group === null ? null : deriveWorkflowProgress(opening.group).counts;
   const agents =
-    members.length === 0
+    counts === null || counts.observed === 0
       ? null
-      : `${members.length} ${members.length === 1 ? "agent" : "agents"} · ${[
-          "working",
-          "done",
-          "failed",
-          "stopped",
-        ]
-          .filter((key) => counts.has(key))
-          .map((key) => `${counts.get(key)} ${key}`)
-          .join(" · ")}`;
+      : `${counts.observed} ${counts.observed === 1 ? "agent" : "agents"} · ${workflowCountsText(counts)}`;
   return { title, description, agents };
 }
 
@@ -588,23 +585,6 @@ export function appWorkflowMemberThreads(
     members.set(workflow.id, threads);
   }
   return members;
-}
-
-/** The heading of a T3-run workflow's timeline block for each run status. */
-export function appWorkflowHeading(status: OrchestrationV2Subagent["status"]): string {
-  switch (status) {
-    case "running":
-      return "Workflow running";
-    case "completed":
-      return "Workflow finished";
-    case "failed":
-      return "Workflow failed";
-    case "cancelled":
-    case "interrupted":
-      return "Workflow stopped";
-    default:
-      return "Workflow";
-  }
 }
 
 /**

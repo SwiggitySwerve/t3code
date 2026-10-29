@@ -23,6 +23,7 @@ import {
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import {
   WORKFLOW_QA_EXPECTED_STATES,
+  WORKFLOW_QA_AGENT_COUNTS,
   WORKFLOW_QA_REVIEW_STATES,
   WORKFLOW_QA_RUNNING_WAVE,
   WORKFLOW_QA_STOP_VISIBLE,
@@ -61,6 +62,15 @@ describe.each(["graph", "script"] as const)("workflow block, %s", (kind) => {
       element: () => <WorkflowBlockSurface kind={kind} variant={variant} />,
     });
   });
+  it.each(WORKFLOW_QA_AGENT_COUNTS)("overview with %i agents", async (count) => {
+    await captureSurface({
+      surface,
+      state: `agents-${count}`,
+      selector: "[data-workflow-opening]",
+      frame: "[data-qa-column]",
+      element: () => <WorkflowBlockSurface kind={kind} agentCount={count} />,
+    });
+  });
 });
 
 it("workflow block, graph, 150 nodes scrolled to the running wave", async () => {
@@ -70,7 +80,11 @@ it("workflow block, graph, 150 nodes scrolled to the running wave", async () => 
     selector: "[data-workflow-opening]",
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" variant="many-nodes" />,
-    settle: async (screen) => scrollWavesToNode(screen.container, RUNNING_WAVE_NODE),
+    settle: async (screen) => {
+      await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
+      await userEvent.click(screen.getByRole("button", { name: "More graph nodes", exact: true }));
+      await scrollWavesToNode(screen.container, RUNNING_WAVE_NODE);
+    },
   });
 });
 

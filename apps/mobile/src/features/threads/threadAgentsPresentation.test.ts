@@ -208,7 +208,11 @@ describe("workflow member rows", () => {
       speed: "Fast",
       fast: true,
     });
-    expect(workflowMemberDetail(completed!)).toEqual({ detail: "Checked controls", error: null });
+    expect(workflowMemberDetail(completed!)).toEqual({
+      detail: "Checked controls",
+      intent: null,
+      error: null,
+    });
   });
 
   it("reports nothing the provider did not send", () => {
@@ -256,7 +260,8 @@ describe("workflow member rows", () => {
     ])[0]!.members;
 
     expect(workflowMemberDetail(failed!)).toEqual({
-      detail: "Update session store",
+      detail: null,
+      intent: "Update session store",
       error: "Type error",
     });
   });

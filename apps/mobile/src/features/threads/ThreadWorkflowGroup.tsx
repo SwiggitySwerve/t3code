@@ -165,7 +165,7 @@ function WorkflowMemberRow(props: {
     result: null,
     childThreadId: threadId,
   });
-  const { detail, error } = workflowMemberDetail(member);
+  const { detail, intent, error } = workflowMemberDetail(member);
   const metadata = workflowMemberMetadata(member, props.provider);
   const labels = [metadata.model, metadata.effort].filter((value) => value !== null);
   return (
@@ -247,6 +247,10 @@ function WorkflowMemberRow(props: {
         {detail ? (
           <Text textRole="label" numberOfLines={1} className="text-foreground-muted">
             {detail}
+          </Text>
+        ) : intent ? (
+          <Text textRole="label" numberOfLines={1} className="text-foreground-muted">
+            Task: {intent}
           </Text>
         ) : null}
         {error ? (
