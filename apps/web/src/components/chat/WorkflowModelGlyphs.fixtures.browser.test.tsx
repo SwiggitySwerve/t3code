@@ -16,8 +16,8 @@ vi.mock(import("@effect/atom-react"), async (original) => ({
 }));
 
 async function expandAgents(screen: Screen) {
-  for (const button of screen.getByRole("button", { name: /^Show agents/ }).all()) {
-    await userEvent.click(button);
+  for (const button of screen.getByRole("button", { name: / agents$/ }).all()) {
+    if (button.element().getAttribute("aria-expanded") === "false") await userEvent.click(button);
   }
 }
 

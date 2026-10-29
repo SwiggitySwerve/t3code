@@ -180,8 +180,9 @@ describe("deriveWorkflowGroups over a dynamic workflow", () => {
       total: null,
     });
     expect(progress.phases.map((phase) => phase.counts.total)).toEqual([null, null]);
+    expect(progress.phases.map((phase) => phase.allDone)).toEqual([false, false]);
     expect(progress.successful).toBe(false);
-    expect(progress.headline).toBe("alpha:two failed");
+    expect(progress.headline).toBe("1 agent failed · alpha:two");
   });
 
   it.each([false, true])("keeps a reported phase title, missing title first=%s", (missingFirst) => {
@@ -230,43 +231,59 @@ describe("workflow progress aggregation", () => {
         `${appWorkflowHeading(status)} · 1 settled · 1 discovered · total unknown`,
       );
       expect(progress.successful).toBe(status === "completed");
+      expect(progress.phases[0]?.allDone).toBe(true);
     },
   );
 
-  it("keeps auxiliary agents separate from the fixed graph denominator and exposes their failures", () => {
-    const workflow = {
-      phases: [],
-      plan: { nodes: [{ key: "a", label: "Audit", wave: 0, dependsOn: [] }] },
-      agents: [member({ graphNodeKey: "a", state: "completed" })],
-      nodeOutcomes: { a: { status: "passed" as const } },
-    };
-    const before = deriveWorkflowProgress(groupsOf([subagent({ workflow })])[0]!);
-    const after = deriveWorkflowProgress(
-      groupsOf([
-        subagent({
-          workflow: {
-            ...workflow,
-            agents: [
-              ...workflow.agents,
-              member({
-                index: 2,
-                label: "Auxiliary check",
-                state: "failed",
-                result: "Permission denied",
-              }),
-            ],
-          },
-        }),
-      ])[0]!,
-    );
-    expect(after.counts).toEqual(before.counts);
-    expect(after.counts).toMatchObject({ total: 1, observed: 1, done: 1, settled: 1 });
-    expect(after.phases.at(-1)?.counts).toMatchObject({ total: null, observed: 1, failed: 1 });
-    expect(after.failedCount).toBe(1);
-    expect(after.agentCount).toBe(2);
-    expect(after.headline).toBe("Auxiliary check failed: Permission denied");
-    expect(after.successful).toBe(false);
-  });
+  it.each([1, 2])(
+    "keeps %i auxiliary failures separate from the fixed graph denominator",
+    (failures) => {
+      const workflow = {
+        phases: [],
+        plan: { nodes: [{ key: "a", label: "Audit", wave: 0, dependsOn: [] }] },
+        agents: [member({ graphNodeKey: "a", state: "completed" })],
+        nodeOutcomes: { a: { status: "passed" as const } },
+      };
+      const before = deriveWorkflowProgress(
+        groupsOf([subagent({ workflow, status: "completed" })])[0]!,
+      );
+      const after = deriveWorkflowProgress(
+        groupsOf([
+          subagent({
+            status: "completed",
+            workflow: {
+              ...workflow,
+              agents: [
+                ...workflow.agents,
+                ...Array.from({ length: failures }, (_, index) =>
+                  member({
+                    index: index + 2,
+                    label: "Auxiliary check",
+                    state: "failed",
+                    result: "Permission denied",
+                  }),
+                ),
+              ],
+            },
+          }),
+        ])[0]!,
+      );
+      expect(after.counts).toEqual(before.counts);
+      expect(before.successful).toBe(true);
+      expect(after.counts).toMatchObject({ total: 1, observed: 1, done: 1, settled: 1 });
+      expect(after.phases.at(-1)?.counts).toMatchObject({
+        total: null,
+        observed: failures,
+        failed: failures,
+      });
+      expect(after.failedCount).toBe(failures);
+      expect(after.agentCount).toBe(1 + failures);
+      expect(after.headline).toBe(
+        `${failures} ${failures === 1 ? "agent" : "agents"} failed · Auxiliary check: Permission denied`,
+      );
+      expect(after.successful).toBe(false);
+    },
+  );
 
   it("counts a logical agent once across retries and excludes native descendants", () => {
     const runtime = projectedSubagentsToRuntime([
@@ -303,6 +320,9 @@ describe("workflow progress aggregation", () => {
     ])[0]!;
     expect(deriveWorkflowProgress(group).counts).toMatchObject({ observed: count, total: null });
     expect(deriveWorkflowProgress(group).headline).toBe("Inspecting exports");
+    expect(
+      deriveWorkflowProgress({ ...group, workflow: { ...group.workflow, progress: " " } }).headline,
+    ).toBe(`Alpha · ${count} running`);
   });
 
   it("keeps graph totals fixed across retries and distinguishes settlement from success", () => {
@@ -344,7 +364,7 @@ describe("workflow progress aggregation", () => {
     );
     expect(failed.counts).toMatchObject({ total: 2, settled: 2, done: 0, failed: 1, skipped: 1 });
     expect(failed.successful).toBe(false);
-    expect(failed.headline).toBe("Audit failed: Permission denied");
+    expect(failed.headline).toBe("1 agent failed · Audit: Permission denied");
   });
 });
 
