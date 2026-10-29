@@ -92,15 +92,18 @@ describe.each(["graph", "script"] as const)("workflow block, %s", (kind) => {
       element: () => <WorkflowBlockSurface kind={kind} variant={variant} />,
     });
   });
-  it.each(WORKFLOW_QA_AGENT_COUNTS)("overview with %i agents", async (count) => {
-    await captureSurface({
-      surface,
-      state: `agents-${count}`,
-      selector: "[data-workflow-opening]",
-      frame: "[data-qa-column]",
-      element: () => <WorkflowBlockSurface kind={kind} agentCount={count} />,
-    });
-  });
+  it.each([...WORKFLOW_QA_AGENT_COUNTS, 1024] as const)(
+    "overview with %i agents",
+    async (count) => {
+      await captureSurface({
+        surface,
+        state: `agents-${count}`,
+        selector: "[data-workflow-opening]",
+        frame: "[data-qa-column]",
+        element: () => <WorkflowBlockSurface kind={kind} agentCount={count} />,
+      });
+    },
+  );
 });
 
 it("workflow block, graph, 150 nodes scrolled to the running wave", async () => {
@@ -119,6 +122,17 @@ it("workflow block, graph, 150 nodes scrolled to the running wave", async () => 
 });
 
 describe("workflow canvas", () => {
+  it.each([256, 1024] as const)("scale direct canvas with %i agents", async (count) => {
+    await captureSurface({
+      surface: "workflow-canvas",
+      state: `agents-${count}-running-wave`,
+      selector: "[data-workflow-waves]",
+      frame: "[data-qa-column]",
+      element: () => <WorkflowCanvasSurface agentCount={count} />,
+      settle: async (screen) => scrollWavesToNode(screen.container, `task-${count / 2}`),
+    });
+  });
+
   it.each(statesOf("workflow-canvas"))("%s", async (variant) => {
     await captureSurface({
       surface: "workflow-canvas",
@@ -138,6 +152,20 @@ describe("workflow canvas", () => {
       element: () => <WorkflowCanvasSurface variant="many-nodes" />,
       settle: async (screen) => scrollWavesToNode(screen.container, RUNNING_WAVE_NODE),
     });
+  });
+});
+
+it.each([256, 1024] as const)("scale paged graph with %i agents", async (count) => {
+  await captureSurface({
+    surface: "workflow-block-graph",
+    state: `agents-${count}-graph-page-2`,
+    selector: "[data-workflow-opening]",
+    frame: "[data-qa-column]",
+    element: () => <WorkflowBlockSurface kind="graph" agentCount={count} />,
+    settle: async (screen) => {
+      await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
+      await userEvent.click(screen.getByRole("button", { name: "More graph nodes", exact: true }));
+    },
   });
 });
 

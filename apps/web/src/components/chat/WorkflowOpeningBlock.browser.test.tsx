@@ -5,6 +5,7 @@ import type {
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   appWorkflowHeading,
+  deriveWorkflowProgress,
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
@@ -31,6 +32,7 @@ import type ChatMarkdown from "../ChatMarkdown";
 import { collectThreadFindRanges } from "./threadFindHighlights";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
+import { scrollWavesToNode } from "../../../test/workflow-fixtures/surfaces";
 import {
   workflowScaleFixture,
   workflowScriptProgressFixture,
@@ -47,6 +49,125 @@ vi.mock(import("@effect/atom-react"), async (original) => {
       select === undefined ? providers : select(providers)) as never,
   };
 });
+
+it.each([
+  ["graph", 256],
+  ["graph", 1024],
+  ["script", 256],
+  ["script", 1024],
+] as const)("updates one selected agent in the %s overview of %i agents", async (kind, count) => {
+  const before = workflowScaleFixture(kind, count);
+  const after = workflowScaleFixture(kind, count, true);
+  const progress = deriveWorkflowProgress(before.group);
+  expect(progress.counts).toMatchObject({
+    done: count / 2,
+    running: count / 4,
+    failed: 1,
+    queued: count / 4 - 1,
+    settled: count / 2 + 1,
+    observed: count,
+    total: kind === "graph" ? count : null,
+  });
+  expect(before.row.workflow!.agents[0]!.attemptHistory).toHaveLength(3);
+  const view = (fixture: typeof before) => (
+    <WorkflowOpeningBlock
+      opening={fixture.opening}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />
+  );
+  await using screen = await render(view(before));
+  const phase = screen.getByRole("button", {
+    name: `Phase ${count === 256 ? 9 : 17} agents`,
+    exact: true,
+  });
+  await userEvent.click(phase);
+  expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
+    count === 256 ? 16 : 20,
+  );
+  if (count === 1024) {
+    await userEvent.click(screen.getByRole("button", { name: "More agents", exact: true }));
+    expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(12);
+    await expect
+      .element(screen.getByRole("button", { name: "Open Agent 533", exact: true }))
+      .toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Previous agents", exact: true }));
+  }
+  const selected = screen.getByRole("button", { name: `Open Agent ${count / 2 + 1}`, exact: true });
+  await expect.element(selected).toHaveAccessibleDescription(expect.stringContaining("running"));
+  using _timers = fakeTimers();
+  await screen.rerender(view(after));
+  await act(() => vi.advanceTimersByTime(999));
+  await expect.element(selected).toHaveAccessibleDescription(expect.stringContaining("running"));
+  await act(() => vi.advanceTimersByTime(1));
+  await expect.element(selected).toHaveAccessibleDescription(expect.stringContaining("done"));
+  await expect.element(phase).toHaveAttribute("aria-expanded", "true");
+  expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
+    count === 256 ? 16 : 20,
+  );
+  expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
+  if (kind === "graph") {
+    await expect
+      .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
+      .toHaveAttribute("value", String(count / 2 + 2));
+  } else {
+    await expect
+      .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
+      .not.toBeInTheDocument();
+    expect(screen.container.textContent).toContain("total unknown");
+  }
+});
+
+it.each([256, 1024] as const)(
+  "keeps %i direct-canvas nodes accessible while windowing full cards",
+  async (count) => {
+    const before = workflowScaleFixture("graph", count);
+    const after = workflowScaleFixture("graph", count, true);
+    const onOpenThread = vi.fn();
+    const view = (fixture: typeof before) => (
+      <div style={{ width: 736 }}>
+        <WorkflowWaveCanvas
+          graph={fixture.group.graph!}
+          environmentId={EnvironmentId.make("test")}
+          onOpenThread={onOpenThread}
+        />
+      </div>
+    );
+    await using screen = await render(view(before));
+    expect(screen.container.querySelectorAll("[data-workflow-node]")).toHaveLength(count);
+    expect(
+      screen.container.querySelectorAll("[data-workflow-node-placeholder]").length,
+    ).toBeGreaterThan(0);
+    const selectedKey = `task-${count / 2}`;
+    await scrollWavesToNode(screen.container, selectedKey);
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open Agent ${count / 2 + 1}, running`, exact: true }),
+    );
+    expect(onOpenThread).toHaveBeenLastCalledWith(`qa-thread-${count / 2}`);
+    await screen.rerender(view(after));
+    await expect
+      .element(
+        screen.getByRole("button", { name: `Open Agent ${count / 2 + 1}, passed`, exact: true }),
+      )
+      .toHaveFocus();
+    expect(screen.container.querySelectorAll("[data-workflow-node]")).toHaveLength(count);
+    expect(
+      screen.container.querySelectorAll(
+        "[data-workflow-node]:not([data-workflow-node-placeholder])",
+      ).length,
+    ).toBeLessThan(count);
+    await scrollWavesToNode(screen.container, `task-${count - 1}`);
+    await userEvent.click(
+      screen.getByRole("button", { name: `Open Agent ${count}, failed`, exact: true }),
+    );
+    expect(onOpenThread).toHaveBeenLastCalledWith(`qa-thread-${count - 1}`);
+    await expect
+      .element(
+        screen.getByText("Access denied. Check workspace permissions.", { exact: true }).first(),
+      )
+      .toBeVisible();
+  },
+);
 vi.mock(import("../ChatMarkdown"), async () => {
   const { memo } = await import("react");
   return {
@@ -64,7 +185,7 @@ const opening: WorkflowOpening = {
   group: null,
 };
 
-it.each([4, 40, 256] as const)(
+it.each([4, 40, 256, 1024] as const)(
   "bounds the overview and lazily pages details for %i agents",
   async (count) => {
     const fixture = workflowScaleFixture("graph", count);
@@ -78,7 +199,7 @@ it.each([4, 40, 256] as const)(
       />,
     );
     expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(
-      count === 256 ? 16 : count === 40 ? 4 : 2,
+      count === 1024 ? 24 : count === 256 ? 16 : count === 40 ? 4 : 2,
     );
     expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
       count === 4 ? 2 : 0,
@@ -137,6 +258,21 @@ it.each([4, 40, 256] as const)(
         .not.toBeInTheDocument();
       await expect
         .element(screen.getByRole("region", { name: "Phase 16 phase", exact: true }))
+        .toBeVisible();
+    }
+    if (count === 1024) {
+      expect(screen.container.querySelector('[aria-label="Wave 2"] h4')?.textContent).toContain(
+        "32/32 finished · 8 shown",
+      );
+      await userEvent.click(screen.getByRole("button", { name: "More graph nodes", exact: true }));
+      expect(screen.container.querySelector('[aria-label="Wave 2"] h4')?.textContent).toContain(
+        "32/32 finished · 24 shown",
+      );
+      expect(screen.container.querySelectorAll("[data-workflow-node]")).toHaveLength(40);
+      await userEvent.click(screen.getByRole("button", { name: "More phases", exact: true }));
+      expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(8);
+      await expect
+        .element(screen.getByRole("region", { name: "Phase 32 phase", exact: true }))
         .toBeVisible();
     }
   },
