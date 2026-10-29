@@ -1,3 +1,5 @@
+import * as NodeVM from "node:vm";
+
 import { ThreadId } from "@t3tools/contracts";
 import { expect, it } from "vite-plus/test";
 
@@ -30,6 +32,33 @@ it("treats the server's mark as the answer and falls back to the text only witho
     false,
   );
   expect(isWorkflowScriptMessage({ role: "assistant", text: SCRIPT })).toBe(false);
+});
+
+it.each([
+  "export const meta = {};",
+  " \n\t/**/ /* stars ** and / slashes\n ***/ // line\nexport const meta = {};",
+  "/**//****/export\nconst\tmeta = {};",
+])("recognizes a script after leading comments and whitespace: %s", (text) => {
+  expect(isWorkflowScriptMessage({ role: "user", text })).toBe(true);
+});
+
+it.each([
+  "/* unterminated export const meta",
+  "/**/export const metadata = {};",
+  "// comment only",
+])("rejects text without an opening meta export: %s", (text) => {
+  expect(isWorkflowScriptMessage({ role: "user", text })).toBe(false);
+});
+
+it("rejects a long run of block comments without backtracking", () => {
+  // The VM watchdog interrupts a regressed regex instead of hanging the test runner.
+  expect(
+    NodeVM.runInNewContext(
+      "isWorkflowScriptMessage(message)",
+      { isWorkflowScriptMessage, message: { role: "user", text: "/**/".repeat(10_000) } },
+      { timeout: 1_000 },
+    ),
+  ).toBe(false);
 });
 
 it("opens a workflow only for the first user message of a provider-native subagent thread", () => {
