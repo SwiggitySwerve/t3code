@@ -1,6 +1,7 @@
 # Workflow runner: measured costs and next design steps
 
-Status: design note. Section 1 is shipped; sections 2 to 6 are proposals awaiting implementation.
+Status: design note. Sections 1 and 3 are shipped; section 3's X2 measurement remains open.
+Sections 2 and 4 are proposals, section 5 is guidance, and section 6 is deferred.
 Evidence comes from the M7 live runs (the fan-in and serial graphs from the omx graph benchmarks,
 on the codex driver through a proxy and on the claudeAgent driver, with Claude Haiku 5.5). It is a
 small sample: one run per configuration, on tiny tasks.
@@ -68,20 +69,21 @@ Options, cheapest first:
 Gate: on the M7 fan-in, member time before the turn drops by at least half, and every reader
 listed above works on member threads (tested, not assumed).
 
-## 3. A smaller context per member (proposal, gated by an experiment)
+## 3. A smaller context per member (shipped; X2 measurement open)
 
-T3 cannot narrow a member's context today. The skills list (about 74k characters) and AGENTS.md
-(about 29k) come from Codex's own loader, and every thread gets the same MCP toolkit. Two levers
-are candidates:
+T3 narrows member context as described in
+[Member toolset](orchestrator-mcp-server.md#transport-and-authentication):
 
-- **Codex:** `skills.include_instructions=false` in the per-thread `config` of `thread/start`.
-  Codex 0.163.0 contains the key, and T3's fixture recorder already sends it. Its effect is
-  untested. Experiment X2: send it to one member only, then compare first-request input tokens and
-  the rollout's skills section against a control member and an untouched sibling. It passes if
-  input drops by at least 20k tokens for the treated member only.
-- **All drivers:** a member capability set narrower than the thread default. Members already lose
-  `orchestration`. The MCP server could also stop listing tools a credential cannot call, which
-  shrinks the tool schemas sent to the model.
+- **Codex:** members send `skills.include_instructions=false` in the per-thread `config` of both
+  `thread/start` and `thread/resume`. Codex restores the skills catalog on a resume that omits it.
+- **All drivers:** `McpHttpServer` uses `TOOLKIT_REQUIRED_CAPABILITY` to hide toolkits whose
+  capability a member lacks. In the test registration, a member sees 9 tools against a
+  coordinator's 88; hidden tools cannot be called either.
+
+Experiment X2 remains open: compare first-request input tokens and the rollout's skills section
+for a member with `skills.include_instructions=false` against a control member and an untouched
+sibling. It passes if input drops by at least 20k tokens for the treated member only. The shipped
+configuration and tool filtering do not establish that token reduction.
 
 ## 4. Benchmark on real tasks (proposal)
 
