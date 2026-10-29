@@ -38,6 +38,11 @@ it.each([400, 736])(
       reducedMotion: "reduce",
     });
     await using screen = await render(<WorkflowModelGlyphSurface />);
+    const headline = screen.container.querySelector('[aria-live="polite"]')!;
+    expect(headline.querySelector("[data-model-glyph]")?.getAttribute("data-model-glyph")).toBe(
+      "gpt-6.1-sol",
+    );
+    expect(headline.textContent).toContain("Phase 3 · 4 running");
     await expandAgents(screen);
     const overview = screen.container.querySelector<HTMLElement>("[data-workflow-overview]")!;
     expect(overview.querySelectorAll("[data-model-glyph]")).toHaveLength(8);
@@ -75,6 +80,11 @@ it.each([400, 736])(
     expect(overview.scrollWidth).toBeLessThanOrEqual(overview.clientWidth);
 
     await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
+    const graphSol = screen.getByRole("button", { name: "Open Sol analyst, passed", exact: true });
+    await expect.element(graphSol.getByText("6.1 Sol", { exact: true })).toBeVisible();
+    await expect
+      .element(graphSol)
+      .toHaveAccessibleDescription(expect.stringContaining("cliproxy / openai.gpt-6.1-sol"));
     await scrollWavesToNode(screen.container, "model-4");
     const graphOpus = screen.getByRole("button", {
       name: "Open Opus planner, passed",
@@ -86,6 +96,16 @@ it.each([400, 736])(
     await expect
       .element(graphOpus)
       .toHaveAccessibleDescription(expect.stringContaining("cliproxy / claude-opus-5-5"));
+    const graphSonnet = screen.getByRole("button", {
+      name: "Open Sonnet researcher, passed",
+      exact: true,
+    });
+    await expect.element(graphSonnet.getByText("Sonnet 4.6", { exact: true })).toBeVisible();
+    await expect
+      .element(graphSonnet)
+      .toHaveAccessibleDescription(
+        expect.stringContaining("cliproxy / anthropic/claude-sonnet-4-6"),
+      );
     await scrollWavesToNode(screen.container, "model-8");
     const graphUnknown = screen.getByRole("button", {
       name: "Open Unknown model, running",
@@ -96,6 +116,9 @@ it.each([400, 736])(
       .toHaveAccessibleDescription(expect.stringContaining("Work Cursor"));
     expect(graphUnknown.element().querySelector("[data-provider-package-icon]")).not.toBeNull();
     expect(graphUnknown.element().querySelector("[data-model-glyph]")).toBeNull();
+    await expect
+      .element(graphUnknown.getByText("vendor/claude-opus-5-5-custom", { exact: true }))
+      .toBeVisible();
     for (const identity of screen.container.querySelectorAll<HTMLElement>(
       "[data-workflow-agent-identity]",
     )) {
@@ -105,18 +128,23 @@ it.each([400, 736])(
   },
 );
 
-it.each(["overview", "graph", "graph-fallbacks"] as const)(
+it.each(["headline", "overview", "graph", "graph-fallbacks"] as const)(
   "model identities fixture: %s",
   async (state) => {
     await captureSurface({
       surface: "workflow-model-identities",
       state,
-      selector: state === "overview" ? "[data-workflow-overview]" : "[data-workflow-waves]",
+      selector:
+        state === "headline"
+          ? "[data-workflow-opening]"
+          : state === "overview"
+            ? "[data-workflow-overview]"
+            : "[data-workflow-waves]",
       frame: "[data-qa-column]",
       element: () => <WorkflowModelGlyphSurface />,
       settle: async (screen) => {
         if (state === "overview") await expandAgents(screen);
-        else {
+        else if (state !== "headline") {
           await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
           if (state === "graph-fallbacks") await scrollWavesToNode(screen.container, "model-8");
         }

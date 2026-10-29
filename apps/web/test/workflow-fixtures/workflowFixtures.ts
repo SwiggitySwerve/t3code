@@ -802,7 +802,7 @@ export function workflowModelGlyphFixture(): WorkflowQaFixture {
     ["Sonnet researcher", "anthropic/claude-sonnet-4-6", "cliproxy"],
     ["Fable writer", "claude-fable-5-1", "cursor-work"],
     ["Haiku verifier", "claude-haiku-5-5", "cursor-work"],
-    ["Unknown model", "custom-model", "cursor-work"],
+    ["Unknown model", "vendor/claude-opus-5-5-custom", "cursor-work"],
     ["Unknown harness", "custom-model", "lab-runner"],
     ["Missing model", null, "cliproxy"],
     ["Unavailable instance", "custom-model", "retired-instance"],
@@ -814,11 +814,13 @@ export function workflowModelGlyphFixture(): WorkflowQaFixture {
         state: index < 8 ? "completed" : "running",
         identity: { ...(model === null ? {} : { model }), provider },
         tokens: 1200,
+        durationMs: index < 8 ? 1200 : 600,
       },
     ),
   );
   const row: WorkflowQaRow = {
     ...seed.row,
+    progress: "",
     workflow: {
       name: "Model identities across providers",
       agents,
@@ -837,5 +839,5 @@ export function workflowModelGlyphFixture(): WorkflowQaFixture {
     },
   };
   const opening = resolveAppWorkflowView(row)!;
-  return { ...seed, row, opening, group: opening.group! };
+  return { ...seed, row, opening, group: opening.group!, progress: workflowProgressText(row) };
 }

@@ -231,6 +231,7 @@ describe("workflow progress aggregation", () => {
         `${appWorkflowHeading(status)} · 1 settled · 1 discovered · total unknown`,
       );
       expect(progress.successful).toBe(status === "completed");
+      expect(progress.headlineMember).toBeNull();
       expect(progress.phases[0]?.allDone).toBe(true);
     },
   );
@@ -290,7 +291,10 @@ describe("workflow progress aggregation", () => {
       subagent({
         workflow: {
           phases: [],
-          agents: [member({ state: "failed" }), member({ state: "running", attempt: 2 })],
+          agents: [
+            member({ state: "failed", startedAt: 1000, completedAt: 9000 }),
+            member({ state: "running", attempt: 2, startedAt: 2000 }),
+          ],
         },
       }),
     ]);
@@ -300,10 +304,66 @@ describe("workflow progress aggregation", () => {
       kind: "subagent" as const,
       parentAgentId: "coordinator",
       agentIndex: null,
+      startedAt: "2099-01-01T00:00:00Z",
     };
     const progress = deriveWorkflowProgress(deriveWorkflowGroups([...runtime, native])[0]!);
     expect(progress.counts).toMatchObject({ observed: 1, running: 1, failed: 0, total: null });
     expect(progress.phases[0]?.tasks[0]?.member?.attempt).toBe(2);
+    expect(progress.headlineMember?.attempt).toBe(2);
+  });
+
+  it("selects the latest logical start or completion without inventing missing activity", () => {
+    const group = groupsOf([
+      subagent({
+        workflow: {
+          phases: [],
+          agents: [
+            member({ index: 1, model: "gpt-6-luna", startedAt: 2000 }),
+            member({
+              index: 2,
+              state: "completed",
+              model: "gpt-6.1-sol",
+              startedAt: 1000,
+              completedAt: 3000,
+            }),
+            member({ index: 3, prompt: "Latest activity", model: "claude-opus-5-5" }),
+          ],
+        },
+      }),
+    ])[0]!;
+    expect(deriveWorkflowProgress(group).headlineMember?.model).toBe("gpt-6.1-sol");
+    const withMembers = (members: (typeof group.phases)[number]["members"]) => ({
+      ...group,
+      phases: [{ ...group.phases[0]!, members }],
+    });
+    const [first, second, missing] = group.phases[0]!.members;
+    const tied = [first!, { ...second!, completedAt: first!.startedAt }];
+    expect(deriveWorkflowProgress(withMembers(tied)).headlineMember?.id).toBe(first!.id);
+    expect(deriveWorkflowProgress(withMembers(tied.toReversed())).headlineMember?.id).toBe(
+      first!.id,
+    );
+    const unknown = { ...missing!, startedAt: "1970-01-01T00:00:04Z", model: null };
+    expect(deriveWorkflowProgress(withMembers([first!, second!, unknown])).headlineMember).toBe(
+      unknown,
+    );
+    expect(
+      deriveWorkflowProgress(
+        withMembers([
+          { ...first!, startedAt: "invalid", completedAt: null, updatedAt: "2099-01-01T00:00:00Z" },
+          missing!,
+        ]),
+      ).headlineMember,
+    ).toBeNull();
+    expect(
+      deriveWorkflowProgress({
+        ...group,
+        workflow: { ...group.workflow, progress: "Coordinator log" },
+      }).headlineMember,
+    ).toBeNull();
+    expect(
+      deriveWorkflowProgress({ ...group, workflow: { ...group.workflow, status: "failed" } })
+        .headlineMember,
+    ).toBeNull();
   });
 
   it.each([4, 40, 256])("preserves unknown script totals as %i agents are discovered", (count) => {
@@ -320,6 +380,7 @@ describe("workflow progress aggregation", () => {
     ])[0]!;
     expect(deriveWorkflowProgress(group).counts).toMatchObject({ observed: count, total: null });
     expect(deriveWorkflowProgress(group).headline).toBe("Inspecting exports");
+    expect(deriveWorkflowProgress(group).headlineMember).toBeNull();
     expect(
       deriveWorkflowProgress({ ...group, workflow: { ...group.workflow, progress: " " } }).headline,
     ).toBe(`Alpha · ${count} running`);
@@ -335,8 +396,8 @@ describe("workflow progress aggregation", () => {
         ],
       },
       agents: [
-        member({ graphNodeKey: "a", state: "failed" }),
-        member({ index: 2, graphNodeKey: "a", state: "running", attempt: 1 }),
+        member({ graphNodeKey: "a", state: "failed", startedAt: 1000, completedAt: 9000 }),
+        member({ index: 2, graphNodeKey: "a", state: "running", attempt: 1, startedAt: 2000 }),
       ],
     };
     const running = deriveWorkflowProgress(groupsOf([subagent({ workflow })])[0]!);
@@ -347,6 +408,7 @@ describe("workflow progress aggregation", () => {
       failed: 0,
       queued: 1,
     });
+    expect(running.headlineMember?.agentIndex).toBe(2);
     const failed = deriveWorkflowProgress(
       groupsOf([
         subagent({
@@ -365,6 +427,7 @@ describe("workflow progress aggregation", () => {
     expect(failed.counts).toMatchObject({ total: 2, settled: 2, done: 0, failed: 1, skipped: 1 });
     expect(failed.successful).toBe(false);
     expect(failed.headline).toBe("1 agent failed · Audit: Permission denied");
+    expect(failed.headlineMember).toBeNull();
   });
 });
 

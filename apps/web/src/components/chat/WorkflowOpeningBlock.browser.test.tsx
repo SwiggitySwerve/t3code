@@ -33,12 +33,15 @@ import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
 import { workflowScaleFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 
-vi.mock(import("@effect/atom-react"), async (original) => ({
-  ...(await original()),
-  // Applies the selector to no providers, as the avatar reads its name and icon through one.
-  useAtomValue: ((_atom: unknown, select?: (value: unknown) => unknown) =>
-    select === undefined ? [] : select([])) as never,
-}));
+vi.mock(import("@effect/atom-react"), async (original) => {
+  const providers: ReadonlyArray<never> = [];
+  return {
+    ...(await original()),
+    // Applies the selector to no providers, as the avatar reads its name and icon through one.
+    useAtomValue: ((_atom: unknown, select?: (value: unknown) => unknown) =>
+      select === undefined ? providers : select(providers)) as never,
+  };
+});
 vi.mock(import("../ChatMarkdown"), async () => {
   const { memo } = await import("react");
   return {
@@ -199,7 +202,11 @@ it("coalesces continuing workflow updates into one polite announcement and prese
   const fixture = workflowScaleFixture("script", 4);
   // Elapsed labels read the shared clock on their first mount.
   using _timers = fakeTimers({ now: 10_000 });
-  const view = (log: string, status: RuntimeSubagent["status"] = "running") => (
+  const view = (
+    log: string,
+    status: RuntimeSubagent["status"] = "running",
+    model: string | null = "gpt-6.1-sol",
+  ) => (
     <WorkflowOpeningBlock
       opening={{
         ...fixture.opening,
@@ -212,7 +219,12 @@ it("coalesces continuing workflow updates into one polite announcement and prese
               .filter((member) => member.status !== "failed")
               .map((member) => ({
                 ...member,
-                startedAt: "1970-01-01T00:00:00.000Z",
+                startedAt:
+                  member.status === "running"
+                    ? "1970-01-01T00:00:00.000Z"
+                    : "1969-12-31T23:59:59.000Z",
+                completedAt: null,
+                model: member.status === "running" ? model : member.model,
                 status: member.status === "running" ? status : member.status,
               })),
           })),
@@ -244,6 +256,31 @@ it("coalesces continuing workflow updates into one polite announcement and prese
   expect(active.element().textContent).toContain("11s");
   expect(screen.container.querySelector("progress")).toBeNull();
   expect(screen.container.textContent).toContain("total unknown");
+  const live = screen.container.querySelector('[aria-live="polite"]')!;
+  expect(live.querySelector("[data-model-glyph]")).toBeNull();
+  await screen.rerender(view(""));
+  await act(() => vi.advanceTimersByTime(999));
+  expect(live.textContent).toBe("Checking types");
+  expect(live.querySelector("[data-model-glyph]")).toBeNull();
+  await act(() => vi.advanceTimersByTime(1));
+  expect(live.querySelector("[data-model-glyph]")?.getAttribute("data-model-glyph")).toBe(
+    "gpt-6.1-sol",
+  );
+  expect(live.textContent).toContain("Phase 2 · 1 running");
+  await screen.rerender(view("", "running", "gpt-6-luna"));
+  await act(() => vi.advanceTimersByTime(500));
+  expect(live.querySelector("[data-model-glyph]")?.getAttribute("data-model-glyph")).toBe(
+    "gpt-6.1-sol",
+  );
+  await screen.rerender(view("", "running", null));
+  await act(() => vi.advanceTimersByTime(500));
+  expect(live.querySelector("[data-model-glyph]")).toBeNull();
+  expect(live.querySelector("svg")).not.toBeNull();
+  expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
+  await screen.rerender(view("Coordinator resumed"));
+  await act(() => vi.advanceTimersByTime(1000));
+  expect(live.textContent).toBe("Coordinator resumed");
+  expect(live.querySelector('[role="img"]')).toBeNull();
   await screen.rerender(view("Checking types", "cancelled"));
   await expect.element(screen.getByText("Workflow running", { exact: true })).toBeVisible();
   await act(() => vi.advanceTimersByTime(1000));
@@ -255,7 +292,7 @@ it("coalesces continuing workflow updates into one polite announcement and prese
     "Checking types",
   );
   expect(screen.container.textContent).not.toContain("Checking types");
-  expect(active.element().textContent).not.toContain("12s");
+  expect(active.element().textContent).not.toContain("15s");
 });
 
 it("reveals a declaration search match while keeping the graph unmounted", async () => {

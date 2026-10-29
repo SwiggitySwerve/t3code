@@ -6,7 +6,8 @@ import {
   type WorkflowGraphView,
   type RuntimeSubagent,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { EnvironmentId } from "@t3tools/contracts";
+import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
+import { useAtomValue } from "@effect/atom-react";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import { workflowOpeningTitles } from "@t3tools/shared/workflowOpeningText";
 import { ChevronDownIcon, ChevronRightIcon, SquareIcon, WorkflowIcon } from "lucide-react";
@@ -19,6 +20,8 @@ import { PROGRESS_CLASS_NAME } from "../ui/progress";
 import { WorkflowDeclaration } from "./WorkflowDeclaration";
 import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
+import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
+import { providersIgnoringCheckedAtAtom } from "../../state/server";
 
 type WorkflowOpeningProps = {
   readonly opening: WorkflowOpening;
@@ -43,23 +46,25 @@ function useWorkflowSnapshot(
   opening: WorkflowOpening,
   progress: string | null | undefined,
   heading: string | undefined,
+  providers: ReadonlyArray<ServerProvider>,
 ) {
-  const [snapshot, setSnapshot] = useState({ opening, progress, heading });
+  const [snapshot, setSnapshot] = useState({ opening, progress, heading, providers });
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const flush = useEffectEvent(() => {
     timer.current = null;
-    setSnapshot({ opening, progress, heading });
+    setSnapshot({ opening, progress, heading, providers });
   });
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- coalesces external workflow events without postponing a flush during continuous streaming.
   useEffect(() => {
     if (
       snapshot.opening === opening &&
       snapshot.progress === progress &&
-      snapshot.heading === heading
+      snapshot.heading === heading &&
+      snapshot.providers === providers
     )
       return;
     if (timer.current === null) timer.current = setTimeout(flush, 1000);
-  }, [opening, progress, heading, snapshot]);
+  }, [opening, progress, heading, providers, snapshot]);
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- releases the pending publication timer on unmount.
   useEffect(
     () => () => {
@@ -72,11 +77,13 @@ function useWorkflowSnapshot(
 }
 
 function WorkflowOpeningContent(props: WorkflowOpeningProps) {
+  const currentProviders = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const {
     opening,
     progress,
     heading: suppliedHeading,
-  } = useWorkflowSnapshot(props.opening, props.progress, props.heading);
+    providers,
+  } = useWorkflowSnapshot(props.opening, props.progress, props.heading, currentProviders);
   const [detailOpen, setDetailOpen] = useState(false);
   const [resultOpen, setResultOpen] = useState(false);
   const heading =
@@ -91,6 +98,7 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
   const graph = group?.graph ?? null;
   const waitingOn = graph === null ? null : workflowGraphHeadline(graph).waitingOn;
   const liveHeadline = overview?.headline ?? progress;
+  const headlineMember = overview?.headlineMember ?? null;
   const terminalResult =
     group?.workflow.result && group.workflow.status !== "running" && progress !== liveHeadline
       ? progress
@@ -123,9 +131,21 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           <div
             aria-live="polite"
             aria-atomic="true"
-            className="text-xs text-muted-foreground [overflow-wrap:anywhere]"
+            className="flex min-w-0 items-start gap-1 text-xs text-muted-foreground [overflow-wrap:anywhere]"
           >
-            {liveHeadline ? <WorkflowProgress text={liveHeadline} /> : null}
+            {headlineMember === null ? null : (
+              <WorkflowAgentIdentity
+                member={headlineMember}
+                provider={providers.find(
+                  (provider) => provider.instanceId === headlineMember.providerInstanceId,
+                )}
+              />
+            )}
+            {liveHeadline ? (
+              <div className="min-w-0 flex-1">
+                <WorkflowProgress text={liveHeadline} />
+              </div>
+            ) : null}
           </div>
           {headline.description ? (
             <p className="text-xs text-muted-foreground" data-thread-find-text={find}>
