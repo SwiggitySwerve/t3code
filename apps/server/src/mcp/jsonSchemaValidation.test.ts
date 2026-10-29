@@ -18,13 +18,46 @@ const evictEverything = () => {
 const reparsed = (schema: object): object => JSON.parse(JSON.stringify(schema));
 
 describe("JSON Schema validation", () => {
+  it("accepts properties named after regex keywords", () => {
+    const schema = {
+      type: "object",
+      properties: { pattern: { type: "string" }, patternProperties: { type: "string" } },
+    };
+    expect(validateJsonSchema(schema, { pattern: "text", patternProperties: "text" })).toBeNull();
+    expect(validateJsonSchema(schema, { pattern: 1 })).toBe("$.pattern must be string");
+  });
+
+  it.each(["$defs", "definitions", "dependentSchemas", "dependencies"])(
+    "treats names in %s as names, and its values as schemas",
+    (keyword) => {
+      expect(validateJsonSchema({ [keyword]: { pattern: { type: "string" } } }, {})).toBeNull();
+      expect(validateJsonSchema({ [keyword]: { x: { pattern: "^(a+)+$" } } }, {})).toContain(
+        "the schema is invalid",
+      );
+    },
+  );
+
+  it("does not interpret literal values as schemas", () => {
+    const value = { pattern: "text", patternProperties: {} };
+    expect(
+      validateJsonSchema({ const: value, default: value, examples: [value] }, value),
+    ).toBeNull();
+  });
+
   it.each([
     { pattern: "^(a+)+$" },
     { patternProperties: { "^(a+)+$": { type: "string" } } },
-    { properties: { value: { pattern: "^(a+)+$" } } },
+    { properties: { x: { pattern: "^(a+)+$" } } },
     { properties: { value: { patternProperties: { "^(a+)+$": {} } } } },
     { anyOf: [{ type: "null" }, { pattern: "^(a+)+$" }] },
     { allOf: [{ patternProperties: { "^(a+)+$": {} } }] },
+    { oneOf: [{ pattern: "^(a+)+$" }] },
+    { prefixItems: [{ pattern: "^(a+)+$" }] },
+    { items: [{ pattern: "^(a+)+$" }] },
+    { additionalProperties: { pattern: "^(a+)+$" } },
+    { items: { pattern: "^(a+)+$" } },
+    { if: { properties: { x: { pattern: "^(a+)+$" } } } },
+    { $ref: "#/custom", custom: { pattern: "^(a+)+$" } },
     { $defs: { unused: { pattern: "^(a+)+$" } } },
     { $defs: { unused: { patternProperties: { "^(a+)+$": {} } } } },
   ])("rejects regex keywords anywhere in a schema: %j", (schema) => {
