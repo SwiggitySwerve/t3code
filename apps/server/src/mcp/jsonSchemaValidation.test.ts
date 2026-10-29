@@ -18,6 +18,20 @@ const evictEverything = () => {
 const reparsed = (schema: object): object => JSON.parse(JSON.stringify(schema));
 
 describe("JSON Schema validation", () => {
+  it.each([
+    { pattern: "^(a+)+$" },
+    { patternProperties: { "^(a+)+$": { type: "string" } } },
+    { properties: { value: { pattern: "^(a+)+$" } } },
+    { properties: { value: { patternProperties: { "^(a+)+$": {} } } } },
+    { anyOf: [{ type: "null" }, { pattern: "^(a+)+$" }] },
+    { allOf: [{ patternProperties: { "^(a+)+$": {} } }] },
+    { $defs: { unused: { pattern: "^(a+)+$" } } },
+    { $defs: { unused: { patternProperties: { "^(a+)+$": {} } } } },
+  ])("rejects regex keywords anywhere in a schema: %j", (schema) => {
+    expect(validateJsonSchema(schema, {})).toContain("the schema is invalid");
+    expect(validateJsonSchema(reparsed(schema), {})).toContain("the schema is invalid");
+  });
+
   it("reports the first mismatch with its path", () => {
     const schema = {
       type: "object",

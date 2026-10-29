@@ -7,13 +7,23 @@ import { Ajv, type ValidateFunction } from "ajv";
 const compiled = new Map<string, ValidateFunction | string>();
 const MAX_COMPILED = 64;
 
+function containsRegexKeyword(value: unknown): boolean {
+  if (typeof value !== "object" || value === null) return false;
+  return Object.entries(value).some(
+    ([key, nested]) =>
+      key === "pattern" || key === "patternProperties" || containsRegexKeyword(nested),
+  );
+}
+
 function compile(schema: object): ValidateFunction | string {
   const key = JSON.stringify(schema);
   const cached = compiled.get(key);
   if (cached !== undefined) return cached;
   let result: ValidateFunction | string;
   try {
-    result = new Ajv({ strict: false }).compile(schema);
+    result = containsRegexKeyword(schema)
+      ? "the schema is invalid: pattern and patternProperties are not supported"
+      : new Ajv({ strict: false }).compile(schema);
   } catch (error) {
     result = `the schema is invalid: ${error instanceof Error ? error.message : String(error)}`;
   }
