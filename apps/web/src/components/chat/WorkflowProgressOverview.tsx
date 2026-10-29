@@ -6,6 +6,11 @@ import {
   type WorkflowTaskProgress,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { useState } from "react";
+import { useAtomValue } from "@effect/atom-react";
+import type { EnvironmentId, ServerProvider } from "@t3tools/contracts";
+import { workflowMemberIdentity } from "@t3tools/client-runtime/state/subagentRuntime";
+import { providersIgnoringCheckedAtAtom } from "../../state/server";
+import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
 import { PROGRESS_CLASS_NAME } from "../ui/progress";
@@ -17,9 +22,11 @@ const TASK_PAGE_SIZE = 20;
 
 export function WorkflowProgressOverview(props: {
   readonly progress: ReturnType<typeof deriveWorkflowProgress>;
+  readonly environmentId: EnvironmentId;
   readonly onOpenThread: (threadId: string) => void;
 }) {
   const { progress } = props;
+  const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const [phasePage, setPhasePage] = useState(0);
   const [failuresOnly, setFailuresOnly] = useState(false);
   const filtering = failuresOnly && progress.failedCount > 0;
@@ -58,6 +65,7 @@ export function WorkflowProgressOverview(props: {
           <TaskDetails
             key={`${phase.id}:${filtering}`}
             tasks={phase.tasks}
+            providers={providers}
             expanded={small || filtering}
             failuresOnly={filtering}
             onOpenThread={props.onOpenThread}
@@ -100,6 +108,7 @@ function ProgressCounts(props: {
 
 function TaskDetails(props: {
   readonly tasks: ReadonlyArray<WorkflowTaskProgress>;
+  readonly providers: ReadonlyArray<ServerProvider> | undefined;
   readonly expanded: boolean;
   readonly failuresOnly: boolean;
   readonly onOpenThread: (threadId: string) => void;
@@ -120,7 +129,14 @@ function TaskDetails(props: {
           <>
             <ul className="m-0 list-none p-0">
               {tasks.slice(page * TASK_PAGE_SIZE, (page + 1) * TASK_PAGE_SIZE).map((task) => (
-                <TaskRow key={task.id} task={task} onOpenThread={props.onOpenThread} />
+                <TaskRow
+                  key={task.id}
+                  task={task}
+                  provider={props.providers?.find(
+                    (provider) => provider.instanceId === task.member?.providerInstanceId,
+                  )}
+                  onOpenThread={props.onOpenThread}
+                />
               ))}
             </ul>
             <PageControls
@@ -138,6 +154,7 @@ function TaskDetails(props: {
 
 function TaskRow(props: {
   readonly task: WorkflowTaskProgress;
+  readonly provider: ServerProvider | undefined;
   readonly onOpenThread: (threadId: string) => void;
 }) {
   const { task } = props;
@@ -145,7 +162,13 @@ function TaskRow(props: {
   const body = (
     <>
       <span className="min-w-0 flex-1">
-        <span className="block truncate text-xs font-medium">{task.label}</span>
+        <span className="block text-xs font-medium">
+          <WorkflowAgentIdentity
+            member={task.member}
+            provider={props.provider}
+            label={task.label}
+          />
+        </span>
         {task.detail ? (
           <span className="block truncate text-2xs text-muted-foreground">{task.detail}</span>
         ) : null}
@@ -170,7 +193,13 @@ function TaskRow(props: {
               <button
                 type="button"
                 aria-label={`Open ${task.label}`}
-                aria-description={task.state}
+                aria-description={[
+                  task.state,
+                  props.provider?.displayName,
+                  workflowMemberIdentity(task.member),
+                ]
+                  .filter(Boolean)
+                  .join(", ")}
                 className={cn(
                   className,
                   "cursor-pointer hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
@@ -178,17 +207,21 @@ function TaskRow(props: {
                 onClick={() => props.onOpenThread(threadId)}
               />
             ) : (
-              <div tabIndex={task.detail ? 0 : undefined} className={className} />
+              <div tabIndex={0} className={className} />
             )
           }
         >
           {body}
         </TooltipTrigger>
-        {task.detail ? (
-          <TooltipPopup>
+        <TooltipPopup>
+          <p>
+            {props.provider?.displayName ?? task.member?.providerInstanceId ?? "Unknown provider"} ·{" "}
+            {workflowMemberIdentity(task.member)}
+          </p>
+          {task.detail ? (
             <div className="max-h-60 overflow-auto whitespace-pre-wrap">{task.detail}</div>
-          </TooltipPopup>
-        ) : null}
+          ) : null}
+        </TooltipPopup>
       </Tooltip>
     </li>
   );

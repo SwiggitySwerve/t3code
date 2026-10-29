@@ -14,6 +14,7 @@ import { getProviderClient } from "@t3tools/client-runtime/provider-clients";
 
 type ProviderIconProps = {
   readonly provider: string | null | undefined;
+  readonly displayName?: string;
   readonly iconUrl?: string | null | undefined;
   readonly size?: number;
 };
@@ -139,6 +140,16 @@ export function ProviderIcon(props: ProviderIconProps) {
     );
   }
 
+  if (props.provider !== "codex") {
+    return (
+      <Text
+        style={{ width: size, height: size, fontSize: size * 0.6, lineHeight: size, color: mono }}
+      >
+        {providerInstanceInitials(props.displayName ?? props.provider ?? "") || "?"}
+      </Text>
+    );
+  }
+
   return (
     <Svg width={size} height={size} viewBox="100 100 411 411" fill="none">
       <Path
@@ -164,7 +175,12 @@ export function ProviderInstanceIcon(props: {
   return (
     <View style={{ position: "relative" }}>
       <View style={{ opacity: 0.6 }}>
-        <ProviderIcon iconUrl={props.iconUrl} provider={props.provider} size={props.size} />
+        <ProviderIcon
+          iconUrl={props.iconUrl}
+          provider={props.provider}
+          displayName={props.displayName}
+          size={props.size}
+        />
       </View>
       {props.showBadge ? (
         // An absolute badge alone is capped at icon width and clips initials.

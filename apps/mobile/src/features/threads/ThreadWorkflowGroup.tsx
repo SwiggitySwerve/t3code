@@ -11,6 +11,12 @@ import {
   type ServerProvider,
 } from "@t3tools/contracts";
 import { deriveSubagentElapsedMs, formatDuration } from "@t3tools/shared/orchestrationTiming";
+import { resolveModelGlyph } from "@t3tools/shared/model";
+import {
+  normalizeProviderAccentColor,
+  resolveProviderInstanceDisplayName,
+} from "@t3tools/client-runtime/state/provider-instance-display";
+import { ProviderIcon } from "../../components/ProviderIcon";
 import { useState, type ReactNode } from "react";
 import { ScrollView, View } from "react-native";
 
@@ -50,9 +56,7 @@ export function ThreadWorkflowGroup(props: {
   readonly onOpen: (threadId: ThreadId) => void;
 }) {
   const { group } = props;
-  const provider = useEnvironmentServerConfig(props.environmentId)?.providers.find(
-    (candidate) => candidate.instanceId === props.subagent.providerInstanceId,
-  );
+  const providers = useEnvironmentServerConfig(props.environmentId)?.providers;
   const [selected, setSelected] = useState<string | null>(null);
   const rail = workflowRail(group);
   const open = rail.find((item) => item.key === selected);
@@ -136,7 +140,9 @@ export function ThreadWorkflowGroup(props: {
               key={member.id}
               environmentId={props.environmentId}
               member={member}
-              provider={provider}
+              provider={providers?.find(
+                (candidate) => candidate.instanceId === member.providerInstanceId,
+              )}
               onOpen={props.onOpen}
             />
           ))
@@ -167,6 +173,20 @@ function WorkflowMemberRow(props: {
   });
   const { detail, intent, error } = workflowMemberDetail(member);
   const metadata = workflowMemberMetadata(member, props.provider);
+  const providerName = props.provider
+    ? resolveProviderInstanceDisplayName(props.provider)
+    : (member.providerInstanceId ?? "Unknown provider");
+  const driver = props.provider?.driver ?? member.driver;
+  const modelGlyph = resolveModelGlyph(member.model, driver);
+  const accentColor = normalizeProviderAccentColor(props.provider?.accentColor);
+  const providerIcon = (
+    <ProviderIcon
+      provider={driver}
+      displayName={providerName}
+      iconUrl={props.provider?.iconUrl}
+      size={12}
+    />
+  );
   const labels = [metadata.model, metadata.effort].filter((value) => value !== null);
   return (
     <RowPressable
@@ -174,6 +194,8 @@ function WorkflowMemberRow(props: {
       accessibilityLabel={[
         presentation.title,
         presentation.statusLabel,
+        `Provider: ${providerName}${member.providerInstanceId ? ` (${member.providerInstanceId})` : ""}`,
+        member.model ?? "Unknown model",
         ...labels,
         ...(metadata.speed === null ? [] : [metadata.speed]),
         ...(error === null ? [] : [error]),
@@ -189,6 +211,13 @@ function WorkflowMemberRow(props: {
       <View className="min-w-0 flex-1 gap-1">
         <View className="min-h-5 flex-row items-center gap-2">
           <View className="min-w-0 flex-1 flex-row items-baseline gap-1.5">
+            <View
+              accessibilityElementsHidden
+              importantForAccessibility="no-hide-descendants"
+              className="shrink-0"
+            >
+              {modelGlyph ? <Text textRole="footnote">{modelGlyph.glyph}</Text> : providerIcon}
+            </View>
             <Text
               textRole="footnote"
               numberOfLines={1}
@@ -215,6 +244,17 @@ function WorkflowMemberRow(props: {
           {canOpen ? (
             <SymbolView name="chevron.right" size={12} tintColorClassName="accent-icon-subtle" />
           ) : null}
+        </View>
+        <View
+          accessibilityElementsHidden
+          importantForAccessibility="no-hide-descendants"
+          className="max-w-full self-start flex-row items-center gap-1 rounded border border-border-subtle px-1"
+          style={{ borderColor: accentColor }}
+        >
+          {modelGlyph ? providerIcon : null}
+          <Text textRole="label" numberOfLines={1} className="shrink text-foreground-muted">
+            {providerName}
+          </Text>
         </View>
         {labels.length > 0 || metadata.speed !== null ? (
           <View className="min-w-0 flex-row items-center">

@@ -27,7 +27,7 @@ import {
 } from "@t3tools/shared/testing/workflowQa";
 import * as DateTime from "effect/DateTime";
 
-import { QA_DRIVER as DRIVER, QA_PROVIDER_INSTANCE as PROVIDER } from "./providers";
+import { QA_DRIVER as DRIVER, QA_PROVIDER_INSTANCE as PROVIDER, QA_PROVIDERS } from "./providers";
 
 /** The frozen clock: elapsed times in a frame never depend on when the test ran. */
 export const WORKFLOW_QA_NOW = Date.UTC(2026, 9, 24, 12, 0, 0);
@@ -52,7 +52,7 @@ type AgentState = OrchestrationV2WorkflowAgent["state"];
 interface AgentSpec {
   readonly state: AgentState;
   /** `null` leaves the model and provider off the member, as a record that never learned them. */
-  readonly identity?: { readonly provider: string; readonly model: string } | null;
+  readonly identity?: { readonly provider: string; readonly model?: string } | null;
   readonly tokens?: number;
   readonly durationMs?: number;
   readonly result?: string;
@@ -137,8 +137,10 @@ function workflowAgent(
       ? {}
       : {
           providerInstanceId: ProviderInstanceId.make(identity.provider),
-          driver: DRIVER,
-          model: identity.model,
+          driver:
+            QA_PROVIDERS.find((provider) => provider.instanceId === identity.provider)?.driver ??
+            DRIVER,
+          ...(identity.model === undefined ? {} : { model: identity.model }),
         }),
     ...(spec.tokens === undefined ? {} : { totalTokens: spec.tokens }),
     ...(started === undefined ? {} : { startedAt: started }),
@@ -152,11 +154,7 @@ function workflowAgent(
 }
 
 /** One record per child task, as the server writes them: earlier attempts failed, the last is the member's. */
-function attemptRecords(
-  index: number,
-  spec: AgentSpec,
-  identity: { readonly provider: string; readonly model: string } | null,
-) {
+function attemptRecords(index: number, spec: AgentSpec, identity: AgentSpec["identity"]) {
   const retries = spec.retries ?? 0;
   const attempts = retries + 1;
   const taskId = (attempt: number) => NodeId.make(`qa-task-${index}-attempt-${attempt}`);
@@ -178,8 +176,9 @@ function attemptRecords(
               ? ("running" as const)
               : ("completed" as const)
           : ("failed" as const),
-        providerInstanceId: PROVIDER,
-        ...(identity === null ? {} : { model: identity.model }),
+        providerInstanceId:
+          identity == null ? PROVIDER : ProviderInstanceId.make(identity.provider),
+        ...(identity?.model === undefined ? {} : { model: identity.model }),
         totalTokens: Math.round((spec.tokens ?? 0) / attempts),
         usageStatus: "complete" as const,
         timingComplete: !running,
@@ -790,4 +789,53 @@ export function workflowScaleFixture(kind: WorkflowQaKind, count: 4 | 40 | 256):
     progress: workflowProgressText(row),
     running: true,
   };
+}
+
+export function workflowModelGlyphFixture(): WorkflowQaFixture {
+  const seed = workflowFixture("graph", "running");
+  const models = [
+    ["Sol analyst", "openai.gpt-6.1-sol", "cliproxy"],
+    ["Astra architect", "gpt-6-astra", "cliproxy"],
+    ["Terra reviewer", "openai/gpt-6.1-terra", "cursor-work"],
+    ["Luna implementer", "gpt-6-luna", "cursor-work"],
+    ["Opus planner", "claude-opus-5-5", "cliproxy"],
+    ["Sonnet researcher", "anthropic/claude-sonnet-4-6", "cliproxy"],
+    ["Fable writer", "claude-fable-5-1", "cursor-work"],
+    ["Haiku verifier", "claude-haiku-5-5", "cursor-work"],
+    ["Unknown model", "custom-model", "cursor-work"],
+    ["Unknown harness", "custom-model", "lab-runner"],
+    ["Missing model", null, "cliproxy"],
+    ["Unavailable instance", "custom-model", "retired-instance"],
+  ] as const;
+  const agents = models.map(([label, model, provider], index) =>
+    workflowAgent(
+      { index, label, graphNodeKey: `model-${index}` },
+      {
+        state: index < 8 ? "completed" : "running",
+        identity: { ...(model === null ? {} : { model }), provider },
+        tokens: 1200,
+      },
+    ),
+  );
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    workflow: {
+      name: "Model identities across providers",
+      agents,
+      phases: [],
+      nodeOutcomes: Object.fromEntries(
+        agents.slice(0, 8).map((agent) => [agent.graphNodeKey!, { status: "passed" as const }]),
+      ),
+      plan: {
+        nodes: agents.map((agent, index) => ({
+          key: agent.graphNodeKey!,
+          label: agent.label,
+          wave: Math.floor(index / 4),
+          dependsOn: index < 4 ? [] : [`model-${index - 4}`],
+        })),
+      },
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return { ...seed, row, opening, group: opening.group! };
 }

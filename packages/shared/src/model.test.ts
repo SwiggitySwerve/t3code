@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vite-plus/test";
-import { ProviderInstanceId, type ModelCapabilities } from "@t3tools/contracts";
+import { ProviderDriverKind, ProviderInstanceId, type ModelCapabilities } from "@t3tools/contracts";
 
 import {
   applyClaudePromptEffortPrefix,
@@ -11,7 +11,60 @@ import {
   getProviderOptionDescriptors,
   readCustomModelEntries,
   modelSelectionsEqual,
+  resolveModelGlyph,
 } from "./model.ts";
+
+describe("model glyph identity", () => {
+  it.each([
+    [" openai.gpt-6.1-sol ", "🌞"],
+    ["openai/gpt-6-astra", "🌌"],
+    ["gpt-6.1-terra", "🌍"],
+    ["gpt-6-luna", "🌙"],
+    ["anthropic/claude-opus-5.5", "🎵"],
+    ["claude-opus-5[1m]", "🎵"],
+    ["claude-3-5-sonnet-20241022", "🪶"],
+    ["claude-3-7-sonnet-latest", "🪶"],
+    ["claude-3-5-sonnet-latest", "🪶"],
+    ["anthropic/claude-3.5-sonnet", "🪶"],
+    ["claude-sonnet-4-6", "🪶"],
+    ["claude-fable-5-1", "📖"],
+    ["claude-haiku-5-5", "🍃"],
+    ["anthropic/claude-sonnet", "🪶"],
+  ])("recognizes the full model ID %s", (model, glyph) => {
+    expect(resolveModelGlyph(model)?.glyph).toBe(glyph);
+  });
+
+  it("uses harness aliases only when that harness owns them", () => {
+    expect(resolveModelGlyph("opus-4.6-thinking", ProviderDriverKind.make("cursor"))?.glyph).toBe(
+      "🎵",
+    );
+    expect(resolveModelGlyph("opus-4.6-thinking", ProviderDriverKind.make("codex"))).toBeNull();
+    expect(resolveModelGlyph("claude-fable-5", ProviderDriverKind.make("codex"))?.glyph).toBe("📖");
+  });
+
+  it.each([
+    null,
+    undefined,
+    "",
+    " ",
+    "default",
+    "auto",
+    "gpt-5.6-sol",
+    "gpt-6-sol",
+    "gpt-6.1-solar",
+    "gpt-6-astra-custom",
+    "custom-claude-opus-5",
+    "claude-opus-internal",
+    "claude-3-5-sonnet-internal",
+    "claude-haikubot",
+    "sol",
+    "GPT-6.1 Sol",
+    "claude-fable-5/unknown",
+    "claude-fable-5[custom]",
+  ])("leaves unknown or ambiguous identity %s to the provider fallback", (model) => {
+    expect(resolveModelGlyph(model)).toBeNull();
+  });
+});
 
 const codexCaps: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [

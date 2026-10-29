@@ -136,6 +136,12 @@ const browserTestProject = {
       instances: [{ browser: "chromium" }],
       screenshotFailures: false,
       commands: {
+        setMediaPreferences: async (
+          { page },
+          options: { forcedColors: "active" | "none"; reducedMotion: "reduce" | "no-preference" },
+        ) => {
+          await page.emulateMedia(options);
+        },
         collectGarbage: async ({ page }) => {
           const session = await page.context().newCDPSession(page);
           try {

@@ -131,7 +131,11 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
         {liveHeadline ? <WorkflowProgress text={liveHeadline} /> : null}
       </div>
       {overview === null ? null : (
-        <WorkflowProgressOverview progress={overview} onOpenThread={props.onOpenThread} />
+        <WorkflowProgressOverview
+          progress={overview}
+          environmentId={props.environmentId}
+          onOpenThread={props.onOpenThread}
+        />
       )}
       {waitingOn ? (
         <p className="text-2xs text-muted-foreground [overflow-wrap:anywhere]">{waitingOn}</p>
