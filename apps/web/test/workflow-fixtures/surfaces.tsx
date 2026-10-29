@@ -52,6 +52,8 @@ import {
   type WorkflowQaKind,
   type WorkflowQaSidebarState,
   type WorkflowQaVariant,
+  type WorkflowQaFixture,
+  type WorkflowScaleCount,
 } from "./workflowFixtures";
 
 const ENVIRONMENT = QA_ENVIRONMENT;
@@ -73,12 +75,14 @@ function ChatColumn({ children }: { readonly children: ReactNode }) {
 export function WorkflowBlockSurface(props: {
   readonly kind: WorkflowQaKind;
   readonly variant?: WorkflowQaVariant;
-  readonly agentCount?: 4 | 40 | 256;
+  readonly agentCount?: WorkflowScaleCount;
+  readonly fixture?: WorkflowQaFixture;
 }) {
   const fixture =
-    props.agentCount === undefined
+    props.fixture ??
+    (props.agentCount === undefined
       ? workflowFixture(props.kind, props.variant ?? "running")
-      : workflowScaleFixture(props.kind, props.agentCount);
+      : workflowScaleFixture(props.kind, props.agentCount));
   return (
     <ChatColumn>
       <WorkflowOpeningBlock
@@ -94,11 +98,23 @@ export function WorkflowBlockSurface(props: {
 }
 
 /** A graph workflow's wave canvas alone, in the chat column. */
-export function WorkflowCanvasSurface(props: { readonly variant: WorkflowQaVariant }) {
-  const graph = workflowFixture("graph", props.variant).group.graph;
+export function WorkflowCanvasSurface(props: {
+  readonly variant?: WorkflowQaVariant;
+  readonly agentCount?: WorkflowScaleCount;
+  readonly fixture?: WorkflowQaFixture;
+}) {
+  const fixture =
+    props.fixture ??
+    (props.agentCount === undefined
+      ? workflowFixture("graph", props.variant ?? "running")
+      : workflowScaleFixture("graph", props.agentCount));
+  const graph = fixture.group.graph;
   if (graph === null) throw new Error("A graph fixture always has a graph.");
   return (
     <ChatColumn>
+      {fixture.row.workflow?.agents.length === 1024 ? (
+        <p className="text-xs text-muted-foreground">{fixture.opening.name}</p>
+      ) : null}
       <WorkflowWaveCanvas graph={graph} environmentId={ENVIRONMENT} onOpenThread={noop} />
     </ChatColumn>
   );

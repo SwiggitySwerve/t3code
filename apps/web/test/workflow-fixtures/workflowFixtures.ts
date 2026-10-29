@@ -719,9 +719,16 @@ export function workflowFixture(
   };
 }
 
-export function workflowScaleFixture(kind: WorkflowQaKind, count: 4 | 40 | 256): WorkflowQaFixture {
+export type WorkflowScaleCount = 4 | 40 | 256 | 1024;
+
+// 1,024 is synthetic UI stress beyond the server's 1,000-agent runtime limit.
+export function workflowScaleFixture(
+  kind: WorkflowQaKind,
+  count: WorkflowScaleCount,
+  completeSelected = false,
+): WorkflowQaFixture {
   const seed = workflowFixture(kind, "running");
-  const phaseSize = count === 256 ? 16 : count === 40 ? 10 : 2;
+  const phaseSize = count === 1024 ? 32 : count === 256 ? 16 : count === 40 ? 10 : 2;
   const agents = Array.from({ length: count }, (_, index) =>
     workflowAgent(
       {
@@ -735,7 +742,7 @@ export function workflowScaleFixture(kind: WorkflowQaKind, count: 4 | 40 | 256):
         state:
           index === count - 1
             ? "failed"
-            : index < count / 2
+            : index < count / 2 || (completeSelected && index === count / 2)
               ? "completed"
               : index < count * 0.75
                 ? "running"
@@ -750,7 +757,7 @@ export function workflowScaleFixture(kind: WorkflowQaKind, count: 4 | 40 | 256):
     ...seed.row,
     progress: "Reviewing package exports",
     workflow: {
-      name: `Audit ${count} agents`,
+      name: `Audit ${count} agents${count === 1024 ? " (synthetic UI stress; runtime limit 1,000)" : ""}`,
       agents,
       phases: Array.from({ length: count / phaseSize }, (_, index) => ({
         index,
