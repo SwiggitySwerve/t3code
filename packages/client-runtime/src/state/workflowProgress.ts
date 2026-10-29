@@ -24,7 +24,7 @@ export interface WorkflowProgressCounts {
   readonly skipped: number;
   readonly settled: number;
   readonly observed: number;
-  /** Null for scripts: discovered agents do not declare the size of a phase. */
+  /** Null unless the workflow declares a planned number of logical agents. */
   readonly total: number | null;
 }
 
@@ -33,6 +33,7 @@ export interface WorkflowPhaseProgress {
   readonly title: string;
   readonly tasks: ReadonlyArray<WorkflowTaskProgress>;
   readonly counts: WorkflowProgressCounts;
+  readonly state: "planned" | "running" | "completed" | "failed" | "stopped" | null;
   readonly allDone: boolean;
 }
 
@@ -106,9 +107,21 @@ function phaseProgress(
   title: string,
   tasks: ReadonlyArray<WorkflowTaskProgress>,
   total: number | null,
+  declaredState: WorkflowPhaseProgress["state"] = null,
+  workflowStatus?: RuntimeSubagentStatus,
 ): WorkflowPhaseProgress {
+  const state =
+    declaredState === "running" &&
+    workflowStatus !== undefined &&
+    ["completed", "failed", "cancelled", "interrupted"].includes(workflowStatus)
+      ? workflowStatus === "failed"
+        ? "failed"
+        : "stopped"
+      : declaredState;
   const counts = countTasks(tasks, total);
-  return { id, title, tasks, counts, allDone: tasks.length > 0 && counts.done === tasks.length };
+  const allDone =
+    (state === null ? tasks.length > 0 : state === "completed") && counts.done === tasks.length;
+  return { id, title, tasks, counts, state, allDone };
 }
 
 function latestStartedOrFinishedMember(
@@ -133,7 +146,14 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
   const phases: WorkflowPhaseProgress[] =
     group.graph === null
       ? group.phases.map((phase) =>
-          phaseProgress(`phase:${phase.index}`, phase.title, phase.members.map(memberTask), null),
+          phaseProgress(
+            `phase:${phase.index}`,
+            phase.title,
+            phase.members.filter((member) => member.judgmentFor === undefined).map(memberTask),
+            phase.progress?.total ?? null,
+            phase.progress?.state ?? null,
+            group.workflow.status,
+          ),
         )
       : group.graph.waves.map((wave) => {
           const tasks = wave.map((node): WorkflowTaskProgress => ({
@@ -152,17 +172,32 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
           return phaseProgress(`wave:${index}`, `Phase ${index + 1}`, tasks, tasks.length);
         });
   const plannedTasks = phases.flatMap((phase) => phase.tasks);
-  const other = group.graph?.otherMembers ?? group.unphasedMembers;
+  const other = group.graph?.otherMembers ?? [
+    ...group.unphasedMembers,
+    ...group.phases.flatMap((phase) =>
+      phase.members.filter((member) => member.judgmentFor !== undefined),
+    ),
+  ];
+  const scriptTotal =
+    phases.length > 0 &&
+    phases.every((phase) => phase.counts.total !== null) &&
+    group.unphasedMembers.every((member) => member.judgmentFor !== undefined)
+      ? phases.reduce((sum, phase) => sum + phase.counts.total!, 0)
+      : null;
   if (other.length > 0)
     phases.push(phaseProgress("other", "Other agents", other.map(memberTask), null));
   const tasks = phases.flatMap((phase) => phase.tasks);
   const counts = countTasks(
-    group.graph === null ? tasks : plannedTasks,
-    group.graph === null ? null : plannedTasks.length,
+    group.graph === null
+      ? tasks.filter((task) => task.member?.judgmentFor === undefined)
+      : plannedTasks,
+    group.graph === null ? scriptTotal : plannedTasks.length,
   );
   const failure = tasks.find((task) => task.state === "failed");
+  const failedPhase = phases.find((phase) => phase.state === "failed");
   const failedCount = tasks.filter((task) => task.state === "failed").length;
   const current =
+    phases.find((phase) => phase.state === "running") ??
     phases.find((phase) => phase.counts.running > 0) ??
     phases.find((phase) => phase.counts.queued > 0) ??
     phases.at(-1);
@@ -173,20 +208,24 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     group.workflow.status === "interrupted";
   const activity = group.workflow.progress?.trim();
   const headlineMember =
-    failure === undefined && !terminal && !activity ? latestStartedOrFinishedMember(tasks) : null;
+    failure === undefined && failedPhase === undefined && !terminal && !activity
+      ? latestStartedOrFinishedMember(tasks)
+      : null;
   const headline =
     failure !== undefined
       ? `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`
-      : group.workflow.status === "failed"
-        ? (group.workflow.error ?? "Workflow failed")
-        : terminal
-          ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
-          : activity ||
-            `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
+      : failedPhase !== undefined
+        ? `${failedPhase.title} failed`
+        : group.workflow.status === "failed"
+          ? (group.workflow.error ?? "Workflow failed")
+          : terminal
+            ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
+            : activity ||
+              `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
   const successful =
     group.workflow.status === "completed" &&
-    tasks.length > 0 &&
-    phases.every((phase) => phase.tasks.length === 0 || phase.allDone);
+    phases.some((phase) => phase.allDone) &&
+    phases.every((phase) => phase.allDone || (phase.state === null && phase.tasks.length === 0));
   return {
     phases,
     counts,
@@ -201,7 +240,22 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
 export function workflowSettledText(counts: WorkflowProgressCounts): string {
   return counts.total === null
     ? `${counts.settled} settled · ${counts.observed} discovered · total unknown`
-    : `${counts.settled}/${counts.total} settled`;
+    : `${workflowSettledFraction(counts)} settled`;
+}
+
+export function workflowSettledFraction(counts: WorkflowProgressCounts): string {
+  return `${counts.settled}/${counts.total ?? "?"}`;
+}
+
+export function workflowPhaseStatus(phase: WorkflowPhaseProgress) {
+  if (phase.counts.failed > 0 || phase.state === "failed") return "failed";
+  if (phase.counts.running > 0 || phase.state === "running") return "running";
+  if (phase.counts.stopped > 0 || phase.counts.skipped > 0 || phase.state === "stopped")
+    return "stopped";
+  if (phase.state === "completed") return "done";
+  if (phase.counts.queued > 0 || phase.state === "planned" || phase.counts.observed === 0)
+    return "not started";
+  return "done";
 }
 
 export function workflowCountsText(counts: WorkflowProgressCounts): string {

@@ -77,7 +77,7 @@ export function mergeWorkflowPatch(
   previous: OrchestrationV2SubagentWorkflow,
   patch: OrchestrationV2WorkflowPatch,
 ): OrchestrationV2SubagentWorkflow {
-  const { kind: _kind, agents, nodeOutcomes, ...fields } = patch;
+  const { kind: _kind, agents, nodeOutcomes, phaseUpdates, ...fields } = patch;
   assertSamePlan(previous.plan, patch.plan);
   const updates = new Map(agents?.map((agent) => [agent.index, agent]));
   if (updates.size !== (agents?.length ?? 0)) throw new Error("Duplicate workflow agent index.");
@@ -88,10 +88,15 @@ export function mergeWorkflowPatch(
   });
   merged.push(...updates.values());
   merged.sort((a, b) => a.index - b.index);
+  const phases = new Map((fields.phases ?? previous.phases).map((phase) => [phase.index, phase]));
+  const phaseIndices = new Set(phaseUpdates?.map((phase) => phase.index));
+  if (phaseIndices.size !== (phaseUpdates?.length ?? 0))
+    throw new Error("Duplicate workflow phase index.");
+  for (const phase of phaseUpdates ?? []) phases.set(phase.index, phase);
   return {
     ...previous,
     ...fields,
-    phases: fields.phases ?? previous.phases,
+    phases: [...phases.values()].sort((a, b) => a.index - b.index),
     agents: merged,
     ...(nodeOutcomes === undefined
       ? {}
@@ -152,13 +157,16 @@ export function workflowPatches(
   assertSamePlan(previous.plan, next.plan);
   const patches: Array<OrchestrationV2WorkflowPatch> = [];
   const changed = (a: unknown, b: unknown) => JSON.stringify(a) !== JSON.stringify(b);
+  const nextPhaseIndices = new Set(next.phases.map((phase) => phase.index));
   // A plan is immutable and sent once. An unusually large initial plan is the one-time exception.
   if (next.plan !== undefined && previous.plan === undefined)
     patches.push({ kind: "patch", plan: next.plan });
   const metadata: OrchestrationV2WorkflowPatch = {
     kind: "patch",
     ...(next.name === undefined || next.name === previous.name ? {} : { name: next.name }),
-    ...(changed(previous.phases, next.phases) ? { phases: next.phases } : {}),
+    ...(previous.phases.some((phase) => !nextPhaseIndices.has(phase.index))
+      ? { phases: next.phases }
+      : {}),
     ...(next.budget === undefined || !changed(previous.budget, next.budget)
       ? {}
       : { budget: next.budget }),
@@ -167,6 +175,9 @@ export function workflowPatches(
   const append = (addition: OrchestrationV2WorkflowPatch) => {
     const combined = {
       ...current,
+      ...(addition.phaseUpdates === undefined
+        ? {}
+        : { phaseUpdates: [...(current.phaseUpdates ?? []), ...addition.phaseUpdates] }),
       ...(addition.agents === undefined
         ? {}
         : { agents: [...(current.agents ?? []), ...addition.agents] }),
@@ -183,6 +194,12 @@ export function workflowPatches(
     if (Object.keys(current).length > 1) patches.push(current);
     current = addition;
   };
+  if (metadata.phases === undefined) {
+    const oldPhases = new Map(previous.phases.map((phase) => [phase.index, phase]));
+    for (const phase of next.phases)
+      if (changed(oldPhases.get(phase.index), phase))
+        append({ kind: "patch", phaseUpdates: [phase] });
+  }
   const oldAgents = new Map(previous.agents.map((agent) => [agent.index, agent]));
   for (const agent of next.agents)
     if (changed(oldAgents.get(agent.index), agent)) append({ kind: "patch", agents: [agent] });

@@ -31,7 +31,12 @@ import type ChatMarkdown from "../ChatMarkdown";
 import { collectThreadFindRanges } from "./threadFindHighlights";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
-import { workflowScaleFixture } from "../../../test/workflow-fixtures/workflowFixtures";
+import {
+  workflowScaleFixture,
+  workflowScriptProgressFixture,
+  workflowCallbackLifecycleFixture,
+  type WorkflowCallbackState,
+} from "../../../test/workflow-fixtures/workflowFixtures";
 
 vi.mock(import("@effect/atom-react"), async (original) => {
   const providers: ReadonlyArray<never> = [];
@@ -293,6 +298,114 @@ it("coalesces continuing workflow updates into one polite announcement and prese
   );
   expect(screen.container.textContent).not.toContain("Checking types");
   expect(active.element().textContent).not.toContain("15s");
+});
+
+it("renders fixed script capacity and resizes only the phase being entered", async () => {
+  const view = (entered: boolean) => {
+    const { opening } = workflowScriptProgressFixture(entered);
+    return (
+      <WorkflowOpeningBlock
+        opening={opening}
+        environmentId={EnvironmentId.make("test")}
+        onOpenThread={() => {}}
+      />
+    );
+  };
+  await using screen = await render(view(false));
+  using _timers = fakeTimers();
+  const audits = screen.getByRole("button", { name: "Package audits agents", exact: true });
+  const followup = screen.getByRole("button", { name: "Follow up agents", exact: true });
+  await expect.element(audits).toHaveAttribute("aria-expanded", "false");
+  await expect.element(audits).toHaveAccessibleDescription("completed · 2/10 settled · 2 done");
+  await expect.element(followup).toHaveAccessibleDescription("planned · 0/4 settled");
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Package audits tasks settled", exact: true }))
+    .toHaveAttribute("max", "10");
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Follow up tasks settled", exact: true }))
+    .toHaveAttribute("max", "4");
+  await screen.rerender(view(true));
+  await act(() => vi.advanceTimersByTime(999));
+  await expect.element(followup).toHaveAccessibleDescription("planned · 0/4 settled");
+  await act(() => vi.advanceTimersByTime(1));
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Package audits tasks settled", exact: true }))
+    .toHaveAttribute("max", "10");
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Follow up tasks settled", exact: true }))
+    .toHaveAttribute("max", "2");
+  expect(screen.container.textContent).toContain("1 failed");
+  await expect.element(followup.getByText("Follow up · running", { exact: true })).toBeVisible();
+  await expect
+    .element(followup)
+    .toHaveAccessibleDescription("running · 1/2 settled · 1 failed · 1 running");
+  await expect.element(audits).toHaveAttribute("aria-expanded", "false");
+  await expect
+    .element(screen.getByRole("progressbar", { name: "Report tasks settled", exact: true }))
+    .toHaveAttribute("max", "1");
+  await expect
+    .element(screen.getByRole("button", { name: "Open Agent 4", exact: true }))
+    .toBeVisible();
+});
+
+it.each(["completed", "failed", "stopped"] as const)(
+  "waits for callback %s before changing the compact phase disclosure",
+  async (state) => {
+    const view = (state: WorkflowCallbackState) => (
+      <WorkflowOpeningBlock
+        opening={workflowCallbackLifecycleFixture(state).opening}
+        environmentId={EnvironmentId.make("test")}
+        onOpenThread={() => {}}
+      />
+    );
+    await using screen = await render(view("running"));
+    using _timers = fakeTimers();
+    const phase = screen.getByRole("button", { name: "Audit agents", exact: true });
+    const track = screen.getByRole("progressbar", { name: "Audit tasks settled", exact: true });
+    await expect.element(phase).toHaveAttribute("aria-expanded", "true");
+    await expect.element(phase).toHaveAccessibleDescription("running · 1/1 settled · 1 done");
+    await expect.element(track).toHaveAttribute("value", "1");
+    await expect.element(track).toHaveAttribute("max", "1");
+    await screen.rerender(view(state));
+    await act(() => vi.advanceTimersByTime(999));
+    await expect.element(phase).toHaveAccessibleDescription("running · 1/1 settled · 1 done");
+    await act(() => vi.advanceTimersByTime(1));
+    await expect.element(phase.getByText(`Audit · ${state}`, { exact: true })).toBeVisible();
+    await expect.element(phase).toHaveAccessibleDescription(`${state} · 1/1 settled · 1 done`);
+    await expect.element(phase).toHaveAttribute("aria-expanded", String(state !== "completed"));
+    expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
+      state === "completed" ? 0 : 1,
+    );
+    if (state === "failed") {
+      const live = screen.container.querySelector('[aria-live="polite"]')!;
+      expect(live.textContent).toBe("Audit failed");
+      expect(live.querySelector("[data-model-glyph]")).toBeNull();
+    }
+  },
+);
+
+it("retains an explicit phase disclosure choice after the callback completes", async () => {
+  const view = (state: WorkflowCallbackState) => (
+    <WorkflowOpeningBlock
+      opening={workflowCallbackLifecycleFixture(state).opening}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />
+  );
+  await using screen = await render(view("running"));
+  using _timers = fakeTimers();
+  const phase = screen.getByRole("button", { name: "Audit agents", exact: true });
+  await userEvent.click(phase);
+  await expect.element(phase).toHaveAttribute("aria-expanded", "false");
+  await userEvent.click(phase);
+  await expect.element(phase).toHaveAttribute("aria-expanded", "true");
+  await screen.rerender(view("completed"));
+  await act(() => vi.advanceTimersByTime(1000));
+  await expect.element(phase).toHaveAttribute("aria-expanded", "true");
+  await expect.element(phase).toHaveAccessibleDescription("completed · 1/1 settled · 1 done");
+  await expect
+    .element(screen.getByRole("button", { name: "Open Agent 1", exact: true }))
+    .toBeVisible();
 });
 
 it("reveals a declaration search match while keeping the graph unmounted", async () => {

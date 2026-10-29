@@ -46,6 +46,9 @@ import {
   workflowFixture,
   workflowScaleFixture,
   workflowModelGlyphFixture,
+  workflowScriptProgressFixture,
+  workflowCallbackLifecycleFixture,
+  type WorkflowCallbackState,
   type WorkflowQaKind,
   type WorkflowQaSidebarState,
   type WorkflowQaVariant,
@@ -103,6 +106,24 @@ export function WorkflowCanvasSurface(props: { readonly variant: WorkflowQaVaria
 
 export function WorkflowModelGlyphSurface() {
   const fixture = workflowModelGlyphFixture();
+  return (
+    <ChatColumn>
+      <WorkflowOpeningBlock
+        opening={fixture.opening}
+        environmentId={ENVIRONMENT}
+        onOpenThread={noop}
+      />
+    </ChatColumn>
+  );
+}
+
+export function WorkflowScriptProgressSurface(
+  props: { readonly entered: boolean } | { readonly state: WorkflowCallbackState },
+) {
+  const fixture =
+    "state" in props
+      ? workflowCallbackLifecycleFixture(props.state)
+      : workflowScriptProgressFixture(props.entered);
   return (
     <ChatColumn>
       <WorkflowOpeningBlock

@@ -12,6 +12,7 @@ import {
   WorkflowReviewSurface,
   SidebarStatusSurface,
   WorkflowCanvasSurface,
+  WorkflowScriptProgressSurface,
   scrollWavesToNode,
 } from "../../../test/workflow-fixtures/surfaces";
 import {
@@ -29,6 +30,12 @@ import {
   WORKFLOW_QA_STOP_VISIBLE,
 } from "@t3tools/shared/testing/workflowQa";
 import type ChatMarkdown from "../ChatMarkdown";
+import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
+import {
+  QA_DRIVER,
+  QA_PROVIDERS,
+  QA_PROVIDER_INSTANCE,
+} from "../../../test/workflow-fixtures/providers";
 
 // The surfaces read the provider catalog through the app's own atoms; any other atom throws.
 vi.mock(import("@effect/atom-react"), async (original) => ({
@@ -50,6 +57,29 @@ const statesOf = (surface: string) =>
 
 // The 150-node run has 15 waves of 10; wave 6 (index 5) is the one still running.
 const RUNNING_WAVE_NODE = "n5-5";
+
+it.each([false, true])("planned script phase transition, entered=%s", async (entered) => {
+  await captureSurface({
+    surface: "workflow-script-progress",
+    state: entered ? "after-transition" : "before-transition",
+    selector: "[data-workflow-opening]",
+    frame: "[data-qa-column]",
+    element: () => <WorkflowScriptProgressSurface entered={entered} />,
+  });
+});
+
+it.each(["running", "completed", "failed", "stopped"] as const)(
+  "callback phase lifecycle, state=%s",
+  async (state) => {
+    await captureSurface({
+      surface: "workflow-script-progress",
+      state: `callback-${state}`,
+      selector: "[data-workflow-opening]",
+      frame: "[data-qa-column]",
+      element: () => <WorkflowScriptProgressSurface state={state} />,
+    });
+  },
+);
 
 describe.each(["graph", "script"] as const)("workflow block, %s", (kind) => {
   const surface = `workflow-block-${kind}`;
@@ -252,10 +282,64 @@ describe("workflow fixture rows", () => {
       }
     }
     // The count itself is drawn, with its unit dropped first.
-    expect(panel.textContent).toContain("2/2");
-    expect(panel.textContent).toContain("2/2 agents");
+    expect(panel.textContent).toContain("2/?");
+    expect(panel.textContent).toContain("2/? agents");
     // The run's time stays too: the group name gives way first.
     expect(panel.textContent).toContain("1m");
+  });
+
+  it("keeps a failed Lineage phase's elapsed time live while a sibling runs", async () => {
+    using now = vi.spyOn(Date, "now").mockReturnValue(100_000);
+    const { group } = workflowFixture("script", "running");
+    const phase = group.phases[0]!;
+    const member = phase.members[0]!;
+    const mixed = {
+      ...group,
+      phases: [
+        {
+          ...phase,
+          title: "Mixed",
+          members: [
+            {
+              ...member,
+              id: "failed",
+              status: "failed" as const,
+              startedAt: new Date(0).toISOString(),
+              completedAt: new Date(10_000).toISOString(),
+            },
+            {
+              ...member,
+              id: "running",
+              status: "running" as const,
+              startedAt: new Date(0).toISOString(),
+              completedAt: null,
+            },
+          ],
+        },
+      ],
+      unphasedMembers: [],
+    };
+    const surface = () => (
+      <ThreadLineageWorkflowRow
+        group={mixed}
+        header={<span>Mixed workflow</span>}
+        providerInstanceId={QA_PROVIDER_INSTANCE}
+        provider={QA_PROVIDERS[0]}
+        providers={QA_PROVIDERS}
+        driver={QA_DRIVER}
+        onOpenThread={() => {}}
+        isThreadAvailable={() => true}
+        stopping={false}
+        stopDisabled={false}
+      />
+    );
+    await using screen = await render(surface());
+    await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
+    const header = screen.getByRole("button", { name: "Expand Mixed phase, failed" });
+    expect(header.element().textContent).toContain("1m 40s");
+    now.mockReturnValue(200_000);
+    await screen.rerender(surface());
+    expect(header.element().textContent).toContain("3m 20s");
   });
 
   it("gives queued, waiting and skipped nodes a glyph each, and Waiting an hourglass in the sidebar", async () => {

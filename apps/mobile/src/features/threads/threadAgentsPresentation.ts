@@ -5,6 +5,9 @@ import {
 } from "@t3tools/client-runtime/state/subagent-display";
 import {
   isActiveSubagentStatus,
+  deriveWorkflowProgress,
+  workflowSettledText,
+  workflowPhaseStatus,
   type RuntimeSubagent,
   type SubagentWorkflowGroup,
 } from "@t3tools/client-runtime/state/subagentRuntime";
@@ -116,37 +119,30 @@ export interface WorkflowRailItem {
   readonly key: string;
   readonly title: string;
   readonly members: ReadonlyArray<RuntimeSubagent>;
-  readonly completedCount: number;
+  readonly progressText: string;
   readonly tone: WorkflowRailTone;
 }
 
-function railTone(members: ReadonlyArray<RuntimeSubagent>): WorkflowRailTone {
-  if (members.every((member) => member.status === "pending")) return "queued";
-  if (members.some((member) => isActiveSubagentStatus(member.status) || member.status === "idle")) {
-    return "working";
-  }
-  if (members.some((member) => member.status === "failed")) return "failed";
-  return members.every((member) => member.status === "completed") ? "completed" : "stopped";
-}
-
 export function workflowRail(group: SubagentWorkflowGroup): ReadonlyArray<WorkflowRailItem> {
-  const items = group.phases.map((phase) => ({
-    key: String(phase.index),
-    title: phase.title,
-    members: phase.members,
-  }));
-  if (group.unphasedMembers.length > 0) {
-    items.push({
-      key: "unphased",
-      title: items.length === 0 ? "Agents" : "Other",
-      members: group.unphasedMembers,
-    });
-  }
-  return items.map((item) => ({
-    ...item,
-    completedCount: item.members.filter((member) => member.status === "completed").length,
-    tone: railTone(item.members),
-  }));
+  return deriveWorkflowProgress(group).phases.map((phase) => {
+    const members = phase.tasks.flatMap((task) => (task.member === null ? [] : [task.member]));
+    const status = workflowPhaseStatus(phase);
+    const tone =
+      status === "running"
+        ? "working"
+        : status === "done"
+          ? "completed"
+          : status === "not started"
+            ? "queued"
+            : status;
+    return {
+      key: phase.id === "other" ? "unphased" : phase.id.replace(/^(phase|wave):/, ""),
+      title: phase.id === "other" ? (group.phases.length === 0 ? "Agents" : "Other") : phase.title,
+      members,
+      progressText: workflowSettledText(phase.counts),
+      tone,
+    };
+  });
 }
 
 export function nextWorkflowSelection(

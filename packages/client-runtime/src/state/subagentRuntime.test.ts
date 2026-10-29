@@ -23,6 +23,7 @@ import {
   resolveWorkflowOpening,
   workflowProgressText,
   workflowMemberIdentity,
+  workflowPhaseStatus,
 } from "./subagentRuntime.ts";
 
 const at = (iso: string) => DateTime.makeUnsafe(iso);
@@ -160,14 +161,13 @@ describe("deriveWorkflowGroups over a dynamic workflow", () => {
       }),
     ]);
     const group = groups[0];
-    expect(group?.phases.map((phase) => [phase.title, phase.state])).toEqual([
-      ["Alpha", "done"],
-      ["Beta", "running"],
-    ]);
-    expect(group?.phases.map((phase) => phase.settledCount)).toEqual([2, 0]);
     expect(group?.phases.flatMap((phase) => phase.members)).toHaveLength(4);
     expect(group?.unphasedMembers).toEqual([]);
     const progress = deriveWorkflowProgress(group!);
+    expect(progress.phases.map((phase) => [phase.title, phase.counts.settled])).toEqual([
+      ["Alpha", 2],
+      ["Beta", 0],
+    ]);
     expect(progress.counts).toEqual({
       done: 1,
       failed: 1,
@@ -216,6 +216,161 @@ describe("deriveWorkflowGroups over a dynamic workflow", () => {
 });
 
 describe("workflow progress aggregation", () => {
+  it.each([
+    {
+      state: "planned",
+      status: "running",
+      total: 4,
+      observed: 0,
+      allDone: false,
+      label: "not started",
+    },
+    {
+      state: "running",
+      status: "running",
+      total: 1,
+      observed: 1,
+      allDone: false,
+      label: "running",
+    },
+    { state: "failed", status: "running", total: 1, observed: 1, allDone: false, label: "failed" },
+    {
+      state: "failed",
+      status: "completed",
+      total: 1,
+      observed: 1,
+      allDone: false,
+      label: "failed",
+    },
+    {
+      state: "running",
+      status: "cancelled",
+      total: 1,
+      observed: 1,
+      allDone: false,
+      label: "stopped",
+    },
+    {
+      state: "running",
+      status: "completed",
+      total: 1,
+      observed: 1,
+      allDone: false,
+      label: "stopped",
+    },
+    {
+      state: "completed",
+      status: "completed",
+      total: 4,
+      observed: 1,
+      allDone: true,
+      label: "done",
+    },
+    {
+      state: "completed",
+      status: "completed",
+      total: 4,
+      observed: 0,
+      allDone: true,
+      label: "done",
+    },
+    {
+      state: "completed",
+      status: "completed",
+      total: 0,
+      observed: 0,
+      allDone: true,
+      label: "done",
+    },
+  ] as const)(
+    "keeps callback $state authoritative with workflow $status and $observed/$total tasks done",
+    ({ state, status, total, observed, allDone, label }) => {
+      const progress = deriveWorkflowProgress(
+        groupsOf([
+          subagent({
+            status,
+            workflow: {
+              phases: [{ index: 0, title: "Audit", progress: { total, state } }],
+              agents: Array.from({ length: observed }, (_, index) =>
+                member({ index, phaseIndex: 0, state: "completed", completedAt: 2000 }),
+              ),
+            },
+          }),
+        ])[0]!,
+      );
+      expect(progress.counts).toMatchObject({ total, observed, done: observed, settled: observed });
+      expect(progress.phases[0]?.allDone).toBe(allDone);
+      expect(workflowPhaseStatus(progress.phases[0]!)).toBe(label);
+      expect(progress.successful).toBe(allDone && status === "completed");
+      if (state === "failed") {
+        expect(progress.headline).toBe("Audit failed");
+        expect(progress.headlineMember).toBeNull();
+      }
+    },
+  );
+
+  it.each(["running", "completed", "failed", "cancelled"] as const)(
+    "preserves planned script totals, callback lifecycle and member failures when %s",
+    (status) => {
+      const progress = deriveWorkflowProgress(
+        groupsOf([
+          subagent({
+            status,
+            workflow: {
+              phases: [
+                {
+                  index: 0,
+                  title: "Audit",
+                  progress: { total: 10, state: status === "completed" ? "completed" : "running" },
+                },
+                { index: 1, title: "Next", progress: { total: 3, state: "planned" } },
+              ],
+              agents: [
+                member({ index: 0, phaseIndex: 0, state: "completed", attempt: 2 }),
+                member({ index: 1, phaseIndex: 0, state: "failed" }),
+                member({
+                  index: 2,
+                  phaseIndex: 0,
+                  state: "completed",
+                  judgmentFor: { agentIndex: 0, attempt: 2 },
+                }),
+              ],
+            },
+          }),
+        ])[0]!,
+      );
+      expect(progress.counts).toMatchObject({
+        total: 13,
+        done: 1,
+        failed: 1,
+        observed: 2,
+        settled: 2,
+      });
+      expect(progress.phases[0]?.counts).toMatchObject({ total: 10, observed: 2 });
+      expect(progress.phases[1]?.counts).toMatchObject({ total: 3, observed: 0 });
+      expect(progress.phases[2]?.title).toBe("Other agents");
+      expect(progress.phases.map((phase) => phase.allDone)).toEqual([false, false, true]);
+      expect(progress.phases[0]?.state).toBe(status === "cancelled" ? "stopped" : status);
+      expect(progress.successful).toBe(false);
+    },
+  );
+
+  it("shows zero work and a caught callback failure without inventing successful agents", () => {
+    const progress = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          status: "completed",
+          workflow: {
+            phases: [{ index: 0, title: "Empty", progress: { total: 0, state: "failed" } }],
+            agents: [],
+          },
+        }),
+      ])[0]!,
+    );
+    expect(progress.counts).toMatchObject({ total: 0, observed: 0, settled: 0, done: 0 });
+    expect(progress.headline).toBe("Empty failed");
+    expect(progress.successful).toBe(false);
+  });
   it.each(["completed", "cancelled", "interrupted"] as const)(
     "announces %s instead of the retained activity log",
     (status) => {

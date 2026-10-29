@@ -841,3 +841,57 @@ export function workflowModelGlyphFixture(): WorkflowQaFixture {
   const opening = resolveAppWorkflowView(row)!;
   return { ...seed, row, opening, group: opening.group!, progress: workflowProgressText(row) };
 }
+
+export function workflowScriptProgressFixture(entered: boolean): WorkflowQaFixture {
+  const seed = workflowScaleFixture("script", 4);
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    workflow: {
+      ...seed.row.workflow!,
+      phases: [
+        { index: 0, title: "Package audits", progress: { total: 10, state: "completed" } },
+        {
+          index: 1,
+          title: "Follow up",
+          progress: { total: entered ? 2 : 4, state: entered ? "running" : "planned" },
+        },
+        { index: 2, title: "Report", progress: { total: 1, state: "planned" } },
+      ],
+      agents: entered ? seed.row.workflow!.agents : seed.row.workflow!.agents.slice(0, 2),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return { ...seed, row, opening, group: opening.group! };
+}
+
+export type WorkflowCallbackState = "running" | "completed" | "failed" | "stopped";
+
+export function workflowCallbackLifecycleFixture(state: WorkflowCallbackState): WorkflowQaFixture {
+  const seed = workflowScaleFixture("script", 4);
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    status: state === "running" ? "running" : state === "stopped" ? "cancelled" : "completed",
+    progress: "",
+    workflow: {
+      ...seed.row.workflow!,
+      phases: [
+        {
+          index: 0,
+          title: "Audit",
+          progress: { total: 1, state: state === "stopped" ? "running" : state },
+        },
+      ],
+      agents: seed.row.workflow!.agents.slice(0, 1),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return {
+    ...seed,
+    row,
+    opening,
+    group: opening.group!,
+    heading: appWorkflowHeading(row.status),
+    progress: workflowProgressText(row),
+    running: row.status === "running",
+  };
+}

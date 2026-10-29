@@ -157,10 +157,14 @@ describe("workflowRail", () => {
     ]);
   });
 
-  it("counts only completed agents toward a failed phase's progress", () => {
+  it("reports settlement separately from a failed phase's outcome and unknown size", () => {
     const [phase] = workflowRailOf([agent(1, 0, "failed"), agent(2, 0, "completed")], "completed");
 
-    expect([phase!.tone, phase!.completedCount, phase!.members.length]).toEqual(["failed", 1, 2]);
+    expect([phase!.tone, phase!.progressText, phase!.members.length]).toEqual([
+      "failed",
+      "2 settled · 2 discovered · total unknown",
+      2,
+    ]);
   });
 });
 

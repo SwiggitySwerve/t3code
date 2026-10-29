@@ -1,6 +1,11 @@
-import type {
-  SubagentWorkflowGroup,
-  RuntimeSubagent,
+import {
+  type SubagentWorkflowGroup,
+  type RuntimeSubagent,
+  type WorkflowPhaseProgress,
+  deriveWorkflowProgress,
+  workflowPhaseStatus,
+  workflowSettledFraction,
+  workflowSettledText,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import type { ProviderDriverKind, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
 import { ChevronDownIcon, SquareIcon } from "lucide-react";
@@ -43,13 +48,15 @@ export function WorkflowLineageStatus(props: {
   );
 }
 
-function phaseElapsed(phase: SubagentWorkflowGroup["phases"][number]) {
+function phaseElapsed(
+  phase: WorkflowPhaseProgress & { readonly members: ReadonlyArray<RuntimeSubagent> },
+) {
   const instants = (key: "startedAt" | "completedAt") =>
     phase.members
       .map((member) => member[key])
       .filter((value) => value !== null)
       .sort();
-  const running = phase.state === "running";
+  const running = phase.state === "running" || phase.counts.running > 0;
   const startedAt = instants("startedAt")[0] ?? null;
   const completedAt = running ? null : (instants("completedAt").at(-1) ?? null);
   return {
@@ -57,17 +64,6 @@ function phaseElapsed(phase: SubagentWorkflowGroup["phases"][number]) {
     startedAt: running || completedAt !== null ? startedAt : null,
     completedAt,
   };
-}
-
-function phaseStatusLabel(phase: SubagentWorkflowGroup["phases"][number]) {
-  if (phase.state === "running") return "running";
-  if (phase.members.some((member) => member.status === "failed")) return "failed";
-  if (
-    phase.members.some((member) => member.status === "cancelled" || member.status === "interrupted")
-  ) {
-    return "stopped";
-  }
-  return phase.state === "done" ? "done" : "not started";
 }
 
 function WorkflowMemberRow({
@@ -177,9 +173,19 @@ export function ThreadLineageWorkflowRow({
   readonly stopDisabled: boolean;
 }) {
   const [expanded, setExpanded] = useState(false);
-  const [phaseOpen, setPhaseOpen] = useState<ReadonlyMap<number, boolean>>(() => new Map());
+  const [phaseOpen, setPhaseOpen] = useState<ReadonlyMap<string, boolean>>(() => new Map());
   const label = workflowLineageLabel(group.workflow);
-  const phases = group.phases.filter((phase) => phase.members.length > 0);
+  const overview = deriveWorkflowProgress(group);
+  const phases = overview.phases
+    .filter((phase) => phase.id !== "other" && (phase.tasks.length > 0 || phase.state !== null))
+    .map((phase) => ({
+      ...phase,
+      members: phase.tasks.flatMap((task) => (task.member === null ? [] : [task.member])),
+    }));
+  const otherMembers =
+    overview.phases
+      .find((phase) => phase.id === "other")
+      ?.tasks.flatMap((task) => (task.member === null ? [] : [task.member])) ?? [];
   // T3-run workflows record each agent's own provider; Claude's run on the workflow's.
   const memberProvider = (member: RuntimeSubagent) =>
     member.providerInstanceId === undefined
@@ -240,28 +246,38 @@ export function ThreadLineageWorkflowRow({
       {expanded ? (
         <ul className="m-0 list-none p-0 ps-6.5">
           {phases.map((phase) => {
-            const open = phaseOpen.get(phase.index) ?? phase.state === "running";
-            const status = phaseStatusLabel(phase);
+            const status = workflowPhaseStatus(phase);
+            const open = phaseOpen.get(phase.id) ?? status === "running";
             return (
-              <li key={phase.index}>
+              <li key={phase.id}>
                 <CollapsibleSectionHeader
                   variant="panel"
-                  tone={phase.state === "running" ? "emphasized" : "muted"}
+                  tone={status === "running" ? "emphasized" : "muted"}
                   expanded={open}
                   aria-label={`${open ? "Collapse" : "Expand"} ${phase.title} phase, ${status}`}
-                  onClick={() => setPhaseOpen((phases) => new Map(phases).set(phase.index, !open))}
+                  onClick={() => setPhaseOpen((phases) => new Map(phases).set(phase.id, !open))}
                   accessory={
                     <>
                       {status === "failed" ? (
                         <SectionHeaderStatus>Failed</SectionHeaderStatus>
                       ) : null}
-                      <span className="shrink-0 text-2xs font-normal tabular-nums">
-                        {phase.settledCount}/{phase.members.length}
-                        {/* The unit goes first in a narrow panel, so the count and time stay whole. */}
-                        <span className="@max-[18rem]:hidden">
-                          {phase.members.length === 1 ? " agent" : " agents"}
-                        </span>
-                      </span>
+                      <Tooltip>
+                        <TooltipTrigger
+                          render={
+                            <span
+                              className="shrink-0 text-2xs font-normal tabular-nums"
+                              aria-label={workflowSettledText(phase.counts)}
+                            />
+                          }
+                        >
+                          {workflowSettledFraction(phase.counts)}
+                          {/* The unit goes first in a narrow panel, so the count and time stay whole. */}
+                          <span className="@max-[18rem]:hidden">
+                            {phase.counts.total === 1 ? " agent" : " agents"}
+                          </span>
+                        </TooltipTrigger>
+                        <TooltipPopup side="left">{workflowSettledText(phase.counts)}</TooltipPopup>
+                      </Tooltip>
                       <span className="shrink-0 text-2xs font-normal tabular-nums empty:hidden">
                         <AgentElapsed agent={phaseElapsed(phase)} />
                       </span>
@@ -296,7 +312,7 @@ export function ThreadLineageWorkflowRow({
               </li>
             );
           })}
-          {group.unphasedMembers.map((member) => (
+          {otherMembers.map((member) => (
             <WorkflowMemberRow
               key={member.id}
               member={member}
@@ -306,7 +322,7 @@ export function ThreadLineageWorkflowRow({
               isThreadAvailable={isThreadAvailable}
             />
           ))}
-          {phases.length === 0 && group.unphasedMembers.length === 0 ? (
+          {phases.length === 0 && otherMembers.length === 0 ? (
             <li className="px-2.5 py-1.5 text-2xs text-muted-foreground/70">No agents yet</li>
           ) : null}
         </ul>

@@ -182,7 +182,13 @@ function PhaseDetails(props: {
         <h4>
           <CollapsibleTrigger
             aria-label={`${phase.title} agents`}
-            aria-description={workflowCountsText(phase.counts)}
+            aria-description={[
+              phase.state,
+              workflowSettledText(phase.counts),
+              workflowCountsText(phase.counts),
+            ]
+              .filter(Boolean)
+              .join(" · ")}
             render={
               <button
                 type="button"
@@ -195,7 +201,10 @@ function PhaseDetails(props: {
               className={cn("mt-0.5 size-3 shrink-0", open && "rotate-90")}
             />
             <span className="flex min-w-0 flex-1 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
-              <span className="text-xs font-medium [overflow-wrap:anywhere]">{phase.title}</span>
+              <span className="text-xs font-medium [overflow-wrap:anywhere]">
+                {phase.title}
+                {phase.state === null ? "" : ` · ${phase.state}`}
+              </span>
               <CountLabels counts={phase.counts} compact />
             </span>
           </CollapsibleTrigger>
