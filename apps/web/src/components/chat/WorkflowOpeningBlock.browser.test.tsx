@@ -4,6 +4,7 @@ import type {
   WorkflowOpening,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
+  appWorkflowHeading,
   deriveWorkflowGroups,
   projectedSubagentsToRuntime,
   resolveWorkflowOpening,
@@ -68,18 +69,35 @@ it.each([4, 40, 256] as const)(
         findable
       />,
     );
-    expect(screen.container.querySelectorAll("[data-workflow-phase]").length).toBeLessThanOrEqual(
-      8,
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(
+      count === 256 ? 16 : count === 40 ? 4 : 2,
     );
     expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
-      count === 4 ? 4 : 0,
+      count === 4 ? 2 : 0,
     );
     expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
     expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
     expect(screen.container.textContent).not.toContain("These are task instructions");
+    expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toBe(
+      `1 agent failed · Agent ${count}: Access denied. Check workspace permissions.`,
+    );
     await expect
       .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
       .toHaveAttribute("max", String(count));
+    await expect
+      .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
+      .toHaveAttribute("value", String(count / 2 + 1));
+    if (count === 4) {
+      const completedPhase = screen.getByRole("button", { name: "Phase 1 agents", exact: true });
+      await expect.element(completedPhase).toHaveAttribute("aria-expanded", "false");
+      await userEvent.tab();
+      await userEvent.tab();
+      await expect.element(completedPhase).toHaveFocus();
+      await userEvent.keyboard("{Enter}");
+      expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(4);
+      await userEvent.keyboard(" ");
+      await expect.element(completedPhase).toHaveAttribute("aria-expanded", "false");
+    }
     await userEvent.click(screen.getByRole("button", { name: "Show failures (1)", exact: true }));
     expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(1);
     await userEvent.click(screen.getByRole("button", { name: `Open Agent ${count}`, exact: true }));
@@ -106,7 +124,9 @@ it.each([4, 40, 256] as const)(
       await expect
         .element(screen.getByRole("button", { name: "Open Agent 41, passed", exact: true }))
         .toHaveAccessibleDescription(expect.stringContaining("after Agent 17"));
-      await userEvent.click(screen.getByRole("button", { name: "More phases", exact: true }));
+      await expect
+        .element(screen.getByRole("button", { name: "More phases", exact: true }))
+        .not.toBeInTheDocument();
       await expect
         .element(screen.getByRole("region", { name: "Phase 16 phase", exact: true }))
         .toBeVisible();
@@ -114,16 +134,25 @@ it.each([4, 40, 256] as const)(
   },
 );
 
-it("pages a large phase without mounting every agent", async () => {
+it.each(["agents", "phases"] as const)("pages %s without mounting every detail", async (paging) => {
   const fixture = workflowScaleFixture("script", 40);
+  const members = fixture.group.phases.flatMap((phase) => phase.members);
   const group = {
     ...fixture.group,
-    phases: [
-      {
-        ...fixture.group.phases[0]!,
-        members: fixture.group.phases.flatMap((phase) => phase.members),
-      },
-    ],
+    phases:
+      paging === "phases"
+        ? members.map((member, index) => ({
+            ...fixture.group.phases[0]!,
+            index,
+            title: `Phase ${index + 1}`,
+            members: [member],
+          }))
+        : [
+            {
+              ...fixture.group.phases[0]!,
+              members,
+            },
+          ],
   };
   await using screen = await render(
     <WorkflowOpeningBlock
@@ -132,7 +161,26 @@ it("pages a large phase without mounting every agent", async () => {
       onOpenThread={() => {}}
     />,
   );
-  await userEvent.click(screen.getByRole("button", { name: "Show agents (40)", exact: true }));
+  if (paging === "phases") {
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(24);
+    expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(0);
+    await userEvent.click(screen.getByRole("button", { name: "More phases", exact: true }));
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(16);
+    await expect
+      .element(screen.getByRole("region", { name: "Phase 40 phase", exact: true }))
+      .toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Show failures (1)", exact: true }));
+    expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(1);
+    await expect
+      .element(screen.getByRole("button", { name: "Open Agent 40", exact: true }))
+      .toBeVisible();
+    await userEvent.click(screen.getByRole("button", { name: "Show all agents", exact: true }));
+    await expect
+      .element(screen.getByRole("region", { name: "Phase 1 phase", exact: true }))
+      .toBeVisible();
+    return;
+  }
+  await userEvent.click(screen.getByRole("button", { name: "Phase 1 agents", exact: true }));
   expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(20);
   await expect
     .element(screen.getByRole("button", { name: "Open Agent 1", exact: true }))
@@ -149,6 +197,8 @@ it("pages a large phase without mounting every agent", async () => {
 
 it("coalesces continuing workflow updates into one polite announcement and preserves unknown totals", async () => {
   const fixture = workflowScaleFixture("script", 4);
+  // Elapsed labels read the shared clock on their first mount.
+  using _timers = fakeTimers({ now: 10_000 });
   const view = (log: string, status: RuntimeSubagent["status"] = "running") => (
     <WorkflowOpeningBlock
       opening={{
@@ -158,16 +208,29 @@ it("coalesces continuing workflow updates into one polite announcement and prese
           workflow: { ...fixture.group.workflow, progress: log, status },
           phases: fixture.group.phases.map((phase) => ({
             ...phase,
-            members: phase.members.filter((member) => member.status !== "failed"),
+            members: phase.members
+              .filter((member) => member.status !== "failed")
+              .map((member) => ({
+                ...member,
+                startedAt: "1970-01-01T00:00:00.000Z",
+                status: member.status === "running" ? status : member.status,
+              })),
           })),
         },
       }}
       environmentId={EnvironmentId.make("test")}
+      progress={log}
+      heading={appWorkflowHeading(status)}
       onOpenThread={() => {}}
     />
   );
   await using screen = await render(view("Inspecting packages"));
-  using _timers = fakeTimers();
+  expect(screen.getByText("Inspecting packages", { exact: true }).elements()).toHaveLength(1);
+  expect(screen.container.querySelector("h3")?.nextElementSibling).toBe(
+    screen.container.querySelector('[aria-live="polite"]'),
+  );
+  const active = screen.getByRole("button", { name: "Open Agent 3", exact: true });
+  expect(active.element().textContent).toContain("10s");
   await screen.rerender(view("Reading exports"));
   await act(() => vi.advanceTimersByTime(500));
   await screen.rerender(view("Checking types"));
@@ -178,16 +241,21 @@ it("coalesces continuing workflow updates into one polite announcement and prese
   expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toBe(
     "Checking types",
   );
+  expect(active.element().textContent).toContain("11s");
   expect(screen.container.querySelector("progress")).toBeNull();
   expect(screen.container.textContent).toContain("total unknown");
   await screen.rerender(view("Checking types", "cancelled"));
+  await expect.element(screen.getByText("Workflow running", { exact: true })).toBeVisible();
   await act(() => vi.advanceTimersByTime(1000));
+  await expect.element(screen.getByText("Workflow stopped", { exact: true })).toBeVisible();
   expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toContain(
     "Workflow stopped",
   );
   expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).not.toContain(
     "Checking types",
   );
+  expect(screen.container.textContent).not.toContain("Checking types");
+  expect(active.element().textContent).not.toContain("12s");
 });
 
 it("reveals a declaration search match while keeping the graph unmounted", async () => {
@@ -656,22 +724,28 @@ it("shows no script before the workflow's agents have loaded", async () => {
   expectNoScript(screen.container, marker);
 });
 
-it.each([false, true])(
-  "reveals and refolds the complete long result with the keyboard, coordinator failure=%s",
-  async (failed) => {
+it.each(["unloaded", "failed", "completed"] as const)(
+  "reveals and refolds the complete long result with the keyboard, coordinator=%s",
+  async (status) => {
     const progress = `Script output\n${"  untouched <data> & `code`\n".repeat(500)}FINAL RESULT`;
     const container = document.createElement("div");
     container.style.width = "400px";
     await using screen = await render(
       <WorkflowOpeningBlock
         opening={
-          failed
+          status !== "unloaded"
             ? {
                 ...opening,
                 group: {
                   ...scriptGroup(),
                   phases: [],
-                  workflow: { ...scriptGroup().workflow, status: "failed", error: progress },
+                  workflow: {
+                    ...scriptGroup().workflow,
+                    status,
+                    error: status === "failed" ? progress : null,
+                    result: progress,
+                    progress: "Old running log",
+                  },
                 },
               }
             : opening
@@ -682,6 +756,17 @@ it.each([false, true])(
       />,
       { container },
     );
+    if (status === "completed") {
+      expect(screen.container.textContent).not.toContain("FINAL RESULT");
+      expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toContain(
+        "Workflow finished",
+      );
+      expect(screen.container.textContent).not.toContain("Old running log");
+      const result = screen.getByRole("button", { name: "Workflow result", exact: true });
+      await userEvent.tab();
+      await expect.element(result).toHaveFocus();
+      await userEvent.keyboard("{Enter}");
+    }
     const reveal = screen.getByRole("button", { name: "Show full result" });
     await expect.element(reveal).toBeVisible();
     const content = screen.getByText(progress, { exact: true }).element();

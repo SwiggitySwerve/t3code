@@ -33,6 +33,7 @@ export interface WorkflowPhaseProgress {
   readonly title: string;
   readonly tasks: ReadonlyArray<WorkflowTaskProgress>;
   readonly counts: WorkflowProgressCounts;
+  readonly allDone: boolean;
 }
 
 export function appWorkflowHeading(status: RuntimeSubagentStatus): string {
@@ -100,20 +101,23 @@ function memberTask(member: RuntimeSubagent): WorkflowTaskProgress {
   };
 }
 
-function scriptPhase(
+function phaseProgress(
   id: string,
   title: string,
-  members: ReadonlyArray<RuntimeSubagent>,
+  tasks: ReadonlyArray<WorkflowTaskProgress>,
+  total: number | null,
 ): WorkflowPhaseProgress {
-  const tasks = members.map(memberTask);
-  return { id, title, tasks, counts: countTasks(tasks, null) };
+  const counts = countTasks(tasks, total);
+  return { id, title, tasks, counts, allDone: tasks.length > 0 && counts.done === tasks.length };
 }
 
 /** Graph nodes own retry identity; script agents keep their index across attempts. */
 export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
   const phases: WorkflowPhaseProgress[] =
     group.graph === null
-      ? group.phases.map((phase) => scriptPhase(`phase:${phase.index}`, phase.title, phase.members))
+      ? group.phases.map((phase) =>
+          phaseProgress(`phase:${phase.index}`, phase.title, phase.members.map(memberTask), null),
+        )
       : group.graph.waves.map((wave) => {
           const tasks = wave.map((node): WorkflowTaskProgress => ({
             id: node.key,
@@ -128,29 +132,26 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
               null,
           }));
           const index = wave[0]!.wave;
-          return {
-            id: `wave:${index}`,
-            title: `Phase ${index + 1}`,
-            tasks,
-            counts: countTasks(tasks, tasks.length),
-          };
+          return phaseProgress(`wave:${index}`, `Phase ${index + 1}`, tasks, tasks.length);
         });
   const plannedTasks = phases.flatMap((phase) => phase.tasks);
   const other = group.graph?.otherMembers ?? group.unphasedMembers;
-  if (other.length > 0) phases.push(scriptPhase("other", "Other agents", other));
+  if (other.length > 0)
+    phases.push(phaseProgress("other", "Other agents", other.map(memberTask), null));
   const tasks = phases.flatMap((phase) => phase.tasks);
   const counts = countTasks(
     group.graph === null ? tasks : plannedTasks,
     group.graph === null ? null : plannedTasks.length,
   );
   const failure = tasks.find((task) => task.state === "failed");
+  const failedCount = tasks.filter((task) => task.state === "failed").length;
   const current =
     phases.find((phase) => phase.counts.running > 0) ??
     phases.find((phase) => phase.counts.queued > 0) ??
     phases.at(-1);
   const headline =
     failure !== undefined
-      ? `${failure.label} failed${failure.detail ? `: ${failure.detail}` : ""}`
+      ? `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`
       : group.workflow.status === "failed"
         ? (group.workflow.error ?? "Workflow failed")
         : group.workflow.status === "completed" ||
@@ -158,12 +159,11 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
             group.workflow.status === "interrupted"
           ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
           : group.workflow.progress?.trim() ||
-            `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running · ${workflowSettledText(current?.counts ?? counts)}`;
+            `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
   const successful =
     group.workflow.status === "completed" &&
     tasks.length > 0 &&
-    tasks.every((task) => task.state === "done");
-  const failedCount = tasks.filter((task) => task.state === "failed").length;
+    phases.every((phase) => phase.tasks.length === 0 || phase.allDone);
   return { phases, counts, headline, successful, failedCount, agentCount: tasks.length };
 }
 
@@ -174,8 +174,13 @@ export function workflowSettledText(counts: WorkflowProgressCounts): string {
 }
 
 export function workflowCountsText(counts: WorkflowProgressCounts): string {
-  return (["done", "running", "failed", "queued", "stopped", "skipped"] as const)
-    .filter((state) => counts[state] > 0)
-    .map((state) => `${counts[state]} ${state}`)
+  return workflowCountEntries(counts)
+    .map(({ state, count }) => `${count} ${state}`)
     .join(" · ");
+}
+
+export function workflowCountEntries(counts: WorkflowProgressCounts) {
+  return (["done", "failed", "running", "queued", "stopped", "skipped"] as const)
+    .filter((state) => counts[state] > 0)
+    .map((state) => ({ state, count: counts[state] }));
 }

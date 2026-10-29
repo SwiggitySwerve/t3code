@@ -37,6 +37,7 @@ export { workflowNodeAccounting } from "./workflowAttempts.ts";
 export {
   appWorkflowHeading,
   deriveWorkflowProgress,
+  workflowCountEntries,
   workflowCountsText,
   workflowSettledText,
   type WorkflowPhaseProgress,
