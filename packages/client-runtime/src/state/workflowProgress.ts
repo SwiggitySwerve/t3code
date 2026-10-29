@@ -111,6 +111,23 @@ function phaseProgress(
   return { id, title, tasks, counts, allDone: tasks.length > 0 && counts.done === tasks.length };
 }
 
+function latestStartedOrFinishedMember(
+  tasks: ReadonlyArray<WorkflowTaskProgress>,
+): RuntimeSubagent | null {
+  let latest: { task: WorkflowTaskProgress; at: number } | null = null;
+  for (const task of tasks) {
+    const member = task.member;
+    if (member === null) continue;
+    for (const timestamp of [member.startedAt, member.completedAt]) {
+      const at = timestamp === null ? NaN : Date.parse(timestamp);
+      if (!Number.isFinite(at)) continue;
+      if (latest === null || at > latest.at || (at === latest.at && task.id < latest.task.id))
+        latest = { task, at };
+    }
+  }
+  return latest?.task.member ?? null;
+}
+
 /** Graph nodes own retry identity; script agents keep their index across attempts. */
 export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
   const phases: WorkflowPhaseProgress[] =
@@ -149,22 +166,36 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     phases.find((phase) => phase.counts.running > 0) ??
     phases.find((phase) => phase.counts.queued > 0) ??
     phases.at(-1);
+  const terminal =
+    group.workflow.status === "failed" ||
+    group.workflow.status === "completed" ||
+    group.workflow.status === "cancelled" ||
+    group.workflow.status === "interrupted";
+  const activity = group.workflow.progress?.trim();
+  const headlineMember =
+    failure === undefined && !terminal && !activity ? latestStartedOrFinishedMember(tasks) : null;
   const headline =
     failure !== undefined
       ? `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`
       : group.workflow.status === "failed"
         ? (group.workflow.error ?? "Workflow failed")
-        : group.workflow.status === "completed" ||
-            group.workflow.status === "cancelled" ||
-            group.workflow.status === "interrupted"
+        : terminal
           ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
-          : group.workflow.progress?.trim() ||
+          : activity ||
             `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
   const successful =
     group.workflow.status === "completed" &&
     tasks.length > 0 &&
     phases.every((phase) => phase.tasks.length === 0 || phase.allDone);
-  return { phases, counts, headline, successful, failedCount, agentCount: tasks.length };
+  return {
+    phases,
+    counts,
+    headline,
+    headlineMember,
+    successful,
+    failedCount,
+    agentCount: tasks.length,
+  };
 }
 
 export function workflowSettledText(counts: WorkflowProgressCounts): string {

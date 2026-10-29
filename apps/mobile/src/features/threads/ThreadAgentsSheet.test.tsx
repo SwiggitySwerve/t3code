@@ -1,5 +1,11 @@
 import { deriveThreadTurnSubagents } from "@t3tools/client-runtime/state/thread-subagents";
-import { EnvironmentId, ThreadId } from "@t3tools/contracts";
+import {
+  EnvironmentId,
+  ProviderDriverKind,
+  ProviderInstanceId,
+  ThreadId,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as DateTime from "effect/DateTime";
 import { AsyncResult } from "effect/reactivity";
@@ -22,6 +28,7 @@ const harness = vi.hoisted(() => ({
   threadSubagents: [] as ReadonlyArray<unknown>,
   stop: vi.fn(),
   announce: vi.fn(),
+  providers: [] as ReadonlyArray<ServerProvider>,
 }));
 
 vi.mock("react-native", () => ({
@@ -55,6 +62,11 @@ vi.mock("../../components/ui/AppText", () => ({
   }) => <span aria-live={accessibilityLiveRegion}>{children}</span>,
 }));
 vi.mock("../../components/ui/AppSymbol", () => ({ SymbolView: () => null }));
+vi.mock("../../components/ProviderIcon", () => ({
+  ProviderIcon: ({ provider, displayName }: { provider?: string; displayName?: string }) => (
+    <span data-provider={provider}>{displayName}</span>
+  ),
+}));
 vi.mock("../../components/ui/GlassSurface", () => ({
   GlassSurface: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
@@ -124,11 +136,20 @@ vi.mock("../../components/ui/ListSection", () => ({
   ListSection: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
 }));
 vi.mock("../../components/ui/RowPressable", () => ({
-  RowPressable: ({ children }: { children?: ReactNode }) => <div>{children}</div>,
+  RowPressable: (props: PressableProps) => (
+    <button
+      type="button"
+      disabled={props.disabled}
+      aria-label={props.accessibilityLabel}
+      onClick={props.onPress}
+    >
+      {props.children}
+    </button>
+  ),
 }));
 vi.mock("../../state/entities", () => ({
-  useEnvironmentServerConfig: () => undefined,
-  useThreadShell: () => undefined,
+  useEnvironmentServerConfig: () => ({ providers: harness.providers }),
+  useThreadShell: () => ({}),
 }));
 vi.mock("./SubagentStatusDot", () => ({
   SUBAGENT_TONE_TEXT_CLASS: {},
@@ -222,6 +243,7 @@ beforeEach(() => {
   container = document.createElement("div");
   root = createRoot(container);
   harness.granted = new Set([ENVIRONMENT]);
+  harness.providers = [];
   project(agent());
   harness.stop.mockReset();
   harness.stop.mockResolvedValue(AsyncResult.success(undefined));
@@ -233,6 +255,58 @@ afterEach(() => {
 });
 
 describe("ThreadAgentsSheet workflow Stop", () => {
+  it("keeps a cross-harness workflow member's own provider and model identity", () => {
+    harness.providers = [
+      {
+        instanceId: ProviderInstanceId.make("cursor-work"),
+        driver: ProviderDriverKind.make("cursor"),
+        displayName: "Work Cursor",
+        accentColor: "#0d9488",
+        enabled: true,
+        installed: true,
+        version: "test",
+        status: "ready",
+        auth: { status: "authenticated" },
+        checkedAt: "2026-10-24T12:00:00Z",
+        models: [],
+        slashCommands: [],
+        skills: [],
+      },
+    ];
+    project(
+      agent({
+        workflow: {
+          name: "Ship the release",
+          phases: [{ index: 0, title: "Review" }],
+          agents: [
+            {
+              index: 0,
+              label: "Fable writer",
+              state: "running",
+              phaseIndex: 0,
+              phaseTitle: "Review",
+              childThreadId: "writer",
+              providerInstanceId: "cursor-work",
+              driver: "cursor",
+              model: "claude-fable-5-1",
+            },
+          ],
+        },
+      }),
+    );
+    show();
+    act(() =>
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Ship the release workflow, Working"]')
+        ?.click(),
+    );
+    const member = container.querySelector('[aria-label*="Provider: Work Cursor (cursor-work)"]');
+    expect(member).not.toBeNull();
+    expect(member?.textContent).toContain("📖");
+    expect(member?.querySelector('[data-provider="cursor"]')).not.toBeNull();
+    expect(member?.getAttribute("aria-label")).toContain("claude-fable-5-1");
+  });
+
   it("stops a running workflow T3 runs, not just its status", async () => {
     show();
 

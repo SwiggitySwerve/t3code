@@ -45,6 +45,7 @@ import {
   WORKFLOW_QA_NOW,
   workflowFixture,
   workflowScaleFixture,
+  workflowModelGlyphFixture,
   type WorkflowQaKind,
   type WorkflowQaSidebarState,
   type WorkflowQaVariant,
@@ -96,6 +97,19 @@ export function WorkflowCanvasSurface(props: { readonly variant: WorkflowQaVaria
   return (
     <ChatColumn>
       <WorkflowWaveCanvas graph={graph} environmentId={ENVIRONMENT} onOpenThread={noop} />
+    </ChatColumn>
+  );
+}
+
+export function WorkflowModelGlyphSurface() {
+  const fixture = workflowModelGlyphFixture();
+  return (
+    <ChatColumn>
+      <WorkflowOpeningBlock
+        opening={fixture.opening}
+        environmentId={ENVIRONMENT}
+        onOpenThread={noop}
+      />
     </ChatColumn>
   );
 }

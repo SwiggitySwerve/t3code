@@ -3,6 +3,10 @@ import { commands } from "vite-plus/test/browser";
 
 declare module "vite-plus/test/browser" {
   interface BrowserCommands {
+    setMediaPreferences: (options: {
+      forcedColors: "active" | "none";
+      reducedMotion: "reduce" | "no-preference";
+    }) => Promise<void>;
     /** Defined in vite.config.ts. Moves Playwright's mouse off the page. */
     resetPointer: () => Promise<void>;
     /** Collects Chromium's weak caches for identity and lifecycle regressions. */

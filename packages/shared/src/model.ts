@@ -327,6 +327,33 @@ export function codexModelFamily(slug: string): string {
   return slug.startsWith("openai.gpt-") ? slug.slice("openai.".length) : slug;
 }
 
+const MODEL_GLYPHS = [
+  { family: "gpt-6.1-sol", label: "GPT-6.1 Sol", glyph: "🌞" },
+  { family: "gpt-6-astra", label: "GPT-6 Astra", glyph: "🌌" },
+  { family: "gpt-6.1-terra", label: "GPT-6.1 Terra", glyph: "🌍" },
+  { family: "gpt-6-luna", label: "GPT-6 Luna", glyph: "🌙" },
+  { family: "claude-opus", label: "Claude Opus", glyph: "🎵" },
+  { family: "claude-sonnet", label: "Claude Sonnet", glyph: "🪶" },
+  { family: "claude-fable", label: "Claude Fable", glyph: "📖" },
+  { family: "claude-haiku", label: "Claude Haiku", glyph: "🍃" },
+] as const;
+
+/** Model identity is independent of the harness; only its own alias table may expand a slug. */
+export function resolveModelGlyph(model: string | null | undefined, driver?: ProviderDriverKind) {
+  const normalized =
+    driver === undefined ? normalizeCustomModelSlug(model) : normalizeModelSlug(model, driver);
+  if (normalized === null) return null;
+  const leaf = normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
+  const slug = codexModelFamily(leaf)
+    .replace(/\[1m\]$/, "")
+    .replace(/-\d{8}$/, "");
+  const claude =
+    /^claude-([a-z]+)(?:-\d+(?:[.-]\d+)*)?(?:-latest)?$/.exec(slug) ??
+    /^claude-\d+(?:[.-]\d+)*-([a-z]+)(?:-latest)?$/.exec(slug);
+  const family = claude ? `claude-${claude[1]}` : slug;
+  return MODEL_GLYPHS.find((entry) => entry.family === family) ?? null;
+}
+
 export function formatCodexModelName(name: string): string {
   return name.replace(/^gpt/i, "GPT").replace(/-([a-z])/g, (_, c) => "-" + c.toUpperCase());
 }

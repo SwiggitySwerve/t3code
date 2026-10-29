@@ -327,6 +327,7 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
   "workflow-block-graph": [...GRAPH_STATES, WORKFLOW_QA_RUNNING_WAVE, ...OVERVIEW_STATES],
   "workflow-block-script": [...SCRIPT_STATES, ...OVERVIEW_STATES],
   "workflow-canvas": [...GRAPH_STATES, WORKFLOW_QA_RUNNING_WAVE],
+  "workflow-model-identities": ["overview", "graph", "graph-fallbacks"],
   "lineage-row-graph": [...GRAPH_STATES, WORKFLOW_QA_STOP_VISIBLE],
   "lineage-row-script": SCRIPT_STATES,
   "lineage-row-narrow-graph": NARROW_LINEAGE_STATES,
