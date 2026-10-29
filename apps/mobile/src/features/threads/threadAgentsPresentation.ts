@@ -198,10 +198,11 @@ export function workflowMemberMetadata(
 }
 
 export function workflowMemberDetail(
-  member: Pick<RuntimeSubagent, "status" | "progress" | "result" | "error">,
+  member: Pick<RuntimeSubagent, "status" | "progress" | "intent" | "result" | "error">,
 ) {
   return {
     detail: subagentCardDetail(subagentDetailPreview(member)),
+    intent: subagentCardDetail(member.intent ?? null),
     error: member.status === "failed" ? subagentCardDetail(member.error) : null,
   };
 }

@@ -1,5 +1,4 @@
 import { useAtomValue } from "@effect/atom-react";
-import { useNowSecond } from "../../hooks/useNowSecond";
 import {
   WORKFLOW_GRAPH_STATE_LABEL,
   workflowGraphNodeDetail,
@@ -91,6 +90,7 @@ const MUTED_STATES: ReadonlySet<WorkflowGraphNodeState> = new Set([
 export function WorkflowWaveCanvas(props: {
   readonly graph: WorkflowGraphView<RuntimeSubagent>;
   readonly environmentId: EnvironmentId;
+  readonly visibleNodeKeys?: ReadonlySet<string>;
   /** Whether find-in-thread reads the node labels; see `WorkflowOpeningBlock`. */
   readonly findable?: boolean;
   readonly onOpenThread: (threadId: string) => void;
@@ -98,14 +98,28 @@ export function WorkflowWaveCanvas(props: {
   const { graph } = props;
   const find = props.findable === true ? "true" : undefined;
   const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
-  const nodes = graph.waves.flat();
-  const labels = new Map(nodes.map((node) => [node.key, node.label] as const));
+  const waves = graph.waves
+    .map((nodes) => ({
+      nodes:
+        props.visibleNodeKeys === undefined
+          ? nodes
+          : nodes.filter((node) => props.visibleNodeKeys!.has(node.key)),
+      total: nodes.length,
+      settled: nodes.filter(
+        (node) => node.state === "passed" || node.state === "failed" || node.state === "skipped",
+      ).length,
+    }))
+    .filter((wave) => wave.nodes.length > 0);
+  const nodes = waves.flatMap((wave) => wave.nodes);
+  const labels = new Map(
+    graph.waves.flatMap((wave) => wave.map((node) => [node.key, node.label] as const)),
+  );
   // Only cards in view (plus a margin) draw in full; a 150-node graph stays fast to render.
   const scrollRef = useRef<HTMLDivElement>(null);
   const [viewport, setViewport] = useState<WaveViewport | null>(null);
   // The scroll area's width decides the card width, so a narrow chat shows two whole columns.
   const layout = workflowWaveLayout(
-    graph.waves.map((wave) =>
+    waves.map(({ nodes: wave }) =>
       wave.map((node) => {
         const { detail, retries } = workflowGraphNodeDetail(node, labels);
         const failure = node.state === "failed" ? node.reason : null;
@@ -119,7 +133,7 @@ export function WorkflowWaveCanvas(props: {
         };
       }),
     ),
-    waveCardWidth(viewport?.width, graph.waves.length),
+    waveCardWidth(viewport?.width, waves.length),
   );
   // Hovering or focusing a node highlights it, what it depends on and what depends on it.
   const [highlighted, setHighlighted] = useState<string | null>(null);
@@ -221,25 +235,22 @@ export function WorkflowWaveCanvas(props: {
             );
           })}
         </svg>
-        {graph.waves.map((nodes, column) => {
+        {waves.map(({ nodes, total, settled }, column) => {
           const x = layout.columns[column]?.x ?? 0;
-          const settled = nodes.filter(
-            (node) =>
-              node.state === "passed" || node.state === "failed" || node.state === "skipped",
-          ).length;
+          const waveNumber = nodes[0]!.wave + 1;
           return (
             <section
               key={nodes[0]?.wave ?? column}
-              aria-label={`Wave ${column + 1}`}
+              aria-label={`Wave ${waveNumber}`}
               className="contents"
             >
               <h4
                 className="absolute flex items-baseline gap-2 px-1 text-2xs font-medium text-muted-foreground"
                 style={{ left: x, top: 0, width: layout.cards.get(nodes[0]?.key ?? "")?.width }}
               >
-                <span>Wave {column + 1}</span>
+                <span>Wave {waveNumber}</span>
                 <span className="font-normal tabular-nums">
-                  {settled} of {nodes.length} finished
+                  {settled}/{total} finished{nodes.length < total ? ` · ${nodes.length} shown` : ""}
                 </span>
               </h4>
               {nodes.map((node) => {
@@ -418,9 +429,7 @@ function workflowNodeAgent(
 }
 
 function WorkflowNodeCard(props: WorkflowNodeCardProps) {
-  const snapshot = workflowNodeAccounting(props.node);
-  const now = useNowSecond(snapshot.live);
-  const accounting = snapshot.live ? workflowNodeAccounting(props.node, now) : snapshot;
+  const accounting = workflowNodeAccounting(props.node);
   const { node, box } = props;
   const { detail, retries } = workflowGraphNodeDetail(node, props.labels);
   const threadId = node.member?.childThreadId ?? null;

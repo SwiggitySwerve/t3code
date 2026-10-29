@@ -44,6 +44,7 @@ import { QA_DRIVER, QA_ENVIRONMENT, QA_PROVIDERS, QA_PROVIDER_INSTANCE } from ".
 import {
   WORKFLOW_QA_NOW,
   workflowFixture,
+  workflowScaleFixture,
   type WorkflowQaKind,
   type WorkflowQaSidebarState,
   type WorkflowQaVariant,
@@ -67,9 +68,13 @@ function ChatColumn({ children }: { readonly children: ReactNode }) {
 /** The workflow block the timeline draws for a workflow T3 runs. */
 export function WorkflowBlockSurface(props: {
   readonly kind: WorkflowQaKind;
-  readonly variant: WorkflowQaVariant;
+  readonly variant?: WorkflowQaVariant;
+  readonly agentCount?: 4 | 40 | 256;
 }) {
-  const fixture = workflowFixture(props.kind, props.variant);
+  const fixture =
+    props.agentCount === undefined
+      ? workflowFixture(props.kind, props.variant ?? "running")
+      : workflowScaleFixture(props.kind, props.agentCount);
   return (
     <ChatColumn>
       <WorkflowOpeningBlock

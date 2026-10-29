@@ -309,6 +309,8 @@ const without = <T extends string>(states: ReadonlyArray<T>, ...removed: Readonl
   states.filter((state) => !removed.includes(state));
 
 const GRAPH_STATES = [...WORKFLOW_QA_STATUSES, ...WORKFLOW_QA_STRESS] as ReadonlyArray<string>;
+export const WORKFLOW_QA_AGENT_COUNTS = [4, 40, 256] as const;
+const OVERVIEW_STATES = WORKFLOW_QA_AGENT_COUNTS.map((count) => `agents-${count}`);
 // A script declares no dependencies, so nothing can be retrying behind another node.
 const SCRIPT_STATES = without(GRAPH_STATES, "retrying", "missing-model");
 // A collapsed Lineage row shows the run's status and title only.
@@ -322,8 +324,8 @@ const NARROW_LINEAGE_STATES = ["running", "failed", "long-labels"];
  * here, so a fixture that is deleted or skipped fails the capture instead of shrinking it.
  */
 export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<string>>> = {
-  "workflow-block-graph": [...GRAPH_STATES, WORKFLOW_QA_RUNNING_WAVE],
-  "workflow-block-script": SCRIPT_STATES,
+  "workflow-block-graph": [...GRAPH_STATES, WORKFLOW_QA_RUNNING_WAVE, ...OVERVIEW_STATES],
+  "workflow-block-script": [...SCRIPT_STATES, ...OVERVIEW_STATES],
   "workflow-canvas": [...GRAPH_STATES, WORKFLOW_QA_RUNNING_WAVE],
   "lineage-row-graph": [...GRAPH_STATES, WORKFLOW_QA_STOP_VISIBLE],
   "lineage-row-script": SCRIPT_STATES,

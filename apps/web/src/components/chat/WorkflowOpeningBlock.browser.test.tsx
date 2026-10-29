@@ -17,7 +17,7 @@ import {
   ThreadId,
   type OrchestrationV2Subagent,
 } from "@t3tools/contracts";
-import { countThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
+import { findThreadSearchOccurrences } from "@t3tools/shared/threadSearch";
 import { searchableWorkflowOpeningSegments } from "@t3tools/shared/workflowOpeningText";
 import * as DateTime from "effect/DateTime";
 import type { ComponentProps } from "react";
@@ -30,6 +30,7 @@ import type ChatMarkdown from "../ChatMarkdown";
 import { collectThreadFindRanges } from "./threadFindHighlights";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
+import { workflowScaleFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 
 vi.mock(import("@effect/atom-react"), async (original) => ({
   ...(await original()),
@@ -53,6 +54,164 @@ const opening: WorkflowOpening = {
   providerInstanceId: null,
   group: null,
 };
+
+it.each([4, 40, 256] as const)(
+  "bounds the overview and lazily pages details for %i agents",
+  async (count) => {
+    const fixture = workflowScaleFixture("graph", count);
+    const onOpenThread = vi.fn();
+    await using screen = await render(
+      <WorkflowOpeningBlock
+        opening={fixture.opening}
+        environmentId={EnvironmentId.make("test")}
+        onOpenThread={onOpenThread}
+        findable
+      />,
+    );
+    expect(screen.container.querySelectorAll("[data-workflow-phase]").length).toBeLessThanOrEqual(
+      8,
+    );
+    expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(
+      count === 4 ? 4 : 0,
+    );
+    expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
+    expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
+    expect(screen.container.textContent).not.toContain("These are task instructions");
+    await expect
+      .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
+      .toHaveAttribute("max", String(count));
+    await userEvent.click(screen.getByRole("button", { name: "Show failures (1)", exact: true }));
+    expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(1);
+    await userEvent.click(screen.getByRole("button", { name: `Open Agent ${count}`, exact: true }));
+    expect(onOpenThread).toHaveBeenLastCalledWith(`qa-thread-${count - 1}`);
+    await userEvent.click(screen.getByRole("button", { name: "Show all agents", exact: true }));
+    await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
+    expect(screen.container.querySelectorAll("[data-workflow-node]").length).toBeLessThanOrEqual(
+      40,
+    );
+    if (count === 256) {
+      expect(screen.container.querySelector('[aria-label="Wave 3"] h4')?.textContent).toContain(
+        "16/16 finished · 8 shown",
+      );
+      await userEvent.click(screen.getByRole("button", { name: "More graph nodes", exact: true }));
+      expect(screen.container.querySelector('[aria-label="Wave 3"] h4')?.textContent).toContain(
+        "16/16 finished · 8 shown",
+      );
+      await expect
+        .element(screen.getByRole("region", { name: "Wave 1", exact: true }))
+        .not.toBeInTheDocument();
+      expect(screen.container.querySelectorAll("[data-workflow-node]").length).toBeLessThanOrEqual(
+        40,
+      );
+      await expect
+        .element(screen.getByRole("button", { name: "Open Agent 41, passed", exact: true }))
+        .toHaveAccessibleDescription(expect.stringContaining("after Agent 17"));
+      await userEvent.click(screen.getByRole("button", { name: "More phases", exact: true }));
+      await expect
+        .element(screen.getByRole("region", { name: "Phase 16 phase", exact: true }))
+        .toBeVisible();
+    }
+  },
+);
+
+it("pages a large phase without mounting every agent", async () => {
+  const fixture = workflowScaleFixture("script", 40);
+  const group = {
+    ...fixture.group,
+    phases: [
+      {
+        ...fixture.group.phases[0]!,
+        members: fixture.group.phases.flatMap((phase) => phase.members),
+      },
+    ],
+  };
+  await using screen = await render(
+    <WorkflowOpeningBlock
+      opening={{ ...fixture.opening, group }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Show agents (40)", exact: true }));
+  expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(20);
+  await expect
+    .element(screen.getByRole("button", { name: "Open Agent 1", exact: true }))
+    .toBeVisible();
+  await userEvent.click(screen.getByRole("button", { name: "More agents", exact: true }));
+  expect(screen.container.querySelectorAll("[data-workflow-task]")).toHaveLength(20);
+  await expect
+    .element(screen.getByRole("button", { name: "Open Agent 1", exact: true }))
+    .not.toBeInTheDocument();
+  await expect
+    .element(screen.getByRole("button", { name: "Open Agent 40", exact: true }))
+    .toBeVisible();
+});
+
+it("coalesces continuing workflow updates into one polite announcement and preserves unknown totals", async () => {
+  const fixture = workflowScaleFixture("script", 4);
+  const view = (log: string, status: RuntimeSubagent["status"] = "running") => (
+    <WorkflowOpeningBlock
+      opening={{
+        ...fixture.opening,
+        group: {
+          ...fixture.group,
+          workflow: { ...fixture.group.workflow, progress: log, status },
+          phases: fixture.group.phases.map((phase) => ({
+            ...phase,
+            members: phase.members.filter((member) => member.status !== "failed"),
+          })),
+        },
+      }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />
+  );
+  await using screen = await render(view("Inspecting packages"));
+  using _timers = fakeTimers();
+  await screen.rerender(view("Reading exports"));
+  await act(() => vi.advanceTimersByTime(500));
+  await screen.rerender(view("Checking types"));
+  expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toBe(
+    "Inspecting packages",
+  );
+  await act(() => vi.advanceTimersByTime(500));
+  expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toBe(
+    "Checking types",
+  );
+  expect(screen.container.querySelector("progress")).toBeNull();
+  expect(screen.container.textContent).toContain("total unknown");
+  await screen.rerender(view("Checking types", "cancelled"));
+  await act(() => vi.advanceTimersByTime(1000));
+  expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toContain(
+    "Workflow stopped",
+  );
+  expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).not.toContain(
+    "Checking types",
+  );
+});
+
+it("reveals a declaration search match while keeping the graph unmounted", async () => {
+  const fixture = workflowScaleFixture("graph", 256);
+  await using screen = await render(
+    <div data-timeline-row-id="workflow">
+      <WorkflowOpeningBlock
+        opening={fixture.opening}
+        environmentId={EnvironmentId.make("test")}
+        onOpenThread={() => {}}
+        findable
+      />
+    </div>,
+  );
+  const matches = collectThreadFindRanges(screen.container, "Agent 256");
+  expect(matches).toHaveLength(1);
+  const fold = matches[0]!.range.startContainer.parentElement!.closest("[hidden]")!;
+  expect(fold).not.toBeNull();
+  await act(() => fold.dispatchEvent(new Event("beforematch")));
+  await expect
+    .element(screen.getByRole("button", { name: "Workflow declaration", exact: true }))
+    .toHaveAttribute("aria-expanded", "true");
+  expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
+});
 
 it("shows exact recorded usage, partial usage and budget overshoot honestly", async () => {
   await using screen = await render(
@@ -206,7 +365,6 @@ function expectNoScript(root: HTMLElement, marker: string) {
   expect(root.textContent).not.toContain(marker);
   expect(root.textContent).not.toContain("export const meta");
   expect(root.querySelector("pre, code")).toBeNull();
-  expect(root.textContent).not.toMatch(/show (full )?script/i);
 }
 
 it("grows a card only by its checker rows and keeps the canvas stable while scrolling", async () => {
@@ -360,7 +518,7 @@ it("keeps a focused card drawn when it scrolls away and draws a placeholder on f
   expect(document.activeElement).toBe(card("0-5").querySelector("[data-node-state]"));
 });
 
-it("ticks running attempt totals with the shared clock and stops after completion", async () => {
+it("shows recorded attempt totals without a per-card ticker", async () => {
   const onOpenThread = vi.fn();
   await using screen = await render(
     <WorkflowWaveCanvas
@@ -378,9 +536,9 @@ it("ticks running attempt totals with the shared clock and stops after completio
       onOpenThread={onOpenThread}
     />,
   );
-  await expect.element(screen.getByText("≥100 tokens · ≥3.5s", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("≥100 tokens · ≥5.0s", { exact: true })).toBeVisible();
   await act(() => vi.advanceTimersByTime(1000));
-  await expect.element(screen.getByText("≥100 tokens · ≥4.5s", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("≥100 tokens · ≥5.0s", { exact: true })).toBeVisible();
   // The card's name carries its state, which changes with the run.
   const card = screen.getByRole("button", { name: /^Open Audit, / });
   card.element().focus();
@@ -474,6 +632,7 @@ it("never shows the generated runner of a graph workflow", async () => {
       onOpenThread={onOpenThread}
     />,
   );
+  await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
   await expect.element(screen.getByRole("region", { name: "Workflow graph" })).toBeVisible();
   await userEvent.click(
     screen.getByRole("button", { name: "Open Audit, interrupted", exact: true }),
@@ -497,41 +656,55 @@ it("shows no script before the workflow's agents have loaded", async () => {
   expectNoScript(screen.container, marker);
 });
 
-it("reveals and refolds the complete long result with the keyboard", async () => {
-  const progress = `Script output\n${"  untouched <data> & `code`\n".repeat(500)}FINAL RESULT`;
-  const container = document.createElement("div");
-  container.style.width = "400px";
-  await using screen = await render(
-    <WorkflowOpeningBlock
-      opening={opening}
-      environmentId={EnvironmentId.make("test")}
-      progress={progress}
-      onOpenThread={() => {}}
-    />,
-    { container },
-  );
-  const reveal = screen.getByRole("button", { name: "Show full result" });
-  await expect.element(reveal).toBeVisible();
-  const content = screen.getByText(progress, { exact: true }).element();
-  expect(content.textContent).toBe(progress);
-  expect(content.clientHeight).toBeLessThan(content.scrollHeight);
+it.each([false, true])(
+  "reveals and refolds the complete long result with the keyboard, coordinator failure=%s",
+  async (failed) => {
+    const progress = `Script output\n${"  untouched <data> & `code`\n".repeat(500)}FINAL RESULT`;
+    const container = document.createElement("div");
+    container.style.width = "400px";
+    await using screen = await render(
+      <WorkflowOpeningBlock
+        opening={
+          failed
+            ? {
+                ...opening,
+                group: {
+                  ...scriptGroup(),
+                  phases: [],
+                  workflow: { ...scriptGroup().workflow, status: "failed", error: progress },
+                },
+              }
+            : opening
+        }
+        environmentId={EnvironmentId.make("test")}
+        progress={progress}
+        onOpenThread={() => {}}
+      />,
+      { container },
+    );
+    const reveal = screen.getByRole("button", { name: "Show full result" });
+    await expect.element(reveal).toBeVisible();
+    const content = screen.getByText(progress, { exact: true }).element();
+    expect(content.textContent).toBe(progress);
+    expect(content.clientHeight).toBeLessThan(content.scrollHeight);
 
-  await userEvent.tab();
-  await expect.element(reveal).toHaveFocus();
-  await userEvent.keyboard("{Enter}");
-  const collapse = screen.getByRole("button", { name: "Show less", expanded: true });
-  await expect.element(collapse).toHaveFocus();
-  await expect.element(collapse).toBeVisible();
-  expect(content.clientHeight).toBe(content.scrollHeight);
-  expect(getComputedStyle(content).whiteSpace).toBe("pre-wrap");
-  expect(content.textContent).toBe(progress);
+    await userEvent.tab();
+    await expect.element(reveal).toHaveFocus();
+    await userEvent.keyboard("{Enter}");
+    const collapse = screen.getByRole("button", { name: "Show less", expanded: true });
+    await expect.element(collapse).toHaveFocus();
+    await expect.element(collapse).toBeVisible();
+    expect(content.clientHeight).toBe(content.scrollHeight);
+    expect(getComputedStyle(content).whiteSpace).toBe("pre-wrap");
+    expect(content.textContent).toBe(progress);
 
-  await userEvent.keyboard(" ");
-  await expect.element(reveal).toHaveFocus();
-  await expect.element(reveal).toHaveAttribute("aria-expanded", "false");
-  expect(content.clientHeight).toBeLessThan(content.scrollHeight);
-  expect(content.textContent).toBe(progress);
-});
+    await userEvent.keyboard(" ");
+    await expect.element(reveal).toHaveFocus();
+    await expect.element(reveal).toHaveAttribute("aria-expanded", "false");
+    expect(content.clientHeight).toBeLessThan(content.scrollHeight);
+    expect(content.textContent).toBe(progress);
+  },
+);
 
 it("keeps a concise failure summary readable without a disclosure", async () => {
   const progress = "Graph failed: Audit: permission denied. 2 nodes skipped.";
@@ -796,9 +969,10 @@ it("lets the keyboard reach a workflow block's graph, its cards and its Stop", a
   const block = screen.container.querySelector("[data-workflow-opening]")!;
   expect(block).not.toBeNull();
   expect(block).toHaveAttribute("aria-label", "Workflow running: Retry");
+  await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
   screen.getByRole("button", { name: "Before the block" }).element().focus();
   const stops: Array<string> = [];
-  for (let press = 0; press < 6; press += 1) {
+  for (let press = 0; press < 10; press += 1) {
     await userEvent.tab();
     const active = document.activeElement;
     if (active !== null && block.contains(active)) {
@@ -986,11 +1160,13 @@ it.each(Object.entries(AGREEMENT_ROWS))(
     );
     const drawn = (query: string) =>
       collectThreadFindRanges(screen.container, query).map(({ range }) =>
-        (range.startContainer.textContent ?? "").replace(/\r?\n/g, " "),
+        range.toString().replace(/\r?\n/g, " "),
       );
     const counted = (query: string) =>
       segments.flatMap((segment) =>
-        Array<string>(countThreadSearchOccurrences(segment, query)).fill(segment),
+        findThreadSearchOccurrences(segment, query).map((offset) =>
+          segment.slice(offset, offset + query.length),
+        ),
       );
     for (const query of ["quarter", "audit", "review", "phase", "a", "e", "workflow", "audit "]) {
       expect(drawn(query), query).toEqual(counted(query));

@@ -59,6 +59,21 @@ export function collectThreadFindRanges(container: HTMLElement, query: string): 
       if (block) flush();
       if (node.nodeType === 3) {
         const value = node.nodeValue ?? "";
+        if (scope.hasAttribute("data-thread-find-lines")) {
+          let start = 0;
+          for (const line of value.split("\n")) {
+            for (const offset of findThreadSearchOccurrences(line, query)) {
+              const range = container.ownerDocument.createRange();
+              range.setStart(node, start + offset);
+              range.setEnd(node, start + offset + query.length);
+              const occurrence = occurrenceByRowId.get(rowId) ?? 0;
+              ranges.push({ rowId, occurrence, range });
+              occurrenceByRowId.set(rowId, occurrence + 1);
+            }
+            start += line.length + 1;
+          }
+          return;
+        }
         const start = text.length;
         text += inPre ? value : value.replace(/\r?\n/g, " ");
         nodes.push({ node, start, end: text.length });

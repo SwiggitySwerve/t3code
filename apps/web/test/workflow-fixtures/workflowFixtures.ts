@@ -719,3 +719,75 @@ export function workflowFixture(
     running: status === "running",
   };
 }
+
+export function workflowScaleFixture(kind: WorkflowQaKind, count: 4 | 40 | 256): WorkflowQaFixture {
+  const seed = workflowFixture(kind, "running");
+  const phaseSize = count === 256 ? 16 : count === 40 ? 10 : 2;
+  const agents = Array.from({ length: count }, (_, index) =>
+    workflowAgent(
+      {
+        index,
+        label: `Agent ${index + 1}`,
+        phaseIndex: Math.floor(index / phaseSize),
+        phaseTitle: `Phase ${Math.floor(index / phaseSize) + 1}`,
+        ...(kind === "graph" ? { graphNodeKey: `task-${index}` } : {}),
+      },
+      {
+        state:
+          index === count - 1
+            ? "failed"
+            : index < count / 2
+              ? "completed"
+              : index < count * 0.75
+                ? "running"
+                : "queued",
+        ...(index === count - 1 ? { result: "Access denied. Check workspace permissions." } : {}),
+        prompt: "These are task instructions, not live activity.",
+        ...(index === 0 ? { retries: 2 } : {}),
+      },
+    ),
+  );
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    progress: "Reviewing package exports",
+    workflow: {
+      name: `Audit ${count} agents`,
+      agents,
+      phases: Array.from({ length: count / phaseSize }, (_, index) => ({
+        index,
+        title: `Phase ${index + 1}`,
+      })),
+      ...(kind === "graph"
+        ? {
+            plan: {
+              nodes: agents.map((agent) => ({
+                key: agent.graphNodeKey!,
+                label: agent.label,
+                wave: agent.phaseIndex!,
+                dependsOn:
+                  agent.phaseIndex === 0 ? [] : [`task-${(agent.phaseIndex! - 1) * phaseSize}`],
+              })),
+            },
+            nodeOutcomes: Object.fromEntries(
+              agents.flatMap((agent): Array<[string, OrchestrationV2WorkflowNodeOutcome]> =>
+                agent.state === "completed"
+                  ? [[agent.graphNodeKey!, { status: "passed" }]]
+                  : agent.state === "failed"
+                    ? [[agent.graphNodeKey!, { status: "failed", reason: agent.result! }]]
+                    : [],
+              ),
+            ),
+          }
+        : {}),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return {
+    row,
+    opening,
+    group: opening.group!,
+    heading: appWorkflowHeading(row.status),
+    progress: workflowProgressText(row),
+    running: true,
+  };
+}
