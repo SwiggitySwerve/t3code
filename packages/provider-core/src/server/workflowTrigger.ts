@@ -133,6 +133,8 @@ export function applyTurnTriggers(
     typedWords: personTypedWords(input.typedText),
     createdBy: input.createdBy,
     creationSource: input.creationSource,
+    scheduledTaskId: input.scheduledTaskId,
+    senderThreadId: input.senderThreadId,
     delegatedThread: input.delegatedThread,
   });
 }

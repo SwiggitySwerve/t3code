@@ -114,6 +114,20 @@ describe("applyTurnTriggers", () => {
     expect(turn("Audit this")).toBe("Audit this");
   });
 
+  it.each([{ scheduledTaskId: "task-1" }, { senderThreadId: "thread-1" }])(
+    "does not opt a delegated thread into ultracode from an automated message: %j",
+    (origin) => {
+      const text = "ultracode: audit this";
+      for (const creationSource of ["web", "mobile"] as const) {
+        for (const ultracode of ["keyword", "always"] as const) {
+          const input = { delegatedThread: true, creationSource, ultracode };
+          expect(turn(text, { ...input, ...origin })).toBe(text);
+          expect(turn(text, input)).toBe(`${text}\n\n${ULTRACODE_TURN_NOTE}`);
+        }
+      }
+    },
+  );
+
   it("reads the typed text, not the provider text", () => {
     // A context chip's contents are in the provider text; only what the person typed counts.
     const providerText = "Look at this\n\n<t3_context>the workflow log</t3_context>";

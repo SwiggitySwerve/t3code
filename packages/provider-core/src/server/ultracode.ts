@@ -32,6 +32,8 @@ export function applyUltracode(input: {
   readonly typedWords: string;
   readonly createdBy: "agent" | "system" | "user";
   readonly creationSource: OrchestrationV2CreationSource;
+  readonly scheduledTaskId?: string | undefined;
+  readonly senderThreadId?: string | undefined;
   /** The thread is a delegated task or workflow member (persisted lineage: a subagent child). */
   readonly delegatedThread: boolean;
 }): string {
