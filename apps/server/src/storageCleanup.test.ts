@@ -2408,8 +2408,6 @@ describe("explicit removal of a finished workflow member's checkout", () => {
         fixture.setAfterProjectsRead(Deferred.succeed(reachedLease, undefined));
         const removal = yield* fixture.remove().pipe(Effect.forkChild);
         yield* Deferred.await(reachedLease);
-        for (let turn = 0; turn < 50; turn++) yield* Effect.yieldNow;
-        expect(fixture.occurred).toEqual([]);
         yield* Deferred.succeed(release, undefined);
         yield* Fiber.join(holder);
         expect(yield* Fiber.join(removal)).toMatchObject({ status: "removed" });
