@@ -262,13 +262,16 @@ it.each([
       for (let opened = folded.elements().length; opened > 0; opened -= 1) {
         await userEvent.click(folded.first());
       }
-      if (open !== null)
-        await userEvent.click(
-          screen.getByRole("button", { name: new RegExp(`^Expand ${open} phase,`) }),
-        );
-      // The last phases hold the queued and failed rows.
       const list = screen.getByRole("list", { name: "Related threads", exact: true }).element();
+      // The last phases hold the queued and failed rows; an opened phase is shown from its row.
       list.scrollTop = list.scrollHeight;
+      if (open !== null) {
+        const phase = screen
+          .getByRole("button", { name: new RegExp(`^Expand ${open} phase,`) })
+          .element();
+        await userEvent.click(phase);
+        list.scrollTop += phase.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      }
       const bars = [...list.querySelectorAll("[data-workflow-track]")].map((bar) =>
         bar.getBoundingClientRect(),
       );
