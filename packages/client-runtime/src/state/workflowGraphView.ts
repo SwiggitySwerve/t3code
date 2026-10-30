@@ -220,7 +220,7 @@ export function workflowGraphBlockedReasons(graph: WorkflowGraphView<unknown>) {
   const nodes = graph.waves.flat();
   const byKey = new Map(nodes.map((node) => [node.key, node]));
   for (const node of nodes) {
-    if (node.state !== "waiting" && node.state !== "queued") continue;
+    if (!["waiting", "queued", "skipped", "not_run"].includes(node.state)) continue;
     const dependency = node.dependsOn
       .map((key) => byKey.get(key))
       .find(

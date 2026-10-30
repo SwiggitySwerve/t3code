@@ -2,6 +2,7 @@ import {
   appWorkflowHeading,
   deriveWorkflowProgress,
   workflowGraphHeadline,
+  workflowProgressText,
   type WorkflowOpening,
   type WorkflowGraphView,
   type RuntimeSubagent,
@@ -102,9 +103,16 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
   const activityHeadline = overview?.headline ?? progress;
   const liveHeadline = [activityHeadline, waitingOn].filter(Boolean).join(" · ");
   const headlineMember = overview?.headlineMember ?? null;
-  const terminalResult = overview?.terminal
-    ? (group?.workflow.result ?? group?.workflow.error ?? null)
-    : null;
+  const terminalResult =
+    overview?.terminal && group !== null
+      ? progress === undefined
+        ? workflowProgressText({
+            status: group.workflow.status,
+            result: group.workflow.result ?? group.workflow.error,
+            workflow: group.workflow.graph,
+          })
+        : progress
+      : null;
   const declaration =
     graph !== null
       ? graph.waves.flatMap((wave) => wave.map((node) => node.label))

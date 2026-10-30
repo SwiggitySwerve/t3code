@@ -153,6 +153,59 @@ describe("compact workflow presentation", () => {
     ]);
   });
 
+  it("keeps dependency-skipped and not-run nodes in terminal attention without changing their states", () => {
+    const progress = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          status: "failed",
+          workflow: {
+            phases: [],
+            agents: [],
+            plan: {
+              nodes: [
+                { key: "failed", label: "Failed", wave: 0, dependsOn: [] },
+                { key: "skipped", label: "Skipped", wave: 1, dependsOn: ["failed"] },
+                { key: "not-run", label: "Not run", wave: 2, dependsOn: ["skipped"] },
+                {
+                  key: "independent-skipped",
+                  label: "Independent skipped",
+                  wave: 0,
+                  dependsOn: [],
+                },
+                {
+                  key: "independent-not-run",
+                  label: "Independent not run",
+                  wave: 0,
+                  dependsOn: [],
+                },
+              ],
+            },
+            nodeOutcomes: {
+              failed: { status: "failed", reason: "Permission denied" },
+              skipped: { status: "skipped", reason: "Predecessor failed did not pass." },
+              "independent-skipped": { status: "skipped", reason: "Not selected" },
+            },
+          },
+        }),
+      ])[0]!,
+    );
+    expect(
+      progress.attention.map(({ id, state, attention }) => ({ id, state, attention })),
+    ).toEqual([
+      { id: "failed", state: "failed", attention: { kind: "failed", reason: "Permission denied" } },
+      {
+        id: "skipped",
+        state: "skipped",
+        attention: { kind: "blocked", reason: "Blocked by Failed" },
+      },
+      {
+        id: "not-run",
+        state: "stopped",
+        attention: { kind: "blocked", reason: "Blocked by Skipped" },
+      },
+    ]);
+  });
+
   it.each([
     ["completed", "2026-08-01T10:00:05Z", 5000],
     ["failed", "2026-08-01T10:00:05Z", 5000],

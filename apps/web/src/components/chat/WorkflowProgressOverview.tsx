@@ -8,6 +8,7 @@ import {
   type WorkflowTaskProgress,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
+  Fragment,
   memo,
   useEffect,
   useLayoutEffect,
@@ -357,7 +358,7 @@ export function WorkflowProgressOverview(props: {
                 ))
               : null;
             return group.kind === null ? (
-              grids
+              <Fragment key={group.id}>{grids}</Fragment>
             ) : (
               <section
                 key={group.id}

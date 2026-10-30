@@ -1,4 +1,8 @@
 import { EnvironmentId } from "@t3tools/contracts";
+import {
+  deriveWorkflowProgress,
+  workflowProgressText,
+} from "@t3tools/client-runtime/state/subagentRuntime";
 import { expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { act, fakeTimers, render } from "../../../test/render";
@@ -10,6 +14,7 @@ import {
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import { WorkflowBlockSurface } from "../../../test/workflow-fixtures/surfaces";
 import { WorkflowOpeningBlock } from "./WorkflowOpeningBlock";
+import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 import "../../index.css";
 
 vi.mock(import("@effect/atom-react"), async (original) => ({
@@ -131,4 +136,105 @@ it("keeps one running phase unchanged and dismisses its readout when completion 
   await act(() => vi.advanceTimersByTime(1000));
   expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(0);
   await expect.element(page.getByRole("note", { name: "Agent details" })).not.toBeInTheDocument();
+});
+
+it("preserves the focused running grid when earlier completed phases merge", async () => {
+  const fixture = workflowCollapseFixture("graph", 40);
+  const graph = fixture.group.graph!;
+  const view = (completedSecond: boolean) => (
+    <WorkflowProgressOverview
+      progress={deriveWorkflowProgress({
+        ...fixture.group,
+        graph: {
+          ...graph,
+          waves: graph.waves.map((wave, index) =>
+            wave.map((node) => ({
+              ...node,
+              state:
+                index === 0 || (index === 1 && completedSecond)
+                  ? "passed"
+                  : index <= 2
+                    ? "running"
+                    : "waiting",
+            })),
+          ),
+        },
+      })}
+      environmentId={EnvironmentId.make("qa")}
+      onOpenThread={() => {}}
+    />
+  );
+  await using screen = await render(view(false));
+  const selector = `[data-workflow-dot="${graph.waves[2]![0]!.key}"]`;
+  const cell = screen.container.querySelector<HTMLButtonElement>(selector)!;
+  await act(() => cell.focus());
+  expect(document.activeElement).toBe(cell);
+  await screen.rerender(view(true));
+  expect(screen.container.querySelector(selector)).toBe(cell);
+  expect(document.activeElement).toBe(cell);
+  await expect.element(page.getByRole("note", { name: "Agent details" })).toBeVisible();
+});
+
+it.each(["omitted", "normalized"] as const)(
+  "suppresses internal graph results in receipts when progress is %s",
+  async (mode) => {
+    const fixture = workflowCollapseFixture("graph", 4, "completed");
+    const result = JSON.stringify({
+      ok: true,
+      nodes: Object.fromEntries(
+        fixture.row.workflow!.plan!.nodes.map((node) => [node.key, { status: "passed" }]),
+      ),
+    });
+    const normalized = workflowProgressText({ ...fixture.row, result });
+    expect(normalized).toBeNull();
+    await using screen = await render(
+      <WorkflowOpeningBlock
+        opening={{
+          ...fixture.opening,
+          group: { ...fixture.group, workflow: { ...fixture.group.workflow, result } },
+        }}
+        {...(mode === "normalized" ? { progress: normalized } : {})}
+        environmentId={EnvironmentId.make("qa")}
+        onOpenThread={() => {}}
+      />,
+    );
+    expect(
+      screen.getByRole("button", { name: "Workflow result", exact: true }).elements(),
+    ).toHaveLength(0);
+  },
+);
+
+it("keeps script results and respects an explicitly suppressed terminal result", async () => {
+  const fixture = workflowCollapseFixture("script", 4, "completed");
+  const opening = {
+    ...fixture.opening,
+    group: {
+      ...fixture.group,
+      workflow: { ...fixture.group.workflow, result: "Published the migration report." },
+    },
+  };
+  await using screen = await render(
+    <WorkflowOpeningBlock
+      opening={opening}
+      environmentId={EnvironmentId.make("qa")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Workflow result", exact: true }));
+  await expect
+    .element(screen.getByText("Published the migration report.", { exact: true }))
+    .toBeVisible();
+  using _timers = fakeTimers();
+  await screen.rerender(
+    <WorkflowOpeningBlock
+      opening={opening}
+      progress={null}
+      environmentId={EnvironmentId.make("qa")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await act(() => vi.advanceTimersByTime(1000));
+  expect(
+    screen.getByRole("button", { name: "Workflow result", exact: true }).elements(),
+  ).toHaveLength(0);
 });
