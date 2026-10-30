@@ -74,6 +74,7 @@ import {
 import { GRAPH_DRIVER_SCRIPT } from "./workflowGraph.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { WorkflowPhases } from "./workflowPhases.ts";
+import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
 
@@ -158,6 +159,7 @@ export function selectWorkflowTarget(
   snapshots?: WorkflowContext["presetTargets"],
 ): {
   readonly target: unknown;
+  readonly plannedTarget?: unknown;
   readonly source: "target" | "model" | "preset" | "workerTarget" | "defaultPreset" | "caller";
   readonly error?: string;
   readonly preference?: WorkflowPreference;
@@ -186,6 +188,7 @@ export function selectWorkflowTarget(
     if (snapshot !== undefined)
       return {
         target: "target" in snapshot ? snapshot.target : undefined,
+        plannedTarget: preset.target,
         source,
         ...("error" in snapshot ? { error: snapshot.error } : {}),
       };
@@ -631,7 +634,12 @@ class WorkflowSession {
       throw new Error("Use bar.agent() to join a progress phase.");
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
-    const { target, source, error } = selectWorkflowTarget(
+    const {
+      target,
+      source,
+      error,
+      plannedTarget = target,
+    } = selectWorkflowTarget(
       { target: options.target, model, preset: options.preset },
       this.workflow.workerTarget,
       this.workflow.workflowPresets,
@@ -761,6 +769,10 @@ class WorkflowSession {
       })
     )
       throw new Error(`Cannot establish workflow agent identity for "${label}".`);
+    const plannedIdentity =
+      previous?.plannedIdentity ??
+      this.workflow.plan?.nodes.find((node) => node.key === graphNodeKey)?.plannedIdentity ??
+      workflowPlannedIdentity(plannedTarget);
     const entry: MutableAgent = {
       index: previous?.index ?? this.nextAgentIndex++,
       requestKey,
@@ -768,6 +780,7 @@ class WorkflowSession {
       ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
       ...(request.judgmentFor === undefined ? {} : { judgmentFor: request.judgmentFor }),
       state: "queued",
+      ...(plannedIdentity === undefined ? {} : { plannedIdentity }),
       ...(phaseRow === undefined ? {} : { phaseIndex: phaseRow.index, phaseTitle: phaseRow.title }),
       prompt: promptPreview,
     };

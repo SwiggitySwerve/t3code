@@ -136,6 +136,19 @@ const browserTestProject = {
       instances: [{ browser: "chromium" }],
       screenshotFailures: false,
       commands: {
+        mockWorkflowAcpIcon: async ({ page }, enabled: boolean) => {
+          const url = "https://cdn.agentclientprotocol.com/registry/v1/latest/claude-acp.svg";
+          await page.unroute(url);
+          if (enabled)
+            await page.route(url, async (route) =>
+              route.fulfill({
+                contentType: "image/svg+xml",
+                body: await NodeFSP.readFile(
+                  new URL("./test/workflow-fixtures/claude-acp.svg", import.meta.url),
+                ),
+              }),
+            );
+        },
         setMediaPreferences: async (
           { page },
           options: { forcedColors: "active" | "none"; reducedMotion: "reduce" | "no-preference" },

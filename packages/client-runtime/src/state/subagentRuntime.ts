@@ -90,6 +90,7 @@ export interface RuntimeSubagent {
   readonly title: string;
   readonly role: string | null;
   readonly model: string | null;
+  readonly plannedIdentity?: OrchestrationV2SubagentWorkflow["agents"][number]["plannedIdentity"];
   readonly effort: string | null;
   readonly speed?: string | undefined;
   readonly status: RuntimeSubagentStatus;
@@ -309,6 +310,7 @@ function workflowMembersToRuntime(
       kind: "workflow_agent" as const,
       title: agent.label,
       model: agent.model ?? null,
+      plannedIdentity: agent.plannedIdentity,
       effort: agent.effort ?? null,
       ...(agent.speed === undefined ? {} : { speed: agent.speed }),
       status,

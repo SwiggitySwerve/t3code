@@ -45,3 +45,45 @@ it("resolves changed model identity without retaining the earlier attempt", () =
     { modelName: "Haiku 5.5", icon: { family: "claude-haiku" } },
   );
 });
+
+it("keeps stopped unspawned identity planned and replaces it only with known actual facts", () => {
+  const member = workflowModelGlyphFixture().group.graph!.waves[0]![0]!.member!;
+  const provider = QA_PROVIDERS.find((entry) => entry.instanceId === member.providerInstanceId)!;
+  const plannedIdentity = { providerInstanceId: provider.instanceId, model: "claude-opus-5-5" };
+  expect(
+    resolveWorkflowIdentity(null, undefined, "queued", plannedIdentity, provider),
+  ).toMatchObject({
+    planned: true,
+    modelName: "Opus 5.5",
+    icon: { family: "claude-opus" },
+  });
+  expect(
+    resolveWorkflowIdentity(
+      { ...member, childThreadId: null, startedAt: null },
+      provider,
+      "stopped",
+      plannedIdentity,
+      provider,
+    ),
+  ).toMatchObject({ planned: true });
+  expect(
+    resolveWorkflowIdentity(member, provider, "running", plannedIdentity, provider),
+  ).toMatchObject({
+    planned: false,
+    modelName: "6.1 Sol",
+    plannedDescription: "CLI Proxy · Opus 5.5",
+  });
+  expect(
+    resolveWorkflowIdentity(
+      { ...member, model: null },
+      provider,
+      "running",
+      plannedIdentity,
+      provider,
+    ).plannedDescription,
+  ).toBeUndefined();
+  expect(
+    resolveWorkflowIdentity(member, provider, "running", { model: "openai/gpt-6.1-sol" })
+      .plannedDescription,
+  ).toBeUndefined();
+});

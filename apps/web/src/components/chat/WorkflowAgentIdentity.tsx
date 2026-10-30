@@ -79,11 +79,20 @@ export function WorkflowAgentIdentity(props: {
   readonly label?: string;
   readonly grid?: boolean;
   readonly state?: WorkflowTaskProgress["state"];
+  readonly plannedIdentity?: RuntimeSubagent["plannedIdentity"];
+  readonly plannedProvider?: ServerProvider | undefined;
   readonly identity?: WorkflowIdentity;
   readonly sprite?: WorkflowIdentitySprite;
 }) {
   const identity =
-    props.identity ?? resolveWorkflowIdentity(props.member, props.provider, props.state);
+    props.identity ??
+    resolveWorkflowIdentity(
+      props.member,
+      props.provider,
+      props.state,
+      props.plannedIdentity,
+      props.plannedProvider,
+    );
   const { icon } = identity;
   const symbol = icon.kind === "glyph" ? undefined : props.sprite?.get(icon.key);
   const glyph = (
@@ -113,6 +122,7 @@ export function WorkflowAgentIdentity(props: {
 }
 
 export interface WorkflowIdentityGlyphProps {
+  readonly planned?: boolean | undefined;
   readonly kind: WorkflowIdentityIcon["kind"];
   readonly glyph?: string | undefined;
   readonly family?: string | undefined;
@@ -128,6 +138,7 @@ export function workflowIdentityGlyphProps(
 ): WorkflowIdentityGlyphProps {
   const { icon } = identity;
   return {
+    planned: identity.planned,
     kind: icon.kind,
     glyph: icon.kind === "glyph" ? icon.glyph : undefined,
     family: icon.kind === "glyph" ? icon.family : undefined,
@@ -152,14 +163,23 @@ export function WorkflowIdentityGlyph(
   return (
     <span
       role="img"
-      aria-label={props.iconLabel}
+      aria-label={props.planned ? `Planned: ${props.iconLabel}` : props.iconLabel}
       className={cn(
         "flex shrink-0 items-center justify-center leading-none",
-        props.grid ? "size-4 text-base" : "size-3.5 text-xs",
+        props.grid ? "text-base" : "text-xs",
+        props.planned
+          ? props.grid
+            ? "size-6 p-0.75"
+            : "size-5 p-0.5"
+          : props.grid
+            ? "size-4"
+            : "size-3.5",
+        props.planned && "rounded-full border border-dashed border-current opacity-60",
         props.className,
       )}
       data-model-glyph={props.family}
       data-workflow-identity={props.kind}
+      data-workflow-planned={props.planned ? "" : undefined}
     >
       {props.kind === "glyph" ? (
         props.glyph

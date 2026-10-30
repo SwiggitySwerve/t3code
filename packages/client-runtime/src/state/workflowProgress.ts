@@ -13,6 +13,7 @@ export interface WorkflowTaskProgress {
   readonly state: WorkflowTaskState;
   readonly detail: string | null;
   readonly member: RuntimeSubagent | null;
+  readonly plannedIdentity?: RuntimeSubagent["plannedIdentity"];
 }
 
 export interface WorkflowProgressCounts {
@@ -95,6 +96,7 @@ function memberTask(member: RuntimeSubagent): WorkflowTaskProgress {
     label: member.title,
     state: WORKFLOW_MEMBER_STATE[member.status],
     member,
+    plannedIdentity: member.plannedIdentity,
     detail:
       member.status === "failed"
         ? (member.error ?? member.result)
@@ -161,6 +163,7 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
             label: node.label,
             state: WORKFLOW_NODE_STATE[node.state],
             member: node.member,
+            plannedIdentity: node.plannedIdentity ?? node.member?.plannedIdentity,
             detail:
               node.reason ??
               (node.state === "failed"

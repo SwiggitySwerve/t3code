@@ -7,9 +7,10 @@ import {
   workflowModelGlyphFixture,
   workflowScaleFixture,
   workflowScriptProgressFixture,
+  workflowPlannedIdentityFixture,
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import "../../index.css";
-import { act, render } from "../../../test/render";
+import { act, fakeTimers, render } from "../../../test/render";
 import { captureSurface } from "../../../test/workflow-fixtures/capture";
 import { readQaAtom } from "../../../test/workflow-fixtures/atoms";
 import { workflowClientSettings } from "../../../test/workflow-fixtures/settings";
@@ -96,6 +97,105 @@ it.each([4, 40, 256, 1024] as const)("dot grid final: %i agents", async (count) 
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" agentCount={count} />,
   });
+});
+
+it.each([
+  "planned-256",
+  "planned-states",
+  "planned-stopped",
+  "planned-fallback",
+  "planned-script",
+] as const)("planned identities: %s", async (variant) => {
+  await captureSurface({
+    surface: "workflow-dot-grid",
+    state: variant,
+    selector: "[data-workflow-opening]",
+    frame: variant === "planned-fallback" ? "[data-qa-readout-frame]" : "[data-qa-column]",
+    ...(variant === "planned-fallback" ? { keepInteraction: true } : {}),
+    element: () => (
+      <div
+        className={variant === "planned-fallback" ? "min-h-screen bg-background" : undefined}
+        data-qa-readout-frame
+      >
+        <WorkflowBlockSurface
+          kind={variant === "planned-script" ? "script" : "graph"}
+          fixture={workflowPlannedIdentityFixture(
+            variant === "planned-script" ? "script" : "graph",
+            variant === "planned-256" || variant === "planned-script" ? 256 : "states",
+            variant === "planned-stopped",
+          )}
+        />
+      </div>
+    ),
+    settle: async (screen) => {
+      if (variant !== "planned-fallback") return;
+      await act(() =>
+        screen.getByRole("button", { name: "Open Sol running", exact: true }).element().focus(),
+      );
+      await expect
+        .element(page.getByText("Changed from planned: CLI Proxy · Opus 5.5", { exact: true }))
+        .toBeVisible();
+    },
+  });
+});
+
+it("replaces an unspawned plan with actual identity and explains a fallback", async () => {
+  const fixture = workflowPlannedIdentityFixture("graph", "states");
+  await using screen = await render(<WorkflowBlockSurface kind="graph" fixture={fixture} />);
+  const queued = screen.getByRole("button", { name: "Open Waiting for agent", exact: true });
+  await expect
+    .element(queued)
+    .toHaveAccessibleDescription(expect.stringMatching(/^queued, Planned, CLI Proxy, Opus 5.5/));
+  expect(queued.element().querySelector("[data-workflow-planned]")).not.toBeNull();
+  const before = queued.element().getBoundingClientRect().toJSON();
+  await userEvent.hover(queued);
+  await expect
+    .element(page.getByText("Planned: CLI Proxy · Opus 5.5", { exact: true }))
+    .toBeVisible();
+  expect(queued.element().getBoundingClientRect().toJSON()).toEqual(before);
+  const missing = screen.getByRole("button", { name: "Open Agent not run", exact: true });
+  expect(missing.element().querySelector("[data-workflow-planned]")).toBeNull();
+  expect(missing.element().querySelector('[data-workflow-identity="generic"]')).not.toBeNull();
+  const actual = screen.getByRole("button", { name: "Open Sol running", exact: true });
+  expect(actual.element().querySelector("[data-workflow-planned]")).toBeNull();
+  await userEvent.hover(actual);
+  await expect
+    .element(page.getByText("Changed from planned: CLI Proxy · Opus 5.5", { exact: true }))
+    .toBeVisible();
+  const progress = deriveWorkflowProgress(fixture.group);
+  const task = progress.phases
+    .flatMap((phase) => phase.tasks)
+    .find((task) => task.id === "queued")!;
+  const running = {
+    ...fixture.group.graph!.waves[0]![0]!.member!,
+    graphNodeKey: task.id,
+    title: task.label,
+  };
+  const group = {
+    ...fixture.group,
+    graph: {
+      ...fixture.group.graph!,
+      waves: fixture.group.graph!.waves.map((wave) =>
+        wave.map((node) =>
+          node.key === task.id ? { ...node, state: "running" as const, member: running } : node,
+        ),
+      ),
+    },
+  };
+  using _timers = fakeTimers();
+  await screen.rerender(
+    <WorkflowBlockSurface
+      kind="graph"
+      fixture={{ ...fixture, group, opening: { ...fixture.opening, group } }}
+    />,
+  );
+  await act(() => vi.advanceTimersByTime(1000));
+  await userEvent.hover(queued);
+  expect(queued.element().querySelector("[data-workflow-planned]")).toBeNull();
+  expect(queued.element().querySelector('[data-model-glyph="gpt-sol"]')).not.toBeNull();
+  await expect
+    .element(page.getByText("Changed from planned: CLI Proxy · Opus 5.5", { exact: true }))
+    .toBeVisible();
 });
 
 it.each(["stopped", "mixed-models", "verbose", "failure-focus"] as const)(

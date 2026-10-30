@@ -802,6 +802,14 @@ export const WorkflowAgentOutcomeCategory = Schema.Literals([
 ]);
 export type WorkflowAgentOutcomeCategory = typeof WorkflowAgentOutcomeCategory.Type;
 
+export const OrchestrationV2WorkflowPlannedIdentity = Schema.Struct({
+  providerInstanceId: Schema.optional(ProviderInstanceId),
+  driver: Schema.optional(ProviderDriverKind),
+  model: Schema.optional(TrimmedNonEmptyString),
+});
+export type OrchestrationV2WorkflowPlannedIdentity =
+  typeof OrchestrationV2WorkflowPlannedIdentity.Type;
+
 /** A node of a reviewed graph, as the app shows it: no prompts or inputs, so updates stay small. */
 export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
   key: TrimmedNonEmptyString,
@@ -809,6 +817,7 @@ export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
   /** Dependency depth: 0 for nodes with no dependencies. A layout column, not a barrier. */
   wave: NonNegativeInt,
   dependsOn: Schema.Array(TrimmedNonEmptyString),
+  plannedIdentity: Schema.optional(OrchestrationV2WorkflowPlannedIdentity),
 });
 export type OrchestrationV2WorkflowPlanNode = typeof OrchestrationV2WorkflowPlanNode.Type;
 
@@ -883,6 +892,7 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
   agentId: Schema.optional(TrimmedNonEmptyString),
   childThreadId: Schema.optional(ThreadId),
   state: Schema.Literals(["queued", "running", "completed", "failed"]),
+  plannedIdentity: Schema.optional(OrchestrationV2WorkflowPlannedIdentity),
   /** Set when members can run on different providers than their workflow (T3-run workflows). */
   providerInstanceId: Schema.optional(ProviderInstanceId),
   driver: Schema.optional(ProviderDriverKind),

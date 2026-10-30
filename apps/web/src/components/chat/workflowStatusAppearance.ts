@@ -38,11 +38,11 @@ export const WORKFLOW_STATE_MARKER = {
   skipped: `${WORKFLOW_STATE_TEXT.skipped} rounded-none border border-dashed border-current forced-colors:border-[CanvasText]`,
 } as const satisfies Record<State, string>;
 
-export function workflowIdentityStateClass(state: State) {
+export function workflowIdentityStateClass(state: State, planned = false) {
   const cue = WORKFLOW_STATE_CUE[state];
   return [
     WORKFLOW_STATE_TEXT[state],
-    cue.dimmed ? "opacity-40" : "",
+    cue.dimmed && !planned ? "opacity-40" : "",
     cue.ring === "solid"
       ? "rounded-full ring-2 ring-inset ring-current forced-colors:outline-2 forced-colors:-outline-offset-2 forced-colors:outline-[CanvasText]"
       : "",

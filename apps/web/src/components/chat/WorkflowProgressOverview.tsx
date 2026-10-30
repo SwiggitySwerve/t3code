@@ -86,14 +86,27 @@ export function WorkflowProgressOverview(props: {
         member?.driver,
         member?.model,
         member === null || task.state === "queued",
+        Boolean(member?.childThreadId),
+        Boolean(member?.startedAt),
+        task.plannedIdentity?.providerInstanceId,
+        task.plannedIdentity?.driver,
+        task.plannedIdentity?.model,
       ]);
       let identity = cache.get(cacheKey);
       if (!identity) {
-        identity = resolveWorkflowIdentity(member, provider, task.state);
+        identity = resolveWorkflowIdentity(
+          member,
+          provider,
+          task.state,
+          task.plannedIdentity,
+          task.plannedIdentity?.providerInstanceId
+            ? byProvider.get(task.plannedIdentity.providerInstanceId)
+            : undefined,
+        );
         cache.set(cacheKey, identity);
       }
       identities.set(task.id, identity);
-      if (member && task.state !== "queued") {
+      if ((member && task.state !== "queued") || identity.planned) {
         const entry = observed.get(identity.key);
         if (entry) entry.count += 1;
         else observed.set(identity.key, { identity, count: 1 });
@@ -124,7 +137,7 @@ export function WorkflowProgressOverview(props: {
             {legend.slice(0, 4).map(({ identity, count }) => (
               <span
                 key={identity.key}
-                aria-label={`${identity.providerName} · ${identity.modelName}, ${count} agents`}
+                aria-label={`${identity.planned ? "Planned: " : ""}${identity.providerName} · ${identity.modelName}, ${count} agents`}
                 className="inline-flex min-w-0 items-center gap-1"
               >
                 <WorkflowAgentIdentity
@@ -134,6 +147,7 @@ export function WorkflowProgressOverview(props: {
                   sprite={sprite}
                 />
                 <span className="break-words">
+                  {identity.planned ? "Planned: " : ""}
                   {identity.displayName} ×{count}
                 </span>
               </span>
@@ -145,7 +159,7 @@ export function WorkflowProgressOverview(props: {
                   .slice(4)
                   .map(
                     ({ identity, count }) =>
-                      `${identity.providerName} · ${identity.modelName}, ${count} agents`,
+                      `${identity.planned ? "Planned: " : ""}${identity.providerName} · ${identity.modelName}, ${count} agents`,
                   )
                   .join(", ")}`}</span>
               </span>
@@ -166,8 +180,12 @@ export function WorkflowProgressOverview(props: {
                 {inspectedTask.label} · {inspectedTask.state}
               </p>
               <p>
+                {inspectedIdentity.planned ? "Planned: " : ""}
                 {inspectedIdentity.providerName} · {inspectedIdentity.modelName}
               </p>
+              {inspectedIdentity.plannedDescription ? (
+                <p>Changed from planned: {inspectedIdentity.plannedDescription}</p>
+              ) : null}
               {inspectedTask.detail ? (
                 <p className="line-clamp-3 whitespace-pre-wrap">{inspectedTask.detail}</p>
               ) : null}
@@ -466,6 +484,7 @@ const WorkflowTaskIcon = memo(function WorkflowTaskIcon(
       aria-label={`Open ${props.label}`}
       aria-description={[
         state,
+        props.planned ? "Planned" : null,
         props.providerName,
         props.modelName,
         threadId ? null : "Thread not available yet",
@@ -479,10 +498,11 @@ const WorkflowTaskIcon = memo(function WorkflowTaskIcon(
       }}
       className={cn(
         "relative flex size-(--workflow-agent-pitch) items-center justify-center rounded-sm hover:bg-accent/30 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring aria-disabled:cursor-default",
-        workflowIdentityStateClass(state),
+        workflowIdentityStateClass(state, props.planned),
       )}
     >
       <WorkflowIdentityGlyph
+        planned={props.planned}
         kind={props.kind}
         glyph={props.glyph}
         family={props.family}

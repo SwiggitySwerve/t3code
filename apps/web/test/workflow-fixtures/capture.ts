@@ -166,6 +166,7 @@ export async function captureSurface(spec: SurfaceSpec): Promise<ReadonlyArray<W
   const themes = CAPTURE ? requestedThemes : requestedThemes.slice(0, 1);
   const viewports = CAPTURE ? WORKFLOW_QA_VIEWPORTS : WORKFLOW_QA_VIEWPORTS.slice(0, 1);
   const frames: Array<WorkflowQaFrame> = [];
+  await commands.mockWorkflowAcpIcon(true);
   try {
     for (const theme of themes) {
       for (const viewport of viewports) {
@@ -190,6 +191,7 @@ export async function captureSurface(spec: SurfaceSpec): Promise<ReadonlyArray<W
       }
     }
   } finally {
+    await commands.mockWorkflowAcpIcon(false);
     await page.viewport(original.width, original.height);
   }
   return frames;

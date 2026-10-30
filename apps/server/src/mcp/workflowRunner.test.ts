@@ -60,6 +60,7 @@ function clientCounts(workflow: OrchestrationV2SubagentWorkflow) {
 }
 
 interface HarnessOptions {
+  readonly beforeSpawn?: Effect.Effect<void>;
   readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
   readonly beforeAwait?: (taskId: NodeId) => Effect.Effect<void>;
   readonly onAwaitRelease?: () => Effect.Effect<unknown>;
@@ -275,6 +276,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
       threads,
       spawnAgent: (_workflow, item, requestKey) =>
         Effect.gen(function* () {
+          if (options.beforeSpawn !== undefined) yield* options.beforeSpawn;
           spawned += 1;
           keys.set(item.task, requestKey);
           if (options.failSpawn)
@@ -478,6 +480,65 @@ const twoNodePlan: OrchestrationV2WorkflowPlan = {
 };
 
 describe("workflow runner", () => {
+  it.effect.each(["target", "model", "preset", "none"] as const)(
+    "projects the requested %s identity while queued and preserves it after spawn",
+    (choice) =>
+      Effect.gen(function* () {
+        const primary = {
+          providerInstanceId: ProviderInstanceId.make("primary"),
+          model: "gpt-6.1-sol",
+        };
+        const fallback = {
+          providerInstanceId: ProviderInstanceId.make("fallback"),
+          model: "gpt-6-luna",
+        };
+        const queued = yield* Deferred.make<OrchestrationV2SubagentWorkflow>();
+        const release = yield* Deferred.make<void>();
+        const h = yield* makeHarness({
+          beforeSpawn: Deferred.await(release),
+          model: () => "actual-model",
+          onWorkflowUpdate: (workflow) =>
+            workflow.agents[0]?.state === "queued"
+              ? Deferred.succeed(queued, workflow)
+              : Effect.void,
+        });
+        const request =
+          choice === "target"
+            ? { target: primary }
+            : choice === "preset"
+              ? { preset: "review" }
+              : choice === "model"
+                ? { model: primary.model }
+                : {};
+        yield* h.runner.launch({
+          workflowId,
+          threadId,
+          afterSequence: 0,
+          args: null,
+          source: `return agent("work", ${JSON.stringify(request)})`,
+          workflowPresets: {
+            presets: [{ id: "review", name: "Review", target: primary, fallbacks: [fallback] }],
+            defaultPresetId: null,
+          },
+          presetTargets: { review: { target: fallback } },
+        });
+        const projection = (yield* Deferred.await(queued)).agents[0]!;
+        expect(projection.plannedIdentity).toEqual(
+          choice === "none" ? undefined : choice === "model" ? { model: primary.model } : primary,
+        );
+        expect(projection.providerInstanceId).toBeUndefined();
+        expect(projection.model).toBeUndefined();
+        yield* Deferred.succeed(release, undefined);
+        yield* Deferred.await(h.completed);
+        expect(h.workflowUpdates.at(-1)?.agents[0]).toMatchObject({
+          model: "actual-model",
+          providerInstanceId: "codex",
+        });
+        expect(h.workflowUpdates.at(-1)?.agents[0]?.plannedIdentity).toEqual(
+          projection.plannedIdentity,
+        );
+      }),
+  );
   it.effect.each([
     [
       'phase("Audit"); await agent("old"); return progress.phase("Audit", { total: 0 }, () => {});',
