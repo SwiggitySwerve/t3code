@@ -44,7 +44,7 @@ export function workflowIdentityStateClass(state: State) {
     WORKFLOW_STATE_TEXT[state],
     cue.dimmed ? "opacity-40" : "",
     cue.ring === "solid"
-      ? "rounded-full ring-1 ring-current forced-colors:outline forced-colors:-outline-offset-1 forced-colors:outline-[CanvasText]"
+      ? "rounded-full ring-2 ring-inset ring-current forced-colors:outline-2 forced-colors:-outline-offset-2 forced-colors:outline-[CanvasText]"
       : "",
     cue.ring === "dashed" ? WORKFLOW_STATE_MARKER.skipped : "",
     state === "stopped" || state === "skipped" ? "grayscale" : "",

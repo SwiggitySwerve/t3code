@@ -14,6 +14,8 @@ import { render } from "../../../test/render";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { workflowIdentityStatesFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 import { captureSurface } from "../../../test/workflow-fixtures/capture";
+import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
+import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 
 const stop = vi.hoisted(() => vi.fn());
 const state = vi.hoisted(() => ({
@@ -113,12 +115,19 @@ describe("a workflow's row in the Lineage panel", () => {
         frame: "[data-qa-relationships]",
         router: true,
         element: () => (
-          <div
-            className="max-w-80 rounded-xl border border-border bg-popover p-2 text-popover-foreground"
-            data-qa-relationships
-          >
-            <ThreadRelationshipsPanel environmentId={QA_ENVIRONMENT} threadId={LINEAGE_PARENT} />
-          </div>
+          <>
+            <div
+              className="max-w-80 rounded-xl border border-border bg-popover p-2 text-popover-foreground"
+              data-qa-relationships
+            >
+              <ThreadRelationshipsPanel environmentId={QA_ENVIRONMENT} threadId={LINEAGE_PARENT} />
+            </div>
+            <WorkflowProgressOverview
+              progress={deriveWorkflowProgress(fixture.group)}
+              environmentId={QA_ENVIRONMENT}
+              onOpenThread={() => {}}
+            />
+          </>
         ),
         settle: async (screen) => {
           if (stopped)
@@ -128,6 +137,30 @@ describe("a workflow's row in the Lineage panel", () => {
           );
           for (const button of screen.getByRole("button", { name: /^Expand .* phase,/ }).elements())
             await userEvent.click(button);
+          const progress = deriveWorkflowProgress(fixture.group);
+          for (const phase of progress.phases) {
+            for (const task of phase.tasks) {
+              const row = task.member
+                ? screen.getByRole("button", { name: `Open ${task.label} chat`, exact: true })
+                : screen.getByRole("listitem", {
+                    name: `${task.label}, ${task.state}`,
+                    exact: true,
+                  });
+              await expect.element(row.getByText(task.state, { exact: true })).toBeVisible();
+              const icon = screen.container.querySelector(`[data-workflow-dot="${task.id}"]`)!;
+              expect(icon.getAttribute("aria-description")?.split(",")[0]).toBe(task.state);
+              const rowState = row.getByText(task.state, { exact: true }).element();
+              expect(getComputedStyle(rowState).textTransform).toBe("none");
+              expect(getComputedStyle(rowState).color).toBe(
+                getComputedStyle(icon.querySelector("[data-workflow-identity]")!).color,
+              );
+            }
+            expect(
+              screen.container.querySelector(
+                `[aria-label="${phase.counts.settled}/${phase.counts.total} settled"]`,
+              ),
+            ).not.toBeNull();
+          }
           const rows = screen.container.querySelectorAll("[data-workflow-unstarted-row]");
           expect(rows).toHaveLength(3);
           expect([...rows].map((row) => row.getAttribute("aria-label"))).toEqual([

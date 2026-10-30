@@ -95,6 +95,9 @@ export function WorkflowProgressOverview(props: {
       className="flex min-w-0 flex-col gap-3"
       style={{ "--workflow-agent-pitch": `${WORKFLOW_AGENT_PITCH}px` } as CSSProperties}
       data-workflow-overview
+      onKeyDown={(event) => {
+        if (event.key === "Escape") setInspectedId(null);
+      }}
     >
       <WorkflowIdentitySymbols icons={[...icons.values()]} sprite={sprite} />
       <div className="flex min-w-0 flex-col gap-1 text-2xs tabular-nums text-muted-foreground">
@@ -134,30 +137,26 @@ export function WorkflowProgressOverview(props: {
           </div>
         ) : null}
       </div>
-      <div
-        id={readoutId}
-        role="note"
-        aria-label="Agent details"
-        className="min-h-12 rounded-sm border border-border bg-card/30 px-2 py-1 text-xs text-muted-foreground"
-        data-workflow-readout
-      >
-        {inspectedTask && inspectedIdentity ? (
-          <>
-            <p className={cn("font-medium", WORKFLOW_STATE_TEXT[inspectedTask.state])}>
-              {inspectedTask.label} · {inspectedTask.state}
-            </p>
-            <p>
-              {inspectedIdentity.providerName} · {inspectedIdentity.modelName}
-            </p>
-            {inspectedTask.detail ? (
-              <p className="max-h-32 overflow-auto whitespace-pre-wrap">{inspectedTask.detail}</p>
-            ) : null}
-            {inspectedTask.member?.childThreadId ? null : <p>Thread not available yet</p>}
-          </>
-        ) : (
-          <p>Point to or focus an agent for details.</p>
-        )}
-      </div>
+      {inspectedTask && inspectedIdentity ? (
+        <div
+          id={readoutId}
+          role="note"
+          aria-label="Agent details"
+          className="pointer-events-none fixed inset-x-4 bottom-4 z-50 mx-auto max-w-(--chat-content-max-width) rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
+          data-workflow-readout
+        >
+          <p className={cn("font-medium", WORKFLOW_STATE_TEXT[inspectedTask.state])}>
+            {inspectedTask.label} · {inspectedTask.state}
+          </p>
+          <p>
+            {inspectedIdentity.providerName} · {inspectedIdentity.modelName}
+          </p>
+          {inspectedTask.detail ? (
+            <p className="line-clamp-3 whitespace-pre-wrap">{inspectedTask.detail}</p>
+          ) : null}
+          {inspectedTask.member?.childThreadId ? null : <p>Thread not available yet</p>}
+        </div>
+      ) : null}
       {progress.failedCount > 0 ? (
         <div>
           <Button
@@ -290,7 +289,7 @@ function PhaseAgents(props: {
   readonly generic: WorkflowIdentity;
   readonly failuresOnly: boolean;
   readonly readoutId: string;
-  readonly onInspect: (id: string) => void;
+  readonly onInspect: (id: string | null) => void;
   readonly onOpenThread: (threadId: string) => void;
 }) {
   const { phase } = props;
@@ -376,6 +375,12 @@ function PhaseAgents(props: {
         onKeyDown={moveFocus}
         onPointerOver={(event) => inspect(event.target)}
         onFocus={(event) => inspect(event.target, true)}
+        onPointerLeave={(event) => {
+          if (!event.currentTarget.contains(document.activeElement)) props.onInspect(null);
+        }}
+        onBlur={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) props.onInspect(null);
+        }}
         data-workflow-dots
       >
         {tasks.map((task) => {
@@ -453,7 +458,10 @@ const WorkflowTaskIcon = memo(function WorkflowTaskIcon(
       onClick={() => {
         if (threadId) props.onOpenThread(threadId);
       }}
-      className="relative flex size-(--workflow-agent-pitch) items-center justify-center rounded-sm hover:bg-accent/30 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring aria-disabled:cursor-default"
+      className={cn(
+        "relative flex size-(--workflow-agent-pitch) items-center justify-center rounded-sm hover:bg-accent/30 focus-visible:outline-2 focus-visible:-outline-offset-2 focus-visible:outline-ring aria-disabled:cursor-default",
+        workflowIdentityStateClass(state),
+      )}
     >
       <WorkflowIdentityGlyph
         kind={props.kind}
@@ -464,14 +472,12 @@ const WorkflowTaskIcon = memo(function WorkflowTaskIcon(
         dark={props.dark}
         symbol={props.symbol}
         grid
-        className={workflowIdentityStateClass(state)}
       />
       {badge === "!" ? (
         <span
           aria-hidden
           className={cn(
-            "absolute bottom-0 right-0 flex size-2.5 items-center justify-center rounded-full bg-background text-4xs font-bold leading-none",
-            WORKFLOW_STATE_TEXT.failed,
+            "absolute bottom-0 right-0 flex size-2.5 items-center justify-center rounded-full bg-destructive-foreground text-4xs font-bold leading-none text-background",
           )}
         >
           !

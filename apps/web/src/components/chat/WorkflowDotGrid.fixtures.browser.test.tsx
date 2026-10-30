@@ -4,6 +4,7 @@ import { commands, page, userEvent } from "vite-plus/test/browser";
 import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
 import {
   workflowIdentityStatesFixture,
+  workflowModelGlyphFixture,
   workflowScriptProgressFixture,
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import "../../index.css";
@@ -104,13 +105,17 @@ it.each(["stopped", "mixed-models", "verbose", "failure-focus"] as const)(
       state: variant,
       verboseGraph: variant === "verbose",
       selector: "[data-workflow-opening]",
-      frame: "[data-qa-column]",
+      frame: variant === "failure-focus" ? "[data-qa-readout-frame]" : "[data-qa-column]",
       ...(variant === "failure-focus" ? { keepInteraction: true as const } : {}),
       element: () =>
         variant === "mixed-models" ? (
           <WorkflowModelGlyphSurface />
         ) : variant === "stopped" ? (
           <WorkflowBlockSurface kind="graph" variant="stopped" />
+        ) : variant === "failure-focus" ? (
+          <div className="min-h-screen bg-background" data-qa-readout-frame>
+            <WorkflowBlockSurface kind="graph" agentCount={40} />
+          </div>
         ) : (
           <WorkflowBlockSurface kind="graph" agentCount={40} />
         ),
@@ -128,6 +133,16 @@ it.each(["stopped", "mixed-models", "verbose", "failure-focus"] as const)(
     });
   },
 );
+
+it.each(["running", "failed"] as const)("dot grid final: %s glyph cues", async (cue) => {
+  await captureSurface({
+    surface: "workflow-dot-grid",
+    state: `${cue}-glyphs`,
+    selector: "[data-workflow-opening]",
+    frame: "[data-qa-column]",
+    element: () => <WorkflowBlockSurface kind="graph" fixture={workflowModelGlyphFixture(cue)} />,
+  });
+});
 
 it.each([false, true])("dot grid final: settings enabled=%s", async (enabled) => {
   state.persist.mockClear();

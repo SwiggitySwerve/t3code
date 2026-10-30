@@ -109,9 +109,7 @@ function WorkflowMemberRow({
             {member.title}
           </span>
           <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-            <span className={cn("font-medium capitalize", WORKFLOW_STATE_TEXT[state])}>
-              {state}
-            </span>
+            <span className={cn("font-medium", WORKFLOW_STATE_TEXT[state])}>{state}</span>
             {member.startedAt ? (
               <>
                 {" "}
@@ -131,7 +129,7 @@ function WorkflowMemberRow({
             <div className="flex items-center justify-between gap-4">
               <span
                 className={cn(
-                  "inline-flex items-center gap-1 font-medium capitalize",
+                  "inline-flex items-center gap-1 font-medium",
                   WORKFLOW_STATE_TEXT[state],
                 )}
               >
@@ -261,7 +259,7 @@ export function ThreadLineageWorkflowRow({
                   accessory={
                     <>
                       {status === "failed" ? (
-                        <SectionHeaderStatus>Failed</SectionHeaderStatus>
+                        <SectionHeaderStatus>{status}</SectionHeaderStatus>
                       ) : null}
                       <Tooltip>
                         <TooltipTrigger

@@ -290,9 +290,11 @@ function workflowMembersToRuntime(
         ? coordinator.status === "completed"
           ? "interrupted"
           : coordinator.status
-        : agent.state === "queued"
-          ? "pending"
-          : agent.state;
+        : agent.state === "failed" && agent.outcomeCategory === "cancelled"
+          ? "cancelled"
+          : agent.state === "queued"
+            ? "pending"
+            : agent.state;
     const failed = status === "failed";
     const startedAt = isoFromEpochMillis(agent.startedAt);
     const completedAt = isTerminalSubagentStatus(status)

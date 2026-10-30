@@ -329,6 +329,8 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
     "failure-focus",
     "stopped",
     "mixed-models",
+    "running-glyphs",
+    "failed-glyphs",
     "verbose",
     "states",
     "states-grayscale",

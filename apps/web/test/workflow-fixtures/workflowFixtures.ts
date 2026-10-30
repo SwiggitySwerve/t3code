@@ -6,8 +6,6 @@
  */
 import {
   appWorkflowHeading,
-  deriveWorkflowGroups,
-  projectedSubagentsToRuntime,
   resolveAppWorkflowView,
   workflowProgressText,
   type SubagentWorkflowGroup,
@@ -53,6 +51,7 @@ type AgentState = OrchestrationV2WorkflowAgent["state"];
 
 interface AgentSpec {
   readonly state: AgentState;
+  readonly outcomeCategory?: OrchestrationV2WorkflowAgent["outcomeCategory"];
   /** `null` leaves the model and provider off the member, as a record that never learned them. */
   readonly identity?: { readonly provider: string; readonly model?: string } | null;
   readonly tokens?: number;
@@ -133,6 +132,7 @@ function workflowAgent(
   return {
     ...base,
     state: spec.state,
+    ...(spec.outcomeCategory === undefined ? {} : { outcomeCategory: spec.outcomeCategory }),
     agentId: taskId,
     ...(spec.state === "queued" ? {} : { childThreadId: ThreadId.make(`qa-thread-${base.index}`) }),
     ...(identity === null
@@ -800,7 +800,7 @@ export function workflowScaleFixture(
   };
 }
 
-export function workflowModelGlyphFixture(): WorkflowQaFixture {
+export function workflowModelGlyphFixture(cue?: "running" | "failed"): WorkflowQaFixture {
   const seed = workflowFixture("graph", "running");
   const models = [
     ["Sol analyst", "openai.gpt-6.1-sol", "cliproxy"],
@@ -820,7 +820,7 @@ export function workflowModelGlyphFixture(): WorkflowQaFixture {
     workflowAgent(
       { index, label, graphNodeKey: `model-${index}` },
       {
-        state: index < 8 ? "completed" : "running",
+        state: cue ?? (index < 8 ? "completed" : "running"),
         identity: { ...(model === null ? {} : { model }), provider },
         tokens: 1200,
         durationMs: index < 8 ? 1200 : 600,
@@ -835,7 +835,18 @@ export function workflowModelGlyphFixture(): WorkflowQaFixture {
       agents,
       phases: [],
       nodeOutcomes: Object.fromEntries(
-        agents.slice(0, 8).map((agent) => [agent.graphNodeKey!, { status: "passed" as const }]),
+        agents.flatMap((agent) =>
+          agent.state === "completed" || agent.state === "failed"
+            ? [
+                [
+                  agent.graphNodeKey!,
+                  {
+                    status: agent.state === "completed" ? ("passed" as const) : ("failed" as const),
+                  },
+                ],
+              ]
+            : [],
+        ),
       ),
       plan: {
         nodes: agents.map((agent, index) => ({
@@ -907,7 +918,11 @@ export function workflowIdentityStatesFixture(stopped = false): WorkflowQaFixtur
       key: "luna",
       label: "Luna stopped",
       dependsOn: [],
-      agent: { state: "running", identity: { provider: "cursor-work", model: "gpt-6-luna" } },
+      agent: {
+        state: "failed",
+        outcomeCategory: "cancelled",
+        identity: { provider: "cursor-work", model: "gpt-6-luna" },
+      },
     },
     {
       key: "provider",
@@ -959,15 +974,15 @@ export function workflowIdentityStatesFixture(stopped = false): WorkflowQaFixtur
       ...graphWorkflow({ title: "Every agent state", status: "running", nodes, progress: null }),
     },
   };
-  const resolved = resolveAppWorkflowView(row)!;
-  // The state sampler includes an individually interrupted agent in an otherwise active run.
-  // Projected workflow rows cannot express that member state, so derive the graph from runtime members.
-  const members = projectedSubagentsToRuntime([row]).map((member) =>
-    member.graphNodeKey === "luna" ? { ...member, status: "interrupted" as const } : member,
-  );
-  const group = deriveWorkflowGroups(members)[0]!;
-  const opening = { ...resolved, group };
-  return { ...seed, row, opening, group, running: !stopped, progress: workflowProgressText(row) };
+  const opening = resolveAppWorkflowView(row)!;
+  return {
+    ...seed,
+    row,
+    opening,
+    group: opening.group!,
+    running: !stopped,
+    progress: workflowProgressText(row),
+  };
 }
 
 export type WorkflowCallbackState = "running" | "completed" | "failed" | "stopped";
