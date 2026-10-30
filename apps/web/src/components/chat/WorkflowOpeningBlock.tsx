@@ -162,11 +162,18 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
                   <WorkflowProgress text={liveHeadline} />
                 </div>
               ) : null}
-              {/* Needs attention shows the failure; the live region still announces it. */}
-              {overview?.failureSummary ? (
-                <span className="sr-only">{overview.failureSummary}</span>
-              ) : null}
             </div>
+          )}
+          {overview === null || overview.terminal ? null : (
+            // Needs attention shows failures; this region announces them only when they change.
+            <p
+              aria-live="polite"
+              aria-atomic="true"
+              className="sr-only"
+              data-workflow-failure-announcement
+            >
+              {overview.failureSummary}
+            </p>
           )}
           {!overview?.terminal && headline.description ? (
             <p className="text-xs text-muted-foreground" data-thread-find-text={find}>

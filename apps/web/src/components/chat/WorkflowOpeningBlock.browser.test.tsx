@@ -163,6 +163,8 @@ vi.mock(import("../ChatMarkdown"), async () => {
   };
 });
 
+const ACTIVITY_REGION = '[aria-live="polite"]:not([data-workflow-failure-announcement])';
+
 const opening: WorkflowOpening = {
   messageId: "workflow-result",
   name: "Script workflow",
@@ -199,14 +201,15 @@ it.each([4, 40, 256, 1024] as const)(
       screen.container.querySelectorAll("[data-workflow-phase] [data-workflow-identity]"),
     ).toHaveLength(count);
     expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
-    expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
+    expect(screen.container.querySelectorAll(ACTIVITY_REGION)).toHaveLength(1);
     expect(screen.container.textContent).not.toContain("These are task instructions");
-    // Needs attention lists the failure, so only the announcement repeats it.
-    const live = screen.container.querySelector('[aria-live="polite"]')!;
-    expect(live.querySelector("p")?.textContent).toBe("Reviewing package exports");
-    expect(live.querySelector(".sr-only")?.textContent).toBe(
-      `1 agent failed · Agent ${count}: Access denied. Check workspace permissions.`,
+    // Needs attention lists the failure, so only its own announcement repeats it.
+    expect(screen.container.querySelector(ACTIVITY_REGION)?.textContent).toBe(
+      "Reviewing package exports",
     );
+    expect(
+      screen.container.querySelector("[data-workflow-failure-announcement]")?.textContent,
+    ).toBe(`1 agent failed · Agent ${count}: Access denied. Check workspace permissions.`);
     await expect
       .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
       .toHaveAttribute("max", String(count));
@@ -473,7 +476,7 @@ it("coalesces continuing workflow updates into one polite announcement and prese
   await act(() => vi.advanceTimersByTime(500));
   expect(live.querySelector("[data-model-glyph]")).toBeNull();
   expect(live.querySelector("svg")).not.toBeNull();
-  expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
+  expect(screen.container.querySelectorAll(ACTIVITY_REGION)).toHaveLength(1);
   await screen.rerender(view("Coordinator resumed"));
   await act(() => vi.advanceTimersByTime(1000));
   expect(live.textContent).toBe("Coordinator resumed");
