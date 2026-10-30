@@ -19,7 +19,7 @@ import {
   MinusIcon,
   type LucideIcon,
 } from "lucide-react";
-import { resolveSubagentModelLabel } from "@t3tools/client-runtime/state/subagent-display";
+import { workflowModelName } from "./workflowIdentity";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
 import { WORKFLOW_STATE_MARKER, WORKFLOW_STATE_TEXT } from "./workflowStatusAppearance";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
@@ -406,10 +406,7 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
   const threadId = node.member?.childThreadId ?? null;
   const state = WORKFLOW_GRAPH_STATE_LABEL[node.state];
   const identity = workflowMemberIdentity(node.member);
-  const modelLabel =
-    resolveSubagentModelLabel({ model: node.member?.model ?? null, provider }) ??
-    node.member?.model ??
-    "Unknown model";
+  const modelLabel = workflowModelName(node.member?.model ?? null, provider);
   const totals =
     accounting.tokens.value === null && accounting.elapsed.value === null
       ? "Usage unknown"

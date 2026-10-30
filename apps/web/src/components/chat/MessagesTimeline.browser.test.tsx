@@ -931,11 +931,12 @@ describe("MessagesTimeline workflow coordinator opening", () => {
     expect(collectThreadFindRanges(screen.container, "zebra")).toEqual([]);
   });
 
-  it("is in the page's tab order: the keyboard reaches its graph and cards inside the timeline", async () => {
+  it("is in the page's tab order and reserves the composer overlay in its readout boundary", async () => {
     setup();
     const { opening } = workflowFixture("graph", "running");
     await using screen = await renderTimeline([message("script", {}, "script-message")], {
       workflowOpening: { ...opening, messageId: "script-message" },
+      contentInsetEndAdjustment: 160,
     });
     // The timeline is virtualized: the block is mounted only when its row is in the list.
     const block = screen.container.querySelector("[data-workflow-opening]");
@@ -948,8 +949,12 @@ describe("MessagesTimeline workflow coordinator opening", () => {
         reached.push(active.getAttribute("aria-label") ?? active.tagName);
       }
     }
-    expect(reached).toContain("Workflow graph");
-    expect(reached).toContain("Open Count source files, passed");
+    expect(reached).toContain("Open Count source files");
+    const viewport = screen.container.querySelector("[data-assistant-citation-viewport]")!;
+    const boundary = viewport.querySelector("[data-chat-readout-boundary]")!;
+    expect(viewport.getBoundingClientRect().bottom - boundary.getBoundingClientRect().bottom).toBe(
+      160,
+    );
   });
 });
 

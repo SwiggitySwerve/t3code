@@ -332,6 +332,7 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
     "planned-script",
     ...OVERVIEW_STATES,
     "failure-focus",
+    "composer-edge",
     "stopped",
     "mixed-models",
     "running-glyphs",

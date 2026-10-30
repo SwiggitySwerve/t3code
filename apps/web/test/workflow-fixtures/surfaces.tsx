@@ -71,6 +71,36 @@ function ChatColumn({ children }: { readonly children: ReactNode }) {
   );
 }
 
+export function WorkflowComposerEdgeSurface() {
+  return (
+    <div className="relative h-155 bg-background text-foreground" data-qa-chat-frame>
+      <div className="relative h-full" data-assistant-citation-viewport>
+        <div
+          aria-hidden
+          className="pointer-events-none absolute inset-x-0 top-0"
+          style={{ bottom: 160 }}
+          data-chat-readout-boundary
+        />
+        <div className="h-full overflow-y-auto" data-qa-chat-scroll>
+          <div className="h-150 px-4 pt-4 text-sm text-muted-foreground">Earlier chat messages</div>
+          <div style={{ contain: "paint layout style" }}>
+            <WorkflowBlockSurface kind="graph" agentCount={40} />
+          </div>
+          <div className="h-40" />
+        </div>
+      </div>
+      <footer
+        className="absolute inset-x-0 bottom-0 h-40 border-t border-border bg-card p-4"
+        data-qa-composer
+      >
+        <div className="h-24 rounded-xl border border-border bg-background p-3 text-sm text-muted-foreground">
+          Message the agent…
+        </div>
+      </footer>
+    </div>
+  );
+}
+
 /** The workflow block the timeline draws for a workflow T3 runs. */
 export function WorkflowBlockSurface(props: {
   readonly kind: WorkflowQaKind;

@@ -16,6 +16,7 @@ import { readQaAtom } from "../../../test/workflow-fixtures/atoms";
 import { workflowClientSettings } from "../../../test/workflow-fixtures/settings";
 import {
   WorkflowBlockSurface,
+  WorkflowComposerEdgeSurface,
   WorkflowModelGlyphSurface,
 } from "../../../test/workflow-fixtures/surfaces";
 import { WorkflowGraphSettingsRow } from "../settings/WorkflowGraphSettingsRow";
@@ -114,7 +115,7 @@ it.each([
     ...(variant === "planned-fallback" ? { keepInteraction: true } : {}),
     element: () => (
       <div
-        className={variant === "planned-fallback" ? "min-h-screen bg-background" : undefined}
+        className={variant === "planned-fallback" ? "bg-background pb-32" : undefined}
         data-qa-readout-frame
       >
         <WorkflowBlockSurface
@@ -133,7 +134,9 @@ it.each([
         screen.getByRole("button", { name: "Open Sol running", exact: true }).element().focus(),
       );
       await expect
-        .element(page.getByText("Changed from planned: CLI Proxy · Opus 5.5", { exact: true }))
+        .element(
+          page.getByText("Changed from planned: CLI Proxy · Claude Opus 5.5", { exact: true }),
+        )
         .toBeVisible();
     },
   });
@@ -145,12 +148,14 @@ it("replaces an unspawned plan with actual identity and explains a fallback", as
   const queued = screen.getByRole("button", { name: "Open Waiting for agent", exact: true });
   await expect
     .element(queued)
-    .toHaveAccessibleDescription(expect.stringMatching(/^queued, Planned, CLI Proxy, Opus 5.5/));
+    .toHaveAccessibleDescription(
+      expect.stringMatching(/^queued, Planned, CLI Proxy, Claude Opus 5.5/),
+    );
   expect(queued.element().querySelector("[data-workflow-planned]")).not.toBeNull();
   const before = queued.element().getBoundingClientRect().toJSON();
   await userEvent.hover(queued);
   await expect
-    .element(page.getByText("Planned: CLI Proxy · Opus 5.5", { exact: true }))
+    .element(page.getByText("Planned: CLI Proxy · Claude Opus 5.5", { exact: true }))
     .toBeVisible();
   expect(queued.element().getBoundingClientRect().toJSON()).toEqual(before);
   const missing = screen.getByRole("button", { name: "Open Agent not run", exact: true });
@@ -160,7 +165,7 @@ it("replaces an unspawned plan with actual identity and explains a fallback", as
   expect(actual.element().querySelector("[data-workflow-planned]")).toBeNull();
   await userEvent.hover(actual);
   await expect
-    .element(page.getByText("Changed from planned: CLI Proxy · Opus 5.5", { exact: true }))
+    .element(page.getByText("Changed from planned: CLI Proxy · Claude Opus 5.5", { exact: true }))
     .toBeVisible();
   const progress = deriveWorkflowProgress(fixture.group);
   const task = progress.phases
@@ -194,7 +199,7 @@ it("replaces an unspawned plan with actual identity and explains a fallback", as
   expect(queued.element().querySelector("[data-workflow-planned]")).toBeNull();
   expect(queued.element().querySelector('[data-model-glyph="gpt-sol"]')).not.toBeNull();
   await expect
-    .element(page.getByText("Changed from planned: CLI Proxy · Opus 5.5", { exact: true }))
+    .element(page.getByText("Changed from planned: CLI Proxy · Claude Opus 5.5", { exact: true }))
     .toBeVisible();
 });
 
@@ -220,7 +225,7 @@ it.each(["stopped", "mixed-models", "verbose", "failure-focus"] as const)(
             })}
           />
         ) : variant === "failure-focus" ? (
-          <div className="min-h-screen bg-background" data-qa-readout-frame>
+          <div className="bg-background pb-32" data-qa-readout-frame>
             <div style={{ contain: "paint layout style" }}>
               <WorkflowBlockSurface kind="graph" agentCount={40} />
             </div>
@@ -250,6 +255,42 @@ it.each(["running", "failed"] as const)("dot grid final: %s glyph cues", async (
     selector: "[data-workflow-opening]",
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" fixture={workflowModelGlyphFixture(cue)} />,
+  });
+});
+
+it("dot grid final: composer edge", async () => {
+  await captureSurface({
+    surface: "workflow-dot-grid",
+    state: "composer-edge",
+    selector: "[data-workflow-opening]",
+    frame: "[data-qa-chat-frame]",
+    keepInteraction: true,
+    element: () => <WorkflowComposerEdgeSurface />,
+    settle: async (screen) => {
+      const scroll = screen.container.querySelector<HTMLElement>("[data-qa-chat-scroll]")!;
+      const agent = screen.getByRole("button", { name: "Open Agent 40", exact: true });
+      await act(() => {
+        scroll.scrollTop = scroll.scrollHeight;
+        agent.element().focus({ preventScroll: true });
+      });
+      const before = agent.element().getBoundingClientRect().toJSON();
+      const readout = page.getByRole("note", { name: "Agent details" });
+      await expect.element(readout).toBeVisible();
+      await vi.waitFor(() => {
+        const box = readout.element().getBoundingClientRect();
+        const cell = agent.element().getBoundingClientRect();
+        const footer = screen.container
+          .querySelector("[data-qa-composer]")!
+          .getBoundingClientRect();
+        expect(box.bottom).toBeLessThanOrEqual(cell.top);
+        expect(cell.top - box.bottom).toBeLessThanOrEqual(8);
+        expect(box.bottom).toBeLessThan(footer.top);
+        expect(box.left).toBeGreaterThanOrEqual(0);
+        expect(box.right).toBeLessThanOrEqual(innerWidth);
+      });
+      expect(agent.element().getBoundingClientRect().toJSON()).toEqual(before);
+      expect(document.querySelectorAll("[data-workflow-readout]")).toHaveLength(1);
+    },
   });
 });
 

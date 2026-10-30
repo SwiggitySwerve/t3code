@@ -1,6 +1,7 @@
+import { getDisplayModelName } from "./providerIconUtils";
 import { expect, it } from "vite-plus/test";
 import { ProviderDriverKind } from "@t3tools/contracts";
-import { resolveWorkflowIdentity } from "./workflowIdentity";
+import { resolveWorkflowIdentity, workflowModelName } from "./workflowIdentity";
 import { workflowModelGlyphFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 import { QA_PROVIDERS } from "../../../test/workflow-fixtures/providers";
 
@@ -42,7 +43,7 @@ it("resolves changed model identity without retaining the earlier attempt", () =
   const provider = QA_PROVIDERS.find((entry) => entry.instanceId === member.providerInstanceId);
   expect(resolveWorkflowIdentity(member, provider).icon).toMatchObject({ family: "gpt-sol" });
   expect(resolveWorkflowIdentity({ ...member, model: "claude-haiku-5-5" }, provider)).toMatchObject(
-    { modelName: "Haiku 5.5", icon: { family: "claude-haiku" } },
+    { modelName: "Claude Haiku 5.5", icon: { family: "claude-haiku" } },
   );
 });
 
@@ -54,7 +55,7 @@ it("keeps stopped unspawned identity planned and replaces it only with known act
     resolveWorkflowIdentity(null, undefined, "queued", plannedIdentity, provider),
   ).toMatchObject({
     planned: true,
-    modelName: "Opus 5.5",
+    modelName: "Claude Opus 5.5",
     icon: { family: "claude-opus" },
   });
   expect(
@@ -70,8 +71,8 @@ it("keeps stopped unspawned identity planned and replaces it only with known act
     resolveWorkflowIdentity(member, provider, "running", plannedIdentity, provider),
   ).toMatchObject({
     planned: false,
-    modelName: "6.1 Sol",
-    plannedDescription: "CLI Proxy · Opus 5.5",
+    modelName: "GPT-6.1 Sol",
+    plannedDescription: "CLI Proxy · Claude Opus 5.5",
   });
   expect(
     resolveWorkflowIdentity(
@@ -86,4 +87,43 @@ it("keeps stopped unspawned identity planned and replaces it only with known act
     resolveWorkflowIdentity(member, provider, "running", { model: "openai/gpt-6.1-sol" })
       .plannedDescription,
   ).toBeUndefined();
+});
+
+it.each([
+  ["openai.gpt-6.1-sol", "GPT-6.1 Sol", "cliproxy"],
+  ["gpt-6-astra", "GPT-6 Astra", "cliproxy"],
+  ["openai/gpt-6.1-terra", "GPT-6.1 Terra", "cursor-work"],
+  ["gpt-6-luna", "GPT-6 Luna", "cursor-work"],
+  ["claude-opus-5-5", "Claude Opus 5.5", "cliproxy"],
+  ["anthropic/claude-sonnet-4-6", "Claude Sonnet 4.6", "cliproxy"],
+  ["claude-fable-5-1", "Claude Fable 5.1", "cursor-work"],
+  ["claude-haiku-5-5", "Claude Haiku 5.5", "cliproxy"],
+  ["custom-model", "Research Model", "cliproxy"],
+])("uses the model picker name for %s", (model, name, instanceId) => {
+  const source = QA_PROVIDERS.find((entry) => entry.instanceId === instanceId)!;
+  const provider = {
+    ...source,
+    models: [
+      ...source.models,
+      {
+        slug: "custom-model",
+        name: "Lab: Research Model",
+        subProvider: "Lab",
+        shortName: "Short",
+        isCustom: true,
+        capabilities: null,
+      },
+    ],
+  };
+  const member = workflowModelGlyphFixture().group.graph!.waves[0]![0]!.member!;
+  const catalogModel = provider.models.find(
+    (entry) => entry.slug === model || entry.aliases?.includes(model),
+  )!;
+  expect(getDisplayModelName(catalogModel)).toBe(name);
+  expect(workflowModelName(model, provider)).toBe(name);
+  expect(resolveWorkflowIdentity({ ...member, model }, provider)).toMatchObject({
+    modelName: name,
+    displayName: name,
+    ...(model === "custom-model" ? { icon: { kind: "driver" } } : {}),
+  });
 });
