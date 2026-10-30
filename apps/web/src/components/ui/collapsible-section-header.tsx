@@ -43,7 +43,7 @@ export function CollapsibleSectionHeader({
           className={cn("h-px min-w-2 flex-1", tones[tone].line, accessory && "invisible")}
         />
       ) : (
-        // Takes the rule's place, so the row's minimum width is unchanged.
+        // Takes the rule's place and can shrink to nothing, so the row never needs more room.
         <span aria-hidden className="@container/meter flex min-w-0 flex-1 items-center">
           <span className="flex w-14 shrink-0 items-center @max-[3.5rem]/meter:hidden">
             {meter}

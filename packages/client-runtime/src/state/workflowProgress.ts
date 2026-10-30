@@ -297,7 +297,6 @@ type CollapseKind = "done" | "queued" | "settled" | "running";
 const WORKFLOW_EXPANDED_RUNNING_PHASES = 2;
 
 export interface WorkflowPhaseGroup {
-  readonly id: string;
   readonly phases: ReadonlyArray<WorkflowPhaseProgress>;
   readonly kind: CollapseKind | null;
   readonly label: string;
@@ -374,7 +373,7 @@ export function deriveWorkflowPhaseGroups(
           ]
             .filter(Boolean)
             .join(" · ");
-    return { id: run.map((phase) => phase.id).join("/"), phases: run, kind, label, summary };
+    return { phases: run, kind, label, summary };
   });
 }
 
