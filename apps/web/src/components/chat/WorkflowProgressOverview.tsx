@@ -442,6 +442,7 @@ function PhaseAgents(props: {
         }}
         onFocus={(event) => inspect(event.target, true)}
         onPointerLeave={(event) => {
+          if (event.pointerType === "touch") return;
           if (event.currentTarget.contains(document.activeElement)) inspect(document.activeElement);
           else props.onInspect(null);
         }}
