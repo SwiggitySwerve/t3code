@@ -2,6 +2,17 @@ import type { ProviderDriverKind, ServerProvider } from "@t3tools/contracts";
 import { BotIcon, type LucideIcon } from "lucide-react";
 import { cn } from "../../lib/utils";
 import { ProviderInstanceIcon } from "./ProviderInstanceIcon";
+import {
+  WORKFLOW_MEMBER_STATE,
+  type WorkflowTaskProgress,
+} from "@t3tools/client-runtime/state/subagentRuntime";
+import { WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
+
+const STATUS_STATE = new Map<string, WorkflowTaskProgress["state"]>([
+  ...Object.entries(WORKFLOW_MEMBER_STATE),
+  ["in_progress", "running"],
+  ["error", "failed"],
+]);
 
 export function threadRelationshipStatusLabel(status: string | null): string {
   switch (status) {
@@ -69,19 +80,11 @@ export function ThreadRelationshipIcon({
       )}
       <span
         className={cn(
-          "absolute -bottom-1 -right-1 size-2 rounded-full border-2 border-card",
-          status === "running" ||
-            status === "in_progress" ||
-            status === "pending" ||
-            status === "waiting"
-            ? "bg-info"
-            : status === "failed" || status === "error"
-              ? "bg-destructive"
-              : status === "completed"
-                ? "bg-success"
-                : "bg-muted-foreground/45",
+          "absolute -bottom-1 -right-1 size-2 ring-2 ring-card forced-colors:forced-color-adjust-none",
+          WORKFLOW_STATE_MARKER[STATUS_STATE.get(status ?? "") ?? "queued"],
         )}
-        aria-hidden="true"
+        role="img"
+        aria-label={threadRelationshipStatusLabel(status)}
       />
     </span>
   );

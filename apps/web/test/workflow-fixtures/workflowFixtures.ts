@@ -802,7 +802,7 @@ export function workflowModelGlyphFixture(): WorkflowQaFixture {
   const seed = workflowFixture("graph", "running");
   const models = [
     ["Sol analyst", "openai.gpt-6.1-sol", "cliproxy"],
-    ["Astra architect", "gpt-6-astra", "cliproxy"],
+    ["Astra architect", "gpt-6.1-astra", "cliproxy"],
     ["Terra reviewer", "openai/gpt-6.1-terra", "cursor-work"],
     ["Luna implementer", "gpt-6-luna", "cursor-work"],
     ["Opus planner", "claude-opus-5-5", "cliproxy"],

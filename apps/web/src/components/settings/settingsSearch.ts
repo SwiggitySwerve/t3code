@@ -581,6 +581,12 @@ export const SETTINGS_SEARCH_ITEMS = [
     searchTerms: ["command menu dollar $ slash /"],
   },
   {
+    id: "verbose-workflow-graph",
+    title: "Verbose workflow graph",
+    to: "/settings/chat",
+    searchTerms: ["agents phases dots cards graph details workflow"],
+  },
+  {
     id: "composer-rich-text",
     title: "Rich text composer",
     to: "/settings/chat",

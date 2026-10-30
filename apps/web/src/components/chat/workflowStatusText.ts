@@ -1,4 +1,8 @@
-import type { RuntimeSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  WORKFLOW_MEMBER_STATE,
+  type RuntimeSubagentStatus,
+} from "@t3tools/client-runtime/state/subagentRuntime";
+import { WORKFLOW_STATE_TEXT } from "./workflowStatusAppearance";
 
 /** Agent status words accompany colour so the Lineage list never relies on colour alone. */
 export interface WorkflowStatusText {
@@ -6,24 +10,23 @@ export interface WorkflowStatusText {
   readonly className: string;
 }
 
-const GREY = "text-muted-foreground";
-
 export function workflowMemberStatusText(status: RuntimeSubagentStatus): WorkflowStatusText {
+  const className = WORKFLOW_STATE_TEXT[WORKFLOW_MEMBER_STATE[status]];
   switch (status) {
     case "completed":
-      return { label: "Done", className: "text-success-foreground" };
+      return { label: "Done", className };
     case "running":
-      return { label: "Running", className: "text-info-foreground" };
+      return { label: "Running", className };
     case "failed":
-      return { label: "Failed", className: "text-destructive-foreground" };
+      return { label: "Failed", className };
     case "pending":
-      return { label: "Queued", className: GREY };
+      return { label: "Queued", className };
     case "waiting":
-      return { label: "Waiting", className: GREY };
+      return { label: "Waiting", className };
     case "idle":
-      return { label: "Idle", className: GREY };
+      return { label: "Idle", className };
     case "cancelled":
     case "interrupted":
-      return { label: "Stopped", className: GREY };
+      return { label: "Stopped", className };
   }
 }

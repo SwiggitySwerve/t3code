@@ -109,7 +109,7 @@ describe("a workflow's row in the Lineage panel", () => {
     using _permission = stubQaWorkflowStopPermission();
     const { screen, title } = await showLineage();
     await using _screen = screen;
-    const row = screen.getByRole("button", { name: new RegExp(`^${title}`) });
+    const row = screen.getByRole("button", { name: new RegExp(`^Running ${title}`) });
     const button = screen.getByRole("button", { name: `Stop workflow ${title}`, exact: true });
     // The control reveals Stop through the wrapper around it.
     const wrapper = button.element().parentElement!;
@@ -135,7 +135,7 @@ describe("a workflow's row in the Lineage panel", () => {
     const wrapper = button.element().parentElement!;
     await userEvent.tab();
     await expect
-      .element(screen.getByRole("button", { name: new RegExp(`^${title}`) }))
+      .element(screen.getByRole("button", { name: new RegExp(`^Running ${title}`) }))
       .toHaveFocus();
     await userEvent.tab();
     await expect.element(button).toHaveFocus();

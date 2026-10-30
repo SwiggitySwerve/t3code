@@ -1,6 +1,7 @@
 import { useAtomValue } from "@effect/atom-react";
 import {
   WORKFLOW_GRAPH_STATE_LABEL,
+  WORKFLOW_NODE_STATE,
   workflowGraphNodeDetail,
   workflowMemberIdentity,
   workflowNodeAccounting,
@@ -20,6 +21,7 @@ import {
 } from "lucide-react";
 import { resolveSubagentModelLabel } from "@t3tools/client-runtime/state/subagent-display";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
+import { WORKFLOW_STATE_MARKER, WORKFLOW_STATE_TEXT } from "./workflowStatusAppearance";
 import { formatDuration } from "@t3tools/shared/orchestrationTiming";
 import { formatTokens } from "@t3tools/shared/usageFormat";
 import { useLayoutEffect, useRef, useState, type ReactNode } from "react";
@@ -47,13 +49,6 @@ import {
   waveCardWidth,
   workflowWaveLayout,
 } from "./workflowWaveLayout";
-
-/** The dot before a node's status word: green passed, blue running, red failed, grey otherwise. */
-const STATE_DOT: Readonly<Partial<Record<WorkflowGraphNodeState, string>>> = {
-  passed: "bg-success",
-  running: "bg-info",
-  failed: "bg-destructive",
-};
 
 /** Nodes that have not run get a glyph, so queued, waiting and skipped read apart without colour. */
 const STATE_ICON: Readonly<Partial<Record<WorkflowGraphNodeState, LucideIcon>>> = {
@@ -242,14 +237,14 @@ export function WorkflowWaveCanvas(props: {
           return (
             <section
               key={nodes[0]?.wave ?? column}
-              aria-label={`Wave ${waveNumber}`}
+              aria-label={`Phase ${waveNumber}`}
               className="contents"
             >
               <h4
                 className="absolute flex items-baseline gap-2 px-1 text-2xs font-medium text-muted-foreground"
                 style={{ left: x, top: 0, width: layout.cards.get(nodes[0]?.key ?? "")?.width }}
               >
-                <span>Wave {waveNumber}</span>
+                <span>Phase {waveNumber}</span>
                 <span className="font-normal tabular-nums">
                   {settled}/{total} finished{nodes.length < total ? ` · ${nodes.length} shown` : ""}
                 </span>
@@ -399,13 +394,6 @@ interface WorkflowNodeCardProps {
   readonly onHighlight: (on: boolean) => void;
 }
 
-/** The status word's colour: green passed, blue running, red failed, grey for everything else. */
-const STATE_TEXT: Readonly<Partial<Record<WorkflowGraphNodeState, string>>> = {
-  passed: "text-success-foreground",
-  running: "text-info-foreground",
-  failed: "text-destructive-foreground",
-};
-
 const sentenceCase = (text: string) => text.charAt(0).toUpperCase() + text.slice(1);
 
 function WorkflowNodeCard(props: WorkflowNodeCardProps) {
@@ -457,15 +445,15 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
         <span
           className={cn(
             "flex items-center gap-1.5 text-2xs leading-3.5 font-semibold",
-            STATE_TEXT[node.state] ?? "text-muted-foreground",
+            WORKFLOW_STATE_TEXT[WORKFLOW_NODE_STATE[node.state]],
           )}
         >
           {StateIcon === undefined ? (
             <span
               aria-hidden
               className={cn(
-                "size-1.5 shrink-0 rounded-full",
-                STATE_DOT[node.state] ?? "bg-muted-foreground/60",
+                "size-2 shrink-0 forced-colors:forced-color-adjust-none",
+                WORKFLOW_STATE_MARKER[WORKFLOW_NODE_STATE[node.state]],
               )}
             />
           ) : (

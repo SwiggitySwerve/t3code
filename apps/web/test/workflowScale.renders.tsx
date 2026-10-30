@@ -9,6 +9,7 @@ import { commands, page, userEvent } from "vite-plus/test/browser";
 import "../src/index.css";
 import { render } from "./render";
 import { startCounting, stopCounting } from "./renderCounter";
+import { workflowClientSettings } from "./workflow-fixtures/settings";
 import { readQaAtom } from "./workflow-fixtures/atoms";
 import {
   WorkflowBlockSurface,
@@ -29,6 +30,8 @@ function inspectDom(container: HTMLElement) {
     elements: count("*"),
     phases: count("[data-workflow-phase]"),
     taskRows: count("[data-workflow-task]"),
+    dots: count("[data-workflow-dot]"),
+    dotTabStops: count('[data-workflow-dot][tabindex="0"]'),
     nodes: count("[data-workflow-node]"),
     fullCards: count("[data-workflow-node]:not([data-workflow-node-placeholder])"),
     placeholders: count("[data-workflow-node-placeholder]"),
@@ -71,6 +74,7 @@ const CASES = ([256, 1024] as const).flatMap((count) =>
 it.runIf(import.meta.env.VITE_T3_WORKFLOW_SCALE === "1").each(CASES)(
   "workflow scale measurement: $surface / $count",
   async ({ count, surface }) => {
+    using _settings = workflowClientSettings(surface === "paged-graph");
     const originalViewport = { width: innerWidth, height: innerHeight };
     await page.viewport(1024, 900);
     await using _viewport = {
@@ -151,24 +155,14 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_SCALE === "1").each(CASES)(
           );
         }
       }
-      if (isOverview) {
-        const expanded = await measured("expand-selected-phase", () =>
-          userEvent.click(
-            screen.getByRole("button", {
-              name: `Phase ${count === 256 ? 9 : 17} agents`,
-              exact: true,
-            }),
-          ),
-        );
-        operations.push({ ...expanded.metrics, dom: inspectDom(screen.container) });
-      } else {
+      if (!isOverview) {
         const scrolled = await measured("scroll-to-selected-agent", () =>
           scrollWavesToNode(screen.container, `task-${count / 2}`),
         );
         operations.push({ ...scrolled.metrics, dom: inspectDom(screen.container) });
       }
       const selector = isOverview
-        ? `[data-workflow-task] button[aria-label="Open Agent ${count / 2 + 1}"]`
+        ? `[data-workflow-dot][aria-label="Open Agent ${count / 2 + 1}"]`
         : `[data-workflow-node="task-${count / 2}"] [data-node-state]`;
       const attribute = isOverview ? "aria-description" : "data-node-state";
       using completion = observeCompletion(

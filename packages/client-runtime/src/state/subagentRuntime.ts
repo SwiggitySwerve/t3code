@@ -45,6 +45,8 @@ export {
   workflowPhaseStatus,
   type WorkflowPhaseProgress,
   type WorkflowProgressCounts,
+  WORKFLOW_MEMBER_STATE,
+  WORKFLOW_NODE_STATE,
   type WorkflowTaskProgress,
 } from "./workflowProgress.ts";
 
