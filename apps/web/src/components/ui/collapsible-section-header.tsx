@@ -21,7 +21,7 @@ export function CollapsibleSectionHeader({
   tone?: keyof typeof tones;
   variant?: "default" | "panel";
   accessory?: ReactNode;
-  /** A fixed-width inline bar after the label; it narrows before the label or accessory do. */
+  /** A fixed-width inline bar after the label; hidden, never narrowed, when the row lacks room. */
   meter?: ReactNode;
 }) {
   return (
@@ -44,8 +44,10 @@ export function CollapsibleSectionHeader({
         />
       ) : (
         // Takes the rule's place, so the row's minimum width is unchanged.
-        <span aria-hidden className="flex min-w-0 flex-1 items-center">
-          <span className="flex w-14 min-w-0 shrink items-center">{meter}</span>
+        <span aria-hidden className="@container/meter flex min-w-0 flex-1 items-center">
+          <span className="flex w-14 shrink-0 items-center @max-[3.5rem]/meter:hidden">
+            {meter}
+          </span>
         </span>
       )}
       {accessory}

@@ -225,12 +225,14 @@ it("lineage row, graph, running, Stop shown while the row is hovered", async () 
   });
 });
 
-// Every phase row of a 256-agent run, with its agent lists folded so each row's bar is in view.
+// Every phase row, with agent lists folded so each row's bar is in view. `shown` is how many bars
+// must be drawn, or null when it depends on how much room each title leaves.
 it.each([
-  ["graph-256", "graph", false],
-  ["script-256", "script", false],
-  ["graph-256-narrow", "graph", true],
-] as const)("lineage phase bars, %s", async (state, kind, narrow) => {
+  ["graph-256", "graph", 256, false, 16],
+  ["script-256", "script", 256, false, 16],
+  ["graph-256-narrow", "graph", 256, true, 0],
+  ["long-titles", "script", null, false, null],
+] as const)("lineage phase bars, %s", async (state, kind, count, narrow, shown) => {
   await captureSurface({
     surface: "lineage-phase-bars",
     state,
@@ -238,13 +240,20 @@ it.each([
     frame: "[data-qa-panel]",
     // Not width-checked: each folded row's chevron is CSS-rotated, and across runs a few of their
     // edge pixels differ by one grey level, which no layout explains.
-    element: () => (
-      <LineageRowSurface kind={kind} fixture={workflowCollapseFixture(kind, 256)} narrow={narrow} />
-    ),
+    element: () =>
+      count === null ? (
+        <LineageRowSurface kind={kind} variant="long-labels" />
+      ) : (
+        <LineageRowSurface
+          kind={kind}
+          fixture={workflowCollapseFixture(kind, count)}
+          narrow={narrow}
+        />
+      ),
     settle: async (screen) => {
       await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
       const open = screen.getByRole("button", { name: /^Collapse .+ phase,/ });
-      for (let count = open.elements().length; count > 0; count -= 1) {
+      for (let opened = open.elements().length; opened > 0; opened -= 1) {
         await userEvent.click(open.first());
       }
       // The last phases hold the queued and failed rows.
@@ -253,16 +262,16 @@ it.each([
       const bars = [...list.querySelectorAll("[data-workflow-track]")].map((bar) =>
         bar.getBoundingClientRect(),
       );
-      // Every bar starts at one edge with one size; the narrow panel hides them all.
-      expect(
-        bars.map(({ left, width, height }) => ({ left: left - bars[0]!.left, width, height })),
-      ).toEqual(
-        Array.from({ length: 16 }, () => ({
-          left: 0,
-          width: narrow ? 0 : 56,
-          height: narrow ? 0 : 2,
-        })),
+      const drawn = bars.filter((bar) => bar.width > 0);
+      // A bar is drawn at its full size or not at all, never narrowed.
+      expect(bars.filter((bar) => bar.width === 0 && bar.height === 0)).toHaveLength(
+        bars.length - drawn.length,
       );
+      expect(drawn.map(({ width, height }) => [width, height])).toEqual(drawn.map(() => [56, 2]));
+      if (shown !== null) {
+        expect(drawn).toHaveLength(shown);
+        expect(new Set(drawn.map((bar) => bar.left)).size).toBeLessThanOrEqual(1);
+      }
     },
   });
 });

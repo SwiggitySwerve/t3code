@@ -215,7 +215,7 @@ export function ThreadLineageWorkflowRow({
       ? provider
       : providers?.find((entry) => entry.instanceId === member.providerInstanceId);
   return (
-    <li className="group @container" data-workflow-expanded={expanded ? "" : undefined}>
+    <li className="group @container/lineage" data-workflow-expanded={expanded ? "" : undefined}>
       <div className={cn("relative", THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS)}>
         {header}
         {onStop ? (
@@ -280,7 +280,7 @@ export function ThreadLineageWorkflowRow({
                     <WorkflowProgressTrack
                       counts={phase.counts}
                       decorative
-                      className="h-0.5 @max-[16rem]:hidden"
+                      className="h-0.5 @max-[16rem]/lineage:hidden"
                     />
                   }
                   accessory={
