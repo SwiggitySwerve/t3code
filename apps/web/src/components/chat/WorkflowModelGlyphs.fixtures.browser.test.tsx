@@ -1,8 +1,5 @@
 import { expect, it, vi } from "vite-plus/test";
-import {
-  deriveWorkflowProgress,
-  deriveWorkflowPhaseGroups,
-} from "@t3tools/client-runtime/state/subagentRuntime";
+import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
 import { expandWorkflowPhases } from "../../../test/workflow-fixtures/interactions";
 import { EnvironmentId } from "@t3tools/contracts";
 import { commands, page, userEvent } from "vite-plus/test/browser";
@@ -40,11 +37,7 @@ it("shows every agent identity, including namespace aliases and generic fallback
   }));
   await using screen = await render(
     <WorkflowProgressOverview
-      progress={{
-        ...progress,
-        phases,
-        phaseGroups: deriveWorkflowPhaseGroups(phases),
-      }}
+      progress={{ ...progress, phases }}
       environmentId={EnvironmentId.make("qa")}
       onOpenThread={() => {}}
     />,

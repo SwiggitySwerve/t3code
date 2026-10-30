@@ -217,6 +217,46 @@ it("keeps a disclosed running fold and its focused cell while an earlier phase f
     .toHaveAttribute("aria-expanded", "true");
 });
 
+it("keeps a focused fold disclosure when an earlier fold of its kind goes away", async () => {
+  const fixture = workflowCollapseFixture("graph", 256);
+  const graph = fixture.group.graph!;
+  // Phases 1–2 hold the running slots, 3 folds, 4 has a failure, 5–6 fold, the rest wait.
+  const view = (thirdPassed: boolean) => (
+    <WorkflowProgressOverview
+      progress={deriveWorkflowProgress({
+        ...fixture.group,
+        graph: {
+          ...graph,
+          waves: graph.waves.map((wave, index) =>
+            wave.map((node, position) => ({
+              ...node,
+              state:
+                index === 2 && thirdPassed
+                  ? ("passed" as const)
+                  : index === 3 && position === 0
+                    ? ("failed" as const)
+                    : index <= 5
+                      ? ("running" as const)
+                      : ("waiting" as const),
+            })),
+          ),
+        },
+      })}
+      environmentId={EnvironmentId.make("qa")}
+      onOpenThread={() => {}}
+    />
+  );
+  await using screen = await render(view(false));
+  const fold = screen.getByRole("button", { name: /^Phases 5–6 · 32 running/ }).element();
+  await act(() => (fold as HTMLButtonElement).focus());
+  await screen.rerender(view(true));
+  await expect
+    .element(screen.getByRole("button", { name: /^Phase 3 · 16 done/ }))
+    .toBeInTheDocument();
+  expect(fold.isConnected).toBe(true);
+  expect(document.activeElement).toBe(fold);
+});
+
 it.each(["omitted", "normalized"] as const)(
   "suppresses internal graph results in receipts when progress is %s",
   async (mode) => {

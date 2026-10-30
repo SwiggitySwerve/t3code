@@ -265,7 +265,6 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     phases.every((phase) => phase.allDone || (phase.state === null && phase.tasks.length === 0));
   return {
     phases,
-    phaseGroups: deriveWorkflowPhaseGroups(phases),
     attention: tasks
       .filter((task) => task.attention !== undefined)
       .sort(
@@ -296,7 +295,22 @@ type CollapseKind = "done" | "queued" | "settled" | "running";
 /** Running phases shown expanded; later running phases fold. Phases with a failure never fold. */
 const WORKFLOW_EXPANDED_RUNNING_PHASES = 2;
 
+/** What one view's phase groups carry from one update to the next. */
+export interface WorkflowPhaseGroupMemory {
+  /** Running phases that held an expanded slot. */
+  readonly expandedRunning: ReadonlySet<string>;
+  /** The disclosure key each folded phase had, by `${kind}:${phase id}`. */
+  readonly keys: ReadonlyMap<string, string>;
+}
+
+export const EMPTY_WORKFLOW_PHASE_GROUP_MEMORY: WorkflowPhaseGroupMemory = {
+  expandedRunning: new Set(),
+  keys: new Map(),
+};
+
 export interface WorkflowPhaseGroup {
+  /** Kept while phases join or leave a fold, so its disclosure keeps its DOM and focus. */
+  readonly key: string;
   readonly phases: ReadonlyArray<WorkflowPhaseProgress>;
   readonly kind: CollapseKind | null;
   readonly label: string;
@@ -322,59 +336,102 @@ function phaseCollapseKind(phase: WorkflowPhaseProgress): CollapseKind | null {
 }
 
 /**
- * Contiguous done, queued, settled and folded running phases, in phase order. The first
- * `WORKFLOW_EXPANDED_RUNNING_PHASES` running phases stay expanded and later ones fold, so the
- * choice depends only on phase order. A phase with a failure is always expanded and uses no slot.
+ * Contiguous done, queued, settled and folded running phases, in phase order. Up to
+ * `WORKFLOW_EXPANDED_RUNNING_PHASES` running phases stay expanded: a phase that held a slot in
+ * `memory` keeps it while it runs, and free slots go to the earliest other running phases. A
+ * phase with a failure is always expanded and uses no slot. Unchanged memory is returned as is.
  */
 export function deriveWorkflowPhaseGroups(
   phases: ReadonlyArray<WorkflowPhaseProgress>,
-): WorkflowPhaseGroup[] {
+  memory: WorkflowPhaseGroupMemory = EMPTY_WORKFLOW_PHASE_GROUP_MEMORY,
+): { readonly groups: WorkflowPhaseGroup[]; readonly memory: WorkflowPhaseGroupMemory } {
+  const kinds = phases.map(phaseCollapseKind);
+  const running = phases.filter((_, index) => kinds[index] === "running");
+  const expandedRunning = new Set(
+    [
+      ...running.filter((phase) => memory.expandedRunning.has(phase.id)),
+      ...running.filter((phase) => !memory.expandedRunning.has(phase.id)),
+    ]
+      .slice(0, WORKFLOW_EXPANDED_RUNNING_PHASES)
+      .map((phase) => phase.id),
+  );
   const runs: Array<{ kind: CollapseKind | null; phases: WorkflowPhaseProgress[] }> = [];
-  let running = 0;
-  for (const phase of phases) {
-    let kind = phaseCollapseKind(phase);
-    if (kind === "running") {
-      running += 1;
-      if (running <= WORKFLOW_EXPANDED_RUNNING_PHASES) kind = null;
-    }
+  phases.forEach((phase, index) => {
+    const kind = expandedRunning.has(phase.id) ? null : (kinds[index] ?? null);
     const last = runs.at(-1);
     if (kind !== null && last?.kind === kind) last.phases.push(phase);
     else runs.push({ kind, phases: [phase] });
-  }
-  return runs.map(({ kind, phases: run }) => {
-    const first = run[0]!;
-    const last = run.at(-1)!;
-    const total = run.every((phase) => phase.counts.total !== null)
-      ? run.reduce((sum, phase) => sum + phase.counts.total!, 0)
-      : null;
-    const counts = countTasks(
-      run.flatMap((phase) => phase.tasks),
-      total,
-    );
-    const missing = Math.max(0, (total ?? counts.observed) - counts.observed);
-    const numeric = /^Phase (\d+)$/.exec(first.title);
-    const lastNumeric = /^Phase (\d+)$/.exec(last.title);
-    const label =
-      run.length === 1
-        ? first.title
-        : numeric && lastNumeric
-          ? `Phases ${numeric[1]}–${lastNumeric[1]}`
-          : `${first.title}–${last.title}`;
-    const summary =
-      kind === "queued"
-        ? `${total ?? counts.queued} queued${total === null ? " · total unknown" : ""}`
-        : [
-            workflowCountsText(counts) || "No agents observed",
-            missing > 0 ? `${missing} not observed` : null,
-            kind === "settled" && run.some((phase) => phase.state === "stopped")
-              ? "phase stopped"
-              : null,
-            total === null ? "total unknown" : null,
-          ]
-            .filter(Boolean)
-            .join(" · ");
-    return { phases: run, kind, label, summary };
   });
+  const keys = new Map<string, string>();
+  const used = new Set<string>();
+  const groups = runs.map(({ kind, phases: run }) => {
+    const key = kind === null ? run[0]!.id : foldKey(kind, run, memory, used);
+    used.add(key);
+    if (kind !== null) for (const phase of run) keys.set(`${kind}:${phase.id}`, key);
+    return { ...describeGroup(kind, run), key };
+  });
+  const unchanged =
+    sameMembers(expandedRunning, memory.expandedRunning) &&
+    keys.size === memory.keys.size &&
+    [...keys].every(([phase, key]) => memory.keys.get(phase) === key);
+  return { groups, memory: unchanged ? memory : { expandedRunning, keys } };
+}
+
+// A fold keeps the key any of its phases had in a fold of the same kind.
+function foldKey(
+  kind: CollapseKind,
+  run: ReadonlyArray<WorkflowPhaseProgress>,
+  memory: WorkflowPhaseGroupMemory,
+  used: ReadonlySet<string>,
+): string {
+  const candidates = [
+    ...run.map((phase) => memory.keys.get(`${kind}:${phase.id}`)),
+    ...run.map((phase) => `${kind}:${phase.id}`),
+  ];
+  const free = candidates.find((key): key is string => key !== undefined && !used.has(key));
+  if (free !== undefined) return free;
+  let suffix = 1;
+  while (used.has(`${kind}:${run[0]!.id}#${suffix}`)) suffix += 1;
+  return `${kind}:${run[0]!.id}#${suffix}`;
+}
+
+function sameMembers(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPhaseProgress>) {
+  const first = run[0]!;
+  const last = run.at(-1)!;
+  const total = run.every((phase) => phase.counts.total !== null)
+    ? run.reduce((sum, phase) => sum + phase.counts.total!, 0)
+    : null;
+  const counts = countTasks(
+    run.flatMap((phase) => phase.tasks),
+    total,
+  );
+  const missing = Math.max(0, (total ?? counts.observed) - counts.observed);
+  const numeric = /^Phase (\d+)$/.exec(first.title);
+  const lastNumeric = /^Phase (\d+)$/.exec(last.title);
+  const label =
+    run.length === 1
+      ? first.title
+      : numeric && lastNumeric
+        ? `Phases ${numeric[1]}–${lastNumeric[1]}`
+        : `${first.title}–${last.title}`;
+  const summary =
+    kind === "queued"
+      ? `${total ?? counts.queued} queued${total === null ? " · total unknown" : ""}`
+      : [
+          workflowCountsText(counts) || "No agents observed",
+          missing > 0 ? `${missing} not observed` : null,
+          kind === "settled" && run.some((phase) => phase.state === "stopped")
+            ? "phase stopped"
+            : null,
+          total === null ? "total unknown" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+  return { phases: run, kind, label, summary };
 }
 
 export function workflowSettledText(counts: WorkflowProgressCounts): string {

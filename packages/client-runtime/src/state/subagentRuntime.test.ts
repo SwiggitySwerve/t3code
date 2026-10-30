@@ -74,14 +74,17 @@ describe("compact workflow presentation", () => {
       ])[0]!,
     );
     expect(
-      progress.phaseGroups.map(({ label, kind, summary }) => ({ label, kind, summary })),
+      deriveWorkflowPhaseGroups(progress.phases).groups.map(({ label, kind, summary }) => ({
+        label,
+        kind,
+        summary,
+      })),
     ).toEqual([
       { label: "Phases 1–2", kind: "done", summary: "2 done · total unknown" },
       { label: "Phase 3", kind: null, summary: "1 running · total unknown" },
       { label: "Phase 4", kind: null, summary: "1 failed · total unknown" },
       { label: "Phases 5–6", kind: "queued", summary: "2 queued · total unknown" },
     ]);
-    expect(deriveWorkflowPhaseGroups(progress.phases)).toEqual(progress.phaseGroups);
   });
 
   it("expands the first two running phases and folds later ones around phases with failures", () => {
@@ -109,7 +112,11 @@ describe("compact workflow presentation", () => {
       ])[0]!,
     );
     expect(
-      progress.phaseGroups.map(({ label, kind, summary }) => ({ label, kind, summary })),
+      deriveWorkflowPhaseGroups(progress.phases).groups.map(({ label, kind, summary }) => ({
+        label,
+        kind,
+        summary,
+      })),
     ).toEqual([
       { label: "Phase 1", kind: "done", summary: "1 done · total unknown" },
       { label: "Phase 2", kind: null, summary: "1 running · total unknown" },
@@ -122,12 +129,129 @@ describe("compact workflow presentation", () => {
     const later = progress.phases.map((phase, index) =>
       index === 4 ? { ...phase, counts: { ...phase.counts, failed: 0 } } : phase,
     );
-    expect(deriveWorkflowPhaseGroups(later).map(({ label, kind }) => [label, kind])).toEqual([
-      ["Phase 1", "done"],
-      ["Phase 2", null],
-      ["Phase 3", null],
-      ["Phases 4–6", "running"],
-      ["Phase 7", "queued"],
+    expect(deriveWorkflowPhaseGroups(later).groups.map(({ label, kind }) => [label, kind])).toEqual(
+      [
+        ["Phase 1", "done"],
+        ["Phase 2", null],
+        ["Phase 3", null],
+        ["Phases 4–6", "running"],
+        ["Phase 7", "queued"],
+      ],
+    );
+  });
+
+  type AgentState = "completed" | "running" | "failed" | "queued";
+  const phasesOf = (states: ReadonlyArray<ReadonlyArray<AgentState>>) =>
+    deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          workflow: {
+            phases: states.map((_, index) => ({ index, title: `Phase ${index + 1}` })),
+            agents: states.flatMap((phase, index) =>
+              phase.map((state, offset) =>
+                member({ index: index * 2 + offset, phaseIndex: index, state }),
+              ),
+            ),
+          },
+        }),
+      ])[0]!,
+    ).phases;
+  const shape = (result: ReturnType<typeof deriveWorkflowPhaseGroups>) =>
+    result.groups.map(({ label, kind, key }) => [label, kind, key]);
+
+  it("keeps a running phase expanded while it runs, even when an earlier phase runs again", () => {
+    const first = deriveWorkflowPhaseGroups(
+      phasesOf([["completed"], ["running"], ["running"], ["running"], ["queued"]]),
+    );
+    expect(shape(first)).toEqual([
+      ["Phase 1", "done", "done:phase:0"],
+      ["Phase 2", null, "phase:1"],
+      ["Phase 3", null, "phase:2"],
+      ["Phase 4", "running", "running:phase:3"],
+      ["Phase 5", "queued", "queued:phase:4"],
+    ]);
+    const rerun = deriveWorkflowPhaseGroups(
+      phasesOf([["running"], ["running"], ["running"], ["running"], ["queued"]]),
+      first.memory,
+    );
+    expect(shape(rerun)).toEqual([
+      ["Phase 1", "running", "running:phase:0"],
+      ["Phase 2", null, "phase:1"],
+      ["Phase 3", null, "phase:2"],
+      ["Phase 4", "running", "running:phase:3"],
+      ["Phase 5", "queued", "queued:phase:4"],
+    ]);
+    // A freed slot goes to the earliest folded running phase.
+    const states: ReadonlyArray<ReadonlyArray<AgentState>> = [
+      ["running"],
+      ["completed"],
+      ["running"],
+      ["running"],
+      ["queued"],
+    ];
+    const freed = deriveWorkflowPhaseGroups(phasesOf(states), rerun.memory);
+    expect(shape(freed)).toEqual([
+      ["Phase 1", null, "phase:0"],
+      ["Phase 2", "done", "done:phase:1"],
+      ["Phase 3", null, "phase:2"],
+      ["Phase 4", "running", "running:phase:3"],
+      ["Phase 5", "queued", "queued:phase:4"],
+    ]);
+    expect(deriveWorkflowPhaseGroups(phasesOf(states), freed.memory).memory).toBe(freed.memory);
+  });
+
+  it("keeps a fold's key while phases leave its front and earlier folds of its kind go away", () => {
+    const first = deriveWorkflowPhaseGroups(
+      phasesOf([
+        ["running"],
+        ["running"],
+        ["running"],
+        ["running"],
+        ["running", "failed"],
+        ["running"],
+      ]),
+    );
+    expect(shape(first)).toEqual([
+      ["Phase 1", null, "phase:0"],
+      ["Phase 2", null, "phase:1"],
+      ["Phases 3–4", "running", "running:phase:2"],
+      ["Phase 5", null, "phase:4"],
+      ["Phase 6", "running", "running:phase:5"],
+    ]);
+    const regrouped = deriveWorkflowPhaseGroups(
+      phasesOf([
+        ["completed"],
+        ["running"],
+        ["running"],
+        ["running"],
+        ["running", "failed"],
+        ["running"],
+      ]),
+      first.memory,
+    );
+    expect(shape(regrouped)).toEqual([
+      ["Phase 1", "done", "done:phase:0"],
+      ["Phase 2", null, "phase:1"],
+      ["Phase 3", null, "phase:2"],
+      ["Phase 4", "running", "running:phase:2"],
+      ["Phase 5", null, "phase:4"],
+      ["Phase 6", "running", "running:phase:5"],
+    ]);
+    const emptied = deriveWorkflowPhaseGroups(
+      phasesOf([
+        ["completed"],
+        ["running"],
+        ["running"],
+        ["completed"],
+        ["running", "failed"],
+        ["running"],
+      ]),
+      regrouped.memory,
+    );
+    expect(shape(emptied).slice(3)).toEqual([
+      ["Phase 4", "done", "done:phase:3"],
+      ["Phase 5", null, "phase:4"],
+      ["Phase 6", "running", "running:phase:5"],
     ]);
   });
 
@@ -154,7 +278,7 @@ describe("compact workflow presentation", () => {
       index === 2 ? { ...phase, state: "stopped" as const } : phase,
     );
     expect(
-      deriveWorkflowPhaseGroups(phases).map(({ kind, summary }) => ({ kind, summary })),
+      deriveWorkflowPhaseGroups(phases).groups.map(({ kind, summary }) => ({ kind, summary })),
     ).toEqual([
       { kind: null, summary: "1 done" },
       { kind: "done", summary: "1 done · 3 not observed" },

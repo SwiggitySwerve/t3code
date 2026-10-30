@@ -50,6 +50,7 @@ export {
   type WorkflowTaskProgress,
   type WorkflowPhaseGroup,
   deriveWorkflowPhaseGroups,
+  EMPTY_WORKFLOW_PHASE_GROUP_MEMORY,
 } from "./workflowProgress.ts";
 
 export type RuntimeSubagentStatus =

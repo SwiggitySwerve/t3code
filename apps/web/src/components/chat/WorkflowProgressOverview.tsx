@@ -1,4 +1,6 @@
 import {
+  deriveWorkflowPhaseGroups,
+  EMPTY_WORKFLOW_PHASE_GROUP_MEMORY,
   workflowCountEntries,
   workflowCountsText,
   workflowSettledText,
@@ -94,25 +96,25 @@ export function WorkflowProgressOverview(props: {
   });
   const prefix = useId();
   const readoutId = useId();
-  const groups = progress.phaseGroups;
+  // Stored during render, so the next update starts from the slots and keys this one used.
+  const [groupMemory, setGroupMemory] = useState(EMPTY_WORKFLOW_PHASE_GROUP_MEMORY);
+  const { groups, memory: nextGroupMemory } = deriveWorkflowPhaseGroups(
+    progress.phases,
+    groupMemory,
+  );
+  if (nextGroupMemory !== groupMemory) setGroupMemory(nextGroupMemory);
   const pages = Math.ceil(groups.length / PHASE_PAGE_SIZE);
   const page = Math.min(phasePage, Math.max(0, pages - 1));
-  // Grids are siblings keyed by phase and disclosures by kind and order, so a phase moving
+  // Grids are siblings keyed by phase and disclosures by their group key, so a phase moving
   // between groups keeps its DOM and focus.
-  const ordinals = new Map<string, number>();
   const visibleGroups = groups
     .slice(page * PHASE_PAGE_SIZE, (page + 1) * PHASE_PAGE_SIZE)
-    .map((group) => {
-      const ordinal = ordinals.get(`${group.kind}`) ?? 0;
-      ordinals.set(`${group.kind}`, ordinal + 1);
-      return {
-        group,
-        key: `${group.kind}#${ordinal}`,
-        expanded:
-          group.kind === null ||
-          group.phases.some((phase) => expandedPhases.has(`${group.kind}:${phase.id}`)),
-      };
-    });
+    .map((group) => ({
+      group,
+      expanded:
+        group.kind === null ||
+        group.phases.some((phase) => expandedPhases.has(`${group.kind}:${phase.id}`)),
+    }));
   const byProvider = new Map(providers.map((provider) => [provider.instanceId, provider]));
   const cache = new Map<string, WorkflowIdentity>();
   const identities = new Map<string, WorkflowIdentity>();
@@ -338,7 +340,7 @@ export function WorkflowProgressOverview(props: {
           style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 13rem), 1fr))" }}
           data-workflow-phases
         >
-          {visibleGroups.flatMap(({ group, expanded, key }, index) => {
+          {visibleGroups.flatMap(({ group, expanded }, index) => {
             // A disclosure heads its own rows, so the phase after its grids starts a new row.
             const previous = visibleGroups[index - 1]?.group;
             const newRow = group.kind === null && previous !== undefined && previous.kind !== null;
@@ -361,7 +363,7 @@ export function WorkflowProgressOverview(props: {
               ? grids
               : [
                   <button
-                    key={key}
+                    key={group.key}
                     type="button"
                     aria-expanded={expanded}
                     data-workflow-phase-disclosure
