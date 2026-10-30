@@ -16,14 +16,14 @@ import { useState, type ReactNode } from "react";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { MiddleTruncate } from "../ui/middle-truncate";
-import { workflowMemberStatusText } from "./workflowStatusText";
+import { workflowMemberStatusLabel } from "./workflowStatusText";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
 import { WorkflowProgressTrack } from "./WorkflowProgressTrack";
 import { resolveWorkflowIdentity } from "./workflowIdentity";
 import { WORKFLOW_STATE_TEXT, WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
 import { cn } from "../../lib/utils";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
-import { CollapsibleSectionHeader, SectionHeaderStatus } from "../ui/collapsible-section-header";
+import { CollapsibleSectionHeader } from "../ui/collapsible-section-header";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -39,7 +39,6 @@ export function WorkflowLineageStatus(props: {
   readonly workflow: RuntimeSubagent;
   readonly className?: string | undefined;
 }) {
-  const status = workflowMemberStatusText(props.workflow.status);
   return (
     <span
       className={cn(
@@ -47,7 +46,7 @@ export function WorkflowLineageStatus(props: {
         props.className,
       )}
     >
-      <span className={cn("font-medium", status.className)}>{status.label}</span>
+      <span className="font-medium">{workflowMemberStatusLabel(props.workflow.status)}</span>
       <AgentElapsed agent={props.workflow} compact />
     </span>
   );
@@ -120,7 +119,7 @@ function WorkflowMemberRow({
             {member.title}
           </span>
           <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-            <span className={cn("font-medium", WORKFLOW_STATE_TEXT[state])}>{state}</span>
+            <span className="font-medium">{state}</span>
             {member.startedAt ? (
               <>
                 {" "}
@@ -286,7 +285,7 @@ export function ThreadLineageWorkflowRow({
                   accessory={
                     <>
                       {status === "failed" ? (
-                        <SectionHeaderStatus>{status}</SectionHeaderStatus>
+                        <span className="shrink-0 text-3xs leading-none">{status}</span>
                       ) : null}
                       <Tooltip>
                         <TooltipTrigger
@@ -314,8 +313,10 @@ export function ThreadLineageWorkflowRow({
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        // The minimum lines up the bars after "Phase N" labels.
-                        <span className="block min-w-12 max-w-[34cqw] truncate @max-[18rem]:max-w-[24cqw]" />
+                        // One width for every label, so all bars start together. It is 3rem at the
+                        // panel's default width and grows only with the room a "Phase N" row leaves
+                        // after its bar and counts (2.5rem more once counts show their unit).
+                        <span className="block w-[clamp(3rem,100cqw_-_13.25rem,34cqw)] truncate @min-[18rem]/lineage:w-[clamp(3rem,100cqw_-_15.75rem,34cqw)] @max-[16rem]/lineage:w-auto @max-[16rem]/lineage:max-w-[24cqw]" />
                       }
                     >
                       {phase.title}
@@ -344,7 +345,9 @@ export function ThreadLineageWorkflowRow({
                             )}
                           />
                           <span className="min-w-0 flex-1 break-words">{task.label}</span>
-                          <span className={WORKFLOW_STATE_TEXT[task.state]}>{task.state}</span>
+                          <span className="shrink-0 text-2xs text-muted-foreground">
+                            {task.state}
+                          </span>
                         </li>
                       ) : (
                         <WorkflowMemberRow

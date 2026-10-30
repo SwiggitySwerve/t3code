@@ -1047,6 +1047,31 @@ export function workflowPlannedIdentityFixture(
   return { ...seed, row, opening, group: opening.group! };
 }
 
+/** A 40-agent script run whose phase titles range from one word to a sentence. */
+export function workflowPhaseTitlesFixture(): WorkflowQaFixture {
+  const seed = workflowCollapseFixture("script", 40);
+  const titles = [
+    "Collect sources",
+    "Review every package manifest and lockfile",
+    "Fix",
+    "Write the final report",
+  ];
+  const workflow = seed.row.workflow!;
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    workflow: {
+      ...workflow,
+      phases: workflow.phases.map((phase) => ({ ...phase, title: titles[phase.index]! })),
+      agents: workflow.agents.map((agent) => ({
+        ...agent,
+        phaseTitle: titles[agent.phaseIndex!]!,
+      })),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return { ...seed, row, opening, group: opening.group! };
+}
+
 export function workflowScriptProgressFixture(entered: boolean): WorkflowQaFixture {
   const seed = workflowScaleFixture("script", 4);
   const row: WorkflowQaRow = {

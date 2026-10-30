@@ -22,6 +22,7 @@ import {
   WORKFLOW_QA_STRESS,
   workflowCollapseFixture,
   workflowFixture,
+  workflowPhaseTitlesFixture,
   type WorkflowQaVariant,
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import {
@@ -226,13 +227,16 @@ it("lineage row, graph, running, Stop shown while the row is hovered", async () 
 });
 
 // Every phase row, with agent lists folded so each row's bar is in view. `shown` is how many bars
-// must be drawn, or null when it depends on how much room each title leaves.
+// must be drawn, or null when it depends on how much room each title leaves; `open` is a phase
+// whose agent rows are shown.
 it.each([
-  ["graph-256", "graph", 256, false, 16],
-  ["script-256", "script", 256, false, 16],
-  ["graph-256-narrow", "graph", 256, true, 0],
-  ["long-titles", "script", null, false, null],
-] as const)("lineage phase bars, %s", async (state, kind, count, narrow, shown) => {
+  ["graph-256", "graph", "collapse", false, 16, null],
+  ["script-256", "script", "collapse", false, 16, null],
+  ["graph-256-narrow", "graph", "collapse", true, 0, null],
+  ["long-titles", "script", "long-labels", false, null, null],
+  ["script-titles", "script", "titles", false, 4, null],
+  ["agent-rows", "graph", "collapse", false, 16, "Phase 16"],
+] as const)("lineage phase bars, %s", async (state, kind, source, narrow, shown, open) => {
   await captureSurface({
     surface: "lineage-phase-bars",
     state,
@@ -241,21 +245,27 @@ it.each([
     // Not width-checked: each folded row's chevron is CSS-rotated, and across runs a few of their
     // edge pixels differ by one grey level, which no layout explains.
     element: () =>
-      count === null ? (
+      source === "long-labels" ? (
         <LineageRowSurface kind={kind} variant="long-labels" />
       ) : (
         <LineageRowSurface
           kind={kind}
-          fixture={workflowCollapseFixture(kind, count)}
+          fixture={
+            source === "titles" ? workflowPhaseTitlesFixture() : workflowCollapseFixture(kind, 256)
+          }
           narrow={narrow}
         />
       ),
     settle: async (screen) => {
       await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
-      const open = screen.getByRole("button", { name: /^Collapse .+ phase,/ });
-      for (let opened = open.elements().length; opened > 0; opened -= 1) {
-        await userEvent.click(open.first());
+      const folded = screen.getByRole("button", { name: /^Collapse .+ phase,/ });
+      for (let opened = folded.elements().length; opened > 0; opened -= 1) {
+        await userEvent.click(folded.first());
       }
+      if (open !== null)
+        await userEvent.click(
+          screen.getByRole("button", { name: new RegExp(`^Expand ${open} phase,`) }),
+        );
       // The last phases hold the queued and failed rows.
       const list = screen.getByRole("list", { name: "Related threads", exact: true }).element();
       list.scrollTop = list.scrollHeight;
@@ -263,15 +273,13 @@ it.each([
         bar.getBoundingClientRect(),
       );
       const drawn = bars.filter((bar) => bar.width > 0);
-      // A bar is drawn at its full size or not at all, never narrowed.
+      // A bar is drawn at its full size or not at all, and every drawn bar starts at one edge.
       expect(bars.filter((bar) => bar.width === 0 && bar.height === 0)).toHaveLength(
         bars.length - drawn.length,
       );
       expect(drawn.map(({ width, height }) => [width, height])).toEqual(drawn.map(() => [56, 2]));
-      if (shown !== null) {
-        expect(drawn).toHaveLength(shown);
-        expect(new Set(drawn.map((bar) => bar.left)).size).toBeLessThanOrEqual(1);
-      }
+      expect(new Set(drawn.map((bar) => bar.left)).size).toBeLessThanOrEqual(1);
+      if (shown !== null) expect(drawn).toHaveLength(shown);
     },
   });
 });
