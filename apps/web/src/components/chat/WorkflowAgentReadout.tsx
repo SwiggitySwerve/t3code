@@ -40,6 +40,7 @@ export function WorkflowAgentReadout(props: {
           sideOffset={6}
           collisionBoundary={boundary}
           collisionAvoidance={{ side: "flip", align: "shift" }}
+          sticky
           className="pointer-events-none z-[140] max-w-(--available-width) data-anchor-hidden:hidden"
         >
           <Tooltip.Popup

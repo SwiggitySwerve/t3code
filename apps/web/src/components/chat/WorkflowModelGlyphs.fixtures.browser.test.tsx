@@ -237,19 +237,31 @@ it("anchors one shared readout across pointer and keyboard navigation", async ()
 it("shows details on the first touch tap and opens the thread on the second", async () => {
   const open = vi.fn();
   await using screen = await render(
-    <WorkflowProgressOverview
-      progress={deriveWorkflowProgress(workflowModelGlyphFixture().group)}
-      environmentId={EnvironmentId.make("qa")}
-      onOpenThread={open}
-    />,
+    <>
+      <button>Outside overview</button>
+      <WorkflowProgressOverview
+        progress={deriveWorkflowProgress(workflowModelGlyphFixture().group)}
+        environmentId={EnvironmentId.make("qa")}
+        onOpenThread={open}
+      />
+    </>,
   );
   const agent = screen.getByRole("button", { name: "Open Opus planner", exact: true }).element();
+  const outside = screen.getByRole("button", { name: "Outside overview", exact: true }).element();
+  await act(() => outside.focus());
   const tap = () =>
     act(() => {
-      agent.focus();
       agent.dispatchEvent(new PointerEvent("click", { bubbles: true, pointerType: "touch" }));
+      agent.dispatchEvent(
+        new PointerEvent("pointerout", {
+          bubbles: true,
+          pointerType: "touch",
+          relatedTarget: outside,
+        }),
+      );
     });
   await tap();
+  expect(document.activeElement).toBe(outside);
   await expect.element(page.getByRole("note", { name: "Agent details" })).toBeVisible();
   expect(open).not.toHaveBeenCalled();
   await tap();
@@ -278,6 +290,15 @@ it("keeps the readout inside resized chat bounds and hides it when its cell scro
     const box = readout.element().getBoundingClientRect();
     expect(box.bottom).toBeLessThanOrEqual(boundary.getBoundingClientRect().bottom);
     expect(box.top).toBeGreaterThanOrEqual(agent.element().getBoundingClientRect().bottom);
+  });
+  await act(() => {
+    boundary.style.bottom = "320px";
+  });
+  await vi.waitFor(() => {
+    const box = readout.element().getBoundingClientRect();
+    expect(box.bottom).toBeLessThanOrEqual(boundary.getBoundingClientRect().bottom);
+    expect(box.top).toBeGreaterThanOrEqual(boundary.getBoundingClientRect().top);
+    expect(box.bottom).toBeLessThanOrEqual(agent.element().getBoundingClientRect().top);
   });
   const readoutElement = readout.element();
   await act(() => {
