@@ -242,7 +242,7 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     group.workflow.status === "interrupted";
   const activity = group.workflow.progress?.trim();
   const headlineMember =
-    failedPhase === undefined && !terminal && !activity
+    failure === undefined && failedPhase === undefined && !terminal && !activity
       ? latestStartedOrFinishedMember(tasks)
       : null;
   // Agent failures are listed in `attention`; the headline says what else is happening.

@@ -455,6 +455,7 @@ describe("deriveWorkflowGroups over a dynamic workflow", () => {
     expect(progress.successful).toBe(false);
     expect(progress.headline).toBe("Beta · 1 running");
     expect(progress.failureSummary).toBe("1 agent failed · alpha:two");
+    expect(progress.headlineMember).toBeNull();
   });
 
   it.each([false, true])("keeps a reported phase title, missing title first=%s", (missingFirst) => {

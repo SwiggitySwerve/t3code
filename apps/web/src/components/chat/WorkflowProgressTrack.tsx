@@ -21,7 +21,12 @@ export function WorkflowProgressTrack({
   const total = counts.total ?? counts.observed;
   if (counts.total === 0) return null;
   return (
-    <div className={cn("relative h-1 w-full", className)} aria-hidden={decorative || undefined}>
+    // Spans, so the bar can sit inside a button's phrasing content.
+    <span
+      className={cn("relative block h-1 w-full", className)}
+      aria-hidden={decorative || undefined}
+      data-workflow-track
+    >
       {decorative ? null : (
         <progress
           className={cn("absolute inset-0 h-full w-full opacity-0", PROGRESS_CLASS_NAME)}
@@ -31,7 +36,7 @@ export function WorkflowProgressTrack({
           max={total || 1}
         />
       )}
-      <div
+      <span
         aria-hidden="true"
         className={cn(
           // oxlint-disable-next-line shadcn/no-arbitrary-values -- system colors preserve the progress track in forced-colors mode.
@@ -51,7 +56,7 @@ export function WorkflowProgressTrack({
             />
           ),
         )}
-      </div>
-    </div>
+      </span>
+    </span>
   );
 }

@@ -250,6 +250,19 @@ it.each([
       // The last phases hold the queued and failed rows.
       const list = screen.getByRole("list", { name: "Related threads", exact: true }).element();
       list.scrollTop = list.scrollHeight;
+      const bars = [...list.querySelectorAll("[data-workflow-track]")].map((bar) =>
+        bar.getBoundingClientRect(),
+      );
+      // Every bar starts at one edge with one size; the narrow panel hides them all.
+      expect(
+        bars.map(({ left, width, height }) => ({ left: left - bars[0]!.left, width, height })),
+      ).toEqual(
+        Array.from({ length: 16 }, () => ({
+          left: 0,
+          width: narrow ? 0 : 56,
+          height: narrow ? 0 : 2,
+        })),
+      );
     },
   });
 });

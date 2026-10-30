@@ -276,7 +276,12 @@ export function ThreadLineageWorkflowRow({
                   aria-label={`${open ? "Collapse" : "Expand"} ${phase.title} phase, ${status}`}
                   onClick={() => setPhaseOpen((phases) => new Map(phases).set(phase.id, !open))}
                   meter={
-                    <WorkflowProgressTrack counts={phase.counts} decorative className="h-0.5" />
+                    // Hidden in a dragged-narrow panel, where the bars could not keep one width.
+                    <WorkflowProgressTrack
+                      counts={phase.counts}
+                      decorative
+                      className="h-0.5 @max-[16rem]:hidden"
+                    />
                   }
                   accessory={
                     <>

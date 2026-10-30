@@ -265,6 +265,21 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
         .getByRole("button", { name: /^Expand Phase 16 phase,/ })
         .element()
         .scrollIntoView({ block: "end" });
+      // At the panel's default width each bar keeps its size and no row grows. The before/after
+      // comparison also runs this view on heads that have no bars.
+      const rows = page.getByRole("button", { name: /^Expand Phase \d+ phase,/ }).elements();
+      const bars = rows.flatMap((row) => [...row.querySelectorAll("[data-workflow-track]")]);
+      if (bars.length > 0) {
+        expect(
+          bars.map((bar) => [
+            bar.getBoundingClientRect().width,
+            bar.getBoundingClientRect().height,
+          ]),
+        ).toEqual(Array.from({ length: 16 }, () => [56, 2]));
+      }
+      expect(rows.map((row) => row.getBoundingClientRect().height)).toEqual(
+        Array.from({ length: 16 }, () => 32),
+      );
     }
     if (name === "09-settings") {
       await act(() => router.navigate({ to: "/settings/chat" }));
