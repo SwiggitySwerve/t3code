@@ -263,6 +263,13 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
       await commands.resetPointer();
     }
     await quiet();
+    if (name === "03-expanded-row") {
+      screen
+        .getByRole("button", { name: /Phases 1–8 · 128 done/ })
+        .element()
+        .scrollIntoView({ block: "center" });
+      await quiet();
+    }
     await page.elementLocator(document.body).screenshot({
       path: `${server.config.root}/../../.logs/workflow-qa/full-window/${name}__dark-${width}.png`,
     });
