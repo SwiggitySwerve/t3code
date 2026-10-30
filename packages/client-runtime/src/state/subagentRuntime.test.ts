@@ -24,6 +24,7 @@ import {
   workflowProgressText,
   workflowMemberIdentity,
   workflowPhaseStatus,
+  deriveWorkflowPhaseGroups,
 } from "./subagentRuntime.ts";
 
 const at = (iso: string) => DateTime.makeUnsafe(iso);
@@ -58,6 +59,121 @@ const member = (
 
 const groupsOf = (subagents: ReadonlyArray<ProjectedSubagent>) =>
   deriveWorkflowGroups(projectedSubagentsToRuntime(subagents));
+
+describe("compact workflow presentation", () => {
+  it("groups contiguous settled and queued phases while keeping running and failed phases open", () => {
+    const states = ["completed", "completed", "running", "failed", "queued", "queued"] as const;
+    const progress = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          workflow: {
+            phases: states.map((_, index) => ({ index, title: `Phase ${index + 1}` })),
+            agents: states.map((state, index) => member({ index, phaseIndex: index, state })),
+          },
+        }),
+      ])[0]!,
+    );
+    expect(
+      progress.phaseGroups.map(({ label, kind, summary }) => ({ label, kind, summary })),
+    ).toEqual([
+      { label: "Phases 1–2", kind: "done", summary: "2 done · total unknown" },
+      { label: "Phase 3", kind: null, summary: "1 running · total unknown" },
+      { label: "Phase 4", kind: null, summary: "1 failed · total unknown" },
+      { label: "Phases 5–6", kind: "queued", summary: "2 queued · total unknown" },
+    ]);
+    expect(deriveWorkflowPhaseGroups(progress.phases)).toEqual(progress.phaseGroups);
+  });
+
+  it("respects declared running, stopped and unobserved phases without inventing completions", () => {
+    const progress = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          workflow: {
+            phases: [
+              { index: 0, title: "Scan", progress: { total: 1, state: "running" } },
+              { index: 1, title: "Build", progress: { total: 4, state: "completed" } },
+              { index: 2, title: "Publish", progress: { total: 3, state: "planned" } },
+              { index: 3, title: "Later", progress: { total: 8, state: "planned" } },
+            ],
+            agents: [
+              member({ index: 0, phaseIndex: 0, state: "completed" }),
+              member({ index: 1, phaseIndex: 1, state: "completed" }),
+            ],
+          },
+        }),
+      ])[0]!,
+    );
+    const phases = progress.phases.map((phase, index) =>
+      index === 2 ? { ...phase, state: "stopped" as const } : phase,
+    );
+    expect(
+      deriveWorkflowPhaseGroups(phases).map(({ kind, summary }) => ({ kind, summary })),
+    ).toEqual([
+      { kind: null, summary: "1 done" },
+      { kind: "done", summary: "1 done · 3 not observed" },
+      { kind: "settled", summary: "No agents observed · 3 not observed · phase stopped" },
+      { kind: "queued", summary: "8 queued" },
+    ]);
+  });
+
+  it("derives failures, active retries and dependency blockers without labelling ordinary queued work", () => {
+    const progress = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          workflow: {
+            phases: [],
+            plan: {
+              nodes: [
+                { key: "retry", label: "Retrying", wave: 0, dependsOn: [] },
+                { key: "failed", label: "Failed", wave: 0, dependsOn: [] },
+                { key: "done", label: "Done", wave: 0, dependsOn: [] },
+                { key: "queued", label: "Queued", wave: 0, dependsOn: [] },
+                { key: "blocked", label: "Blocked", wave: 1, dependsOn: ["failed"] },
+                { key: "indirect", label: "Indirect", wave: 2, dependsOn: ["blocked"] },
+              ],
+            },
+            nodeOutcomes: {
+              failed: { status: "failed", reason: "Permission denied" },
+              done: { status: "passed", attempts: 3 },
+            },
+            agents: [
+              member({ index: 0, graphNodeKey: "retry", attempt: 2 }),
+              member({ index: 1, graphNodeKey: "failed", state: "failed" }),
+              member({ index: 2, graphNodeKey: "done", state: "completed", attempt: 2 }),
+            ],
+          },
+        }),
+      ])[0]!,
+    );
+    expect(progress.attention.map((task) => [task.id, task.attention])).toEqual([
+      ["failed", { kind: "failed", reason: "Permission denied" }],
+      ["retry", { kind: "retrying", reason: "Retry 2" }],
+      ["blocked", { kind: "blocked", reason: "Blocked by Failed" }],
+      ["indirect", { kind: "blocked", reason: "Blocked by Blocked" }],
+    ]);
+  });
+
+  it.each([
+    ["completed", "2026-08-01T10:00:05Z", 5000],
+    ["failed", "2026-08-01T10:00:05Z", 5000],
+    ["completed", "2026-08-01T09:59:59Z", null],
+    ["completed", null, null],
+    ["running", "2026-08-01T10:00:05Z", null],
+  ] as const)("uses reliable terminal timestamps for %s at %s", (status, end, elapsedMs) => {
+    const group = groupsOf([
+      subagent({
+        status,
+        completedAt: end === null ? null : at(end),
+        workflow: { phases: [], agents: [] },
+      }),
+    ])[0]!;
+    expect(deriveWorkflowProgress(group).elapsedMs).toBe(elapsedMs);
+    expect(
+      deriveWorkflowProgress({ ...group, workflow: { ...group.workflow, startedAt: null } })
+        .elapsedMs,
+    ).toBeNull();
+  });
+});
 
 describe("projectedSubagentsToRuntime workflow expansion", () => {
   it.each([false, true])(

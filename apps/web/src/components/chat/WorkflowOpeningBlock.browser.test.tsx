@@ -28,6 +28,7 @@ import { page, userEvent } from "vite-plus/test/browser";
 
 import "../../index.css";
 import { workflowClientSettings } from "../../../test/workflow-fixtures/settings";
+import { expandWorkflowPhases } from "../../../test/workflow-fixtures/interactions";
 import { persistClientSettingsPatch } from "../../hooks/useSettings";
 import { act, fakeTimers, render } from "../../../test/render";
 import type ChatMarkdown from "../ChatMarkdown";
@@ -80,6 +81,7 @@ it.each([
   );
   using _settings = workflowClientSettings(true);
   await using screen = await render(view(before));
+  await expandWorkflowPhases(screen);
   expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(count);
   const selected = screen.getByRole("button", { name: `Open Agent ${count / 2 + 1}`, exact: true });
   await expect.element(selected).toHaveAccessibleDescription(expect.stringContaining("running"));
@@ -185,6 +187,7 @@ it.each([4, 40, 256, 1024] as const)(
         findable
       />,
     );
+    await expandWorkflowPhases(screen);
     expect(screen.container.querySelectorAll("[data-workflow-phase]")).toHaveLength(
       count === 1024 ? 32 : count === 256 ? 16 : count === 40 ? 4 : 2,
     );
@@ -266,7 +269,12 @@ it("pages more than 32 phases and resets the page when filtering failures", asyn
       ...fixture.group.phases[0]!,
       index,
       title: `Phase ${index + 1}`,
-      members: [member],
+      members: [
+        {
+          ...member,
+          status: index === members.length - 1 ? ("failed" as const) : ("running" as const),
+        },
+      ],
     })),
   };
   using _settings = workflowClientSettings(true);
@@ -307,6 +315,7 @@ it("moves through dots by keyboard, preserves focus on updates, and skips the re
       />
     </div>,
   );
+  await expandWorkflowPhases(screen);
   const first = screen.getByRole("button", { name: "Open Agent 1", exact: true });
   await act(() => first.element().focus());
   await userEvent.keyboard("{ArrowRight}");
@@ -485,7 +494,8 @@ it("coalesces continuing workflow updates into one polite announcement and prese
     "Checking types",
   );
   expect(screen.container.textContent).not.toContain("Checking types");
-  expect(active.element().textContent).not.toContain("15s");
+  expect(active.elements()).toHaveLength(0);
+  expect(screen.container.querySelector("[data-workflow-receipt]")).not.toBeNull();
 });
 
 it("renders fixed script capacity and resizes only the phase being entered", async () => {
@@ -501,6 +511,7 @@ it("renders fixed script capacity and resizes only the phase being entered", asy
   };
   using _settings = workflowClientSettings(true);
   await using screen = await render(view(false));
+  await expandWorkflowPhases(screen);
   using _timers = fakeTimers();
   const audits = screen.getByRole("region", { name: "Package audits phase", exact: true });
   const followup = screen.getByRole("region", { name: "Follow up phase", exact: true });
@@ -520,7 +531,7 @@ it("renders fixed script capacity and resizes only the phase being entered", asy
 });
 
 it.each(["completed", "failed", "stopped"] as const)(
-  "keeps dots visible and waits for callback %s before changing phase status",
+  "waits for callback %s before changing phase status and preserves disclosed dots",
   async (state) => {
     const view = (state: WorkflowCallbackState) => (
       <WorkflowOpeningBlock
@@ -538,11 +549,15 @@ it.each(["completed", "failed", "stopped"] as const)(
     await act(() => vi.advanceTimersByTime(999));
     await expect.element(phase).toHaveAccessibleDescription("running · 1/1 settled · 1 done");
     await act(() => vi.advanceTimersByTime(1));
+    await expandWorkflowPhases(screen);
     await expect.element(phase).toHaveAccessibleDescription(`${state} · 1/1 settled · 1 done`);
     expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(1);
     if (state === "failed") {
       const live = screen.container.querySelector('[aria-live="polite"]')!;
-      expect(live.textContent).toBe("Audit failed");
+      expect(live.textContent).toBe("Workflow finished · Audit failed");
+      expect(screen.container.querySelector("[data-workflow-receipt]")?.textContent).toContain(
+        "0 agents failed · 1 phase failed",
+      );
       expect(live.querySelector("[data-model-glyph]")).toBeNull();
     }
   },
@@ -1057,14 +1072,14 @@ it.each(["unloaded", "failed", "completed"] as const)(
       />,
       { container },
     );
-    if (status === "completed") {
+    if (status !== "unloaded") {
       expect(screen.container.textContent).not.toContain("FINAL RESULT");
       expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toContain(
-        "Workflow finished",
+        status === "completed" ? "Workflow finished" : "Workflow failed",
       );
       expect(screen.container.textContent).not.toContain("Old running log");
       const result = screen.getByRole("button", { name: "Workflow result", exact: true });
-      await userEvent.tab();
+      await act(() => result.element().focus());
       await expect.element(result).toHaveFocus();
       await userEvent.keyboard("{Enter}");
     }
@@ -1628,6 +1643,7 @@ it("defaults to dots, reacts to the persisted graph preference, and removes the 
       onOpenThread={() => {}}
     />,
   );
+  await expandWorkflowPhases(screen);
   await expect
     .element(screen.getByRole("button", { name: "Graph details", exact: true }))
     .not.toBeInTheDocument();

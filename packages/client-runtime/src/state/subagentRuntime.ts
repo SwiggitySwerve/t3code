@@ -48,6 +48,8 @@ export {
   WORKFLOW_MEMBER_STATE,
   WORKFLOW_NODE_STATE,
   type WorkflowTaskProgress,
+  type WorkflowPhaseGroup,
+  deriveWorkflowPhaseGroups,
 } from "./workflowProgress.ts";
 
 export type RuntimeSubagentStatus =

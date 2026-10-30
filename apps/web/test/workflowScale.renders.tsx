@@ -17,6 +17,8 @@ import {
   scrollWavesToNode,
 } from "./workflow-fixtures/surfaces";
 import { workflowScaleFixture, type WorkflowQaFixture } from "./workflow-fixtures/workflowFixtures";
+import { workflowCollapseFixture } from "./workflow-fixtures/workflowFixtures";
+import { expandWorkflowPhases } from "./workflow-fixtures/interactions";
 
 vi.mock(import("@effect/atom-react"), async (original) => ({
   ...(await original()),
@@ -37,6 +39,7 @@ function inspectDom(container: HTMLElement) {
     placeholders: count("[data-workflow-node-placeholder]"),
     edges: count("[data-workflow-waves] > div > svg > path"),
     columnWidth: container.querySelector("[data-qa-column]")?.getBoundingClientRect().width,
+    blockHeight: container.querySelector("[data-workflow-opening]")?.getBoundingClientRect().height,
   };
 }
 
@@ -68,6 +71,68 @@ const CASES = ([256, 1024] as const).flatMap((count) =>
       surface,
     }),
   ),
+);
+
+const COLLAPSE_CASES = (["graph", "script"] as const).flatMap((kind) =>
+  ([4, 40, 256, 1024] as const).flatMap((count) =>
+    (["running", "completed"] as const).flatMap((status) =>
+      [false, true].map((expanded) => ({ kind, count, status, expanded })),
+    ),
+  ),
+);
+
+it.runIf(import.meta.env.VITE_T3_WORKFLOW_SCALE === "1").each(COLLAPSE_CASES)(
+  "workflow collapse footprint: $kind / $count / $status / expanded=$expanded",
+  async ({ kind, count, status, expanded }) => {
+    using _settings = workflowClientSettings();
+    const previous = { width: innerWidth, height: innerHeight };
+    await page.viewport(736, 900);
+    await using _viewport = {
+      [Symbol.asyncDispose]: () => page.viewport(previous.width, previous.height),
+    };
+    const fixture = workflowCollapseFixture(kind, count, status);
+    const expected = new Map(
+      deriveWorkflowProgress(fixture.group).phases.flatMap((phase) =>
+        phase.tasks.map((task) => [task.id, task.state] as const),
+      ),
+    );
+    const samples = [];
+    for (let sample = 0; sample < 5; sample += 1) {
+      const start = performance.now();
+      await using screen = await render(<WorkflowBlockSurface kind={kind} fixture={fixture} />, {
+        // The production surface receives its routing inputs through props.
+        router: false,
+      });
+      const mountMs = performance.now() - start;
+      if (expanded) await expandWorkflowPhases(screen);
+      const readyMs = performance.now() - start;
+      const cells = screen.container.querySelectorAll<HTMLButtonElement>("[data-workflow-dot]");
+      if (expanded) expect(cells).toHaveLength(count);
+      for (const cell of cells) {
+        expect(expected.has(cell.dataset.workflowDot!)).toBe(true);
+        expect(cell.getAttribute("aria-description")).toMatch(
+          new RegExp(`^${expected.get(cell.dataset.workflowDot!)}(?:,|$)`),
+        );
+      }
+      samples.push({ sample, mountMs, readyMs, dom: inspectDom(screen.container) });
+    }
+    await commands.writeRenderReport(
+      `workflow-collapse-${kind}-${count}-${status}-${expanded ? "expanded" : "default"}`,
+      JSON.stringify(
+        {
+          kind,
+          count,
+          status,
+          expanded,
+          samples,
+          methodology:
+            "First sample after imports; warm median of samples 1–4. mountMs is render/act through committed DOM. readyMs also includes user-event disclosures for all-expanded cases. No paint, cold-cache, CPU or memory claim. Same 736px viewport; no samples discarded.",
+        },
+        null,
+        2,
+      ),
+    );
+  },
 );
 
 // Opt in separately so scripts/render-metrics.ts keeps its existing report schema.

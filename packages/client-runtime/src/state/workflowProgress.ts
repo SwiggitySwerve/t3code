@@ -3,7 +3,7 @@ import type {
   RuntimeSubagentStatus,
   SubagentWorkflowGroup,
 } from "./subagentRuntime.ts";
-import type { WorkflowGraphNodeState } from "./workflowGraphView.ts";
+import { workflowGraphBlockedReasons, type WorkflowGraphNodeState } from "./workflowGraphView.ts";
 
 export type WorkflowTaskState = "done" | "running" | "failed" | "queued" | "stopped" | "skipped";
 
@@ -14,6 +14,12 @@ export interface WorkflowTaskProgress {
   readonly detail: string | null;
   readonly member: RuntimeSubagent | null;
   readonly plannedIdentity?: RuntimeSubagent["plannedIdentity"];
+  readonly attention?:
+    | {
+        readonly kind: "failed" | "blocked" | "retrying" | "waiting";
+        readonly reason: string;
+      }
+    | undefined;
 }
 
 export interface WorkflowProgressCounts {
@@ -97,11 +103,24 @@ function memberTask(member: RuntimeSubagent): WorkflowTaskProgress {
     state: WORKFLOW_MEMBER_STATE[member.status],
     member,
     plannedIdentity: member.plannedIdentity,
+    attention: memberAttention(member, WORKFLOW_MEMBER_STATE[member.status]),
     detail:
       member.status === "failed"
         ? (member.error ?? member.result)
         : (member.result ?? member.progress),
   };
+}
+
+function memberAttention(
+  member: RuntimeSubagent | null,
+  state: WorkflowTaskState,
+): WorkflowTaskProgress["attention"] {
+  if (state === "failed")
+    return { kind: "failed", reason: member?.error ?? member?.result ?? "Agent failed" };
+  if (state !== "running" || member === null) return undefined;
+  if ((member.attempt ?? 0) > 0) return { kind: "retrying", reason: `Retry ${member.attempt}` };
+  if (member.status === "waiting") return { kind: "waiting", reason: member.progress ?? "Waiting" };
+  return undefined;
 }
 
 function phaseProgress(
@@ -145,6 +164,8 @@ function latestStartedOrFinishedMember(
 
 /** Graph nodes own retry identity; script agents keep their index across attempts. */
 export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
+  const blocked =
+    group.graph === null ? new Map<string, string>() : workflowGraphBlockedReasons(group.graph);
   const phases: WorkflowPhaseProgress[] =
     group.graph === null
       ? group.phases.map((phase) =>
@@ -164,6 +185,16 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
             state: WORKFLOW_NODE_STATE[node.state],
             member: node.member,
             plannedIdentity: node.plannedIdentity ?? node.member?.plannedIdentity,
+            attention:
+              node.state === "failed"
+                ? {
+                    kind: "failed",
+                    reason:
+                      node.reason ?? node.member?.error ?? node.member?.result ?? "Agent failed",
+                  }
+                : blocked.has(node.key)
+                  ? { kind: "blocked", reason: blocked.get(node.key)! }
+                  : memberAttention(node.member, WORKFLOW_NODE_STATE[node.state]),
             detail:
               node.reason ??
               (node.state === "failed"
@@ -231,13 +262,109 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     phases.every((phase) => phase.allDone || (phase.state === null && phase.tasks.length === 0));
   return {
     phases,
+    phaseGroups: deriveWorkflowPhaseGroups(phases),
+    attention: tasks
+      .filter((task) => task.attention !== undefined)
+      .sort(
+        (left, right) =>
+          Number(right.attention?.kind === "failed") - Number(left.attention?.kind === "failed"),
+      ),
+    terminal,
+    elapsedMs: workflowElapsedMs(group.workflow, terminal),
     counts,
     headline,
     headlineMember,
     successful,
     failedCount,
+    failedPhaseCount: phases.filter((phase) => phase.state === "failed").length,
     agentCount: tasks.length,
   };
+}
+
+function workflowElapsedMs(workflow: RuntimeSubagent, terminal: boolean): number | null {
+  if (!terminal || workflow.startedAt === null || workflow.completedAt === null) return null;
+  const elapsed = Date.parse(workflow.completedAt) - Date.parse(workflow.startedAt);
+  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : null;
+}
+
+type CollapseKind = "done" | "queued" | "settled";
+
+export interface WorkflowPhaseGroup {
+  readonly id: string;
+  readonly phases: ReadonlyArray<WorkflowPhaseProgress>;
+  readonly kind: CollapseKind | null;
+  readonly label: string;
+  readonly summary: string;
+}
+
+function phaseCollapseKind(phase: WorkflowPhaseProgress): CollapseKind | null {
+  const { counts, state } = phase;
+  if (
+    phase.id === "other" ||
+    counts.failed > 0 ||
+    counts.running > 0 ||
+    state === "failed" ||
+    state === "running"
+  )
+    return null;
+  if (state === "stopped") return "settled";
+  if (
+    state === "completed" ||
+    (counts.done > 0 &&
+      counts.done === counts.observed &&
+      (counts.total === null || counts.done === counts.total))
+  )
+    return "done";
+  if (counts.settled > 0 && counts.settled === counts.observed) return "settled";
+  if (state === "planned" || (counts.queued > 0 && counts.queued === counts.observed))
+    return "queued";
+  return null;
+}
+
+export function deriveWorkflowPhaseGroups(
+  phases: ReadonlyArray<WorkflowPhaseProgress>,
+): WorkflowPhaseGroup[] {
+  const runs: Array<{ kind: CollapseKind | null; phases: WorkflowPhaseProgress[] }> = [];
+  for (const phase of phases) {
+    const kind = phaseCollapseKind(phase);
+    const last = runs.at(-1);
+    if (kind !== null && last?.kind === kind) last.phases.push(phase);
+    else runs.push({ kind, phases: [phase] });
+  }
+  return runs.map(({ kind, phases: run }) => {
+    const first = run[0]!;
+    const last = run.at(-1)!;
+    const total = run.every((phase) => phase.counts.total !== null)
+      ? run.reduce((sum, phase) => sum + phase.counts.total!, 0)
+      : null;
+    const counts = countTasks(
+      run.flatMap((phase) => phase.tasks),
+      total,
+    );
+    const missing = Math.max(0, (total ?? counts.observed) - counts.observed);
+    const numeric = /^Phase (\d+)$/.exec(first.title);
+    const lastNumeric = /^Phase (\d+)$/.exec(last.title);
+    const label =
+      run.length === 1
+        ? first.title
+        : numeric && lastNumeric
+          ? `Phases ${numeric[1]}–${lastNumeric[1]}`
+          : `${first.title}–${last.title}`;
+    const summary =
+      kind === "queued"
+        ? `${total ?? counts.queued} queued${total === null ? " · total unknown" : ""}`
+        : [
+            workflowCountsText(counts) || "No agents observed",
+            missing > 0 ? `${missing} not observed` : null,
+            kind === "settled" && run.some((phase) => phase.state === "stopped")
+              ? "phase stopped"
+              : null,
+            total === null ? "total unknown" : null,
+          ]
+            .filter(Boolean)
+            .join(" · ");
+    return { id: run.map((phase) => phase.id).join("/"), phases: run, kind, label, summary };
+  });
 }
 
 export function workflowSettledText(counts: WorkflowProgressCounts): string {

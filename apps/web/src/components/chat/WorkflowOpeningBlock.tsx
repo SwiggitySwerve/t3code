@@ -102,10 +102,9 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
   const activityHeadline = overview?.headline ?? progress;
   const liveHeadline = [activityHeadline, waitingOn].filter(Boolean).join(" · ");
   const headlineMember = overview?.headlineMember ?? null;
-  const terminalResult =
-    group?.workflow.result && group.workflow.status !== "running" && progress !== activityHeadline
-      ? progress
-      : null;
+  const terminalResult = overview?.terminal
+    ? (group?.workflow.result ?? group?.workflow.error ?? null)
+    : null;
   const declaration =
     graph !== null
       ? graph.waves.flatMap((wave) => wave.map((node) => node.label))
@@ -121,36 +120,43 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
         <WorkflowIcon aria-hidden className="mt-0.5 size-3.5 shrink-0 text-muted-foreground" />
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <p
+            aria-live={overview?.terminal ? "polite" : undefined}
+            aria-atomic={overview?.terminal ? true : undefined}
             className={cn(
               "text-2xs font-medium text-muted-foreground",
               group?.workflow.status === "failed" && "text-destructive-foreground",
             )}
           >
             {heading}
+            {overview?.terminal && overview.failedPhaseCount > 0 && overview.failedCount === 0
+              ? ` · ${overview.headline}`
+              : null}
           </p>
           <h3 className="truncate text-sm font-medium text-foreground" data-thread-find-text={find}>
             {headline.title}
           </h3>
-          <div
-            aria-live="polite"
-            aria-atomic="true"
-            className="flex min-w-0 items-start gap-1 text-xs text-muted-foreground [overflow-wrap:anywhere]"
-          >
-            {headlineMember === null ? null : (
-              <WorkflowAgentIdentity
-                member={headlineMember}
-                provider={providers.find(
-                  (provider) => provider.instanceId === headlineMember.providerInstanceId,
-                )}
-              />
-            )}
-            {liveHeadline ? (
-              <div className="min-w-0 flex-1">
-                <WorkflowProgress text={liveHeadline} />
-              </div>
-            ) : null}
-          </div>
-          {headline.description ? (
+          {overview?.terminal ? null : (
+            <div
+              aria-live="polite"
+              aria-atomic="true"
+              className="flex min-w-0 items-start gap-1 text-xs text-muted-foreground [overflow-wrap:anywhere]"
+            >
+              {headlineMember === null ? null : (
+                <WorkflowAgentIdentity
+                  member={headlineMember}
+                  provider={providers.find(
+                    (provider) => provider.instanceId === headlineMember.providerInstanceId,
+                  )}
+                />
+              )}
+              {liveHeadline ? (
+                <div className="min-w-0 flex-1">
+                  <WorkflowProgress text={liveHeadline} />
+                </div>
+              ) : null}
+            </div>
+          )}
+          {!overview?.terminal && headline.description ? (
             <p className="text-xs text-muted-foreground" data-thread-find-text={find}>
               {headline.description}
             </p>
@@ -170,7 +176,11 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           </Button>
         ) : null}
       </header>
-      {opening.budget === undefined ? null : <WorkflowBudgetMeter budget={opening.budget} />}
+      {opening.budget === undefined ||
+      overview?.terminal ||
+      (overview?.attention.length ?? 0) > 0 ? null : (
+        <WorkflowBudgetMeter budget={opening.budget} />
+      )}
       {overview === null ? null : (
         <WorkflowProgressOverview
           progress={overview}
@@ -178,6 +188,11 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           onOpenThread={props.onOpenThread}
         />
       )}
+      {opening.budget !== undefined &&
+      !overview?.terminal &&
+      (overview?.attention.length ?? 0) > 0 ? (
+        <WorkflowBudgetMeter budget={opening.budget} />
+      ) : null}
       {terminalResult ? (
         <Collapsible open={resultOpen} onOpenChange={setResultOpen}>
           <CollapsibleTrigger render={<Button size="xs" variant="ghost" />}>

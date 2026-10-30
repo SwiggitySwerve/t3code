@@ -15,6 +15,7 @@ import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { workflowIdentityStatesFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 import { captureSurface } from "../../../test/workflow-fixtures/capture";
 import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
+import { expandWorkflowPhases } from "../../../test/workflow-fixtures/interactions";
 import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 
 const stop = vi.hoisted(() => vi.fn());
@@ -137,6 +138,7 @@ describe("a workflow's row in the Lineage panel", () => {
           );
           for (const button of screen.getByRole("button", { name: /^Expand .* phase,/ }).elements())
             await userEvent.click(button);
+          await expandWorkflowPhases(screen);
           const progress = deriveWorkflowProgress(fixture.group);
           for (const phase of progress.phases) {
             for (const task of phase.tasks) {

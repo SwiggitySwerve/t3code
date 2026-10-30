@@ -1,5 +1,9 @@
 import { expect, it, vi } from "vite-plus/test";
-import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  deriveWorkflowProgress,
+  deriveWorkflowPhaseGroups,
+} from "@t3tools/client-runtime/state/subagentRuntime";
+import { expandWorkflowPhases } from "../../../test/workflow-fixtures/interactions";
 import { EnvironmentId } from "@t3tools/contracts";
 import { commands, page, userEvent } from "vite-plus/test/browser";
 import "../../index.css";
@@ -27,22 +31,25 @@ it("shows every agent identity, including namespace aliases and generic fallback
     ["gpt-6.1-sol", "openai.gpt-6.1-sol", "openai/gpt-6.1-sol", "gpt-6-luna"],
     ["gpt-6-sol", "gpt-6.1-sol", "vendor/custom-model", "custom-model"],
   ];
+  const phases = progress.phases.slice(0, 2).map((phase, phaseIndex) => ({
+    ...phase,
+    tasks: phase.tasks.map((task, taskIndex) => ({
+      ...task,
+      member: { ...task.member!, model: models[phaseIndex]![taskIndex]! },
+    })),
+  }));
   await using screen = await render(
     <WorkflowProgressOverview
       progress={{
         ...progress,
-        phases: progress.phases.slice(0, 2).map((phase, phaseIndex) => ({
-          ...phase,
-          tasks: phase.tasks.map((task, taskIndex) => ({
-            ...task,
-            member: { ...task.member!, model: models[phaseIndex]![taskIndex]! },
-          })),
-        })),
+        phases,
+        phaseGroups: deriveWorkflowPhaseGroups(phases),
       }}
       environmentId={EnvironmentId.make("qa")}
       onOpenThread={() => {}}
     />,
   );
+  await expandWorkflowPhases(screen);
   const [aliases, distinct] = screen.container.querySelectorAll("[data-workflow-phase]");
   expect(aliases!.querySelectorAll('[data-model-glyph="gpt-sol"]')).toHaveLength(3);
   expect(aliases!.querySelector('[data-model-glyph="gpt-luna"]')).not.toBeNull();
@@ -72,6 +79,7 @@ it.each([400, 736])(
     });
     using _settings = workflowClientSettings(true);
     await using screen = await render(<WorkflowModelGlyphSurface />);
+    await expandWorkflowPhases(screen);
     const headline = screen.container.querySelector('[aria-live="polite"]')!;
     expect(headline.querySelector("[data-model-glyph]")?.getAttribute("data-model-glyph")).toBe(
       "gpt-sol",
@@ -178,6 +186,7 @@ it("anchors one shared readout across pointer and keyboard navigation", async ()
       </div>
     </>,
   );
+  await expandWorkflowPhases(screen);
   const opus = screen.getByRole("button", { name: "Open Opus planner", exact: true });
   const haiku = screen.getByRole("button", { name: "Open Haiku verifier", exact: true });
   await userEvent.click(screen.getByRole("button", { name: "Outside the overview" }));
@@ -246,6 +255,7 @@ it("shows details on the first touch tap and opens the thread on the second", as
       />
     </>,
   );
+  await expandWorkflowPhases(screen);
   const agent = screen.getByRole("button", { name: "Open Opus planner", exact: true }).element();
   const outside = screen.getByRole("button", { name: "Outside overview", exact: true }).element();
   await act(() => outside.focus());

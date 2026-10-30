@@ -897,6 +897,83 @@ export function workflowModelGlyphFixture(cue?: "running" | "failed"): WorkflowQ
   return { ...seed, row, opening, group: opening.group!, progress: workflowProgressText(row) };
 }
 
+export function workflowCollapseFixture(
+  kind: WorkflowQaKind,
+  count: WorkflowScaleCount,
+  status: "running" | "completed" | "failed" = "running",
+): WorkflowQaFixture {
+  const seed = workflowScaleFixture(kind, count, false, { identities: "diverse" });
+  const workflow = seed.row.workflow!;
+  const agents = workflow.agents.map((agent, index) => ({
+    ...agent,
+    ...(count === 4 ? { phaseIndex: 0, phaseTitle: "Phase 1" } : {}),
+    state:
+      status === "running"
+        ? count === 4
+          ? ("running" as const)
+          : agent.state
+        : status === "failed" && index === count - 1
+          ? ("failed" as const)
+          : ("completed" as const),
+    ...(count === 4
+      ? { attempt: 0, result: undefined, attemptHistory: [], attemptTaskIds: [] }
+      : {}),
+    ...(status !== "running"
+      ? {
+          startedAt: WORKFLOW_QA_NOW - 5000,
+          completedAt: WORKFLOW_QA_NOW,
+          childThreadId: ThreadId.make(`qa-thread-${index}`),
+        }
+      : {}),
+  }));
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    status,
+    completedAt: status === "running" ? null : DateTime.makeUnsafe(WORKFLOW_QA_NOW),
+    workflow: {
+      ...workflow,
+      agents,
+      phases: count === 4 ? [{ index: 0, title: "Phase 1" }] : workflow.phases,
+      ...(workflow.plan
+        ? {
+            plan: {
+              nodes: workflow.plan.nodes.map((node) =>
+                count === 4 ? { ...node, wave: 0, dependsOn: [] } : node,
+              ),
+            },
+            nodeOutcomes: Object.fromEntries(
+              agents.flatMap((agent) =>
+                agent.state === "completed" || agent.state === "failed"
+                  ? [
+                      [
+                        agent.graphNodeKey!,
+                        {
+                          status:
+                            agent.state === "failed" ? ("failed" as const) : ("passed" as const),
+                          ...(agent.state === "failed"
+                            ? { reason: "Access denied. Check workspace permissions." }
+                            : {}),
+                        },
+                      ],
+                    ]
+                  : [],
+              ),
+            ),
+          }
+        : {}),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return {
+    row,
+    opening,
+    group: opening.group!,
+    heading: appWorkflowHeading(status),
+    progress: workflowProgressText(row),
+    running: status === "running",
+  };
+}
+
 export function workflowPlannedIdentityFixture(
   kind: WorkflowQaKind,
   count: WorkflowScaleCount | "states" = 256,
