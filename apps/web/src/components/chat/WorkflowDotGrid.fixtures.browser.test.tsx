@@ -5,6 +5,7 @@ import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRu
 import {
   workflowIdentityStatesFixture,
   workflowModelGlyphFixture,
+  workflowScaleFixture,
   workflowScriptProgressFixture,
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import "../../index.css";
@@ -111,10 +112,18 @@ it.each(["stopped", "mixed-models", "verbose", "failure-focus"] as const)(
         variant === "mixed-models" ? (
           <WorkflowModelGlyphSurface />
         ) : variant === "stopped" ? (
-          <WorkflowBlockSurface kind="graph" variant="stopped" />
+          <WorkflowBlockSurface
+            kind="graph"
+            fixture={workflowScaleFixture("graph", 40, false, {
+              identities: "diverse",
+              stopped: true,
+            })}
+          />
         ) : variant === "failure-focus" ? (
           <div className="min-h-screen bg-background" data-qa-readout-frame>
-            <WorkflowBlockSurface kind="graph" agentCount={40} />
+            <div style={{ contain: "paint layout style" }}>
+              <WorkflowBlockSurface kind="graph" agentCount={40} />
+            </div>
           </div>
         ) : (
           <WorkflowBlockSurface kind="graph" agentCount={40} />

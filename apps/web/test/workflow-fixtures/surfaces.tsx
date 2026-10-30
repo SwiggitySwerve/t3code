@@ -82,7 +82,7 @@ export function WorkflowBlockSurface(props: {
     props.fixture ??
     (props.agentCount === undefined
       ? workflowFixture(props.kind, props.variant ?? "running")
-      : workflowScaleFixture(props.kind, props.agentCount));
+      : workflowScaleFixture(props.kind, props.agentCount, false, { identities: "diverse" }));
   return (
     <ChatColumn>
       <WorkflowOpeningBlock
@@ -107,7 +107,7 @@ export function WorkflowCanvasSurface(props: {
     props.fixture ??
     (props.agentCount === undefined
       ? workflowFixture("graph", props.variant ?? "running")
-      : workflowScaleFixture("graph", props.agentCount));
+      : workflowScaleFixture("graph", props.agentCount, false, { identities: "diverse" }));
   const graph = fixture.group.graph;
   if (graph === null) throw new Error("A graph fixture always has a graph.");
   return (

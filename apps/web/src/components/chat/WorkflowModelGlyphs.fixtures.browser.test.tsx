@@ -167,13 +167,30 @@ it.each([400, 736])(
 );
 
 it("updates one inline readout across pointer and keyboard navigation", async () => {
-  await using screen = await render(<WorkflowModelGlyphSurface />);
+  await using screen = await render(
+    <>
+      <button type="button">Outside the overview</button>
+      <div style={{ contain: "paint layout style", minHeight: 1200 }}>
+        <WorkflowModelGlyphSurface />
+      </div>
+    </>,
+  );
   const opus = screen.getByRole("button", { name: "Open Opus planner", exact: true });
   const haiku = screen.getByRole("button", { name: "Open Haiku verifier", exact: true });
+  await userEvent.click(screen.getByRole("button", { name: "Outside the overview" }));
+  const before = opus.element().getBoundingClientRect().toJSON();
+  await userEvent.hover(opus);
+  const details = page.getByRole("note", { name: "Agent details" });
+  await expect.element(details).toBeVisible();
+  expect(details.element().getBoundingClientRect().bottom).toBeLessThanOrEqual(innerHeight);
+  expect(opus.element().getBoundingClientRect().toJSON()).toEqual(before);
+  await userEvent.keyboard("{Escape}");
+  await expect.element(details).not.toBeInTheDocument();
+  await userEvent.hover(haiku);
   await userEvent.hover(opus);
   await expect
     .element(
-      screen
+      page
         .getByRole("note", { name: "Agent details" })
         .getByText("CLI Proxy · Opus 5.5", { exact: true }),
     )
@@ -181,7 +198,7 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
   await userEvent.hover(haiku);
   await expect
     .element(
-      screen
+      page
         .getByRole("note", { name: "Agent details" })
         .getByText("Work Cursor · Haiku 5.5", { exact: true }),
     )
@@ -193,7 +210,7 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
   await expect.element(sonnet).toHaveFocus();
   await expect
     .element(
-      screen
+      page
         .getByRole("note", { name: "Agent details" })
         .getByText("CLI Proxy · Sonnet 4.6", { exact: true }),
     )
@@ -201,7 +218,7 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
   await userEvent.keyboard("{ArrowRight}");
   await expect
     .element(
-      screen
+      page
         .getByRole("note", { name: "Agent details" })
         .getByText("Work Cursor · Fable 5.1", { exact: true }),
     )

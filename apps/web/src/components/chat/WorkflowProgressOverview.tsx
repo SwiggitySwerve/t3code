@@ -7,7 +7,8 @@ import {
   type WorkflowPhaseProgress,
   type WorkflowTaskProgress,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { memo, useId, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { memo, useEffect, useId, useState, type CSSProperties, type KeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
@@ -48,6 +49,16 @@ export function WorkflowProgressOverview(props: {
   const [phasePage, setPhasePage] = useState(0);
   const [failuresOnly, setFailuresOnly] = useState(false);
   const [inspectedId, setInspectedId] = useState<string | null>(null);
+  const inspecting = inspectedId !== null;
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hover inspection must receive Escape even when keyboard focus is outside this overview.
+  useEffect(() => {
+    if (!inspecting) return;
+    const dismiss = (event: globalThis.KeyboardEvent) => {
+      if (event.key === "Escape") setInspectedId(null);
+    };
+    document.addEventListener("keydown", dismiss);
+    return () => document.removeEventListener("keydown", dismiss);
+  }, [inspecting]);
   const prefix = useId();
   const readoutId = useId();
   const filtering = failuresOnly && progress.failedCount > 0;
@@ -59,7 +70,7 @@ export function WorkflowProgressOverview(props: {
   const byProvider = new Map(providers.map((provider) => [provider.instanceId, provider]));
   const cache = new Map<string, WorkflowIdentity>();
   const identities = new Map<string, WorkflowIdentity>();
-  const observed = new Map<string, WorkflowIdentity>();
+  const observed = new Map<string, { identity: WorkflowIdentity; count: number }>();
   const icons = new Map<string, Exclude<WorkflowIdentityIcon, { kind: "glyph" }>>();
   const generic = resolveWorkflowIdentity(null, undefined);
   if (generic.icon.kind !== "glyph") icons.set(generic.icon.key, generic.icon);
@@ -82,22 +93,22 @@ export function WorkflowProgressOverview(props: {
         cache.set(cacheKey, identity);
       }
       identities.set(task.id, identity);
-      if (member && task.state !== "queued" && !observed.has(identity.key))
-        observed.set(identity.key, identity);
+      if (member && task.state !== "queued") {
+        const entry = observed.get(identity.key);
+        if (entry) entry.count += 1;
+        else observed.set(identity.key, { identity, count: 1 });
+      }
       if (identity.icon.kind !== "glyph") icons.set(identity.icon.key, identity.icon);
       if (task.id === inspectedId) inspectedTask = task;
     }
   const sprite = new Map([...icons.keys()].map((key, index) => [key, `${prefix}-icon-${index}`]));
-  const legend = [...observed.values()];
+  const legend = [...observed.values()].toSorted((left, right) => right.count - left.count);
   const inspectedIdentity = inspectedTask ? identities.get(inspectedTask.id) : undefined;
   return (
     <div
       className="flex min-w-0 flex-col gap-3"
       style={{ "--workflow-agent-pitch": `${WORKFLOW_AGENT_PITCH}px` } as CSSProperties}
       data-workflow-overview
-      onKeyDown={(event) => {
-        if (event.key === "Escape") setInspectedId(null);
-      }}
     >
       <WorkflowIdentitySymbols icons={[...icons.values()]} sprite={sprite} />
       <div className="flex min-w-0 flex-col gap-1 text-2xs tabular-nums text-muted-foreground">
@@ -110,10 +121,10 @@ export function WorkflowProgressOverview(props: {
             className="flex flex-wrap items-center gap-x-3 gap-y-1"
             data-workflow-legend
           >
-            {legend.slice(0, 4).map((identity) => (
+            {legend.slice(0, 4).map(({ identity, count }) => (
               <span
                 key={identity.key}
-                aria-label={`${identity.providerName} · ${identity.modelName}`}
+                aria-label={`${identity.providerName} · ${identity.modelName}, ${count} agents`}
                 className="inline-flex min-w-0 items-center gap-1"
               >
                 <WorkflowAgentIdentity
@@ -122,7 +133,9 @@ export function WorkflowProgressOverview(props: {
                   identity={identity}
                   sprite={sprite}
                 />
-                <span className="break-words">{identity.displayName}</span>
+                <span className="break-words">
+                  {identity.displayName} ×{count}
+                </span>
               </span>
             ))}
             {legend.length > 4 ? (
@@ -130,33 +143,39 @@ export function WorkflowProgressOverview(props: {
                 <span aria-hidden>+{legend.length - 4}</span>
                 <span className="sr-only">{`${legend.length - 4} more models: ${legend
                   .slice(4)
-                  .map((identity) => `${identity.providerName} · ${identity.modelName}`)
+                  .map(
+                    ({ identity, count }) =>
+                      `${identity.providerName} · ${identity.modelName}, ${count} agents`,
+                  )
                   .join(", ")}`}</span>
               </span>
             ) : null}
           </div>
         ) : null}
       </div>
-      {inspectedTask && inspectedIdentity ? (
-        <div
-          id={readoutId}
-          role="note"
-          aria-label="Agent details"
-          className="pointer-events-none fixed inset-x-4 bottom-4 z-50 mx-auto max-w-(--chat-content-max-width) rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
-          data-workflow-readout
-        >
-          <p className={cn("font-medium", WORKFLOW_STATE_TEXT[inspectedTask.state])}>
-            {inspectedTask.label} · {inspectedTask.state}
-          </p>
-          <p>
-            {inspectedIdentity.providerName} · {inspectedIdentity.modelName}
-          </p>
-          {inspectedTask.detail ? (
-            <p className="line-clamp-3 whitespace-pre-wrap">{inspectedTask.detail}</p>
-          ) : null}
-          {inspectedTask.member?.childThreadId ? null : <p>Thread not available yet</p>}
-        </div>
-      ) : null}
+      {inspectedTask && inspectedIdentity
+        ? createPortal(
+            <div
+              id={readoutId}
+              role="note"
+              aria-label="Agent details"
+              className="pointer-events-none fixed inset-x-4 bottom-4 z-50 mx-auto max-w-(--chat-content-max-width) rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
+              data-workflow-readout
+            >
+              <p className={cn("font-medium", WORKFLOW_STATE_TEXT[inspectedTask.state])}>
+                {inspectedTask.label} · {inspectedTask.state}
+              </p>
+              <p>
+                {inspectedIdentity.providerName} · {inspectedIdentity.modelName}
+              </p>
+              {inspectedTask.detail ? (
+                <p className="line-clamp-3 whitespace-pre-wrap">{inspectedTask.detail}</p>
+              ) : null}
+              {inspectedTask.member?.childThreadId ? null : <p>Thread not available yet</p>}
+            </div>,
+            document.body,
+          )
+        : null}
       {progress.failedCount > 0 ? (
         <div>
           <Button

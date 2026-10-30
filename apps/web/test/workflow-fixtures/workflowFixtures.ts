@@ -723,11 +723,40 @@ export function workflowFixture(
 
 export type WorkflowScaleCount = 4 | 40 | 256 | 1024;
 
+const SCALE_MODELS = [
+  { provider: "cliproxy", model: "claude-opus-5-5" },
+  { provider: "cursor-work", model: "gpt-6-luna" },
+  { provider: "cliproxy", model: "claude-haiku-5-5" },
+  { provider: "cliproxy", model: "gpt-6.1-sol" },
+  { provider: "cliproxy", model: "claude-sonnet-4-6" },
+  { provider: "cliproxy", model: "gpt-6.1-astra" },
+  { provider: "cursor-work", model: "openai/gpt-6.1-terra" },
+  { provider: "cursor-work", model: "claude-fable-5-1" },
+] as const;
+
+function scaleIdentity(index: number, count: WorkflowScaleCount, phaseSize: number) {
+  if (count === 4) return SCALE_MODELS[[0, 4, 1, 3][index]!]!;
+  const phase = Math.floor(index / phaseSize);
+  const slot = index % phaseSize;
+  const dominant = SCALE_MODELS[phase % SCALE_MODELS.length]!;
+  if (index === count - 1 || slot < phaseSize - 3) return dominant;
+  if (slot === phaseSize - 3) return SCALE_MODELS[[4, 7, 6, 5][phase % 4]!]!;
+  if (slot === phaseSize - 2)
+    return {
+      provider: ["cursor-work", "qa-opencode", "qa-acp"][phase % 3]!,
+      model: "custom-model",
+    };
+  return phase % 8 === 1
+    ? { provider: "lab-runner", model: "custom-model" }
+    : SCALE_MODELS[phase === 0 ? 5 : (phase + 1) % SCALE_MODELS.length]!;
+}
+
 // 1,024 is synthetic UI stress beyond the server's 1,000-agent runtime limit.
 export function workflowScaleFixture(
   kind: WorkflowQaKind,
   count: WorkflowScaleCount,
   completeSelected = false,
+  options?: { readonly identities?: "diverse"; readonly stopped?: boolean },
 ): WorkflowQaFixture {
   const seed = workflowFixture(kind, "running");
   const phaseSize = count === 1024 ? 32 : count === 256 ? 16 : count === 40 ? 10 : 2;
@@ -741,6 +770,9 @@ export function workflowScaleFixture(
         ...(kind === "graph" ? { graphNodeKey: `task-${index}` } : {}),
       },
       {
+        ...(options?.identities === "diverse"
+          ? { identity: scaleIdentity(index, count, phaseSize) }
+          : {}),
         state:
           index === count - 1
             ? "failed"
@@ -757,6 +789,9 @@ export function workflowScaleFixture(
   );
   const row: WorkflowQaRow = {
     ...seed.row,
+    ...(options?.stopped
+      ? { status: "cancelled" as const, completedAt: DateTime.makeUnsafe(WORKFLOW_QA_NOW) }
+      : {}),
     progress: "Reviewing package exports",
     workflow: {
       name: `Audit ${count} agents${count === 1024 ? " (synthetic UI stress; runtime limit 1,000)" : ""}`,
@@ -796,7 +831,7 @@ export function workflowScaleFixture(
     group: opening.group!,
     heading: appWorkflowHeading(row.status),
     progress: workflowProgressText(row),
-    running: true,
+    running: row.status === "running",
   };
 }
 

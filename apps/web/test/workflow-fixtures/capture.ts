@@ -12,7 +12,7 @@ import {
   type WorkflowQaFrame,
   type WorkflowQaTheme,
 } from "@t3tools/shared/testing/workflowQa";
-import { vi } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import { commands, page, server } from "vite-plus/test/browser";
 
 import { fakeTimers, render, type Screen } from "../render";
@@ -178,6 +178,10 @@ export async function captureSurface(spec: SurfaceSpec): Promise<ReadonlyArray<W
         using _settings = workflowClientSettings(spec.verboseGraph);
         await using screen = await render(spec.element(), { router: spec.router ? "/" : false });
         await spec.settle?.(screen);
+        if (screen.container.querySelector('[data-workflow-identity="acp"]'))
+          await expect
+            .poll(() => screen.container.querySelector('[data-workflow-image-status="loaded"]'))
+            .not.toBeNull();
         if (spec.keepInteraction !== true) {
           if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
           await commands.resetPointer();
