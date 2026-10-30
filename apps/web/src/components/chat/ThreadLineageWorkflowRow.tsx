@@ -18,6 +18,7 @@ import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { MiddleTruncate } from "../ui/middle-truncate";
 import { workflowMemberStatusText } from "./workflowStatusText";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
+import { WorkflowProgressTrack } from "./WorkflowProgressTrack";
 import { resolveWorkflowIdentity } from "./workflowIdentity";
 import { WORKFLOW_STATE_TEXT, WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
 import { cn } from "../../lib/utils";
@@ -274,6 +275,9 @@ export function ThreadLineageWorkflowRow({
                   expanded={open}
                   aria-label={`${open ? "Collapse" : "Expand"} ${phase.title} phase, ${status}`}
                   onClick={() => setPhaseOpen((phases) => new Map(phases).set(phase.id, !open))}
+                  meter={
+                    <WorkflowProgressTrack counts={phase.counts} decorative className="h-0.5" />
+                  }
                   accessory={
                     <>
                       {status === "failed" ? (
@@ -305,7 +309,8 @@ export function ThreadLineageWorkflowRow({
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        <span className="block max-w-[34cqw] truncate @max-[18rem]:max-w-[24cqw]" />
+                        // The minimum lines up the bars after "Phase N" labels.
+                        <span className="block min-w-12 max-w-[34cqw] truncate @max-[18rem]:max-w-[24cqw]" />
                       }
                     >
                       {phase.title}

@@ -23,10 +23,13 @@ vi.mock(import("@effect/atom-react"), async (original) => ({
     readQaAtom(atom, selector)) as never,
 }));
 
-it("discloses contiguous done and queued phases locally while keeping running and failed grids visible", async () => {
+it("discloses contiguous done, queued and later running phases locally while keeping two running and failed grids visible", async () => {
   const fixture = workflowPlannedIdentityFixture("graph", 256);
   await using screen = await render(<WorkflowBlockSurface kind="graph" fixture={fixture} />);
-  expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(80);
+  expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(48);
+  await expect
+    .element(screen.getByRole("button", { name: /^Phases 11–12 · 32 running/ }))
+    .toHaveAttribute("aria-expanded", "false");
   const done = screen.getByRole("button", { name: /Phases 1–8 · 128 done/ });
   await expect.element(done).toHaveAttribute("aria-expanded", "false");
   await expect
@@ -37,9 +40,9 @@ it("discloses contiguous done and queued phases locally while keeping running an
   ).toBeLessThanOrEqual(3);
   await userEvent.click(done);
   await expect.element(done).toHaveAttribute("aria-expanded", "true");
-  expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(208);
+  expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(176);
   await userEvent.click(done);
-  expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(80);
+  expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(48);
   await expandWorkflowPhases(screen);
   expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(256);
   for (const cell of screen.container.querySelectorAll("[data-workflow-dot]")) {
@@ -61,9 +64,9 @@ it("defaults terminal work to a receipt and reveals its complete grids on reques
   await expect
     .element(screen.getByRole("button", { name: "Show phases", exact: true }))
     .toHaveAttribute("aria-expanded", "false");
-  expect(screen.container.querySelector("[data-workflow-receipt]")?.textContent).toContain(
-    "256 agents · 0 agents failed",
-  );
+  const receipt = screen.container.querySelector("[data-workflow-receipt]")?.textContent;
+  expect(receipt).toContain("256 agents");
+  expect(receipt).not.toContain("failed");
   await expandWorkflowPhases(screen);
   expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(256);
   await userEvent.click(screen.getByRole("button", { name: "Hide phases", exact: true }));
@@ -173,6 +176,45 @@ it("preserves the focused running grid when earlier completed phases merge", asy
   expect(screen.container.querySelector(selector)).toBe(cell);
   expect(document.activeElement).toBe(cell);
   await expect.element(page.getByRole("note", { name: "Agent details" })).toBeVisible();
+});
+
+it("keeps a disclosed running fold and its focused cell while an earlier phase finishes", async () => {
+  const fixture = workflowCollapseFixture("graph", 256);
+  const graph = fixture.group.graph!;
+  const view = (ninthFinished: boolean) => (
+    <WorkflowProgressOverview
+      progress={deriveWorkflowProgress({
+        ...fixture.group,
+        graph: {
+          ...graph,
+          waves: graph.waves.map((wave, index) =>
+            index === 8 && ninthFinished
+              ? wave.map((node) => ({ ...node, state: "passed" as const }))
+              : wave,
+          ),
+        },
+      })}
+      environmentId={EnvironmentId.make("qa")}
+      onOpenThread={() => {}}
+    />
+  );
+  await using screen = await render(view(false));
+  await userEvent.click(screen.getByRole("button", { name: /^Phases 11–12 · 32 running/ }));
+  const cell = (id: string) =>
+    screen.container.querySelector<HTMLButtonElement>(`[data-workflow-dot="${id}"]`)!;
+  // Phase 11 leaves the fold for its own expanded grid; Phase 12 stays folded.
+  const leaving = cell("task-160");
+  await act(() => leaving.focus());
+  await screen.rerender(view(true));
+  expect(document.activeElement).toBe(leaving);
+  await screen.rerender(view(false));
+  const staying = cell("task-176");
+  await act(() => staying.focus());
+  await screen.rerender(view(true));
+  expect(document.activeElement).toBe(staying);
+  await expect
+    .element(screen.getByRole("button", { name: /^Phase 12 · 16 running/ }))
+    .toHaveAttribute("aria-expanded", "true");
 });
 
 it.each(["omitted", "normalized"] as const)(

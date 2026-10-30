@@ -162,6 +162,10 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
                   <WorkflowProgress text={liveHeadline} />
                 </div>
               ) : null}
+              {/* Needs attention shows the failure; the live region still announces it. */}
+              {overview?.failureSummary ? (
+                <span className="sr-only">{overview.failureSummary}</span>
+              ) : null}
             </div>
           )}
           {!overview?.terminal && headline.description ? (

@@ -201,7 +201,10 @@ it.each([4, 40, 256, 1024] as const)(
     expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
     expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
     expect(screen.container.textContent).not.toContain("These are task instructions");
-    expect(screen.container.querySelector('[aria-live="polite"]')?.textContent).toBe(
+    // Needs attention lists the failure, so only the announcement repeats it.
+    const live = screen.container.querySelector('[aria-live="polite"]')!;
+    expect(live.querySelector("p")?.textContent).toBe("Reviewing package exports");
+    expect(live.querySelector(".sr-only")?.textContent).toBe(
       `1 agent failed · Agent ${count}: Access denied. Check workspace permissions.`,
     );
     await expect
@@ -210,11 +213,8 @@ it.each([4, 40, 256, 1024] as const)(
     await expect
       .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
       .toHaveAttribute("value", String(count / 2 + 1));
-    await userEvent.click(screen.getByRole("button", { name: "Show failures (1)", exact: true }));
-    expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(1);
     await userEvent.click(screen.getByRole("button", { name: `Open Agent ${count}`, exact: true }));
     expect(onOpenThread).toHaveBeenLastCalledWith(`qa-thread-${count - 1}`);
-    await userEvent.click(screen.getByRole("button", { name: "Show all agents", exact: true }));
     await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
     expect(screen.container.querySelectorAll("[data-workflow-node]").length).toBeLessThanOrEqual(
       40,
@@ -260,7 +260,7 @@ it.each([4, 40, 256, 1024] as const)(
   },
 );
 
-it("pages more than 32 phases and resets the page when filtering failures", async () => {
+it("pages more than 32 phase groups", async () => {
   const fixture = workflowScaleFixture("script", 40);
   const members = fixture.group.phases.flatMap((phase) => phase.members);
   const group = {
@@ -272,7 +272,7 @@ it("pages more than 32 phases and resets the page when filtering failures", asyn
       members: [
         {
           ...member,
-          status: index === members.length - 1 ? ("failed" as const) : ("running" as const),
+          status: "failed" as const,
         },
       ],
     })),
@@ -291,12 +291,7 @@ it("pages more than 32 phases and resets the page when filtering failures", asyn
   await expect
     .element(screen.getByRole("region", { name: "Phase 40 phase", exact: true }))
     .toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Show failures (1)", exact: true }));
-  expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(1);
-  await expect
-    .element(screen.getByRole("button", { name: "Open Agent 40", exact: true }))
-    .toBeVisible();
-  await userEvent.click(screen.getByRole("button", { name: "Show all agents", exact: true }));
+  await userEvent.click(screen.getByRole("button", { name: "Previous phases", exact: true }));
   await expect
     .element(screen.getByRole("region", { name: "Phase 1 phase", exact: true }))
     .toBeVisible();
@@ -556,7 +551,7 @@ it.each(["completed", "failed", "stopped"] as const)(
       const live = screen.container.querySelector('[aria-live="polite"]')!;
       expect(live.textContent).toBe("Workflow finished · Audit failed");
       expect(screen.container.querySelector("[data-workflow-receipt]")?.textContent).toContain(
-        "0 agents failed · 1 phase failed",
+        "1 agent · 1 phase failed",
       );
       expect(live.querySelector("[data-model-glyph]")).toBeNull();
     }

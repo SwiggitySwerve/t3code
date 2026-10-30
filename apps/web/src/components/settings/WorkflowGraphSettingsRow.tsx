@@ -10,7 +10,7 @@ export function WorkflowGraphSettingsRow() {
   return (
     <SettingsRow
       {...searchableSetting("verbose-workflow-graph")}
-      description="Show Graph details with agent cards and dependency connections below the phase icons."
+      description="Show graph details with agent cards and dependency connections below the phase icons."
       resetAction={
         enabled !== DEFAULT_UNIFIED_SETTINGS.verboseWorkflowGraph ? (
           <SettingResetButton

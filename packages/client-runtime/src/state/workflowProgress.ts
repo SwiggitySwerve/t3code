@@ -242,20 +242,23 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     group.workflow.status === "interrupted";
   const activity = group.workflow.progress?.trim();
   const headlineMember =
-    failure === undefined && failedPhase === undefined && !terminal && !activity
+    failedPhase === undefined && !terminal && !activity
       ? latestStartedOrFinishedMember(tasks)
       : null;
+  // Agent failures are listed in `attention`; the headline says what else is happening.
+  const failureSummary =
+    failure === undefined
+      ? null
+      : `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`;
   const headline =
-    failure !== undefined
-      ? `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`
-      : failedPhase !== undefined
-        ? `${failedPhase.title} failed`
-        : group.workflow.status === "failed"
-          ? (group.workflow.error ?? "Workflow failed")
-          : terminal
-            ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
-            : activity ||
-              `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
+    failedPhase !== undefined
+      ? `${failedPhase.title} failed`
+      : group.workflow.status === "failed"
+        ? (group.workflow.error ?? "Workflow failed")
+        : terminal
+          ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
+          : activity ||
+            `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
   const successful =
     group.workflow.status === "completed" &&
     phases.some((phase) => phase.allDone) &&
@@ -274,6 +277,7 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     counts,
     headline,
     headlineMember,
+    failureSummary,
     successful,
     failedCount,
     failedPhaseCount: phases.filter((phase) => phase.state === "failed").length,
@@ -287,7 +291,10 @@ function workflowElapsedMs(workflow: RuntimeSubagent, terminal: boolean): number
   return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : null;
 }
 
-type CollapseKind = "done" | "queued" | "settled";
+type CollapseKind = "done" | "queued" | "settled" | "running";
+
+/** Running phases shown expanded; later running phases fold. Phases with a failure never fold. */
+const WORKFLOW_EXPANDED_RUNNING_PHASES = 2;
 
 export interface WorkflowPhaseGroup {
   readonly id: string;
@@ -299,14 +306,8 @@ export interface WorkflowPhaseGroup {
 
 function phaseCollapseKind(phase: WorkflowPhaseProgress): CollapseKind | null {
   const { counts, state } = phase;
-  if (
-    phase.id === "other" ||
-    counts.failed > 0 ||
-    counts.running > 0 ||
-    state === "failed" ||
-    state === "running"
-  )
-    return null;
+  if (phase.id === "other" || counts.failed > 0 || state === "failed") return null;
+  if (counts.running > 0 || state === "running") return "running";
   if (state === "stopped") return "settled";
   if (
     state === "completed" ||
@@ -321,12 +322,22 @@ function phaseCollapseKind(phase: WorkflowPhaseProgress): CollapseKind | null {
   return null;
 }
 
+/**
+ * Contiguous done, queued, settled and folded running phases, in phase order. The first
+ * `WORKFLOW_EXPANDED_RUNNING_PHASES` running phases stay expanded and later ones fold, so the
+ * choice depends only on phase order. A phase with a failure is always expanded and uses no slot.
+ */
 export function deriveWorkflowPhaseGroups(
   phases: ReadonlyArray<WorkflowPhaseProgress>,
 ): WorkflowPhaseGroup[] {
   const runs: Array<{ kind: CollapseKind | null; phases: WorkflowPhaseProgress[] }> = [];
+  let running = 0;
   for (const phase of phases) {
-    const kind = phaseCollapseKind(phase);
+    let kind = phaseCollapseKind(phase);
+    if (kind === "running") {
+      running += 1;
+      if (running <= WORKFLOW_EXPANDED_RUNNING_PHASES) kind = null;
+    }
     const last = runs.at(-1);
     if (kind !== null && last?.kind === kind) last.phases.push(phase);
     else runs.push({ kind, phases: [phase] });
