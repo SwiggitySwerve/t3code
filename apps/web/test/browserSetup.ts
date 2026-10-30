@@ -3,6 +3,7 @@ import { commands } from "vite-plus/test/browser";
 
 declare module "vite-plus/test/browser" {
   interface BrowserCommands {
+    mockWorkflowAcpIcon: (enabled: boolean) => Promise<void>;
     setMediaPreferences: (options: {
       forcedColors: "active" | "none";
       reducedMotion: "reduce" | "no-preference";

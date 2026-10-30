@@ -8,10 +8,10 @@ import {
   type WorkflowTaskProgress,
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { memo, useEffect, useId, useState, type CSSProperties, type KeyboardEvent } from "react";
-import { createPortal } from "react-dom";
 import { useAtomValue } from "@effect/atom-react";
 import type { EnvironmentId } from "@t3tools/contracts";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
+import { WorkflowAgentReadout } from "./WorkflowAgentReadout";
 import {
   WorkflowAgentIdentity,
   WorkflowIdentityGlyph,
@@ -48,13 +48,26 @@ export function WorkflowProgressOverview(props: {
   const providers = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const [phasePage, setPhasePage] = useState(0);
   const [failuresOnly, setFailuresOnly] = useState(false);
-  const [inspectedId, setInspectedId] = useState<string | null>(null);
-  const inspecting = inspectedId !== null;
+  const [inspection, setInspection] = useState<{
+    anchor: HTMLButtonElement;
+    touchReady: boolean;
+  } | null>(null);
+  const inspectedId = inspection?.anchor.dataset.workflowDot;
+  const inspecting = inspection !== null;
+  function inspect(anchor: HTMLButtonElement | null) {
+    setInspection((previous) =>
+      anchor === null
+        ? null
+        : previous?.anchor === anchor
+          ? previous
+          : { anchor, touchReady: false },
+    );
+  }
   // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- hover inspection must receive Escape even when keyboard focus is outside this overview.
   useEffect(() => {
     if (!inspecting) return;
     const dismiss = (event: globalThis.KeyboardEvent) => {
-      if (event.key === "Escape") setInspectedId(null);
+      if (event.key === "Escape") setInspection(null);
     };
     document.addEventListener("keydown", dismiss);
     return () => document.removeEventListener("keydown", dismiss);
@@ -109,6 +122,21 @@ export function WorkflowProgressOverview(props: {
       className="flex min-w-0 flex-col gap-3"
       style={{ "--workflow-agent-pitch": `${WORKFLOW_AGENT_PITCH}px` } as CSSProperties}
       data-workflow-overview
+      onClickCapture={(event) => {
+        if (
+          !(event.nativeEvent instanceof PointerEvent) ||
+          event.nativeEvent.pointerType !== "touch"
+        )
+          return;
+        const anchor =
+          event.target instanceof Element
+            ? event.target.closest<HTMLButtonElement>("[data-workflow-dot]")
+            : null;
+        if (!anchor || (inspection?.anchor === anchor && inspection.touchReady)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        setInspection({ anchor, touchReady: true });
+      }}
     >
       <WorkflowIdentitySymbols icons={[...icons.values()]} sprite={sprite} />
       <div className="flex min-w-0 flex-col gap-1 text-2xs tabular-nums text-muted-foreground">
@@ -153,29 +181,20 @@ export function WorkflowProgressOverview(props: {
           </div>
         ) : null}
       </div>
-      {inspectedTask && inspectedIdentity
-        ? createPortal(
-            <div
-              id={readoutId}
-              role="note"
-              aria-label="Agent details"
-              className="pointer-events-none fixed inset-x-4 bottom-4 z-50 mx-auto max-w-(--chat-content-max-width) rounded-md border border-border bg-popover px-3 py-2 text-xs text-popover-foreground shadow-md"
-              data-workflow-readout
-            >
-              <p className={cn("font-medium", WORKFLOW_STATE_TEXT[inspectedTask.state])}>
-                {inspectedTask.label} · {inspectedTask.state}
-              </p>
-              <p>
-                {inspectedIdentity.providerName} · {inspectedIdentity.modelName}
-              </p>
-              {inspectedTask.detail ? (
-                <p className="line-clamp-3 whitespace-pre-wrap">{inspectedTask.detail}</p>
-              ) : null}
-              {inspectedTask.member?.childThreadId ? null : <p>Thread not available yet</p>}
-            </div>,
-            document.body,
-          )
-        : null}
+      {inspectedTask && inspectedIdentity && inspection ? (
+        <WorkflowAgentReadout id={readoutId} anchor={inspection.anchor}>
+          <p className={cn("font-medium", WORKFLOW_STATE_TEXT[inspectedTask.state])}>
+            {inspectedTask.label} · {inspectedTask.state}
+          </p>
+          <p>
+            {inspectedIdentity.providerName} · {inspectedIdentity.modelName}
+          </p>
+          {inspectedTask.detail ? (
+            <p className="line-clamp-3 whitespace-pre-wrap">{inspectedTask.detail}</p>
+          ) : null}
+          {inspectedTask.member?.childThreadId ? null : <p>Thread not available yet</p>}
+        </WorkflowAgentReadout>
+      ) : null}
       {progress.failedCount > 0 ? (
         <div>
           <Button
@@ -183,6 +202,7 @@ export function WorkflowProgressOverview(props: {
             variant="outline"
             aria-pressed={filtering}
             onClick={() => {
+              setInspection(null);
               setFailuresOnly(!failuresOnly);
               setPhasePage(0);
             }}
@@ -204,7 +224,7 @@ export function WorkflowProgressOverview(props: {
             sprite={sprite}
             generic={generic}
             failuresOnly={filtering}
-            onInspect={setInspectedId}
+            onInspect={inspect}
             readoutId={readoutId}
             onOpenThread={props.onOpenThread}
           />
@@ -216,7 +236,10 @@ export function WorkflowProgressOverview(props: {
             size="xs"
             variant="outline"
             disabled={page === 0}
-            onClick={() => setPhasePage(page - 1)}
+            onClick={() => {
+              setInspection(null);
+              setPhasePage(page - 1);
+            }}
           >
             Previous phases
           </Button>
@@ -227,7 +250,10 @@ export function WorkflowProgressOverview(props: {
             size="xs"
             variant="outline"
             disabled={page + 1 === pages}
-            onClick={() => setPhasePage(page + 1)}
+            onClick={() => {
+              setInspection(null);
+              setPhasePage(page + 1);
+            }}
           >
             More phases
           </Button>
@@ -308,7 +334,7 @@ function PhaseAgents(props: {
   readonly generic: WorkflowIdentity;
   readonly failuresOnly: boolean;
   readonly readoutId: string;
-  readonly onInspect: (id: string | null) => void;
+  readonly onInspect: (anchor: HTMLButtonElement | null) => void;
   readonly onOpenThread: (threadId: string) => void;
 }) {
   const { phase } = props;
@@ -326,7 +352,7 @@ function PhaseAgents(props: {
       target instanceof Element ? target.closest<HTMLButtonElement>("[data-workflow-dot]") : null;
     const id = button?.dataset.workflowDot;
     if (id) {
-      props.onInspect(id);
+      props.onInspect(button);
       if (focused) setActiveId(id);
     }
   }
@@ -392,10 +418,13 @@ function PhaseAgents(props: {
         className="grid min-w-0"
         style={{ gridTemplateColumns: "repeat(auto-fill, var(--workflow-agent-pitch))" }}
         onKeyDown={moveFocus}
-        onPointerOver={(event) => inspect(event.target)}
+        onPointerOver={(event) => {
+          if (event.pointerType !== "touch") inspect(event.target);
+        }}
         onFocus={(event) => inspect(event.target, true)}
         onPointerLeave={(event) => {
-          if (!event.currentTarget.contains(document.activeElement)) props.onInspect(null);
+          if (event.currentTarget.contains(document.activeElement)) inspect(document.activeElement);
+          else props.onInspect(null);
         }}
         onBlur={(event) => {
           if (!event.currentTarget.contains(event.relatedTarget)) props.onInspect(null);

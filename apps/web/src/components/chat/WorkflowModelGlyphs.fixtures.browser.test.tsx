@@ -11,6 +11,7 @@ import { workflowModelGlyphFixture } from "../../../test/workflow-fixtures/workf
 import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 import {
   WorkflowModelGlyphSurface,
+  WorkflowComposerEdgeSurface,
   scrollWavesToNode,
 } from "../../../test/workflow-fixtures/surfaces";
 
@@ -81,7 +82,7 @@ it.each([400, 736])(
     expect(overview.querySelector("[data-workflow-legend-overflow] .sr-only")).not.toBeNull();
     expect(
       overview.querySelector("[data-workflow-legend-overflow] .sr-only")?.textContent,
-    ).toContain("CLI Proxy · Opus 5.5");
+    ).toContain("CLI Proxy · Claude Opus 5.5");
     expect(
       overview
         .querySelector("[data-workflow-legend-overflow] .sr-only")
@@ -97,7 +98,9 @@ it.each([400, 736])(
     await expect.element(opus).toHaveAccessibleDescription(expect.stringContaining("CLI Proxy"));
     await userEvent.tab();
     await act(() => opus.element().focus());
-    await expect.element(page.getByText("CLI Proxy · Opus 5.5", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByText("CLI Proxy · Claude Opus 5.5", { exact: true }))
+      .toBeVisible();
     const unknown = screen.getByRole("button", { name: "Open Unknown model", exact: true });
     await expect
       .element(unknown)
@@ -119,7 +122,7 @@ it.each([400, 736])(
 
     await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
     const graphSol = screen.getByRole("button", { name: "Open Sol analyst, passed", exact: true });
-    await expect.element(graphSol.getByText("6.1 Sol", { exact: true })).toBeVisible();
+    await expect.element(graphSol.getByText("GPT-6.1 Sol", { exact: true })).toBeVisible();
     await expect
       .element(graphSol)
       .toHaveAccessibleDescription(expect.stringContaining("cliproxy / openai.gpt-6.1-sol"));
@@ -138,7 +141,7 @@ it.each([400, 736])(
       name: "Open Sonnet researcher, passed",
       exact: true,
     });
-    await expect.element(graphSonnet.getByText("Sonnet 4.6", { exact: true })).toBeVisible();
+    await expect.element(graphSonnet.getByText("Claude Sonnet 4.6", { exact: true })).toBeVisible();
     await expect
       .element(graphSonnet)
       .toHaveAccessibleDescription(
@@ -155,7 +158,7 @@ it.each([400, 736])(
     expect(graphUnknown.element().querySelector("[data-provider-package-icon]")).not.toBeNull();
     expect(graphUnknown.element().querySelector("[data-model-glyph]")).toBeNull();
     await expect
-      .element(graphUnknown.getByText("vendor/claude-opus-5-5-custom", { exact: true }))
+      .element(graphUnknown.getByText("vendor/Claude Opus 5.5 Custom", { exact: true }))
       .toBeVisible();
     for (const identity of screen.container.querySelectorAll<HTMLElement>(
       "[data-workflow-agent-identity]",
@@ -166,7 +169,7 @@ it.each([400, 736])(
   },
 );
 
-it("updates one inline readout across pointer and keyboard navigation", async () => {
+it("anchors one shared readout across pointer and keyboard navigation", async () => {
   await using screen = await render(
     <>
       <button type="button">Outside the overview</button>
@@ -182,7 +185,13 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
   await userEvent.hover(opus);
   const details = page.getByRole("note", { name: "Agent details" });
   await expect.element(details).toBeVisible();
-  expect(details.element().getBoundingClientRect().bottom).toBeLessThanOrEqual(innerHeight);
+  await vi.waitFor(() => {
+    const box = details.element().getBoundingClientRect();
+    const cell = opus.element().getBoundingClientRect();
+    expect(box.bottom).toBeLessThanOrEqual(innerHeight);
+    expect(box.top).toBeGreaterThanOrEqual(cell.bottom);
+    expect(box.top - cell.bottom).toBeLessThanOrEqual(8);
+  });
   expect(opus.element().getBoundingClientRect().toJSON()).toEqual(before);
   await userEvent.keyboard("{Escape}");
   await expect.element(details).not.toBeInTheDocument();
@@ -192,7 +201,7 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
     .element(
       page
         .getByRole("note", { name: "Agent details" })
-        .getByText("CLI Proxy · Opus 5.5", { exact: true }),
+        .getByText("CLI Proxy · Claude Opus 5.5", { exact: true }),
     )
     .toBeVisible();
   await userEvent.hover(haiku);
@@ -200,7 +209,7 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
     .element(
       page
         .getByRole("note", { name: "Agent details" })
-        .getByText("Work Cursor · Haiku 5.5", { exact: true }),
+        .getByText("Work Cursor · Claude Haiku 5.5", { exact: true }),
     )
     .toBeVisible();
   await userEvent.tab();
@@ -212,7 +221,7 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
     .element(
       page
         .getByRole("note", { name: "Agent details" })
-        .getByText("CLI Proxy · Sonnet 4.6", { exact: true }),
+        .getByText("CLI Proxy · Claude Sonnet 4.6", { exact: true }),
     )
     .toBeVisible();
   await userEvent.keyboard("{ArrowRight}");
@@ -220,9 +229,61 @@ it("updates one inline readout across pointer and keyboard navigation", async ()
     .element(
       page
         .getByRole("note", { name: "Agent details" })
-        .getByText("Work Cursor · Fable 5.1", { exact: true }),
+        .getByText("Work Cursor · Claude Fable 5.1", { exact: true }),
     )
     .toBeVisible();
+});
+
+it("shows details on the first touch tap and opens the thread on the second", async () => {
+  const open = vi.fn();
+  await using screen = await render(
+    <WorkflowProgressOverview
+      progress={deriveWorkflowProgress(workflowModelGlyphFixture().group)}
+      environmentId={EnvironmentId.make("qa")}
+      onOpenThread={open}
+    />,
+  );
+  const agent = screen.getByRole("button", { name: "Open Opus planner", exact: true }).element();
+  const tap = () =>
+    act(() => {
+      agent.focus();
+      agent.dispatchEvent(new PointerEvent("click", { bubbles: true, pointerType: "touch" }));
+    });
+  await tap();
+  await expect.element(page.getByRole("note", { name: "Agent details" })).toBeVisible();
+  expect(open).not.toHaveBeenCalled();
+  await tap();
+  expect(open).toHaveBeenCalledOnce();
+  await userEvent.keyboard("{Escape}");
+  await expect.element(page.getByRole("note", { name: "Agent details" })).not.toBeInTheDocument();
+  await tap();
+  expect(open).toHaveBeenCalledOnce();
+});
+
+it("keeps the readout inside resized chat bounds and hides it when its cell scrolls away", async () => {
+  await using screen = await render(<WorkflowComposerEdgeSurface />);
+  const scroll = screen.container.querySelector<HTMLElement>("[data-qa-chat-scroll]")!;
+  const boundary = screen.container.querySelector<HTMLElement>("[data-chat-readout-boundary]")!;
+  const agent = screen.getByRole("button", { name: "Open Agent 40", exact: true });
+  await act(() => {
+    scroll.scrollTop = scroll.scrollHeight;
+    agent.element().focus({ preventScroll: true });
+  });
+  const readout = page.getByRole("note", { name: "Agent details" });
+  await expect.element(readout).toBeVisible();
+  await act(() => {
+    boundary.style.bottom = "100px";
+  });
+  await vi.waitFor(() => {
+    const box = readout.element().getBoundingClientRect();
+    expect(box.bottom).toBeLessThanOrEqual(boundary.getBoundingClientRect().bottom);
+    expect(box.top).toBeGreaterThanOrEqual(agent.element().getBoundingClientRect().bottom);
+  });
+  const readoutElement = readout.element();
+  await act(() => {
+    scroll.scrollTop = 0;
+  });
+  await expect.element(readoutElement).not.toBeVisible();
 });
 
 it.each(["overview", "graph", "graph-fallbacks"] as const)(

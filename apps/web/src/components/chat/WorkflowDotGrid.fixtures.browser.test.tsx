@@ -15,6 +15,7 @@ import { readQaAtom } from "../../../test/workflow-fixtures/atoms";
 import { workflowClientSettings } from "../../../test/workflow-fixtures/settings";
 import {
   WorkflowBlockSurface,
+  WorkflowComposerEdgeSurface,
   WorkflowModelGlyphSurface,
 } from "../../../test/workflow-fixtures/surfaces";
 import { WorkflowGraphSettingsRow } from "../settings/WorkflowGraphSettingsRow";
@@ -120,7 +121,7 @@ it.each(["stopped", "mixed-models", "verbose", "failure-focus"] as const)(
             })}
           />
         ) : variant === "failure-focus" ? (
-          <div className="min-h-screen bg-background" data-qa-readout-frame>
+          <div className="bg-background pb-32" data-qa-readout-frame>
             <div style={{ contain: "paint layout style" }}>
               <WorkflowBlockSurface kind="graph" agentCount={40} />
             </div>
@@ -150,6 +151,42 @@ it.each(["running", "failed"] as const)("dot grid final: %s glyph cues", async (
     selector: "[data-workflow-opening]",
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" fixture={workflowModelGlyphFixture(cue)} />,
+  });
+});
+
+it("dot grid final: composer edge", async () => {
+  await captureSurface({
+    surface: "workflow-dot-grid",
+    state: "composer-edge",
+    selector: "[data-workflow-opening]",
+    frame: "[data-qa-chat-frame]",
+    keepInteraction: true,
+    element: () => <WorkflowComposerEdgeSurface />,
+    settle: async (screen) => {
+      const scroll = screen.container.querySelector<HTMLElement>("[data-qa-chat-scroll]")!;
+      const agent = screen.getByRole("button", { name: "Open Agent 40", exact: true });
+      await act(() => {
+        scroll.scrollTop = scroll.scrollHeight;
+        agent.element().focus({ preventScroll: true });
+      });
+      const before = agent.element().getBoundingClientRect().toJSON();
+      const readout = page.getByRole("note", { name: "Agent details" });
+      await expect.element(readout).toBeVisible();
+      await vi.waitFor(() => {
+        const box = readout.element().getBoundingClientRect();
+        const cell = agent.element().getBoundingClientRect();
+        const footer = screen.container
+          .querySelector("[data-qa-composer]")!
+          .getBoundingClientRect();
+        expect(box.bottom).toBeLessThanOrEqual(cell.top);
+        expect(cell.top - box.bottom).toBeLessThanOrEqual(8);
+        expect(box.bottom).toBeLessThan(footer.top);
+        expect(box.left).toBeGreaterThanOrEqual(0);
+        expect(box.right).toBeLessThanOrEqual(innerWidth);
+      });
+      expect(agent.element().getBoundingClientRect().toJSON()).toEqual(before);
+      expect(document.querySelectorAll("[data-workflow-readout]")).toHaveLength(1);
+    },
   });
 });
 

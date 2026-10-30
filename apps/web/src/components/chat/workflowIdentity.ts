@@ -3,13 +3,17 @@ import {
   type RuntimeSubagent,
   type WorkflowTaskProgress,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import { resolveSubagentModelLabel } from "@t3tools/client-runtime/state/subagent-display";
 import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
 import { providerClients } from "@t3tools/client-runtime/provider-clients";
 import { resolveOfficialAcpRegistryIconUrl, type ServerProvider } from "@t3tools/contracts";
 import type { ProviderIcon } from "@t3tools/provider-core/client";
-import { formatModelSlugName, resolveModelGlyph } from "@t3tools/shared/model";
+import {
+  formatModelSlugName,
+  resolveModelGlyph,
+  resolveSelectableModel,
+} from "@t3tools/shared/model";
 import { AntigravityIcon, ClaudeAI, OpenAI, type Icon } from "../Icons";
+import { getDisplayModelName } from "./providerIconUtils";
 
 const DRIVER_ICONS: Readonly<Record<string, Icon>> = {
   codex: OpenAI,
@@ -37,6 +41,19 @@ export interface WorkflowIdentity {
   readonly icon: WorkflowIdentityIcon;
 }
 
+export function workflowModelName(
+  model: string | null,
+  provider: ServerProvider | undefined,
+): string {
+  const slug = provider ? resolveSelectableModel(provider.driver, model, provider.models) : null;
+  const catalogModel = provider?.models.find((candidate) => candidate.slug === slug);
+  return catalogModel
+    ? getDisplayModelName(catalogModel)
+    : model
+      ? formatModelSlugName(model)
+      : "Unknown model";
+}
+
 export function resolveWorkflowIdentity(
   member: RuntimeSubagent | null,
   provider: ServerProvider | undefined,
@@ -49,10 +66,7 @@ export function resolveWorkflowIdentity(
     : provider
       ? resolveProviderInstanceDisplayName(provider)
       : "Provider removed";
-  const modelName = unstarted
-    ? "Model not assigned"
-    : (resolveSubagentModelLabel({ model: member.model, provider }) ??
-      (member.model ? formatModelSlugName(member.model) : "Unknown model"));
+  const modelName = unstarted ? "Model not assigned" : workflowModelName(member.model, provider);
   const glyph = unstarted ? null : resolveModelGlyph(member.model, driver);
   // The registry package's logo identifies the registry, not the configured agent.
   const packageIcon = driver === "acpRegistry" ? undefined : providerClients.get(driver)?.icon;
