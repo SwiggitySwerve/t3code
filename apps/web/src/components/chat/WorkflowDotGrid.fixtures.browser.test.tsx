@@ -101,6 +101,7 @@ it.each([
   "failed-receipt",
   "live-attention",
   "running-4",
+  "running-fold-open",
 ] as const)("collapsed workflow: %s", async (state) => {
   const count = state === "running-1024" ? 1024 : state === "running-4" ? 4 : 256;
   const fixture =
@@ -118,10 +119,11 @@ it.each([
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" fixture={fixture} />,
     settle: async (screen) => {
-      if (state === "expanded") {
-        const button = screen.container.querySelector<HTMLButtonElement>(
-          "[data-workflow-phase-disclosure]",
-        )!;
+      if (state === "expanded" || state === "running-fold-open") {
+        const button =
+          state === "expanded"
+            ? screen.container.querySelector<HTMLButtonElement>("[data-workflow-phase-disclosure]")!
+            : screen.getByRole("button", { name: /^Phases 11–12 · 32 running/ }).element();
         await userEvent.click(button);
         await expect.element(button).toHaveAttribute("aria-expanded", "true");
       }

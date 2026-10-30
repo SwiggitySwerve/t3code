@@ -787,14 +787,17 @@ export function workflowScaleFixture(
       },
     ),
   );
+  const name = `Audit ${count} agents${count === 1024 ? " (synthetic UI stress; runtime limit 1,000)" : ""}`;
   const row: WorkflowQaRow = {
     ...seed.row,
+    // The seed's title describes its own four-node run; this run is described by its name.
+    title: name,
     ...(options?.stopped
       ? { status: "cancelled" as const, completedAt: DateTime.makeUnsafe(WORKFLOW_QA_NOW) }
       : {}),
     progress: "Reviewing package exports",
     workflow: {
-      name: `Audit ${count} agents${count === 1024 ? " (synthetic UI stress; runtime limit 1,000)" : ""}`,
+      name,
       agents,
       phases: Array.from({ length: count / phaseSize }, (_, index) => ({
         index,
@@ -864,6 +867,7 @@ export function workflowModelGlyphFixture(cue?: "running" | "failed"): WorkflowQ
   );
   const row: WorkflowQaRow = {
     ...seed.row,
+    title: "Model identities across providers",
     progress: "",
     workflow: {
       name: "Model identities across providers",
@@ -1147,6 +1151,7 @@ export function workflowIdentityStatesFixture(stopped = false): WorkflowQaFixtur
   ];
   const row: WorkflowQaRow = {
     ...seed.row,
+    title: "Every agent state",
     status: stopped ? "cancelled" : "running",
     progress: "",
     workflow: {

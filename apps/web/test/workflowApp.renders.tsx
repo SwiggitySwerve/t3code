@@ -152,11 +152,12 @@ const views = [
   { name: "05-failed-receipt", thread: "workflow-failed", width: 1440 },
   { name: "06-anchored-readout", thread: "workflow-live", width: 1440 },
   { name: "07-relationships", thread: "workflow-live", width: 1440 },
-  { name: "08-sidebar-status", thread: "workflow-small", width: 1440 },
   { name: "09-settings", thread: "workflow-small", width: 1440 },
   { name: "10-verbose-graph", thread: "workflow-small", width: 1440 },
   { name: "11-live-narrow", thread: "workflow-live", width: 800 },
   { name: "12-receipt-narrow", thread: "workflow-failed", width: 800 },
+  { name: "13-running-fold", thread: "workflow-live", width: 1440 },
+  { name: "14-relationships-phases", thread: "workflow-live", width: 1440 },
 ] as const;
 
 async function quiet() {
@@ -212,7 +213,12 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
     if (thread === "workflow-live") opening.scrollIntoView({ block: "start" });
     if (name === "03-expanded-row") {
       await userEvent.click(screen.getByRole("button", { name: /Phases 1–8 · 128 done/ }));
-      expect(container.querySelectorAll("[data-workflow-dot]")).toHaveLength(208);
+      expect(container.querySelectorAll("[data-workflow-dot]")).toHaveLength(176);
+      opening.scrollIntoView({ block: "start" });
+    }
+    if (name === "13-running-fold") {
+      await userEvent.click(screen.getByRole("button", { name: /^Phases 11–12 · 32 running/ }));
+      expect(container.querySelectorAll("[data-workflow-dot]")).toHaveLength(80);
       opening.scrollIntoView({ block: "start" });
     }
     if (name === "06-anchored-readout") {
@@ -238,13 +244,27 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
         expect(cell.getBoundingClientRect().bottom).toBeLessThanOrEqual(boundary.bottom);
       });
     }
-    if (name === "07-relationships") {
+    if (name === "07-relationships" || name === "14-relationships-phases") {
       await userEvent.click(
         page.getByRole("button", { name: "Expand Audit 256 agents", exact: true }),
       );
       await expect
         .element(page.getByRole("button", { name: "Collapse Phase 9 phase, running", exact: true }))
         .toBeInTheDocument();
+    }
+    if (name === "14-relationships-phases") {
+      // Folds the running phases' agent lists so every phase row and its bar is in view.
+      for (const phase of [9, 10, 11, 12])
+        await userEvent.click(
+          page.getByRole("button", { name: `Collapse Phase ${phase} phase, running`, exact: true }),
+        );
+      expect(
+        page.getByRole("button", { name: /^Expand Phase \d+ phase,/ }).elements(),
+      ).toHaveLength(16);
+      page
+        .getByRole("button", { name: /^Expand Phase 16 phase,/ })
+        .element()
+        .scrollIntoView({ block: "end" });
     }
     if (name === "09-settings") {
       await act(() => router.navigate({ to: "/settings/chat" }));

@@ -7,7 +7,7 @@ import { expect, it, vi } from "vite-plus/test";
 import { commands, page, userEvent } from "vite-plus/test/browser";
 
 import "../src/index.css";
-import { render } from "./render";
+import { act, render } from "./render";
 import { startCounting, stopCounting } from "./renderCounter";
 import { workflowClientSettings } from "./workflow-fixtures/settings";
 import { readQaAtom } from "./workflow-fixtures/atoms";
@@ -96,25 +96,57 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_SCALE === "1").each(COLLAPSE_CASES)(
         phase.tasks.map((task) => [task.id, task.state] as const),
       ),
     );
+    let renderMs = 0;
+    const onRender: ProfilerOnRenderCallback = (_id, _phase, actualDuration) => {
+      renderMs += actualDuration;
+    };
+    const view = () => (
+      <Profiler id="workflow-collapse" onRender={onRender}>
+        <WorkflowBlockSurface kind={kind} fixture={fixture} />
+      </Profiler>
+    );
     const samples = [];
     for (let sample = 0; sample < 5; sample += 1) {
-      const start = performance.now();
-      await using screen = await render(<WorkflowBlockSurface kind={kind} fixture={fixture} />, {
+      const measured = await (async () => {
+        renderMs = 0;
+        const start = performance.now();
         // The production surface receives its routing inputs through props.
-        router: false,
-      });
-      const mountMs = performance.now() - start;
-      if (expanded) await expandWorkflowPhases(screen);
-      const readyMs = performance.now() - start;
-      const cells = screen.container.querySelectorAll<HTMLButtonElement>("[data-workflow-dot]");
-      if (expanded) expect(cells).toHaveLength(count);
-      for (const cell of cells) {
-        expect(expected.has(cell.dataset.workflowDot!)).toBe(true);
-        expect(cell.getAttribute("aria-description")).toMatch(
-          new RegExp(`^${expected.get(cell.dataset.workflowDot!)}(?:,|$)`),
-        );
-      }
-      samples.push({ sample, mountMs, readyMs, dom: inspectDom(screen.container) });
+        await using screen = await render(view(), { router: false });
+        const mountMs = performance.now() - start;
+        const mountRenderMs = renderMs;
+        renderMs = 0;
+        const clicks = expanded ? await expandWorkflowPhases(screen) : 0;
+        const readyMs = performance.now() - start;
+        const cells = screen.container.querySelectorAll<HTMLButtonElement>("[data-workflow-dot]");
+        if (expanded) expect(cells).toHaveLength(count);
+        for (const cell of cells) {
+          expect(expected.has(cell.dataset.workflowDot!)).toBe(true);
+          expect(cell.getAttribute("aria-description")).toMatch(
+            new RegExp(`^${expected.get(cell.dataset.workflowDot!)}(?:,|$)`),
+          );
+        }
+        return {
+          mountMs,
+          readyMs,
+          clicks,
+          mountRenderMs,
+          disclosureRenderMs: renderMs,
+          dom: inspectDom(screen.container),
+        };
+      })();
+      // The same expansion dispatched in the page, without a browser-driver round trip per click.
+      const direct = expanded
+        ? await (async () => {
+            renderMs = 0;
+            const start = performance.now();
+            await using screen = await render(view(), { router: false });
+            await expandWorkflowPhases(screen, (button) => act(() => button.click()));
+            const readyMs = performance.now() - start;
+            expect(screen.container.querySelectorAll("[data-workflow-dot]")).toHaveLength(count);
+            return { readyMs, renderMs };
+          })()
+        : null;
+      samples.push({ sample, ...measured, direct });
     }
     await commands.writeRenderReport(
       `workflow-collapse-${kind}-${count}-${status}-${expanded ? "expanded" : "default"}`,
@@ -126,7 +158,7 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_SCALE === "1").each(COLLAPSE_CASES)(
           expanded,
           samples,
           methodology:
-            "First sample after imports; warm median of samples 1–4. mountMs is render/act through committed DOM. readyMs also includes user-event disclosures for all-expanded cases. No paint, cold-cache, CPU or memory claim. Same 736px viewport; no samples discarded.",
+            "First sample after imports; warm median of samples 1–4. mountMs is render/act through committed DOM. readyMs also includes user-event disclosures for all-expanded cases. *RenderMs values are React Profiler actualDuration sums for that stage. direct is a second mount expanded by in-page clicks inside act, without browser-driver round trips. No paint, cold-cache, CPU or memory claim. Same 736px viewport; no samples discarded.",
         },
         null,
         2,

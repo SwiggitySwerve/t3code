@@ -332,6 +332,7 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
     "failed-receipt",
     "live-attention",
     "running-4",
+    "running-fold-open",
   ],
   "workflow-dot-grid": [
     "planned-256",
@@ -383,6 +384,7 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
   "lineage-row-narrow-script": NARROW_LINEAGE_STATES,
   "lineage-collapsed-graph": COLLAPSED_GRAPH_STATES,
   "lineage-collapsed-script": COLLAPSED_SCRIPT_STATES,
+  "lineage-phase-bars": ["graph-256", "script-256", "graph-256-narrow"],
   "sidebar-status": WORKFLOW_QA_SIDEBAR_STATES,
   "settings-agents": WORKFLOW_QA_SETTINGS_STATES,
   "workflow-review": WORKFLOW_QA_REVIEW_STATES,
