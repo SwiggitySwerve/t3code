@@ -481,7 +481,12 @@ function WorkflowNodeCard(props: WorkflowNodeCardProps) {
         {box.started ? (
           <>
             <span className="text-2xs leading-3.5 text-muted-foreground">
-              <WorkflowAgentIdentity member={node.member} provider={provider} label={modelLabel} />
+              <WorkflowAgentIdentity
+                member={node.member}
+                provider={provider}
+                label={modelLabel}
+                state={WORKFLOW_NODE_STATE[node.state]}
+              />
             </span>
             <span className="truncate text-2xs leading-3.5 text-muted-foreground tabular-nums">
               {totals}

@@ -32,11 +32,7 @@ import {
 } from "@t3tools/shared/testing/workflowQa";
 import type ChatMarkdown from "../ChatMarkdown";
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
-import {
-  QA_DRIVER,
-  QA_PROVIDERS,
-  QA_PROVIDER_INSTANCE,
-} from "../../../test/workflow-fixtures/providers";
+import { QA_PROVIDERS } from "../../../test/workflow-fixtures/providers";
 
 // The surfaces read the provider catalog through the app's own atoms; any other atom throws.
 vi.mock(import("@effect/atom-react"), async (original) => ({
@@ -93,18 +89,15 @@ describe.each(["graph", "script"] as const)("workflow block, %s", (kind) => {
       element: () => <WorkflowBlockSurface kind={kind} variant={variant} />,
     });
   });
-  it.each([...WORKFLOW_QA_AGENT_COUNTS, 1024] as const)(
-    "overview with %i agents",
-    async (count) => {
-      await captureSurface({
-        surface,
-        state: `agents-${count}`,
-        selector: "[data-workflow-opening]",
-        frame: "[data-qa-column]",
-        element: () => <WorkflowBlockSurface kind={kind} agentCount={count} />,
-      });
-    },
-  );
+  it.each(WORKFLOW_QA_AGENT_COUNTS)("overview with %i agents", async (count) => {
+    await captureSurface({
+      surface,
+      state: `agents-${count}`,
+      selector: "[data-workflow-opening]",
+      frame: "[data-qa-column]",
+      element: () => <WorkflowBlockSurface kind={kind} agentCount={count} />,
+    });
+  });
 });
 
 it("workflow block, graph, 150 nodes scrolled to the running wave", async () => {
@@ -179,6 +172,7 @@ const expandLineage = async (screen: Screen) => {
   for (let count = folded.elements().length; count > 0; count -= 1) {
     await userEvent.click(folded.first());
   }
+  screen.getByRole("list", { name: "Related threads", exact: true }).element().scrollTop = 0;
 };
 
 describe.each(["graph", "script"] as const)("lineage row, %s", (kind) => {
@@ -356,10 +350,8 @@ describe("workflow fixture rows", () => {
       <ThreadLineageWorkflowRow
         group={mixed}
         header={<span>Mixed workflow</span>}
-        providerInstanceId={QA_PROVIDER_INSTANCE}
         provider={QA_PROVIDERS[0]}
         providers={QA_PROVIDERS}
-        driver={QA_DRIVER}
         onOpenThread={() => {}}
         isThreadAvailable={() => true}
         stopping={false}

@@ -7,16 +7,18 @@ import { cn } from "~/lib/utils";
 export function ProviderPackageIcon({
   icon,
   className,
+  inSymbol = false,
   ...props
-}: { readonly icon: ProviderIcon } & SVGProps<SVGSVGElement>) {
+}: { readonly icon: ProviderIcon; readonly inSymbol?: boolean } & SVGProps<SVGSVGElement>) {
   const gradientId = useId();
+  // A <use> shadow tree cannot match the document's .dark ancestor; color-scheme is inherited.
   return (
     <svg
       {...props}
       viewBox={icon.viewBox}
-      fill="none"
+      fill={inSymbol ? "light-dark(var(--icon-light), var(--icon-dark))" : "none"}
       data-provider-package-icon
-      className={cn("fill-(--icon-light) dark:fill-(--icon-dark)", className)}
+      className={cn(!inSymbol && "fill-(--icon-light) dark:fill-(--icon-dark)", className)}
       style={
         {
           "--icon-light": icon.fill.light,
@@ -50,9 +52,17 @@ export function ProviderPackageIcon({
           key={path.d}
           d={path.d}
           fillRule={path.fillRule}
-          fill={path.gradient ? `url(#${gradientId}-${index})` : undefined}
+          fill={
+            path.gradient
+              ? `url(#${gradientId}-${index})`
+              : inSymbol && path.fill
+                ? "light-dark(var(--path-light), var(--path-dark))"
+                : undefined
+          }
           data-icon-detail={path.fill ? true : undefined}
-          className={path.fill ? "fill-(--path-light) dark:fill-(--path-dark)" : undefined}
+          className={
+            path.fill && !inSymbol ? "fill-(--path-light) dark:fill-(--path-dark)" : undefined
+          }
           style={
             path.fill
               ? ({

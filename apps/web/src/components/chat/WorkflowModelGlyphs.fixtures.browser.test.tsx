@@ -20,7 +20,7 @@ vi.mock(import("@effect/atom-react"), async (original) => ({
     readQaAtom(atom, selector)) as never,
 }));
 
-it("deduplicates recognized model namespaces without merging versions or custom IDs", async () => {
+it("shows every agent identity, including namespace aliases and generic fallbacks", async () => {
   const progress = deriveWorkflowProgress(workflowModelGlyphFixture().group);
   const models = [
     ["gpt-6.1-sol", "openai.gpt-6.1-sol", "openai/gpt-6.1-sol", "gpt-6-luna"],
@@ -43,14 +43,14 @@ it("deduplicates recognized model namespaces without merging versions or custom 
     />,
   );
   const [aliases, distinct] = screen.container.querySelectorAll("[data-workflow-phase]");
-  expect(aliases!.querySelectorAll("header [data-model-glyph]")).toHaveLength(2);
+  expect(aliases!.querySelectorAll('[data-model-glyph="gpt-sol"]')).toHaveLength(3);
   expect(aliases!.querySelector('[data-model-glyph="gpt-luna"]')).not.toBeNull();
   expect(aliases!.querySelector('[aria-label*="more models:"]')).toBeNull();
-  expect(distinct!.querySelectorAll('header [data-model-glyph="gpt-sol"]')).toHaveLength(2);
-  expect(distinct!.querySelector('[aria-label^="1 more models:"]')).not.toBeNull();
+  expect(distinct!.querySelectorAll('[data-model-glyph="gpt-sol"]')).toHaveLength(2);
+  expect(distinct!.querySelector("header [data-model-glyph]")).toBeNull();
   await expect
     .element(screen.getByRole("button", { name: "Open Astra architect", exact: true }))
-    .toHaveAccessibleDescription(expect.stringContaining("openai.gpt-6.1-sol"));
+    .toHaveAccessibleDescription(expect.stringContaining("6.1 Sol"));
 });
 
 it.each([400, 736])(
@@ -78,18 +78,26 @@ it.each([400, 736])(
     expect(headline.textContent).toContain("Phase 3 · 4 running");
     const overview = screen.container.querySelector<HTMLElement>("[data-workflow-overview]")!;
     expect(overview.querySelectorAll("[data-workflow-dot]")).toHaveLength(12);
-    expect(overview.querySelectorAll('[aria-label^="1 more models:"]')).toHaveLength(3);
+    expect(overview.querySelector("[data-workflow-legend-overflow] .sr-only")).not.toBeNull();
+    expect(
+      overview.querySelector("[data-workflow-legend-overflow] .sr-only")?.textContent,
+    ).toContain("CLI Proxy · Opus 5.5");
+    expect(
+      overview
+        .querySelector("[data-workflow-legend-overflow] .sr-only")
+        ?.getAttribute("aria-hidden"),
+    ).toBeNull();
     expect(
       screen
         .getByRole("region", { name: "Phase 1 phase", exact: true })
         .getByRole("img")
         .elements(),
-    ).toHaveLength(3);
+    ).toHaveLength(4);
     const opus = screen.getByRole("button", { name: "Open Opus planner", exact: true });
     await expect.element(opus).toHaveAccessibleDescription(expect.stringContaining("CLI Proxy"));
     await userEvent.tab();
     await act(() => opus.element().focus());
-    await expect.element(page.getByText(/CLI Proxy.*claude-opus-5-5/)).toBeVisible();
+    await expect.element(page.getByText("CLI Proxy · Opus 5.5", { exact: true })).toBeVisible();
     const unknown = screen.getByRole("button", { name: "Open Unknown model", exact: true });
     await expect
       .element(unknown)
@@ -97,13 +105,15 @@ it.each([400, 736])(
     const custom = screen.getByRole("button", { name: "Open Unknown harness", exact: true });
     await expect
       .element(custom)
-      .toHaveAccessibleDescription(expect.stringContaining("lab-runner / custom-model"));
+      .toHaveAccessibleDescription(expect.stringContaining("Research Lab, custom-model"));
+    expect(custom.element().querySelector('[data-workflow-identity="generic"]')).not.toBeNull();
+    expect(custom.element().textContent).not.toContain("RL");
     await expect
       .element(screen.getByRole("button", { name: "Open Missing model", exact: true }))
       .toHaveAccessibleDescription(expect.stringContaining("Unknown model"));
     await expect
       .element(screen.getByRole("button", { name: "Open Unavailable instance", exact: true }))
-      .toHaveAccessibleDescription(expect.stringContaining("retired-instance"));
+      .toHaveAccessibleDescription(expect.stringContaining("Provider removed"));
     expect(overview.querySelector("[data-provider-package-icon]")).not.toBeNull();
     expect(overview.scrollWidth).toBeLessThanOrEqual(overview.clientWidth);
 
@@ -156,18 +166,55 @@ it.each([400, 736])(
   },
 );
 
-it.each(["headline", "overview", "graph", "graph-fallbacks"] as const)(
+it("updates one inline readout across pointer and keyboard navigation", async () => {
+  await using screen = await render(<WorkflowModelGlyphSurface />);
+  const opus = screen.getByRole("button", { name: "Open Opus planner", exact: true });
+  const haiku = screen.getByRole("button", { name: "Open Haiku verifier", exact: true });
+  await userEvent.hover(opus);
+  await expect
+    .element(
+      screen
+        .getByRole("note", { name: "Agent details" })
+        .getByText("CLI Proxy · Opus 5.5", { exact: true }),
+    )
+    .toBeVisible();
+  await userEvent.hover(haiku);
+  await expect
+    .element(
+      screen
+        .getByRole("note", { name: "Agent details" })
+        .getByText("Work Cursor · Haiku 5.5", { exact: true }),
+    )
+    .toBeVisible();
+  await userEvent.tab();
+  await act(() => opus.element().focus());
+  await userEvent.keyboard("{ArrowRight}");
+  const sonnet = screen.getByRole("button", { name: "Open Sonnet researcher", exact: true });
+  await expect.element(sonnet).toHaveFocus();
+  await expect
+    .element(
+      screen
+        .getByRole("note", { name: "Agent details" })
+        .getByText("CLI Proxy · Sonnet 4.6", { exact: true }),
+    )
+    .toBeVisible();
+  await userEvent.keyboard("{ArrowRight}");
+  await expect
+    .element(
+      screen
+        .getByRole("note", { name: "Agent details" })
+        .getByText("Work Cursor · Fable 5.1", { exact: true }),
+    )
+    .toBeVisible();
+});
+
+it.each(["overview", "graph", "graph-fallbacks"] as const)(
   "model identities fixture: %s",
   async (state) => {
     await captureSurface({
       surface: "workflow-model-identities",
       state,
-      selector:
-        state === "headline"
-          ? "[data-workflow-opening]"
-          : state === "overview"
-            ? "[data-workflow-overview]"
-            : "[data-workflow-waves]",
+      selector: state === "overview" ? "[data-workflow-overview]" : "[data-workflow-waves]",
       frame: "[data-qa-column]",
       element: () => <WorkflowModelGlyphSurface />,
       verboseGraph: state.startsWith("graph"),

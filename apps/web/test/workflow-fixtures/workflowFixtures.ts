@@ -6,6 +6,8 @@
  */
 import {
   appWorkflowHeading,
+  deriveWorkflowGroups,
+  projectedSubagentsToRuntime,
   resolveAppWorkflowView,
   workflowProgressText,
   type SubagentWorkflowGroup,
@@ -869,6 +871,103 @@ export function workflowScriptProgressFixture(entered: boolean): WorkflowQaFixtu
   };
   const opening = resolveAppWorkflowView(row)!;
   return { ...seed, row, opening, group: opening.group! };
+}
+
+export function workflowIdentityStatesFixture(stopped = false): WorkflowQaFixture {
+  const seed = workflowFixture("graph", "running");
+  const nodes: ReadonlyArray<NodeSpec> = [
+    {
+      key: "sol",
+      label: "Sol running",
+      dependsOn: [],
+      agent: { state: "running", identity: { provider: "cliproxy", model: "gpt-6.1-sol" } },
+    },
+    {
+      key: "astra",
+      label: "Astra failed",
+      dependsOn: [],
+      agent: {
+        state: "failed",
+        identity: { provider: "cliproxy", model: "gpt-6.1-astra" },
+        result: "Review needs attention",
+      },
+      outcome: { status: "failed", reason: "Review needs attention" },
+    },
+    {
+      key: "terra",
+      label: "Terra done",
+      dependsOn: [],
+      agent: {
+        state: "completed",
+        identity: { provider: "cursor-work", model: "openai/gpt-6.1-terra" },
+      },
+      outcome: { status: "passed" },
+    },
+    {
+      key: "luna",
+      label: "Luna stopped",
+      dependsOn: [],
+      agent: { state: "running", identity: { provider: "cursor-work", model: "gpt-6-luna" } },
+    },
+    {
+      key: "provider",
+      label: "Provider icon",
+      dependsOn: [],
+      agent: { state: "running", identity: { provider: "cursor-work", model: "custom-model" } },
+    },
+    {
+      key: "acp",
+      label: "ACP icon",
+      dependsOn: [],
+      agent: { state: "running", identity: { provider: "qa-acp", model: "custom-model" } },
+    },
+    {
+      key: "generic",
+      label: "Generic agent",
+      dependsOn: [],
+      agent: { state: "running", identity: { provider: "lab-runner", model: "custom-model" } },
+    },
+    {
+      key: "deleted",
+      label: "Provider removed",
+      dependsOn: [],
+      agent: {
+        state: "running",
+        identity: { provider: "retired-instance", model: "custom-model" },
+      },
+    },
+    { key: "queued", label: "Waiting for agent", dependsOn: ["sol"] },
+    {
+      key: "skipped",
+      label: "Skipped agent",
+      dependsOn: ["astra"],
+      outcome: { status: "skipped", reason: "Dependency failed" },
+    },
+    {
+      key: "not-run",
+      label: "Agent not run",
+      dependsOn: ["luna"],
+    },
+  ];
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    status: stopped ? "cancelled" : "running",
+    progress: "",
+    workflow: {
+      name: "Every agent state",
+      phases: [],
+      ...graphWorkflow({ title: "Every agent state", status: "running", nodes, progress: null }),
+    },
+  };
+  const resolved = resolveAppWorkflowView(row)!;
+  // The state sampler includes an individually interrupted agent in an otherwise active run.
+  // Projected workflow rows cannot express that member state, so derive the graph from runtime members.
+  const members = projectedSubagentsToRuntime([row]).map((member) =>
+    member.graphNodeKey === "luna" ? { ...member, status: "interrupted" as const } : member,
+  );
+  const group = deriveWorkflowGroups(members)[0]!;
+  const opening = { ...resolved, group };
+  return { ...seed, row, opening, group, running: !stopped, progress: workflowProgressText(row) };
 }
 
 export type WorkflowCallbackState = "running" | "completed" | "failed" | "stopped";

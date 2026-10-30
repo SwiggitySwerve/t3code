@@ -40,7 +40,7 @@ import {
 import type { ReactNode } from "react";
 import { vi } from "vite-plus/test";
 
-import { QA_DRIVER, QA_ENVIRONMENT, QA_PROVIDERS, QA_PROVIDER_INSTANCE } from "./providers";
+import { QA_ENVIRONMENT, QA_PROVIDERS, QA_PROVIDER_INSTANCE } from "./providers";
 import {
   WORKFLOW_QA_NOW,
   workflowFixture,
@@ -193,10 +193,8 @@ export function LineageRowSurface(props: {
         <ThreadLineageWorkflowRow
           group={group}
           header={header}
-          providerInstanceId={QA_PROVIDER_INSTANCE}
           provider={QA_PROVIDERS.find((entry) => entry.instanceId === QA_PROVIDER_INSTANCE)}
           providers={QA_PROVIDERS}
-          driver={QA_DRIVER}
           onOpenThread={noop}
           isThreadAvailable={() => true}
           onStop={running ? noop : undefined}

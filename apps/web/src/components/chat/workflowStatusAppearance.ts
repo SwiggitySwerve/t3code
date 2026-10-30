@@ -11,26 +11,42 @@ export const WORKFLOW_STATE_TEXT = {
   skipped: "text-muted-foreground",
 } as const satisfies Record<State, string>;
 
+export const WORKFLOW_STATE_CUE = {
+  done: { dimmed: false, ring: "none", badge: null },
+  running: { dimmed: false, ring: "solid", badge: null },
+  failed: { dimmed: false, ring: "solid", badge: "!" },
+  queued: { dimmed: true, ring: "none", badge: null },
+  stopped: { dimmed: false, ring: "none", badge: "square" },
+  skipped: { dimmed: false, ring: "dashed", badge: null },
+} as const;
+
 export const WORKFLOW_STATE_SEGMENT = {
-  done: "bg-info-foreground forced-colors:bg-[Highlight]",
-  running:
-    "bg-success-foreground forced-colors:bg-[Canvas] forced-colors:border-y forced-colors:border-[Highlight]",
-  failed:
-    "bg-destructive-foreground text-background/70 bg-[repeating-linear-gradient(135deg,transparent_0px,transparent_3px,currentColor_3px,currentColor_4px)] forced-colors:bg-[Canvas] forced-colors:text-[CanvasText]",
-  queued: "bg-muted-foreground/25 forced-colors:bg-[Canvas]",
-  stopped:
-    "bg-muted-foreground/35 border-y border-dashed border-muted-foreground forced-colors:bg-[Canvas] forced-colors:border-[CanvasText]",
-  skipped:
-    "bg-muted-foreground/35 border-y border-dotted border-muted-foreground forced-colors:bg-[Canvas] forced-colors:border-[CanvasText]",
+  done: `${WORKFLOW_STATE_TEXT.done} bg-current forced-colors:bg-[Highlight]`,
+  running: `${WORKFLOW_STATE_TEXT.running} bg-current forced-colors:bg-[Canvas] forced-colors:border-y forced-colors:border-[Highlight]`,
+  failed: `${WORKFLOW_STATE_TEXT.failed} bg-current bg-[repeating-linear-gradient(135deg,transparent_0px,transparent_3px,var(--background)_3px,var(--background)_4px)] forced-colors:bg-[Canvas] forced-colors:text-[CanvasText]`,
+  queued: `${WORKFLOW_STATE_TEXT.queued} bg-current forced-colors:bg-[Canvas]`,
+  stopped: `${WORKFLOW_STATE_TEXT.stopped} bg-current forced-colors:bg-[Canvas] forced-colors:border forced-colors:border-[CanvasText]`,
+  skipped: `${WORKFLOW_STATE_TEXT.skipped} border-y border-dashed border-current forced-colors:border-[CanvasText]`,
 } as const satisfies Record<State, string>;
 
 export const WORKFLOW_STATE_MARKER = {
-  done: "rounded-full bg-info-foreground forced-colors:bg-[Highlight]",
-  running: "rounded-full border-2 border-success-foreground forced-colors:border-[Highlight]",
-  failed: `${WORKFLOW_STATE_SEGMENT.failed} rotate-45 rounded-none border border-destructive-foreground forced-colors:border-[CanvasText]`,
-  queued: "rounded-full border border-muted-foreground/60 forced-colors:border-[CanvasText]",
-  stopped:
-    "rounded-none bg-muted-foreground/50 border border-muted-foreground forced-colors:border-[CanvasText]",
-  skipped:
-    "rounded-none border border-dashed border-muted-foreground forced-colors:border-[CanvasText]",
+  done: `${WORKFLOW_STATE_TEXT.done} rounded-full bg-current forced-colors:bg-[Highlight]`,
+  running: `${WORKFLOW_STATE_TEXT.running} rounded-full border-2 border-current forced-colors:border-[Highlight]`,
+  failed: `${WORKFLOW_STATE_SEGMENT.failed} rotate-45 rounded-none border border-current forced-colors:border-[CanvasText]`,
+  queued: `${WORKFLOW_STATE_TEXT.queued} rounded-full border border-current forced-colors:border-[CanvasText]`,
+  stopped: `${WORKFLOW_STATE_TEXT.stopped} rounded-none bg-current border border-current forced-colors:border-[CanvasText]`,
+  skipped: `${WORKFLOW_STATE_TEXT.skipped} rounded-none border border-dashed border-current forced-colors:border-[CanvasText]`,
 } as const satisfies Record<State, string>;
+
+export function workflowIdentityStateClass(state: State) {
+  const cue = WORKFLOW_STATE_CUE[state];
+  return [
+    WORKFLOW_STATE_TEXT[state],
+    cue.dimmed ? "opacity-40" : "",
+    cue.ring === "solid"
+      ? "rounded-full ring-1 ring-current forced-colors:outline forced-colors:-outline-offset-1 forced-colors:outline-[CanvasText]"
+      : "",
+    cue.ring === "dashed" ? WORKFLOW_STATE_MARKER.skipped : "",
+    state === "stopped" || state === "skipped" ? "grayscale" : "",
+  ].join(" ");
+}

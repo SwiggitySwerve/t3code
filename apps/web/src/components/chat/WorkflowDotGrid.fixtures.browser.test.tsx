@@ -1,6 +1,11 @@
 import { DEFAULT_SERVER_SETTINGS } from "@t3tools/contracts";
 import { expect, it, vi } from "vite-plus/test";
-import { page, userEvent } from "vite-plus/test/browser";
+import { commands, page, userEvent } from "vite-plus/test/browser";
+import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
+import {
+  workflowIdentityStatesFixture,
+  workflowScriptProgressFixture,
+} from "../../../test/workflow-fixtures/workflowFixtures";
 import "../../index.css";
 import { act, render } from "../../../test/render";
 import { captureSurface } from "../../../test/workflow-fixtures/capture";
@@ -85,7 +90,6 @@ it.each([4, 40, 256, 1024] as const)("dot grid final: %i agents", async (count) 
   await captureSurface({
     surface: "workflow-dot-grid",
     state: `agents-${count}`,
-    themes: ["dark"],
     selector: "[data-workflow-opening]",
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" agentCount={count} />,
@@ -98,7 +102,6 @@ it.each(["stopped", "mixed-models", "verbose", "failure-focus"] as const)(
     await captureSurface({
       surface: "workflow-dot-grid",
       state: variant,
-      themes: ["dark"],
       verboseGraph: variant === "verbose",
       selector: "[data-workflow-opening]",
       frame: "[data-qa-column]",
@@ -131,7 +134,6 @@ it.each([false, true])("dot grid final: settings enabled=%s", async (enabled) =>
   await captureSurface({
     surface: "workflow-dot-grid-settings",
     state: enabled ? "on" : "off",
-    themes: ["dark"],
     router: true,
     selector: "#workflows",
     frame: "[data-qa-settings]",
@@ -143,5 +145,71 @@ it.each([false, true])("dot grid final: settings enabled=%s", async (enabled) =>
         .element(screen.getByRole("switch", { name: "Verbose workflow graph" }))
         .toHaveAttribute("aria-checked", String(enabled));
     },
+  });
+});
+
+it.each(["states", "states-grayscale", "states-forced-colors"] as const)(
+  "dot grid final: %s",
+  async (variant) => {
+    await using _media = {
+      [Symbol.asyncDispose]: () =>
+        commands.setMediaPreferences({ forcedColors: "none", reducedMotion: "no-preference" }),
+    };
+    if (variant === "states-forced-colors")
+      await commands.setMediaPreferences({ forcedColors: "active", reducedMotion: "reduce" });
+    const fixture = workflowIdentityStatesFixture();
+    expect(
+      new Set(
+        deriveWorkflowProgress(fixture.group).phases.flatMap((phase) =>
+          phase.tasks.map((task) => task.state),
+        ),
+      ),
+    ).toEqual(new Set(["done", "running", "failed", "queued", "stopped", "skipped"]));
+    await captureSurface({
+      surface: "workflow-dot-grid",
+      state: variant,
+      selector: "[data-workflow-opening]",
+      frame: "[data-qa-column]",
+      element: () => (
+        <div style={variant === "states-grayscale" ? { filter: "grayscale(1)" } : undefined}>
+          <WorkflowBlockSurface kind="graph" fixture={fixture} />
+        </div>
+      ),
+      settle: async (screen) => {
+        await vi.waitFor(() =>
+          expect(
+            screen.container.querySelector('[data-workflow-image-status="loaded"]'),
+          ).not.toBeNull(),
+        );
+      },
+    });
+  },
+);
+
+it("shows observed progress for an undeclared total and non-interactive script placeholders", async () => {
+  const fixture = workflowScriptProgressFixture(false);
+  await using screen = await render(<WorkflowBlockSurface kind="script" fixture={fixture} />);
+  expect(screen.container.querySelectorAll("[data-workflow-placeholder]")).toHaveLength(13);
+  expect(
+    screen.container.querySelectorAll(
+      "[data-workflow-placeholder] button, [data-workflow-placeholder][data-workflow-dot]",
+    ),
+  ).toHaveLength(0);
+  await screen.rerender(<WorkflowBlockSurface kind="script" agentCount={40} />);
+  const bar = screen.getByRole("progressbar", { name: "Workflow tasks settled" });
+  await expect.element(bar).toHaveAttribute("max", "40");
+  await expect
+    .element(bar)
+    .toHaveAttribute("aria-valuetext", expect.stringContaining("total unknown"));
+  expect(screen.getByRole("progressbar").elements()).toHaveLength(1);
+});
+
+it("dot grid final: undeclared phase", async () => {
+  await captureSurface({
+    surface: "workflow-dot-grid",
+    state: "undeclared-phase",
+    selector: "[data-workflow-opening]",
+    frame: "[data-qa-column]",
+    element: () => <WorkflowBlockSurface kind="script" agentCount={40} />,
   });
 });

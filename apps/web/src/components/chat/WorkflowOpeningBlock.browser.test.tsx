@@ -98,7 +98,7 @@ it.each([
   } else {
     await expect
       .element(screen.getByRole("progressbar", { name: "Workflow tasks settled", exact: true }))
-      .not.toBeInTheDocument();
+      .toHaveAttribute("max", String(count));
     expect(screen.container.textContent).toContain("total unknown");
   }
 });
@@ -193,8 +193,8 @@ it.each([4, 40, 256, 1024] as const)(
       screen.container.querySelectorAll("[data-workflow-phase]").length,
     );
     expect(
-      screen.container.querySelectorAll("[data-workflow-phase] [data-model-glyph]"),
-    ).toHaveLength(screen.container.querySelectorAll("[data-workflow-phase]").length);
+      screen.container.querySelectorAll("[data-workflow-phase] [data-workflow-identity]"),
+    ).toHaveLength(count);
     expect(screen.container.querySelector("[data-workflow-waves]")).toBeNull();
     expect(screen.container.querySelectorAll('[aria-live="polite"]')).toHaveLength(1);
     expect(screen.container.textContent).not.toContain("These are task instructions");
@@ -447,7 +447,7 @@ it("coalesces continuing workflow updates into one polite announcement and prese
     "Checking types",
   );
 
-  expect(screen.container.querySelector("progress")).toBeNull();
+  expect(screen.container.querySelector("progress")?.getAttribute("max")).toBe("3");
   expect(screen.container.textContent).toContain("total unknown");
   const live = screen.container.querySelector('[aria-live="polite"]')!;
   expect(live.querySelector("[data-model-glyph]")).toBeNull();
