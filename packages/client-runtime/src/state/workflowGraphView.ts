@@ -24,6 +24,7 @@ export interface WorkflowGraphNodeView<Member> {
   readonly label: string;
   readonly wave: number;
   readonly dependsOn: ReadonlyArray<string>;
+  readonly plannedIdentity?: OrchestrationV2WorkflowPlan["nodes"][number]["plannedIdentity"];
   /** Nodes that list this one in their dependsOn. */
   readonly dependents: ReadonlyArray<string>;
   readonly state: WorkflowGraphNodeState;
@@ -109,6 +110,7 @@ export function deriveWorkflowGraph<Member extends GraphMember>(input: {
       label: node.label,
       wave: node.wave,
       dependsOn: node.dependsOn,
+      plannedIdentity: node.plannedIdentity,
       dependents: dependents.get(node.key) ?? [],
       state: outcome?.status ?? stateWithoutOutcome(member, input.active),
       reason: outcome?.reason ?? null,

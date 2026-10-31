@@ -75,6 +75,8 @@ function WorkflowMemberRow({
   state,
   detail,
   provider,
+  plannedIdentity,
+  plannedProvider,
   onOpen,
   isThreadAvailable,
 }: {
@@ -82,12 +84,20 @@ function WorkflowMemberRow({
   state: WorkflowTaskProgress["state"];
   detail: string | null;
   provider: ServerProvider | undefined;
+  plannedIdentity: WorkflowTaskProgress["plannedIdentity"];
+  plannedProvider: ServerProvider | undefined;
   onOpen: (threadId: string) => void;
   isThreadAvailable: (threadId: string) => boolean;
 }) {
   const threadId = member.childThreadId;
   const canOpen = threadId !== null && isThreadAvailable(threadId);
-  const identity = resolveWorkflowIdentity(member, provider, state);
+  const identity = resolveWorkflowIdentity(
+    member,
+    provider,
+    state,
+    plannedIdentity,
+    plannedProvider,
+  );
   const preview = subagentDetailPreview({ status: member.status, result: detail });
   return (
     <li>
@@ -104,7 +114,7 @@ function WorkflowMemberRow({
             />
           }
         >
-          <WorkflowAgentIdentity member={member} provider={provider} state={state} />
+          <WorkflowAgentIdentity member={member} provider={provider} identity={identity} />
           <span className="line-clamp-2 min-w-0 flex-1 whitespace-normal [overflow-wrap:anywhere]">
             {member.title}
           </span>
@@ -138,6 +148,14 @@ function WorkflowMemberRow({
               </span>
               <AgentElapsed agent={member} />
             </div>
+            {identity.planned ? (
+              <p>
+                Planned: {identity.providerName} · {identity.modelName}
+              </p>
+            ) : null}
+            {identity.plannedDescription ? (
+              <p>Changed from planned: {identity.plannedDescription}</p>
+            ) : null}
             {preview ? <MiddleTruncate value={preview} className="flex" showTitle={false} /> : null}
           </ThreadHoverCard>
         </ThreadHoverCardPopup>
@@ -309,6 +327,11 @@ export function ThreadLineageWorkflowRow({
                             member={null}
                             provider={undefined}
                             state={task.state}
+                            plannedIdentity={task.plannedIdentity}
+                            plannedProvider={providers?.find(
+                              (entry) =>
+                                entry.instanceId === task.plannedIdentity?.providerInstanceId,
+                            )}
                           />
                           <span className="min-w-0 flex-1 break-words">{task.label}</span>
                           <span className={WORKFLOW_STATE_TEXT[task.state]}>{task.state}</span>
@@ -320,6 +343,11 @@ export function ThreadLineageWorkflowRow({
                           state={task.state}
                           detail={task.detail}
                           provider={memberProvider(task.member)}
+                          plannedIdentity={task.plannedIdentity}
+                          plannedProvider={providers?.find(
+                            (entry) =>
+                              entry.instanceId === task.plannedIdentity?.providerInstanceId,
+                          )}
                           onOpen={onOpenThread}
                           isThreadAvailable={isThreadAvailable}
                         />
@@ -338,6 +366,10 @@ export function ThreadLineageWorkflowRow({
                 state={task.state}
                 detail={task.detail}
                 provider={memberProvider(task.member)}
+                plannedIdentity={task.plannedIdentity}
+                plannedProvider={providers?.find(
+                  (entry) => entry.instanceId === task.plannedIdentity?.providerInstanceId,
+                )}
                 onOpen={onOpenThread}
                 isThreadAvailable={isThreadAvailable}
               />

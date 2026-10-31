@@ -2660,6 +2660,7 @@ const make = Effect.gen(function* () {
     // A profile's choice is reported once, however many nodes use it; a node names it by presetId.
     const profiles = new Map<string, ProfileChoice>();
     const profileEntries = new Map<string, WorkflowPresetTarget>();
+    const plannedTargets = new Map<string, unknown>();
     const targetBlockers: string[] = [];
     const resolveGraphTarget = Effect.fn("OrchestratorMcpService.resolveGraphTarget")(
       function* (value: unknown, _label: string) {
@@ -2730,6 +2731,7 @@ const make = Effect.gen(function* () {
               ? yield* resolveGraphTarget(selected.target, nodeId)
               : chosen?.target;
         let verify = node.verify;
+        plannedTargets.set(nodeId, selected.preference?.entries[0] ?? target);
         let judgmentTarget: OrchestratorMcpTarget | undefined;
         if (verify?.type === "judgment") {
           judgmentTarget = yield* resolveGraphTarget(verify.target ?? target, `${nodeId} judgment`);
@@ -2818,7 +2820,7 @@ const make = Effect.gen(function* () {
         ? {
             source: GRAPH_DRIVER_SCRIPT,
             args: { graph: concreteGraph, inputs: review.inputs },
-            plan: graphPlan(concreteGraph),
+            plan: graphPlan(concreteGraph, plannedTargets),
             title: concreteGraph.name ?? "Graph",
           }
         : undefined;

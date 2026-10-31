@@ -5,15 +5,19 @@ import {
 } from "@t3tools/client-runtime/state/subagentRuntime";
 import { resolveProviderInstanceDisplayName } from "@t3tools/client-runtime/state/provider-instance-display";
 import { providerClients } from "@t3tools/client-runtime/provider-clients";
-import { resolveOfficialAcpRegistryIconUrl, type ServerProvider } from "@t3tools/contracts";
+import {
+  resolveOfficialAcpRegistryIconUrl,
+  type OrchestrationV2WorkflowPlannedIdentity,
+  type ServerProvider,
+} from "@t3tools/contracts";
 import type { ProviderIcon } from "@t3tools/provider-core/client";
 import {
   formatModelSlugName,
   resolveModelGlyph,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
-import { AntigravityIcon, ClaudeAI, OpenAI, type Icon } from "../Icons";
 import { getDisplayModelName } from "./providerIconUtils";
+import { AntigravityIcon, ClaudeAI, OpenAI, type Icon } from "../Icons";
 
 const DRIVER_ICONS: Readonly<Record<string, Icon>> = {
   codex: OpenAI,
@@ -39,6 +43,8 @@ export interface WorkflowIdentity {
   readonly modelName: string;
   readonly displayName: string;
   readonly icon: WorkflowIdentityIcon;
+  readonly planned: boolean;
+  readonly plannedDescription?: string;
 }
 
 export function workflowModelName(
@@ -58,38 +64,82 @@ export function resolveWorkflowIdentity(
   member: RuntimeSubagent | null,
   provider: ServerProvider | undefined,
   state?: WorkflowTaskProgress["state"],
+  plannedIdentity: OrchestrationV2WorkflowPlannedIdentity | undefined = member?.plannedIdentity,
+  plannedProvider?: ServerProvider,
 ): WorkflowIdentity {
-  const unstarted = member === null || (state ?? WORKFLOW_MEMBER_STATE[member.status]) === "queued";
+  const unstarted =
+    member === null ||
+    (state ?? WORKFLOW_MEMBER_STATE[member.status]) === "queued" ||
+    (plannedIdentity !== undefined && member.childThreadId === null && member.startedAt === null);
+  const planned = plannedIdentity
+    ? assignedIdentity(
+        { ...plannedIdentity, model: plannedIdentity.model ?? null },
+        plannedProvider ??
+          (provider?.instanceId === plannedIdentity.providerInstanceId ? provider : undefined),
+      )
+    : undefined;
+  if (unstarted) {
+    return planned
+      ? { ...planned, key: `planned:${planned.key}`, planned: true }
+      : {
+          key: "unstarted",
+          providerName: "Not started",
+          modelName: "Model not assigned",
+          displayName: "Not started",
+          icon: { kind: "generic", key: "generic" },
+          planned: false,
+        };
+  }
+  const actual = assignedIdentity(member, provider);
+  const changed =
+    plannedIdentity !== undefined &&
+    ((plannedIdentity.providerInstanceId !== undefined &&
+      plannedIdentity.providerInstanceId !== member.providerInstanceId) ||
+      (plannedIdentity.driver !== undefined &&
+        plannedIdentity.driver !== (provider?.driver ?? member.driver)) ||
+      (plannedIdentity.model !== undefined &&
+        member.model !== null &&
+        planned?.modelId !== actual.modelId));
+  return {
+    ...actual,
+    planned: false,
+    ...(changed && planned
+      ? { plannedDescription: `${planned.providerName} · ${planned.modelName}` }
+      : {}),
+  };
+}
+
+function assignedIdentity(
+  member: Pick<RuntimeSubagent, "model" | "providerInstanceId" | "driver">,
+  provider: ServerProvider | undefined,
+): Omit<WorkflowIdentity, "planned" | "plannedDescription"> & { readonly modelId: string | null } {
   const driver = provider?.driver ?? member?.driver;
-  const providerName = unstarted
-    ? "Not started"
-    : provider
-      ? resolveProviderInstanceDisplayName(provider)
-      : "Provider removed";
-  const modelName = unstarted ? "Model not assigned" : workflowModelName(member.model, provider);
-  const glyph = unstarted ? null : resolveModelGlyph(member.model, driver);
+  const providerName = provider
+    ? resolveProviderInstanceDisplayName(provider)
+    : member.providerInstanceId
+      ? "Provider removed"
+      : "Provider not assigned";
+  const modelName = workflowModelName(member.model, provider);
+  const glyph = resolveModelGlyph(member.model, driver);
   // The registry package's logo identifies the registry, not the configured agent.
   const packageIcon = driver === "acpRegistry" ? undefined : providerClients.get(driver)?.icon;
   const DriverIcon = driver === undefined ? undefined : DRIVER_ICONS[driver];
   const acp = provider ? resolveOfficialAcpRegistryIconUrl(provider.iconUrl ?? null) : null;
-  const icon: WorkflowIdentityIcon = unstarted
-    ? { kind: "generic", key: "generic" }
-    : glyph
-      ? { kind: "glyph", glyph: glyph.glyph, family: glyph.family, label: glyph.label }
-      : packageIcon
-        ? { kind: "package", key: `driver:${driver}`, icon: packageIcon }
-        : DriverIcon
-          ? { kind: "driver", key: `driver:${driver}`, component: DriverIcon }
-          : acp
-            ? { kind: "acp", key: `acp:${acp}`, url: acp }
-            : { kind: "generic", key: "generic" };
+  const icon: WorkflowIdentityIcon = glyph
+    ? { kind: "glyph", glyph: glyph.glyph, family: glyph.family, label: glyph.label }
+    : packageIcon
+      ? { kind: "package", key: `driver:${driver}`, icon: packageIcon }
+      : DriverIcon
+        ? { kind: "driver", key: `driver:${driver}`, component: DriverIcon }
+        : acp
+          ? { kind: "acp", key: `acp:${acp}`, url: acp }
+          : { kind: "generic", key: "generic" };
   return {
-    key: unstarted
-      ? "unstarted"
-      : `${member.providerInstanceId ?? driver ?? "unknown"}:${glyph?.modelId ?? member.model ?? "unknown"}`,
+    modelId: glyph?.modelId ?? member.model,
+    key: `${member.providerInstanceId ?? driver ?? "unknown"}:${glyph?.modelId ?? member.model ?? "unknown"}`,
     providerName,
     modelName,
-    displayName: unstarted ? "Not started" : member.model ? modelName : providerName,
+    displayName: member.model ? modelName : providerName,
     icon,
   };
 }

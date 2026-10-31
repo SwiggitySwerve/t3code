@@ -897,6 +897,75 @@ export function workflowModelGlyphFixture(cue?: "running" | "failed"): WorkflowQ
   return { ...seed, row, opening, group: opening.group!, progress: workflowProgressText(row) };
 }
 
+export function workflowPlannedIdentityFixture(
+  kind: WorkflowQaKind,
+  count: WorkflowScaleCount | "states" = 256,
+  stopped = false,
+  completeSelected = false,
+): WorkflowQaFixture {
+  const seed =
+    count === "states"
+      ? workflowIdentityStatesFixture(stopped)
+      : workflowScaleFixture(kind, count, completeSelected, { identities: "diverse", stopped });
+  const workflow = seed.row.workflow!;
+  const plans = (
+    workflow.plan?.nodes ??
+    workflow.agents.map((agent) => ({
+      key: String(agent.index),
+      label: agent.label,
+      wave: agent.phaseIndex ?? 0,
+      dependsOn: [],
+    }))
+  ).map((node, index) => {
+    const agent = workflow.agents.find(
+      (entry) =>
+        entry.graphNodeKey === node.key || (kind === "script" && String(entry.index) === node.key),
+    );
+    const fallback = SCALE_MODELS[index % SCALE_MODELS.length]!;
+    const identity =
+      index === 0
+        ? SCALE_MODELS[0]!
+        : {
+            provider: agent?.providerInstanceId ?? fallback.provider,
+            model: agent?.model ?? fallback.model,
+          };
+    return {
+      ...node,
+      ...(index === (count === "states" ? 10 : count - 2)
+        ? {}
+        : {
+            plannedIdentity: {
+              providerInstanceId: ProviderInstanceId.make(identity.provider),
+              model: identity.model,
+            },
+          }),
+    };
+  });
+  const agents = workflow.agents.flatMap((agent) => {
+    const plan = plans.find(
+      (node) => node.key === (kind === "graph" ? agent.graphNodeKey : String(agent.index)),
+    );
+    const planned =
+      plan?.plannedIdentity === undefined ? {} : { plannedIdentity: plan.plannedIdentity };
+    if (agent.state !== "queued") return [{ ...agent, ...planned }];
+    if (kind === "graph" && agent.index % 2 === 0) return [];
+    const {
+      model: _model,
+      providerInstanceId: _provider,
+      driver: _driver,
+      agentId: _id,
+      ...queued
+    } = agent;
+    return [{ ...queued, ...planned }];
+  });
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    workflow: { ...workflow, agents, ...(kind === "graph" ? { plan: { nodes: plans } } : {}) },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return { ...seed, row, opening, group: opening.group! };
+}
+
 export function workflowScriptProgressFixture(entered: boolean): WorkflowQaFixture {
   const seed = workflowScaleFixture("script", 4);
   const row: WorkflowQaRow = {

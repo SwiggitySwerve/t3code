@@ -325,6 +325,11 @@ const NARROW_LINEAGE_STATES = ["running", "failed", "long-labels"];
  */
 export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<string>>> = {
   "workflow-dot-grid": [
+    "planned-256",
+    "planned-states",
+    "planned-stopped",
+    "planned-fallback",
+    "planned-script",
     ...OVERVIEW_STATES,
     "failure-focus",
     "composer-edge",

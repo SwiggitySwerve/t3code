@@ -302,6 +302,14 @@ it("keeps the readout inside resized chat bounds and hides it when its cell scro
   });
   const readoutElement = readout.element();
   await act(() => {
+    scroll.scrollTop -= 100;
+  });
+  await vi.waitFor(() => {
+    expect(readoutElement.getBoundingClientRect().bottom).toBeLessThanOrEqual(
+      boundary.getBoundingClientRect().bottom,
+    );
+  });
+  await act(() => {
     scroll.scrollTop = 0;
   });
   await expect.element(readoutElement).not.toBeVisible();

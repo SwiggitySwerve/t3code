@@ -17,6 +17,7 @@ import {
   type WorkflowCheck,
 } from "./workflowChecks.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW, maxAgentsPerCall } from "./workflowLimits.ts";
+import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
 
 type AttemptBudget = "short" | "standard" | "long";
 const ATTEMPT_BUDGETS = { short: 30 * 60_000, standard: 2 * 60 * 60_000, long: 6 * 60 * 60_000 };
@@ -270,12 +271,26 @@ function graphLayers(graph: WorkflowGraph): string[][] {
 }
 
 /** The graph as the app shows it: each node's label, wave and dependencies, without prompts. */
-export function graphPlan(graph: WorkflowGraph): OrchestrationV2WorkflowPlan {
+export function graphPlan(
+  graph: WorkflowGraph,
+  plannedTargets?: ReadonlyMap<string, unknown>,
+): OrchestrationV2WorkflowPlan {
   return {
     nodes: graphLayers(graph).flatMap((layer, wave) =>
       layer.map((key) => {
         const node = graph.nodes[key]!;
-        return { key, label: node.subject, wave, dependsOn: [...node.dependsOn] };
+        const plannedIdentity = workflowPlannedIdentity(
+          plannedTargets?.get(key) ??
+            node.target ??
+            (node.model ? { model: node.model } : undefined),
+        );
+        return {
+          key,
+          label: node.subject,
+          wave,
+          dependsOn: [...node.dependsOn],
+          ...(plannedIdentity === undefined ? {} : { plannedIdentity }),
+        };
       }),
     ),
   };

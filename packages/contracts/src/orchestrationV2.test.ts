@@ -521,6 +521,30 @@ describe("orchestration V2 contracts", () => {
       }
     });
 
+    it("round-trips optional planned identities alongside old plan nodes and agents", () => {
+      const identity = { providerInstanceId: "requested", model: "gpt-6.1-sol" };
+      const wire = {
+        ...encodeOrchestrationV2SubagentJson(coordinator()),
+        workflow: {
+          ...planned,
+          agents: planned.agents.map((agent, index) =>
+            index === 0 ? { ...agent, plannedIdentity: identity } : agent,
+          ),
+          plan: {
+            nodes: planned.plan.nodes.map((node, index) =>
+              index === 0 ? { ...node, plannedIdentity: identity } : node,
+            ),
+          },
+        },
+      };
+      const decoded = decodeOrchestrationV2SubagentJson(wire);
+      expect(decoded.workflow?.agents[0]?.plannedIdentity).toEqual(identity);
+      expect(decoded.workflow?.plan?.nodes[0]?.plannedIdentity).toEqual(identity);
+      expect(decoded.workflow?.agents[1]?.plannedIdentity).toBeUndefined();
+      expect(decoded.workflow?.plan?.nodes[1]?.plannedIdentity).toBeUndefined();
+      expect(encodeOrchestrationV2SubagentJson(decoded)).toEqual(wire);
+    });
+
     it("still decodes a workflow recorded before plans existed", () => {
       const legacy = {
         ...encodeOrchestrationV2SubagentJson(coordinator()),
@@ -530,6 +554,7 @@ describe("orchestration V2 contracts", () => {
       expect(decoded?.plan).toBeUndefined();
       expect(decoded?.nodeOutcomes).toBeUndefined();
       expect(decoded?.agents[0]?.graphNodeKey).toBeUndefined();
+      expect(decoded?.agents[0]?.plannedIdentity).toBeUndefined();
     });
 
     it.each([

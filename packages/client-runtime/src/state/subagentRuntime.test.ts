@@ -60,6 +60,46 @@ const groupsOf = (subagents: ReadonlyArray<ProjectedSubagent>) =>
   deriveWorkflowGroups(projectedSubagentsToRuntime(subagents));
 
 describe("projectedSubagentsToRuntime workflow expansion", () => {
+  it.each([false, true])(
+    "preserves planned identity independently of actual identity (graph=%s)",
+    (graph) => {
+      const plannedIdentity = {
+        providerInstanceId: ProviderInstanceId.make("primary"),
+        model: "gpt-6.1-sol",
+      };
+      const workflow = {
+        phases: [],
+        agents: [
+          member({
+            state: "running",
+            graphNodeKey: "a",
+            plannedIdentity,
+            providerInstanceId: ProviderInstanceId.make("fallback"),
+            model: "gpt-6-luna",
+          }),
+        ],
+        ...(graph
+          ? {
+              plan: {
+                nodes: [
+                  { key: "a", label: "A", wave: 0, dependsOn: [], plannedIdentity },
+                  { key: "b", label: "B", wave: 1, dependsOn: ["a"], plannedIdentity },
+                ],
+              },
+            }
+          : {}),
+      };
+      const group = groupsOf([subagent({ workflow })])[0]!;
+      const tasks = deriveWorkflowProgress(group).phases.flatMap((phase) => phase.tasks);
+      expect(tasks[0]?.plannedIdentity).toEqual(plannedIdentity);
+      expect(tasks[0]?.member).toMatchObject({
+        plannedIdentity,
+        model: "gpt-6-luna",
+        providerInstanceId: "fallback",
+      });
+      if (graph) expect(tasks[1]).toMatchObject({ member: null, plannedIdentity, state: "queued" });
+    },
+  );
   it.each(["queued", "running", "failed", "completed"] as const)(
     "uses a recorded cancellation only for a settled failed member (%s)",
     (state) => {
