@@ -324,6 +324,16 @@ const NARROW_LINEAGE_STATES = ["running", "failed", "long-labels"];
  * here, so a fixture that is deleted or skipped fails the capture instead of shrinking it.
  */
 export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<string>>> = {
+  "workflow-collapse": [
+    "running-256",
+    "running-1024",
+    "expanded",
+    "finished",
+    "failed-receipt",
+    "live-attention",
+    "running-4",
+    "running-fold-open",
+  ],
   "workflow-dot-grid": [
     "planned-256",
     "planned-states",
@@ -374,6 +384,15 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
   "lineage-row-narrow-script": NARROW_LINEAGE_STATES,
   "lineage-collapsed-graph": COLLAPSED_GRAPH_STATES,
   "lineage-collapsed-script": COLLAPSED_SCRIPT_STATES,
+  "lineage-phase-bars": [
+    "graph-256",
+    "script-256",
+    "graph-256-narrow",
+    "long-titles",
+    "script-titles",
+    "agent-rows",
+    "long-elapsed",
+  ],
   "sidebar-status": WORKFLOW_QA_SIDEBAR_STATES,
   "settings-agents": WORKFLOW_QA_SETTINGS_STATES,
   "workflow-review": WORKFLOW_QA_REVIEW_STATES,

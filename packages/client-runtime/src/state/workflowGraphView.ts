@@ -214,3 +214,22 @@ export function workflowGraphNodeDetail(
         : `${attempts} attempts`;
   return { detail: node.reason ?? after, retries };
 }
+
+export function workflowGraphBlockedReasons(graph: WorkflowGraphView<unknown>) {
+  const blocked = new Map<string, string>();
+  const nodes = graph.waves.flat();
+  const byKey = new Map(nodes.map((node) => [node.key, node]));
+  for (const node of nodes) {
+    if (!["waiting", "queued", "skipped", "not_run"].includes(node.state)) continue;
+    const dependency = node.dependsOn
+      .map((key) => byKey.get(key))
+      .find(
+        (parent) =>
+          parent &&
+          (["failed", "interrupted", "not_run", "skipped"].includes(parent.state) ||
+            blocked.has(parent.key)),
+      );
+    if (dependency) blocked.set(node.key, `Blocked by ${dependency.label}`);
+  }
+  return blocked;
+}

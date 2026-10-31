@@ -15,6 +15,7 @@ import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
 import { workflowIdentityStatesFixture } from "../../../test/workflow-fixtures/workflowFixtures";
 import { captureSurface } from "../../../test/workflow-fixtures/capture";
 import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
+import { expandWorkflowPhases } from "../../../test/workflow-fixtures/interactions";
 import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 
 const stop = vi.hoisted(() => vi.fn());
@@ -137,7 +138,10 @@ describe("a workflow's row in the Lineage panel", () => {
           );
           for (const button of screen.getByRole("button", { name: /^Expand .* phase,/ }).elements())
             await userEvent.click(button);
+          await expandWorkflowPhases(screen);
           const progress = deriveWorkflowProgress(fixture.group);
+          const stateColours: string[] = [];
+          const cellColours = new Set<string>();
           for (const phase of progress.phases) {
             for (const task of phase.tasks) {
               const row = task.member
@@ -151,15 +155,32 @@ describe("a workflow's row in the Lineage panel", () => {
               expect(icon.getAttribute("aria-description")?.split(",")[0]).toBe(task.state);
               const rowState = row.getByText(task.state, { exact: true }).element();
               expect(getComputedStyle(rowState).textTransform).toBe("none");
-              expect(getComputedStyle(rowState).color).toBe(
-                getComputedStyle(icon.querySelector("[data-workflow-identity]")!).color,
-              );
+              stateColours.push(getComputedStyle(rowState).color);
+              if (["done", "running", "failed"].includes(task.state))
+                cellColours.add(
+                  getComputedStyle(icon.querySelector("[data-workflow-identity]")!).color,
+                );
             }
             expect(
               screen.container.querySelector(
                 `[aria-label="${phase.counts.settled}/${phase.counts.total} settled"]`,
               ),
             ).not.toBeNull();
+          }
+          // Only a phase's bar carries state colour in the Lineage panel; the words stay neutral.
+          expect(new Set(stateColours).size).toBe(1);
+          expect(cellColours.size).toBeGreaterThan(1);
+          expect(cellColours.has(stateColours[0]!)).toBe(false);
+          const failedPhases = screen.getByRole("button", { name: / phase, failed$/ }).all();
+          expect(failedPhases.length).toBeGreaterThan(0);
+          for (const phaseRow of failedPhases) {
+            const word = getComputedStyle(
+              phaseRow.getByText("failed", { exact: true }).element(),
+            ).color;
+            expect(word).toBe(
+              getComputedStyle(phaseRow.element().querySelector('[aria-label$=" settled"]')!).color,
+            );
+            expect(cellColours.has(word)).toBe(false);
           }
           const rows = screen.container.querySelectorAll("[data-workflow-unstarted-row]");
           expect(rows).toHaveLength(3);

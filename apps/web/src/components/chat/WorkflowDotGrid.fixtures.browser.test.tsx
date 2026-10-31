@@ -8,12 +8,15 @@ import {
   workflowScaleFixture,
   workflowScriptProgressFixture,
   workflowPlannedIdentityFixture,
+  workflowCollapseFixture,
+  workflowFixture,
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import "../../index.css";
 import { act, fakeTimers, render } from "../../../test/render";
 import { captureSurface } from "../../../test/workflow-fixtures/capture";
 import { readQaAtom } from "../../../test/workflow-fixtures/atoms";
 import { workflowClientSettings } from "../../../test/workflow-fixtures/settings";
+import { expandWorkflowPhases } from "../../../test/workflow-fixtures/interactions";
 import {
   WorkflowBlockSurface,
   WorkflowComposerEdgeSurface,
@@ -90,6 +93,44 @@ it("toggles and resets the client preference while the workflow is mounted", asy
   );
 });
 
+it.each([
+  "running-256",
+  "running-1024",
+  "expanded",
+  "finished",
+  "failed-receipt",
+  "live-attention",
+  "running-4",
+  "running-fold-open",
+] as const)("collapsed workflow: %s", async (state) => {
+  const count = state === "running-1024" ? 1024 : state === "running-4" ? 4 : 256;
+  const fixture =
+    state === "live-attention"
+      ? workflowFixture("graph", "retrying")
+      : workflowCollapseFixture(
+          "graph",
+          count,
+          state === "finished" ? "completed" : state === "failed-receipt" ? "failed" : "running",
+        );
+  await captureSurface({
+    surface: "workflow-collapse",
+    state,
+    selector: "[data-workflow-opening]",
+    frame: "[data-qa-column]",
+    element: () => <WorkflowBlockSurface kind="graph" fixture={fixture} />,
+    settle: async (screen) => {
+      if (state === "expanded" || state === "running-fold-open") {
+        const button =
+          state === "expanded"
+            ? screen.container.querySelector<HTMLButtonElement>("[data-workflow-phase-disclosure]")!
+            : screen.getByRole("button", { name: /^Phases 11–12 · 32 running/ }).element();
+        await userEvent.click(button);
+        await expect.element(button).toHaveAttribute("aria-expanded", "true");
+      }
+    },
+  });
+});
+
 it.each([4, 40, 256, 1024] as const)("dot grid final: %i agents", async (count) => {
   await captureSurface({
     surface: "workflow-dot-grid",
@@ -145,6 +186,7 @@ it.each([
 it("replaces an unspawned plan with actual identity and explains a fallback", async () => {
   const fixture = workflowPlannedIdentityFixture("graph", "states");
   await using screen = await render(<WorkflowBlockSurface kind="graph" fixture={fixture} />);
+  await expandWorkflowPhases(screen);
   const queued = screen.getByRole("button", { name: "Open Waiting for agent", exact: true });
   await expect
     .element(queued)
@@ -354,6 +396,7 @@ it.each(["states", "states-grayscale", "states-forced-colors"] as const)(
 it("shows observed progress for an undeclared total and non-interactive script placeholders", async () => {
   const fixture = workflowScriptProgressFixture(false);
   await using screen = await render(<WorkflowBlockSurface kind="script" fixture={fixture} />);
+  await expandWorkflowPhases(screen);
   expect(screen.container.querySelectorAll("[data-workflow-placeholder]")).toHaveLength(13);
   expect(
     screen.container.querySelectorAll(

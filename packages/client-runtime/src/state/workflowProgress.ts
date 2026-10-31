@@ -3,7 +3,7 @@ import type {
   RuntimeSubagentStatus,
   SubagentWorkflowGroup,
 } from "./subagentRuntime.ts";
-import type { WorkflowGraphNodeState } from "./workflowGraphView.ts";
+import { workflowGraphBlockedReasons, type WorkflowGraphNodeState } from "./workflowGraphView.ts";
 
 export type WorkflowTaskState = "done" | "running" | "failed" | "queued" | "stopped" | "skipped";
 
@@ -14,6 +14,12 @@ export interface WorkflowTaskProgress {
   readonly detail: string | null;
   readonly member: RuntimeSubagent | null;
   readonly plannedIdentity?: RuntimeSubagent["plannedIdentity"];
+  readonly attention?:
+    | {
+        readonly kind: "failed" | "blocked" | "retrying" | "waiting";
+        readonly reason: string;
+      }
+    | undefined;
 }
 
 export interface WorkflowProgressCounts {
@@ -97,11 +103,24 @@ function memberTask(member: RuntimeSubagent): WorkflowTaskProgress {
     state: WORKFLOW_MEMBER_STATE[member.status],
     member,
     plannedIdentity: member.plannedIdentity,
+    attention: memberAttention(member, WORKFLOW_MEMBER_STATE[member.status]),
     detail:
       member.status === "failed"
         ? (member.error ?? member.result)
         : (member.result ?? member.progress),
   };
+}
+
+function memberAttention(
+  member: RuntimeSubagent | null,
+  state: WorkflowTaskState,
+): WorkflowTaskProgress["attention"] {
+  if (state === "failed")
+    return { kind: "failed", reason: member?.error ?? member?.result ?? "Agent failed" };
+  if (state !== "running" || member === null) return undefined;
+  if ((member.attempt ?? 0) > 0) return { kind: "retrying", reason: `Retry ${member.attempt}` };
+  if (member.status === "waiting") return { kind: "waiting", reason: member.progress ?? "Waiting" };
+  return undefined;
 }
 
 function phaseProgress(
@@ -145,6 +164,8 @@ function latestStartedOrFinishedMember(
 
 /** Graph nodes own retry identity; script agents keep their index across attempts. */
 export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
+  const blocked =
+    group.graph === null ? new Map<string, string>() : workflowGraphBlockedReasons(group.graph);
   const phases: WorkflowPhaseProgress[] =
     group.graph === null
       ? group.phases.map((phase) =>
@@ -164,6 +185,16 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
             state: WORKFLOW_NODE_STATE[node.state],
             member: node.member,
             plannedIdentity: node.plannedIdentity ?? node.member?.plannedIdentity,
+            attention:
+              node.state === "failed"
+                ? {
+                    kind: "failed",
+                    reason:
+                      node.reason ?? node.member?.error ?? node.member?.result ?? "Agent failed",
+                  }
+                : blocked.has(node.key)
+                  ? { kind: "blocked", reason: blocked.get(node.key)! }
+                  : memberAttention(node.member, WORKFLOW_NODE_STATE[node.state]),
             detail:
               node.reason ??
               (node.state === "failed"
@@ -214,30 +245,194 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     failure === undefined && failedPhase === undefined && !terminal && !activity
       ? latestStartedOrFinishedMember(tasks)
       : null;
+  // Agent failures are listed in `attention`; the headline says what else is happening.
+  const failureSummary =
+    failure === undefined
+      ? null
+      : `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`;
   const headline =
-    failure !== undefined
-      ? `${failedCount} ${failedCount === 1 ? "agent" : "agents"} failed · ${failure.label}${failure.detail ? `: ${failure.detail}` : ""}`
-      : failedPhase !== undefined
-        ? `${failedPhase.title} failed`
-        : group.workflow.status === "failed"
-          ? (group.workflow.error ?? "Workflow failed")
-          : terminal
-            ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
-            : activity ||
-              `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
+    failedPhase !== undefined
+      ? `${failedPhase.title} failed`
+      : group.workflow.status === "failed"
+        ? (group.workflow.error ?? "Workflow failed")
+        : terminal
+          ? `${appWorkflowHeading(group.workflow.status)} · ${workflowSettledText(counts)}`
+          : activity ||
+            `${current?.title ?? "Workflow"} · ${current?.counts.running ?? counts.running} running`;
   const successful =
     group.workflow.status === "completed" &&
     phases.some((phase) => phase.allDone) &&
     phases.every((phase) => phase.allDone || (phase.state === null && phase.tasks.length === 0));
   return {
     phases,
+    attention: tasks
+      .filter((task) => task.attention !== undefined)
+      .sort(
+        (left, right) =>
+          Number(right.attention?.kind === "failed") - Number(left.attention?.kind === "failed"),
+      ),
+    terminal,
+    elapsedMs: workflowElapsedMs(group.workflow, terminal),
     counts,
     headline,
     headlineMember,
+    failureSummary,
     successful,
     failedCount,
+    failedPhaseCount: phases.filter((phase) => phase.state === "failed").length,
     agentCount: tasks.length,
   };
+}
+
+function workflowElapsedMs(workflow: RuntimeSubagent, terminal: boolean): number | null {
+  if (!terminal || workflow.startedAt === null || workflow.completedAt === null) return null;
+  const elapsed = Date.parse(workflow.completedAt) - Date.parse(workflow.startedAt);
+  return Number.isFinite(elapsed) && elapsed >= 0 ? elapsed : null;
+}
+
+type CollapseKind = "done" | "queued" | "settled" | "running";
+
+/** Running phases shown expanded; later running phases fold. Phases with a failure never fold. */
+const WORKFLOW_EXPANDED_RUNNING_PHASES = 2;
+
+/** What one view's phase groups carry from one update to the next. */
+export interface WorkflowPhaseGroupMemory {
+  /** Running phases that held an expanded slot. */
+  readonly expandedRunning: ReadonlySet<string>;
+  /** The disclosure key each folded phase had, by `${kind}:${phase id}`. */
+  readonly keys: ReadonlyMap<string, string>;
+}
+
+export const EMPTY_WORKFLOW_PHASE_GROUP_MEMORY: WorkflowPhaseGroupMemory = {
+  expandedRunning: new Set(),
+  keys: new Map(),
+};
+
+export interface WorkflowPhaseGroup {
+  /** Kept while phases join or leave a fold, so its disclosure keeps its DOM and focus. */
+  readonly key: string;
+  readonly phases: ReadonlyArray<WorkflowPhaseProgress>;
+  readonly kind: CollapseKind | null;
+  readonly label: string;
+  readonly summary: string;
+}
+
+function phaseCollapseKind(phase: WorkflowPhaseProgress): CollapseKind | null {
+  const { counts, state } = phase;
+  if (phase.id === "other" || counts.failed > 0 || state === "failed") return null;
+  if (counts.running > 0 || state === "running") return "running";
+  if (state === "stopped") return "settled";
+  if (
+    state === "completed" ||
+    (counts.done > 0 &&
+      counts.done === counts.observed &&
+      (counts.total === null || counts.done === counts.total))
+  )
+    return "done";
+  if (counts.settled > 0 && counts.settled === counts.observed) return "settled";
+  if (state === "planned" || (counts.queued > 0 && counts.queued === counts.observed))
+    return "queued";
+  return null;
+}
+
+/**
+ * Contiguous done, queued, settled and folded running phases, in phase order. Up to
+ * `WORKFLOW_EXPANDED_RUNNING_PHASES` running phases stay expanded: a phase that held a slot in
+ * `memory` keeps it while it runs, and free slots go to the earliest other running phases. A
+ * phase with a failure is always expanded and uses no slot. Unchanged memory is returned as is.
+ */
+export function deriveWorkflowPhaseGroups(
+  phases: ReadonlyArray<WorkflowPhaseProgress>,
+  memory: WorkflowPhaseGroupMemory = EMPTY_WORKFLOW_PHASE_GROUP_MEMORY,
+): { readonly groups: WorkflowPhaseGroup[]; readonly memory: WorkflowPhaseGroupMemory } {
+  const kinds = phases.map(phaseCollapseKind);
+  const running = phases.filter((_, index) => kinds[index] === "running");
+  const expandedRunning = new Set(
+    [
+      ...running.filter((phase) => memory.expandedRunning.has(phase.id)),
+      ...running.filter((phase) => !memory.expandedRunning.has(phase.id)),
+    ]
+      .slice(0, WORKFLOW_EXPANDED_RUNNING_PHASES)
+      .map((phase) => phase.id),
+  );
+  const runs: Array<{ kind: CollapseKind | null; phases: WorkflowPhaseProgress[] }> = [];
+  phases.forEach((phase, index) => {
+    const kind = expandedRunning.has(phase.id) ? null : (kinds[index] ?? null);
+    const last = runs.at(-1);
+    if (kind !== null && last?.kind === kind) last.phases.push(phase);
+    else runs.push({ kind, phases: [phase] });
+  });
+  const keys = new Map<string, string>();
+  const used = new Set<string>();
+  const groups = runs.map(({ kind, phases: run }) => {
+    const key = kind === null ? run[0]!.id : foldKey(kind, run, memory, used);
+    used.add(key);
+    if (kind !== null) for (const phase of run) keys.set(`${kind}:${phase.id}`, key);
+    return { ...describeGroup(kind, run), key };
+  });
+  const unchanged =
+    sameMembers(expandedRunning, memory.expandedRunning) &&
+    keys.size === memory.keys.size &&
+    [...keys].every(([phase, key]) => memory.keys.get(phase) === key);
+  return { groups, memory: unchanged ? memory : { expandedRunning, keys } };
+}
+
+// A fold keeps the key any of its phases had in a fold of the same kind. When two folds merge,
+// the earlier one's key wins and the later disclosure is replaced.
+function foldKey(
+  kind: CollapseKind,
+  run: ReadonlyArray<WorkflowPhaseProgress>,
+  memory: WorkflowPhaseGroupMemory,
+  used: ReadonlySet<string>,
+): string {
+  const candidates = [
+    ...run.map((phase) => memory.keys.get(`${kind}:${phase.id}`)),
+    ...run.map((phase) => `${kind}:${phase.id}`),
+  ];
+  const free = candidates.find((key): key is string => key !== undefined && !used.has(key));
+  if (free !== undefined) return free;
+  let suffix = 1;
+  while (used.has(`${kind}:${run[0]!.id}#${suffix}`)) suffix += 1;
+  return `${kind}:${run[0]!.id}#${suffix}`;
+}
+
+function sameMembers(left: ReadonlySet<string>, right: ReadonlySet<string>): boolean {
+  return left.size === right.size && [...left].every((value) => right.has(value));
+}
+
+function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPhaseProgress>) {
+  const first = run[0]!;
+  const last = run.at(-1)!;
+  const total = run.every((phase) => phase.counts.total !== null)
+    ? run.reduce((sum, phase) => sum + phase.counts.total!, 0)
+    : null;
+  const counts = countTasks(
+    run.flatMap((phase) => phase.tasks),
+    total,
+  );
+  const missing = Math.max(0, (total ?? counts.observed) - counts.observed);
+  const numeric = /^Phase (\d+)$/.exec(first.title);
+  const lastNumeric = /^Phase (\d+)$/.exec(last.title);
+  const label =
+    run.length === 1
+      ? first.title
+      : numeric && lastNumeric
+        ? `Phases ${numeric[1]}–${lastNumeric[1]}`
+        : `${first.title}–${last.title}`;
+  const summary =
+    kind === "queued"
+      ? `${total ?? counts.queued} queued${total === null ? " · total unknown" : ""}`
+      : [
+          workflowCountsText(counts) || "No agents observed",
+          missing > 0 ? `${missing} not observed` : null,
+          kind === "settled" && run.some((phase) => phase.state === "stopped")
+            ? "phase stopped"
+            : null,
+          total === null ? "total unknown" : null,
+        ]
+          .filter(Boolean)
+          .join(" · ");
+  return { phases: run, kind, label, summary };
 }
 
 export function workflowSettledText(counts: WorkflowProgressCounts): string {

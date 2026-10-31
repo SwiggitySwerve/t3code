@@ -787,14 +787,17 @@ export function workflowScaleFixture(
       },
     ),
   );
+  const name = `Audit ${count} agents${count === 1024 ? " (synthetic UI stress; runtime limit 1,000)" : ""}`;
   const row: WorkflowQaRow = {
     ...seed.row,
+    // The seed's title describes its own four-node run; this run is described by its name.
+    title: name,
     ...(options?.stopped
       ? { status: "cancelled" as const, completedAt: DateTime.makeUnsafe(WORKFLOW_QA_NOW) }
       : {}),
     progress: "Reviewing package exports",
     workflow: {
-      name: `Audit ${count} agents${count === 1024 ? " (synthetic UI stress; runtime limit 1,000)" : ""}`,
+      name,
       agents,
       phases: Array.from({ length: count / phaseSize }, (_, index) => ({
         index,
@@ -864,6 +867,7 @@ export function workflowModelGlyphFixture(cue?: "running" | "failed"): WorkflowQ
   );
   const row: WorkflowQaRow = {
     ...seed.row,
+    title: "Model identities across providers",
     progress: "",
     workflow: {
       name: "Model identities across providers",
@@ -895,6 +899,83 @@ export function workflowModelGlyphFixture(cue?: "running" | "failed"): WorkflowQ
   };
   const opening = resolveAppWorkflowView(row)!;
   return { ...seed, row, opening, group: opening.group!, progress: workflowProgressText(row) };
+}
+
+export function workflowCollapseFixture(
+  kind: WorkflowQaKind,
+  count: WorkflowScaleCount,
+  status: "running" | "completed" | "failed" = "running",
+): WorkflowQaFixture {
+  const seed = workflowScaleFixture(kind, count, false, { identities: "diverse" });
+  const workflow = seed.row.workflow!;
+  const agents = workflow.agents.map((agent, index) => ({
+    ...agent,
+    ...(count === 4 ? { phaseIndex: 0, phaseTitle: "Phase 1" } : {}),
+    state:
+      status === "running"
+        ? count === 4
+          ? ("running" as const)
+          : agent.state
+        : status === "failed" && index === count - 1
+          ? ("failed" as const)
+          : ("completed" as const),
+    ...(count === 4
+      ? { attempt: 0, result: undefined, attemptHistory: [], attemptTaskIds: [] }
+      : {}),
+    ...(status !== "running"
+      ? {
+          startedAt: WORKFLOW_QA_NOW - 5000,
+          completedAt: WORKFLOW_QA_NOW,
+          childThreadId: ThreadId.make(`qa-thread-${index}`),
+        }
+      : {}),
+  }));
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    status,
+    completedAt: status === "running" ? null : DateTime.makeUnsafe(WORKFLOW_QA_NOW),
+    workflow: {
+      ...workflow,
+      agents,
+      phases: count === 4 ? [{ index: 0, title: "Phase 1" }] : workflow.phases,
+      ...(workflow.plan
+        ? {
+            plan: {
+              nodes: workflow.plan.nodes.map((node) =>
+                count === 4 ? { ...node, wave: 0, dependsOn: [] } : node,
+              ),
+            },
+            nodeOutcomes: Object.fromEntries(
+              agents.flatMap((agent) =>
+                agent.state === "completed" || agent.state === "failed"
+                  ? [
+                      [
+                        agent.graphNodeKey!,
+                        {
+                          status:
+                            agent.state === "failed" ? ("failed" as const) : ("passed" as const),
+                          ...(agent.state === "failed"
+                            ? { reason: "Access denied. Check workspace permissions." }
+                            : {}),
+                        },
+                      ],
+                    ]
+                  : [],
+              ),
+            ),
+          }
+        : {}),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return {
+    row,
+    opening,
+    group: opening.group!,
+    heading: appWorkflowHeading(status),
+    progress: workflowProgressText(row),
+    running: status === "running",
+  };
 }
 
 export function workflowPlannedIdentityFixture(
@@ -961,6 +1042,54 @@ export function workflowPlannedIdentityFixture(
   const row: WorkflowQaRow = {
     ...seed.row,
     workflow: { ...workflow, agents, ...(kind === "graph" ? { plan: { nodes: plans } } : {}) },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return { ...seed, row, opening, group: opening.group! };
+}
+
+/** The 256-agent run after 12m 30s, so every started phase shows a realistic elapsed time. */
+export function workflowLongElapsedFixture(): WorkflowQaFixture {
+  const seed = workflowCollapseFixture("graph", 256);
+  const workflow = seed.row.workflow!;
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    workflow: {
+      ...workflow,
+      agents: workflow.agents.map((agent) =>
+        agent.startedAt === undefined
+          ? agent
+          : {
+              ...agent,
+              startedAt: WORKFLOW_QA_NOW - 750_000,
+              ...(agent.completedAt === undefined ? {} : { completedAt: WORKFLOW_QA_NOW }),
+            },
+      ),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return { ...seed, row, opening, group: opening.group! };
+}
+
+/** A 40-agent script run whose phase titles range from one word to a sentence. */
+export function workflowPhaseTitlesFixture(): WorkflowQaFixture {
+  const seed = workflowCollapseFixture("script", 40);
+  const titles = [
+    "Collect sources",
+    "Review every package manifest and lockfile",
+    "Fix",
+    "Write the final report",
+  ];
+  const workflow = seed.row.workflow!;
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    workflow: {
+      ...workflow,
+      phases: workflow.phases.map((phase) => ({ ...phase, title: titles[phase.index]! })),
+      agents: workflow.agents.map((agent) => ({
+        ...agent,
+        phaseTitle: titles[agent.phaseIndex!]!,
+      })),
+    },
   };
   const opening = resolveAppWorkflowView(row)!;
   return { ...seed, row, opening, group: opening.group! };
@@ -1070,6 +1199,7 @@ export function workflowIdentityStatesFixture(stopped = false): WorkflowQaFixtur
   ];
   const row: WorkflowQaRow = {
     ...seed.row,
+    title: "Every agent state",
     status: stopped ? "cancelled" : "running",
     progress: "",
     workflow: {

@@ -20,7 +20,10 @@ import {
   WORKFLOW_QA_SCRIPT_MARKER,
   WORKFLOW_QA_STATUSES,
   WORKFLOW_QA_STRESS,
+  workflowCollapseFixture,
   workflowFixture,
+  workflowLongElapsedFixture,
+  workflowPhaseTitlesFixture,
   type WorkflowQaVariant,
 } from "../../../test/workflow-fixtures/workflowFixtures";
 import {
@@ -220,6 +223,72 @@ it("lineage row, graph, running, Stop shown while the row is hovered", async () 
     settle: async (screen) => {
       await expandLineage(screen);
       await userEvent.hover(screen.getByRole("button", { name: /^Collapse [^,]+$/ }));
+    },
+  });
+});
+
+// Every phase row, with agent lists folded so each row's bar is in view. `shown` is how many bars
+// must be drawn, or null when it depends on how much room each title leaves; `open` is a phase
+// whose agent rows are shown.
+it.each([
+  ["graph-256", "graph", "collapse", false, 16, null],
+  ["script-256", "script", "collapse", false, 16, null],
+  ["graph-256-narrow", "graph", "collapse", true, 0, null],
+  ["long-titles", "script", "long-labels", false, null, null],
+  ["script-titles", "script", "titles", false, 4, null],
+  ["agent-rows", "graph", "collapse", false, 16, "Phase 16"],
+  ["long-elapsed", "graph", "elapsed", false, 16, null],
+] as const)("lineage phase bars, %s", async (state, kind, source, narrow, shown, open) => {
+  await captureSurface({
+    surface: "lineage-phase-bars",
+    state,
+    selector: "[data-workflow-expanded]",
+    frame: "[data-qa-panel]",
+    // Not width-checked: each folded row's chevron is CSS-rotated, and across runs a few of their
+    // edge pixels differ by one grey level, which no layout explains.
+    element: () =>
+      source === "long-labels" ? (
+        <LineageRowSurface kind={kind} variant="long-labels" />
+      ) : (
+        <LineageRowSurface
+          kind={kind}
+          fixture={
+            source === "titles"
+              ? workflowPhaseTitlesFixture()
+              : source === "elapsed"
+                ? workflowLongElapsedFixture()
+                : workflowCollapseFixture(kind, 256)
+          }
+          narrow={narrow}
+        />
+      ),
+    settle: async (screen) => {
+      await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
+      const folded = screen.getByRole("button", { name: /^Collapse .+ phase,/ });
+      for (let opened = folded.elements().length; opened > 0; opened -= 1) {
+        await userEvent.click(folded.first());
+      }
+      const list = screen.getByRole("list", { name: "Related threads", exact: true }).element();
+      // The last phases hold the queued and failed rows; an opened phase is shown from its row.
+      list.scrollTop = list.scrollHeight;
+      if (open !== null) {
+        const phase = screen
+          .getByRole("button", { name: new RegExp(`^Expand ${open} phase,`) })
+          .element();
+        await userEvent.click(phase);
+        list.scrollTop += phase.getBoundingClientRect().top - list.getBoundingClientRect().top;
+      }
+      const bars = [...list.querySelectorAll("[data-workflow-track]")].map((bar) =>
+        bar.getBoundingClientRect(),
+      );
+      const drawn = bars.filter((bar) => bar.width > 0);
+      // A bar is drawn at its full size or not at all, and every drawn bar starts at one edge.
+      expect(bars.filter((bar) => bar.width === 0 && bar.height === 0)).toHaveLength(
+        bars.length - drawn.length,
+      );
+      expect(drawn.map(({ width, height }) => [width, height])).toEqual(drawn.map(() => [56, 2]));
+      expect(new Set(drawn.map((bar) => bar.left)).size).toBeLessThanOrEqual(1);
+      if (shown !== null) expect(drawn).toHaveLength(shown);
     },
   });
 });

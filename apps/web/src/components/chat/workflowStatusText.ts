@@ -1,32 +1,22 @@
-import {
-  WORKFLOW_MEMBER_STATE,
-  type RuntimeSubagentStatus,
-} from "@t3tools/client-runtime/state/subagentRuntime";
-import { WORKFLOW_STATE_TEXT } from "./workflowStatusAppearance";
+import type { RuntimeSubagentStatus } from "@t3tools/client-runtime/state/subagentRuntime";
 
-/** Agent status words accompany colour so the Lineage list never relies on colour alone. */
-export interface WorkflowStatusText {
-  readonly label: string;
-  readonly className: string;
-}
-
-export function workflowMemberStatusText(status: RuntimeSubagentStatus): WorkflowStatusText {
-  const className = WORKFLOW_STATE_TEXT[WORKFLOW_MEMBER_STATE[status]];
+/** The word the Lineage header shows for a workflow; its status icon carries the colour. */
+export function workflowMemberStatusLabel(status: RuntimeSubagentStatus): string {
   switch (status) {
     case "completed":
-      return { label: "Done", className };
+      return "Done";
     case "running":
-      return { label: "Running", className };
+      return "Running";
     case "failed":
-      return { label: "Failed", className };
+      return "Failed";
     case "pending":
-      return { label: "Queued", className };
+      return "Queued";
     case "waiting":
-      return { label: "Waiting", className };
+      return "Waiting";
     case "idle":
-      return { label: "Idle", className };
+      return "Idle";
     case "cancelled":
     case "interrupted":
-      return { label: "Stopped", className };
+      return "Stopped";
   }
 }

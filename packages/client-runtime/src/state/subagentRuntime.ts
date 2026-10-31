@@ -48,6 +48,9 @@ export {
   WORKFLOW_MEMBER_STATE,
   WORKFLOW_NODE_STATE,
   type WorkflowTaskProgress,
+  type WorkflowPhaseGroup,
+  deriveWorkflowPhaseGroups,
+  EMPTY_WORKFLOW_PHASE_GROUP_MEMORY,
 } from "./workflowProgress.ts";
 
 export type RuntimeSubagentStatus =
@@ -184,10 +187,10 @@ export function workflowMemberIdentity(member: RuntimeSubagent | null): string {
 
 /** Old graph errors embedded the full outcome record; arbitrary script text stays intact. */
 export function workflowProgressText(row: {
-  readonly status: OrchestrationV2Subagent["status"];
+  readonly status: RuntimeSubagentStatus;
   readonly progress?: string | undefined;
   readonly result: string | null;
-  readonly workflow?: OrchestrationV2SubagentWorkflow | undefined;
+  readonly workflow?: Pick<OrchestrationV2SubagentWorkflow, "plan" | "nodeOutcomes"> | undefined;
 }): string | null {
   if (row.status === "running") return row.progress ?? null;
   const plan = row.workflow?.plan;

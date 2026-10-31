@@ -184,11 +184,13 @@ export function WorkflowScriptProgressSurface(
 /** A workflow's row in the Lineage list of the thread details panel. */
 export function LineageRowSurface(props: {
   readonly kind: WorkflowQaKind;
-  readonly variant: WorkflowQaVariant;
+  readonly variant?: WorkflowQaVariant;
+  readonly fixture?: WorkflowQaFixture;
   /** A narrow right panel, as at the smallest width the details panel is dragged to. */
   readonly narrow?: boolean;
 }) {
-  const { group, running } = workflowFixture(props.kind, props.variant);
+  const { group, running } =
+    props.fixture ?? workflowFixture(props.kind, props.variant ?? "running");
   const { workflow } = group;
   // Mirrors the header ThreadRelationshipsControl passes to the row.
   const header = (

@@ -16,13 +16,14 @@ import { useState, type ReactNode } from "react";
 import { AgentElapsed } from "./AgentElapsed";
 import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
 import { MiddleTruncate } from "../ui/middle-truncate";
-import { workflowMemberStatusText } from "./workflowStatusText";
+import { workflowMemberStatusLabel } from "./workflowStatusText";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
+import { WorkflowProgressTrack } from "./WorkflowProgressTrack";
 import { resolveWorkflowIdentity } from "./workflowIdentity";
-import { WORKFLOW_STATE_TEXT, WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
+import { WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
 import { cn } from "../../lib/utils";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
-import { CollapsibleSectionHeader, SectionHeaderStatus } from "../ui/collapsible-section-header";
+import { CollapsibleSectionHeader } from "../ui/collapsible-section-header";
 import { Spinner } from "../ui/spinner";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
@@ -38,7 +39,6 @@ export function WorkflowLineageStatus(props: {
   readonly workflow: RuntimeSubagent;
   readonly className?: string | undefined;
 }) {
-  const status = workflowMemberStatusText(props.workflow.status);
   return (
     <span
       className={cn(
@@ -46,7 +46,7 @@ export function WorkflowLineageStatus(props: {
         props.className,
       )}
     >
-      <span className={cn("font-medium", status.className)}>{status.label}</span>
+      <span className="font-medium">{workflowMemberStatusLabel(props.workflow.status)}</span>
       <AgentElapsed agent={props.workflow} compact />
     </span>
   );
@@ -119,7 +119,7 @@ function WorkflowMemberRow({
             {member.title}
           </span>
           <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-            <span className={cn("font-medium", WORKFLOW_STATE_TEXT[state])}>{state}</span>
+            <span className="font-medium">{state}</span>
             {member.startedAt ? (
               <>
                 {" "}
@@ -137,12 +137,7 @@ function WorkflowMemberRow({
               label={identity.modelName}
             />
             <div className="flex items-center justify-between gap-4">
-              <span
-                className={cn(
-                  "inline-flex items-center gap-1 font-medium",
-                  WORKFLOW_STATE_TEXT[state],
-                )}
-              >
+              <span className="inline-flex items-center gap-1 font-medium">
                 <span aria-hidden className={cn("size-2", WORKFLOW_STATE_MARKER[state])} />
                 {state}
               </span>
@@ -214,7 +209,7 @@ export function ThreadLineageWorkflowRow({
       ? provider
       : providers?.find((entry) => entry.instanceId === member.providerInstanceId);
   return (
-    <li className="group @container" data-workflow-expanded={expanded ? "" : undefined}>
+    <li className="group @container/lineage" data-workflow-expanded={expanded ? "" : undefined}>
       <div className={cn("relative", THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS)}>
         {header}
         {onStop ? (
@@ -274,10 +269,18 @@ export function ThreadLineageWorkflowRow({
                   expanded={open}
                   aria-label={`${open ? "Collapse" : "Expand"} ${phase.title} phase, ${status}`}
                   onClick={() => setPhaseOpen((phases) => new Map(phases).set(phase.id, !open))}
+                  meter={
+                    // Hidden in a dragged-narrow panel, where the bars could not keep one width.
+                    <WorkflowProgressTrack
+                      counts={phase.counts}
+                      decorative
+                      className="h-0.5 @max-[16rem]/lineage:hidden"
+                    />
+                  }
                   accessory={
                     <>
                       {status === "failed" ? (
-                        <SectionHeaderStatus>{status}</SectionHeaderStatus>
+                        <span className="shrink-0 text-3xs leading-none">{status}</span>
                       ) : null}
                       <Tooltip>
                         <TooltipTrigger
@@ -289,8 +292,8 @@ export function ThreadLineageWorkflowRow({
                           }
                         >
                           {workflowSettledFraction(phase.counts)}
-                          {/* The unit goes first in a narrow panel, so the count and time stay whole. */}
-                          <span className="@max-[18rem]:hidden">
+                          {/* Only once labels reach their cap, so the unit never takes a bar's room. */}
+                          <span className="@max-[27rem]/lineage:hidden">
                             {phase.counts.total === 1 ? " agent" : " agents"}
                           </span>
                         </TooltipTrigger>
@@ -305,7 +308,10 @@ export function ThreadLineageWorkflowRow({
                   <Tooltip>
                     <TooltipTrigger
                       render={
-                        <span className="block max-w-[34cqw] truncate @max-[18rem]:max-w-[24cqw]" />
+                        // One width for every label, so all bars start together. It stays 3rem until
+                        // the row also fits its bar, "failed", "100/100" and "12m 30s"; a row that
+                        // still lacks room hides its bar.
+                        <span className="block w-[clamp(3rem,100cqw_-_15.625rem,34cqw)] truncate @max-[16rem]/lineage:w-auto @max-[16rem]/lineage:max-w-[24cqw]" />
                       }
                     >
                       {phase.title}
@@ -334,7 +340,9 @@ export function ThreadLineageWorkflowRow({
                             )}
                           />
                           <span className="min-w-0 flex-1 break-words">{task.label}</span>
-                          <span className={WORKFLOW_STATE_TEXT[task.state]}>{task.state}</span>
+                          <span className="shrink-0 text-2xs text-muted-foreground">
+                            {task.state}
+                          </span>
                         </li>
                       ) : (
                         <WorkflowMemberRow

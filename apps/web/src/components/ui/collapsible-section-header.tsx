@@ -14,12 +14,15 @@ export function CollapsibleSectionHeader({
   tone = "muted",
   variant = "default",
   accessory,
+  meter,
   ...buttonProps
 }: Omit<ComponentProps<"button">, "className" | "style" | "aria-expanded"> & {
   expanded: boolean;
   tone?: keyof typeof tones;
   variant?: "default" | "panel";
   accessory?: ReactNode;
+  /** A fixed-width inline bar after the label; hidden, never narrowed, when the row lacks room. */
+  meter?: ReactNode;
 }) {
   return (
     <button
@@ -33,11 +36,20 @@ export function CollapsibleSectionHeader({
       )}
     >
       <span className="shrink-0">{children}</span>
-      <span
-        aria-hidden
-        // A header with a trailing count drops its rule so it doesn't read as a leader.
-        className={cn("h-px min-w-2 flex-1", tones[tone].line, accessory && "invisible")}
-      />
+      {meter === undefined ? (
+        <span
+          aria-hidden
+          // A header with a trailing count drops its rule so it doesn't read as a leader.
+          className={cn("h-px min-w-2 flex-1", tones[tone].line, accessory && "invisible")}
+        />
+      ) : (
+        // Takes the rule's place and can shrink to nothing, so the row never needs more room.
+        <span aria-hidden className="@container/meter flex min-w-0 flex-1 items-center">
+          <span className="flex w-14 shrink-0 items-center @max-[3.5rem]/meter:hidden">
+            {meter}
+          </span>
+        </span>
+      )}
       {accessory}
       <ChevronDownIcon
         aria-hidden
