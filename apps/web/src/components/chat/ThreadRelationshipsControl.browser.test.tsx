@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vite-plus/test";
-import { commands, userEvent } from "vite-plus/test/browser";
+import { commands, page, userEvent } from "vite-plus/test/browser";
 
 import "~/index.css";
 
@@ -12,6 +12,10 @@ import {
 import { QA_ENVIRONMENT, QA_PROVIDERS } from "../../../test/workflow-fixtures/providers";
 import { render } from "../../../test/render";
 import { ThreadRelationshipsPanel } from "./ThreadRelationshipsControl";
+import { workflowIdentityStatesFixture } from "../../../test/workflow-fixtures/workflowFixtures";
+import { captureSurface } from "../../../test/workflow-fixtures/capture";
+import { deriveWorkflowProgress } from "@t3tools/client-runtime/state/subagentRuntime";
+import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 
 const stop = vi.hoisted(() => vi.fn());
 const state = vi.hoisted(() => ({
@@ -59,6 +63,119 @@ async function showLineage(fixture = lineagePanelFixture()) {
 }
 
 describe("a workflow's row in the Lineage panel", () => {
+  it("keeps graph outcome state and detail in the row and its hover card", async () => {
+    using _permission = stubQaWorkflowStopPermission();
+    const base = lineagePanelFixture();
+    const fixture = workflowIdentityStatesFixture();
+    const { screen } = await showLineage({
+      ...base,
+      projection: {
+        ...base.projection,
+        subagents: [
+          {
+            ...fixture.row,
+            workflow: {
+              ...fixture.row.workflow!,
+              nodeOutcomes: {
+                ...fixture.row.workflow!.nodeOutcomes,
+                sol: { status: "failed", reason: "Graph outcome failed" },
+              },
+            },
+          },
+        ],
+      },
+    });
+    await using _screen = screen;
+    await userEvent.click(
+      screen.getByRole("button", { name: "Expand Every agent state", exact: true }),
+    );
+    await userEvent.click(
+      screen.getByRole("button", { name: "Expand Phase 1 phase, failed", exact: true }),
+    );
+    const row = screen.getByRole("button", { name: "Open Sol running chat", exact: true });
+    await expect.element(row.getByText("failed", { exact: true })).toBeVisible();
+    await userEvent.hover(row);
+    await expect.poll(() => document.querySelector('[data-slot="tooltip-popup"]')).not.toBeNull();
+    const popup = page.elementLocator(document.querySelector('[data-slot="tooltip-popup"]')!);
+    await expect.element(popup.getByText("failed", { exact: true })).toBeVisible();
+    await expect.element(popup.getByText("Graph outcome failed", { exact: true })).toBeVisible();
+    await expect.element(popup.getByText("running", { exact: true })).not.toBeInTheDocument();
+  });
+  it.each([false, true])(
+    "dot grid final: retains unstarted relationships, stopped=%s",
+    async (stopped) => {
+      using _permission = stubQaWorkflowStopPermission();
+      const base = lineagePanelFixture();
+      const fixture = workflowIdentityStatesFixture(stopped);
+      state.fixture = { ...base, projection: { ...base.projection, subagents: [fixture.row] } };
+      await captureSurface({
+        surface: "workflow-dot-grid-relationships",
+        state: stopped ? "stopped-not-started" : "not-started",
+        selector: "[data-thread-relationships-panel]",
+        frame: "[data-qa-relationships]",
+        router: true,
+        element: () => (
+          <>
+            <div
+              className="max-w-80 rounded-xl border border-border bg-popover p-2 text-popover-foreground"
+              data-qa-relationships
+            >
+              <ThreadRelationshipsPanel environmentId={QA_ENVIRONMENT} threadId={LINEAGE_PARENT} />
+            </div>
+            <WorkflowProgressOverview
+              progress={deriveWorkflowProgress(fixture.group)}
+              environmentId={QA_ENVIRONMENT}
+              onOpenThread={() => {}}
+            />
+          </>
+        ),
+        settle: async (screen) => {
+          if (stopped)
+            await userEvent.click(screen.getByRole("button", { name: /Previous agents/ }));
+          await userEvent.click(
+            screen.getByRole("button", { name: "Expand Every agent state", exact: true }),
+          );
+          for (const button of screen.getByRole("button", { name: /^Expand .* phase,/ }).elements())
+            await userEvent.click(button);
+          const progress = deriveWorkflowProgress(fixture.group);
+          for (const phase of progress.phases) {
+            for (const task of phase.tasks) {
+              const row = task.member
+                ? screen.getByRole("button", { name: `Open ${task.label} chat`, exact: true })
+                : screen.getByRole("listitem", {
+                    name: `${task.label}, ${task.state}`,
+                    exact: true,
+                  });
+              await expect.element(row.getByText(task.state, { exact: true })).toBeVisible();
+              const icon = screen.container.querySelector(`[data-workflow-dot="${task.id}"]`)!;
+              expect(icon.getAttribute("aria-description")?.split(",")[0]).toBe(task.state);
+              const rowState = row.getByText(task.state, { exact: true }).element();
+              expect(getComputedStyle(rowState).textTransform).toBe("none");
+              expect(getComputedStyle(rowState).color).toBe(
+                getComputedStyle(icon.querySelector("[data-workflow-identity]")!).color,
+              );
+            }
+            expect(
+              screen.container.querySelector(
+                `[aria-label="${phase.counts.settled}/${phase.counts.total} settled"]`,
+              ),
+            ).not.toBeNull();
+          }
+          const rows = screen.container.querySelectorAll("[data-workflow-unstarted-row]");
+          expect(rows).toHaveLength(3);
+          expect([...rows].map((row) => row.getAttribute("aria-label"))).toEqual([
+            `Waiting for agent, ${stopped ? "stopped" : "queued"}`,
+            "Skipped agent, skipped",
+            `Agent not run, ${stopped ? "stopped" : "queued"}`,
+          ]);
+          expect(
+            screen.container.querySelectorAll("[data-workflow-unstarted-row] button"),
+          ).toHaveLength(0);
+          rows[0]!.scrollIntoView({ block: "nearest" });
+        },
+      });
+    },
+  );
   it("counts a running workflow before and after its first agent gets a thread", async () => {
     using _permission = stubQaWorkflowStopPermission();
     const fixture = lineagePanelFixture();
@@ -109,7 +226,7 @@ describe("a workflow's row in the Lineage panel", () => {
     using _permission = stubQaWorkflowStopPermission();
     const { screen, title } = await showLineage();
     await using _screen = screen;
-    const row = screen.getByRole("button", { name: new RegExp(`^${title}`) });
+    const row = screen.getByRole("button", { name: new RegExp(`^Running ${title}`) });
     const button = screen.getByRole("button", { name: `Stop workflow ${title}`, exact: true });
     // The control reveals Stop through the wrapper around it.
     const wrapper = button.element().parentElement!;
@@ -135,7 +252,7 @@ describe("a workflow's row in the Lineage panel", () => {
     const wrapper = button.element().parentElement!;
     await userEvent.tab();
     await expect
-      .element(screen.getByRole("button", { name: new RegExp(`^${title}`) }))
+      .element(screen.getByRole("button", { name: new RegExp(`^Running ${title}`) }))
       .toHaveFocus();
     await userEvent.tab();
     await expect.element(button).toHaveFocus();

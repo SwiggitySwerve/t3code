@@ -24,6 +24,16 @@ import {
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
 const decodeClientSettingsPatch = Schema.decodeUnknownSync(ClientSettingsPatch);
+
+it("keeps verbose workflow graphs opt-in across old settings and partial patches", () => {
+  expect(decodeClientSettings({}).verboseWorkflowGraph).toBe(false);
+  expect(decodeClientSettings({ verboseWorkflowGraph: true }).verboseWorkflowGraph).toBe(true);
+  expect(decodeClientSettingsPatch({})).not.toHaveProperty("verboseWorkflowGraph");
+  expect(decodeClientSettingsPatch({ verboseWorkflowGraph: false })).toEqual({
+    verboseWorkflowGraph: false,
+  });
+  expect(() => decodeClientSettingsPatch({ verboseWorkflowGraph: "true" })).toThrow();
+});
 const encodeClientSettings = Schema.encodeSync(ClientSettingsSchema);
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
 const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);

@@ -1,4 +1,5 @@
 import { useAtomValue } from "@effect/atom-react";
+import { WorkflowGraphSettingsRow } from "./WorkflowGraphSettingsRow";
 import { NotificationSettings } from "./NotificationSettings";
 import { PRIVACY_POLICY_URL } from "../../legalLinks";
 import { CheckIcon } from "lucide-react";
@@ -514,6 +515,9 @@ export function useSettingsRestore(onRestored?: () => void) {
     ...(settings.proactivePanelsEnabled !== DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled
       ? ["Proactive panels"]
       : []),
+    ...(settings.verboseWorkflowGraph !== DEFAULT_UNIFIED_SETTINGS.verboseWorkflowGraph
+      ? ["Verbose workflow graph"]
+      : []),
     ...(settings.showSkillsInSlashMenu !== DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu
       ? ["Show skills in slash menu"]
       : []),
@@ -635,6 +639,7 @@ export function useSettingsRestore(onRestored?: () => void) {
       diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
       diffLayout: DEFAULT_UNIFIED_SETTINGS.diffLayout,
       proactivePanelsEnabled: DEFAULT_UNIFIED_SETTINGS.proactivePanelsEnabled,
+      verboseWorkflowGraph: DEFAULT_UNIFIED_SETTINGS.verboseWorkflowGraph,
       showSkillsInSlashMenu: DEFAULT_UNIFIED_SETTINGS.showSkillsInSlashMenu,
       composerRichTextEnabled: DEFAULT_UNIFIED_SETTINGS.composerRichTextEnabled,
       sendShortcut: DEFAULT_UNIFIED_SETTINGS.sendShortcut,
@@ -1226,6 +1231,9 @@ export function ChatSettingsPanel() {
             </Select>
           }
         />
+      </SettingsSection>
+      <SettingsSection id="workflows" title="Workflows">
+        <WorkflowGraphSettingsRow />
       </SettingsSection>
     </SettingsPageContainer>
   );

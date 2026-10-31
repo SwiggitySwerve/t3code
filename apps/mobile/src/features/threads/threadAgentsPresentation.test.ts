@@ -82,7 +82,8 @@ describe("resolveSubagentRowPresentation", () => {
     const row = resolveSubagentRowPresentation({ ...base, status: "pending" });
 
     expect(row.detail).toBeNull();
-    expect(row.statusLabel).toBe("Working");
+    expect(row.statusLabel).toBe("Queued");
+    expect(row.tone).toBe("queued");
   });
 
   it("bounds long result previews without dropping the agent's status", () => {

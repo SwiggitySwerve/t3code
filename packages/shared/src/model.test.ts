@@ -20,6 +20,11 @@ describe("model glyph identity", () => {
     ["openai/gpt-6-astra", "🌌"],
     ["gpt-6.1-terra", "🌍"],
     ["gpt-6-luna", "🌙"],
+    ["gpt-5.6-sol", "🌞"],
+    ["gpt-6-sol", "🌞"],
+    ["openai/gpt-6.1-astra", "🌌"],
+    ["gpt-7-terra", "🌍"],
+    ["GPT-7.2-LUNA", "🌙"],
     ["anthropic/claude-opus-5.5", "🎵"],
     ["claude-opus-5[1m]", "🎵"],
     ["claude-3-5-sonnet-20241022", "🪶"],
@@ -43,14 +48,23 @@ describe("model glyph identity", () => {
   });
 
   it.each([
+    ["gpt-6-sol", "GPT-6 Sol"],
+    ["openai/gpt-6.1-astra", "GPT-6.1 Astra"],
+    ["gpt-7.2-terra", "GPT-7.2 Terra"],
+    ["openai.gpt-5.6-luna", "GPT-5.6 Luna"],
+  ])("labels %s with its actual version", (model, label) => {
+    expect(resolveModelGlyph(model)?.label).toBe(label);
+  });
+
+  it.each([
     null,
     undefined,
     "",
     " ",
     "default",
     "auto",
-    "gpt-5.6-sol",
-    "gpt-6-sol",
+    "gpt-sol",
+    "gpt-x-sol",
     "gpt-6.1-solar",
     "gpt-6-astra-custom",
     "custom-claude-opus-5",

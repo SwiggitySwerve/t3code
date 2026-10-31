@@ -13,6 +13,35 @@ export const QA_DRIVER = ProviderDriverKind.make("codex");
 /** Provider-scoped catalog entries and aliases used by the QA profiles and identity fixtures. */
 export const QA_PROVIDERS: ReadonlyArray<ServerProvider> = [
   {
+    instanceId: ProviderInstanceId.make("qa-opencode"),
+    displayName: "OpenCode",
+    driver: ProviderDriverKind.make("opencode"),
+    enabled: true,
+    installed: true,
+    version: "test",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-10-24T12:00:00Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+  },
+  {
+    instanceId: ProviderInstanceId.make("qa-acp"),
+    displayName: "ACP Agent",
+    driver: ProviderDriverKind.make("acpRegistry"),
+    iconUrl: "https://cdn.agentclientprotocol.com/registry/v1/latest/claude-acp.svg",
+    enabled: true,
+    installed: true,
+    version: "test",
+    status: "ready",
+    auth: { status: "authenticated" },
+    checkedAt: "2026-10-24T12:00:00Z",
+    models: [],
+    slashCommands: [],
+    skills: [],
+  },
+  {
     instanceId: QA_PROVIDER_INSTANCE,
     displayName: "CLI Proxy",
     accentColor: "#7c3aed",
@@ -52,6 +81,7 @@ export const QA_PROVIDERS: ReadonlyArray<ServerProvider> = [
         capabilities: null,
       },
       { slug: "gpt-6-astra", name: "GPT-6 Astra", isCustom: false, capabilities: null },
+      { slug: "gpt-6.1-astra", name: "GPT-6.1 Astra", isCustom: false, capabilities: null },
       {
         slug: "claude-sonnet-4-6",
         name: "Claude Sonnet 4.6",

@@ -4,17 +4,19 @@ import { cn } from "../../lib/cn";
 import type { SubagentRowTone } from "./threadAgentsPresentation";
 
 const TONE_CLASS = {
-  working: "bg-adaptive-sky-600-400",
-  completed: "bg-adaptive-emerald-600-400",
+  working: "bg-adaptive-emerald-600-400",
+  completed: "bg-adaptive-sky-600-400",
   failed: "bg-adaptive-rose-600-400",
   stopped: "bg-foreground-muted",
+  queued: "bg-foreground-muted",
 } as const satisfies Record<SubagentRowTone, string>;
 
 export const SUBAGENT_TONE_TEXT_CLASS = {
-  working: "text-adaptive-sky-600-400",
-  completed: "text-adaptive-emerald-600-400",
+  working: "text-adaptive-emerald-600-400",
+  completed: "text-adaptive-sky-600-400",
   failed: "text-adaptive-rose-600-400",
   stopped: "text-foreground-muted",
+  queued: "text-foreground-muted",
 } as const satisfies Record<SubagentRowTone, string>;
 
 export function SubagentStatusDot({
@@ -27,7 +29,8 @@ export function SubagentStatusDot({
   return (
     <View
       className={cn(
-        "shrink-0 rounded-full",
+        "shrink-0",
+        tone === "failed" ? "rotate-45" : tone === "stopped" ? "rounded-none" : "rounded-full",
         placement === "sheet" ? "h-2 w-2" : "h-1.5 w-1.5",
         TONE_CLASS[tone],
       )}

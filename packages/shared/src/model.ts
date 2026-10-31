@@ -328,10 +328,10 @@ export function codexModelFamily(slug: string): string {
 }
 
 const MODEL_GLYPHS = [
-  { family: "gpt-6.1-sol", label: "GPT-6.1 Sol", glyph: "🌞" },
-  { family: "gpt-6-astra", label: "GPT-6 Astra", glyph: "🌌" },
-  { family: "gpt-6.1-terra", label: "GPT-6.1 Terra", glyph: "🌍" },
-  { family: "gpt-6-luna", label: "GPT-6 Luna", glyph: "🌙" },
+  { family: "gpt-sol", label: "Sol", glyph: "🌞" },
+  { family: "gpt-astra", label: "Astra", glyph: "🌌" },
+  { family: "gpt-terra", label: "Terra", glyph: "🌍" },
+  { family: "gpt-luna", label: "Luna", glyph: "🌙" },
   { family: "claude-opus", label: "Claude Opus", glyph: "🎵" },
   { family: "claude-sonnet", label: "Claude Sonnet", glyph: "🪶" },
   { family: "claude-fable", label: "Claude Fable", glyph: "📖" },
@@ -344,14 +344,18 @@ export function resolveModelGlyph(model: string | null | undefined, driver?: Pro
     driver === undefined ? normalizeCustomModelSlug(model) : normalizeModelSlug(model, driver);
   if (normalized === null) return null;
   const leaf = normalized.slice(normalized.lastIndexOf("/") + 1).toLowerCase();
-  const slug = codexModelFamily(leaf)
-    .replace(/\[1m\]$/, "")
-    .replace(/-\d{8}$/, "");
+  const modelId = codexModelFamily(leaf);
+  const slug = modelId.replace(/\[1m\]$/, "").replace(/-\d{8}$/, "");
   const claude =
     /^claude-([a-z]+)(?:-\d+(?:[.-]\d+)*)?(?:-latest)?$/.exec(slug) ??
     /^claude-\d+(?:[.-]\d+)*-([a-z]+)(?:-latest)?$/.exec(slug);
-  const family = claude ? `claude-${claude[1]}` : slug;
-  return MODEL_GLYPHS.find((entry) => entry.family === family) ?? null;
+  const gpt = /^gpt-(\d+(?:\.\d+)*)-(sol|astra|terra|luna)$/.exec(slug);
+  if (!claude && !gpt) return null;
+  const family = claude ? `claude-${claude[1]}` : gpt ? `gpt-${gpt[2]}` : slug;
+  const entry = MODEL_GLYPHS.find((entry) => entry.family === family);
+  return entry
+    ? { ...entry, modelId, label: gpt ? `GPT-${gpt[1]} ${entry.label}` : entry.label }
+    : null;
 }
 
 export function formatCodexModelName(name: string): string {

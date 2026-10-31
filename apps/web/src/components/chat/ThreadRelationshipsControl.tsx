@@ -792,10 +792,8 @@ export function ThreadRelationshipsPanel(props: {
                   <ThreadLineageWorkflowRow
                     key={threadId}
                     group={workflowGroup}
-                    providerInstanceId={agent.providerInstanceId}
                     provider={provider}
                     providers={providers}
-                    driver={providerDriver}
                     onOpenThread={(memberThreadId) => openThread(memberThreadId as ThreadId)}
                     isThreadAvailable={(memberThreadId) =>
                       graph.nodes.get(memberThreadId as ThreadId)?.missing === false

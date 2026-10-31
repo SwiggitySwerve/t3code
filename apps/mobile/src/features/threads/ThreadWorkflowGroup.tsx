@@ -45,7 +45,7 @@ const RAIL_ICON = {
   working: "circle.inset.filled",
   completed: "checkmark.circle.fill",
   failed: "xmark.circle.fill",
-  stopped: "circle",
+  stopped: "stop.fill",
   queued: "circle.dashed",
 } as const satisfies Record<WorkflowRailTone, AppSymbolName>;
 

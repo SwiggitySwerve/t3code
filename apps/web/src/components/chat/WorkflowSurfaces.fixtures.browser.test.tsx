@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { userEvent } from "vite-plus/test/browser";
 
 import "../../index.css";
+import { workflowClientSettings } from "../../../test/workflow-fixtures/settings";
 import { readQaAtom } from "../../../test/workflow-fixtures/atoms";
 import { captureSurface } from "../../../test/workflow-fixtures/capture";
 import { render, type Screen } from "../../../test/render";
@@ -31,11 +32,7 @@ import {
 } from "@t3tools/shared/testing/workflowQa";
 import type ChatMarkdown from "../ChatMarkdown";
 import { ThreadLineageWorkflowRow } from "./ThreadLineageWorkflowRow";
-import {
-  QA_DRIVER,
-  QA_PROVIDERS,
-  QA_PROVIDER_INSTANCE,
-} from "../../../test/workflow-fixtures/providers";
+import { QA_PROVIDERS } from "../../../test/workflow-fixtures/providers";
 
 // The surfaces read the provider catalog through the app's own atoms; any other atom throws.
 vi.mock(import("@effect/atom-react"), async (original) => ({
@@ -92,18 +89,15 @@ describe.each(["graph", "script"] as const)("workflow block, %s", (kind) => {
       element: () => <WorkflowBlockSurface kind={kind} variant={variant} />,
     });
   });
-  it.each([...WORKFLOW_QA_AGENT_COUNTS, 1024] as const)(
-    "overview with %i agents",
-    async (count) => {
-      await captureSurface({
-        surface,
-        state: `agents-${count}`,
-        selector: "[data-workflow-opening]",
-        frame: "[data-qa-column]",
-        element: () => <WorkflowBlockSurface kind={kind} agentCount={count} />,
-      });
-    },
-  );
+  it.each(WORKFLOW_QA_AGENT_COUNTS)("overview with %i agents", async (count) => {
+    await captureSurface({
+      surface,
+      state: `agents-${count}`,
+      selector: "[data-workflow-opening]",
+      frame: "[data-qa-column]",
+      element: () => <WorkflowBlockSurface kind={kind} agentCount={count} />,
+    });
+  });
 });
 
 it("workflow block, graph, 150 nodes scrolled to the running wave", async () => {
@@ -113,6 +107,7 @@ it("workflow block, graph, 150 nodes scrolled to the running wave", async () => 
     selector: "[data-workflow-opening]",
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" variant="many-nodes" />,
+    verboseGraph: true,
     settle: async (screen) => {
       await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
       await userEvent.click(screen.getByRole("button", { name: "More graph nodes", exact: true }));
@@ -162,6 +157,7 @@ it.each([256, 1024] as const)("scale paged graph with %i agents", async (count) 
     selector: "[data-workflow-opening]",
     frame: "[data-qa-column]",
     element: () => <WorkflowBlockSurface kind="graph" agentCount={count} />,
+    verboseGraph: true,
     settle: async (screen) => {
       await userEvent.click(screen.getByRole("button", { name: "Graph details", exact: true }));
       await userEvent.click(screen.getByRole("button", { name: "More graph nodes", exact: true }));
@@ -176,6 +172,7 @@ const expandLineage = async (screen: Screen) => {
   for (let count = folded.elements().length; count > 0; count -= 1) {
     await userEvent.click(folded.first());
   }
+  screen.getByRole("list", { name: "Related threads", exact: true }).element().scrollTop = 0;
 };
 
 describe.each(["graph", "script"] as const)("lineage row, %s", (kind) => {
@@ -290,6 +287,7 @@ describe("workflow fixture rows", () => {
 
   it("draws the failure once on the node and keeps the stored script out of the timeline", async () => {
     // The block reads no location, so it renders without the test router.
+    using _settings = workflowClientSettings();
     await using screen = await render(<WorkflowBlockSurface kind="graph" variant="failed" />, {
       router: false,
     });
@@ -299,6 +297,7 @@ describe("workflow fixture rows", () => {
   });
 
   it("keeps a narrow Lineage panel's group counts whole", async () => {
+    using _settings = workflowClientSettings();
     await using screen = await render(<LineageRowSurface kind="script" variant="failed" narrow />);
     await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
     const panel = screen.container.querySelector<HTMLElement>("[data-qa-panel]")!;
@@ -351,16 +350,15 @@ describe("workflow fixture rows", () => {
       <ThreadLineageWorkflowRow
         group={mixed}
         header={<span>Mixed workflow</span>}
-        providerInstanceId={QA_PROVIDER_INSTANCE}
         provider={QA_PROVIDERS[0]}
         providers={QA_PROVIDERS}
-        driver={QA_DRIVER}
         onOpenThread={() => {}}
         isThreadAvailable={() => true}
         stopping={false}
         stopDisabled={false}
       />
     );
+    using _settings = workflowClientSettings();
     await using screen = await render(surface());
     await userEvent.click(screen.getByRole("button", { name: /^Expand [^,]+$/ }));
     const header = screen.getByRole("button", { name: "Expand Mixed phase, failed" });
@@ -398,6 +396,7 @@ describe("workflow fixture rows", () => {
       "turn-ended-workflow-running": "Working",
     } as const;
     for (const [state, label] of Object.entries(labels)) {
+      using _settings = workflowClientSettings();
       await using screen = await render(
         <SidebarStatusSurface state={state as keyof typeof labels} />,
         {
@@ -432,8 +431,9 @@ describe("workflow fixture rows", () => {
   });
 
   it("names the run's state in the Lineage header, in words", async () => {
+    using _settings = workflowClientSettings();
     await using screen = await render(<LineageRowSurface kind="script" variant="failed" />);
-    const header = screen.getByRole("button", { name: /^State audit/ }).first();
+    const header = screen.getByRole("button", { name: /State audit/ }).first();
     // The word is drawn, not only read by a screen reader: a screen-reader-only span is 1px wide.
     const word = header.getByText("Failed", { exact: true });
     await expect.element(word).toBeVisible();

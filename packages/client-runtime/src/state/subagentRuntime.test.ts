@@ -60,6 +60,21 @@ const groupsOf = (subagents: ReadonlyArray<ProjectedSubagent>) =>
   deriveWorkflowGroups(projectedSubagentsToRuntime(subagents));
 
 describe("projectedSubagentsToRuntime workflow expansion", () => {
+  it.each(["queued", "running", "failed", "completed"] as const)(
+    "uses a recorded cancellation only for a settled failed member (%s)",
+    (state) => {
+      const progress = deriveWorkflowProgress(
+        groupsOf([
+          subagent({
+            workflow: { phases: [], agents: [member({ state, outcomeCategory: "cancelled" })] },
+          }),
+        ])[0]!,
+      );
+      expect(progress.phases[0]?.tasks[0]?.state).toBe(
+        state === "failed" ? "stopped" : state === "completed" ? "done" : state,
+      );
+    },
+  );
   it("uses a settled member's wall-clock completion separately from its execution duration", () => {
     const [, settled] = projectedSubagentsToRuntime([
       subagent({

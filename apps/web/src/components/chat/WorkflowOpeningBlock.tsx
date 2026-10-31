@@ -22,6 +22,7 @@ import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
 import { providersIgnoringCheckedAtAtom } from "../../state/server";
+import { useClientSettings } from "../../hooks/useSettings";
 
 type WorkflowOpeningProps = {
   readonly opening: WorkflowOpening;
@@ -77,6 +78,7 @@ function useWorkflowSnapshot(
 }
 
 function WorkflowOpeningContent(props: WorkflowOpeningProps) {
+  const verboseGraph = useClientSettings((settings) => settings.verboseWorkflowGraph);
   const currentProviders = useAtomValue(providersIgnoringCheckedAtAtom(props.environmentId));
   const {
     opening,
@@ -97,10 +99,11 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
   const overview = group === null ? null : deriveWorkflowProgress(group);
   const graph = group?.graph ?? null;
   const waitingOn = graph === null ? null : workflowGraphHeadline(graph).waitingOn;
-  const liveHeadline = overview?.headline ?? progress;
+  const activityHeadline = overview?.headline ?? progress;
+  const liveHeadline = [activityHeadline, waitingOn].filter(Boolean).join(" · ");
   const headlineMember = overview?.headlineMember ?? null;
   const terminalResult =
-    group?.workflow.result && group.workflow.status !== "running" && progress !== liveHeadline
+    group?.workflow.result && group.workflow.status !== "running" && progress !== activityHeadline
       ? progress
       : null;
   const declaration =
@@ -175,9 +178,6 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           onOpenThread={props.onOpenThread}
         />
       )}
-      {waitingOn ? (
-        <p className="text-2xs text-muted-foreground [overflow-wrap:anywhere]">{waitingOn}</p>
-      ) : null}
       {terminalResult ? (
         <Collapsible open={resultOpen} onOpenChange={setResultOpen}>
           <CollapsibleTrigger render={<Button size="xs" variant="ghost" />}>
@@ -192,7 +192,7 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
       {props.findable && declaration.length > 0 ? (
         <WorkflowDeclaration segments={declaration} />
       ) : null}
-      {group !== null ? (
+      {group !== null && (graph === null || verboseGraph) ? (
         <Collapsible open={detailOpen} onOpenChange={setDetailOpen}>
           <CollapsibleTrigger render={<Button size="xs" variant="ghost" />}>
             <ChevronRightIcon aria-hidden className={cn("size-3", detailOpen && "rotate-90")} />

@@ -2,20 +2,24 @@ import {
   type SubagentWorkflowGroup,
   type RuntimeSubagent,
   type WorkflowPhaseProgress,
+  type WorkflowTaskProgress,
   deriveWorkflowProgress,
   workflowPhaseStatus,
   workflowSettledFraction,
   workflowSettledText,
 } from "@t3tools/client-runtime/state/subagentRuntime";
-import type { ProviderDriverKind, ProviderInstanceId, ServerProvider } from "@t3tools/contracts";
+import type { ServerProvider } from "@t3tools/contracts";
+import { subagentDetailPreview } from "@t3tools/client-runtime/state/subagent-display";
 import { ChevronDownIcon, SquareIcon } from "lucide-react";
 import { useState, type ReactNode } from "react";
 
 import { AgentElapsed } from "./AgentElapsed";
-import { SubagentTooltipContent } from "./SubagentTooltipContent";
-import { ThreadHoverCardPopup } from "../ThreadHoverCard";
-import { ThreadRelationshipIcon } from "./ThreadRelationshipIcon";
+import { ThreadHoverCard, ThreadHoverCardPopup } from "../ThreadHoverCard";
+import { MiddleTruncate } from "../ui/middle-truncate";
 import { workflowMemberStatusText } from "./workflowStatusText";
+import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
+import { resolveWorkflowIdentity } from "./workflowIdentity";
+import { WORKFLOW_STATE_TEXT, WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
 import { cn } from "../../lib/utils";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { CollapsibleSectionHeader, SectionHeaderStatus } from "../ui/collapsible-section-header";
@@ -68,24 +72,23 @@ function phaseElapsed(
 
 function WorkflowMemberRow({
   member,
-  providerInstanceId,
+  state,
+  detail,
   provider,
-  providers,
-  driver,
   onOpen,
   isThreadAvailable,
 }: {
   member: RuntimeSubagent;
-  providerInstanceId: ProviderInstanceId;
+  state: WorkflowTaskProgress["state"];
+  detail: string | null;
   provider: ServerProvider | undefined;
-  providers: ReadonlyArray<ServerProvider> | undefined;
-  driver: ProviderDriverKind | undefined;
   onOpen: (threadId: string) => void;
   isThreadAvailable: (threadId: string) => boolean;
 }) {
   const threadId = member.childThreadId;
   const canOpen = threadId !== null && isThreadAvailable(threadId);
-  const statusText = workflowMemberStatusText(member.status);
+  const identity = resolveWorkflowIdentity(member, provider, state);
+  const preview = subagentDetailPreview({ status: member.status, result: detail });
   return (
     <li>
       <Tooltip>
@@ -101,12 +104,12 @@ function WorkflowMemberRow({
             />
           }
         >
-          <ThreadRelationshipIcon driver={driver} provider={provider} status={member.status} />
+          <WorkflowAgentIdentity member={member} provider={provider} state={state} />
           <span className="line-clamp-2 min-w-0 flex-1 whitespace-normal [overflow-wrap:anywhere]">
             {member.title}
           </span>
           <span className="shrink-0 text-2xs font-normal tabular-nums text-muted-foreground">
-            <span className={cn("font-medium", statusText.className)}>{statusText.label}</span>
+            <span className={cn("font-medium", WORKFLOW_STATE_TEXT[state])}>{state}</span>
             {member.startedAt ? (
               <>
                 {" "}
@@ -116,19 +119,27 @@ function WorkflowMemberRow({
           </span>
         </TooltipTrigger>
         <ThreadHoverCardPopup side="left">
-          <SubagentTooltipContent
-            title={member.title}
-            model={member.model}
-            providerInstanceId={providerInstanceId}
-            origin="provider_native"
-            provider={provider}
-            providers={providers}
-            driver={driver}
-            elapsed={<AgentElapsed agent={member} />}
-            status={member.status}
-            result={member.result ?? member.error}
-            progress={member.progress}
-          />
+          <ThreadHoverCard title={member.title}>
+            <WorkflowAgentIdentity
+              member={member}
+              provider={provider}
+              identity={identity}
+              label={identity.modelName}
+            />
+            <div className="flex items-center justify-between gap-4">
+              <span
+                className={cn(
+                  "inline-flex items-center gap-1 font-medium",
+                  WORKFLOW_STATE_TEXT[state],
+                )}
+              >
+                <span aria-hidden className={cn("size-2", WORKFLOW_STATE_MARKER[state])} />
+                {state}
+              </span>
+              <AgentElapsed agent={member} />
+            </div>
+            {preview ? <MiddleTruncate value={preview} className="flex" showTitle={false} /> : null}
+          </ThreadHoverCard>
         </ThreadHoverCardPopup>
       </Tooltip>
     </li>
@@ -150,10 +161,8 @@ export function workflowLineageLabel(workflow: {
 export function ThreadLineageWorkflowRow({
   group,
   header,
-  providerInstanceId,
   provider,
   providers,
-  driver,
   onOpenThread,
   isThreadAvailable,
   onStop,
@@ -162,10 +171,8 @@ export function ThreadLineageWorkflowRow({
 }: {
   readonly group: SubagentWorkflowGroup;
   readonly header: ReactNode;
-  readonly providerInstanceId: ProviderInstanceId;
   readonly provider: ServerProvider | undefined;
   readonly providers: ReadonlyArray<ServerProvider> | undefined;
-  readonly driver: ProviderDriverKind | undefined;
   readonly onOpenThread: (threadId: string) => void;
   readonly isThreadAvailable: (threadId: string) => boolean;
   readonly onStop?: (() => void) | undefined;
@@ -182,19 +189,12 @@ export function ThreadLineageWorkflowRow({
       ...phase,
       members: phase.tasks.flatMap((task) => (task.member === null ? [] : [task.member])),
     }));
-  const otherMembers =
-    overview.phases
-      .find((phase) => phase.id === "other")
-      ?.tasks.flatMap((task) => (task.member === null ? [] : [task.member])) ?? [];
+  const otherTasks = overview.phases.find((phase) => phase.id === "other")?.tasks ?? [];
   // T3-run workflows record each agent's own provider; Claude's run on the workflow's.
   const memberProvider = (member: RuntimeSubagent) =>
     member.providerInstanceId === undefined
-      ? { providerInstanceId, provider, driver }
-      : {
-          providerInstanceId: member.providerInstanceId,
-          provider: providers?.find((entry) => entry.instanceId === member.providerInstanceId),
-          driver: member.driver ?? driver,
-        };
+      ? provider
+      : providers?.find((entry) => entry.instanceId === member.providerInstanceId);
   return (
     <li className="group @container" data-workflow-expanded={expanded ? "" : undefined}>
       <div className={cn("relative", THREAD_DETAILS_PANEL_SPLIT_GROUP_CLASS)}>
@@ -259,7 +259,7 @@ export function ThreadLineageWorkflowRow({
                   accessory={
                     <>
                       {status === "failed" ? (
-                        <SectionHeaderStatus>Failed</SectionHeaderStatus>
+                        <SectionHeaderStatus>{status}</SectionHeaderStatus>
                       ) : null}
                       <Tooltip>
                         <TooltipTrigger
@@ -297,32 +297,53 @@ export function ThreadLineageWorkflowRow({
                 </CollapsibleSectionHeader>
                 {open ? (
                   <ul className="m-0 list-none p-0">
-                    {phase.members.map((member) => (
-                      <WorkflowMemberRow
-                        key={member.id}
-                        member={member}
-                        {...memberProvider(member)}
-                        providers={providers}
-                        onOpen={onOpenThread}
-                        isThreadAvailable={isThreadAvailable}
-                      />
-                    ))}
+                    {phase.tasks.map((task) =>
+                      task.member === null ? (
+                        <li
+                          key={task.id}
+                          className="flex items-center gap-2 px-2.5 py-1.5 text-xs"
+                          aria-label={`${task.label}, ${task.state}`}
+                          data-workflow-unstarted-row
+                        >
+                          <WorkflowAgentIdentity
+                            member={null}
+                            provider={undefined}
+                            state={task.state}
+                          />
+                          <span className="min-w-0 flex-1 break-words">{task.label}</span>
+                          <span className={WORKFLOW_STATE_TEXT[task.state]}>{task.state}</span>
+                        </li>
+                      ) : (
+                        <WorkflowMemberRow
+                          key={task.id}
+                          member={task.member}
+                          state={task.state}
+                          detail={task.detail}
+                          provider={memberProvider(task.member)}
+                          onOpen={onOpenThread}
+                          isThreadAvailable={isThreadAvailable}
+                        />
+                      ),
+                    )}
                   </ul>
                 ) : null}
               </li>
             );
           })}
-          {otherMembers.map((member) => (
-            <WorkflowMemberRow
-              key={member.id}
-              member={member}
-              {...memberProvider(member)}
-              providers={providers}
-              onOpen={onOpenThread}
-              isThreadAvailable={isThreadAvailable}
-            />
-          ))}
-          {phases.length === 0 && otherMembers.length === 0 ? (
+          {otherTasks.map((task) =>
+            task.member ? (
+              <WorkflowMemberRow
+                key={task.id}
+                member={task.member}
+                state={task.state}
+                detail={task.detail}
+                provider={memberProvider(task.member)}
+                onOpen={onOpenThread}
+                isThreadAvailable={isThreadAvailable}
+              />
+            ) : null,
+          )}
+          {phases.length === 0 && otherTasks.length === 0 ? (
             <li className="px-2.5 py-1.5 text-2xs text-muted-foreground/70">No agents yet</li>
           ) : null}
         </ul>

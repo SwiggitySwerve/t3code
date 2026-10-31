@@ -9,6 +9,7 @@ import {
 
 import { cn } from "../../lib/utils";
 import { ACPRegistryIcon } from "../Icons";
+import { SvgCurrentColorFilter } from "../ui/svg-current-color-filter";
 
 const ACP_REGISTRY_ICON_CACHE = "t3-acp-registry-icons-v1";
 const MAX_ICON_BYTES = 512 * 1_024;
@@ -131,10 +132,7 @@ export function AcpRegistryAgentIcon({
        * CDN mask CORS restrictions. */}
       <svg aria-hidden className="pointer-events-none absolute size-0" focusable="false">
         <defs>
-          <filter id={colorFilterId} colorInterpolationFilters="sRGB">
-            <feFlood floodColor="currentColor" />
-            <feComposite in2="SourceAlpha" operator="in" />
-          </filter>
+          <SvgCurrentColorFilter id={colorFilterId} />
         </defs>
       </svg>
       {status !== "loaded" ? (

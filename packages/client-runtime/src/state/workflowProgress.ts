@@ -53,7 +53,7 @@ export function appWorkflowHeading(status: RuntimeSubagentStatus): string {
   }
 }
 
-const MEMBER_STATE: Record<RuntimeSubagentStatus, WorkflowTaskState> = {
+export const WORKFLOW_MEMBER_STATE: Readonly<Record<RuntimeSubagentStatus, WorkflowTaskState>> = {
   completed: "done",
   running: "running",
   waiting: "running",
@@ -64,7 +64,7 @@ const MEMBER_STATE: Record<RuntimeSubagentStatus, WorkflowTaskState> = {
   interrupted: "stopped",
 };
 
-const NODE_STATE: Record<WorkflowGraphNodeState, WorkflowTaskState> = {
+export const WORKFLOW_NODE_STATE: Readonly<Record<WorkflowGraphNodeState, WorkflowTaskState>> = {
   passed: "done",
   running: "running",
   queued: "queued",
@@ -93,7 +93,7 @@ function memberTask(member: RuntimeSubagent): WorkflowTaskProgress {
   return {
     id: member.id,
     label: member.title,
-    state: MEMBER_STATE[member.status],
+    state: WORKFLOW_MEMBER_STATE[member.status],
     member,
     detail:
       member.status === "failed"
@@ -159,7 +159,7 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
           const tasks = wave.map((node): WorkflowTaskProgress => ({
             id: node.key,
             label: node.label,
-            state: NODE_STATE[node.state],
+            state: WORKFLOW_NODE_STATE[node.state],
             member: node.member,
             detail:
               node.reason ??

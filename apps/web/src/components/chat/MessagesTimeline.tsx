@@ -1316,6 +1316,12 @@ const ConversationTimeline = memo(function ConversationTimeline({
             className="relative h-full min-h-0"
             data-assistant-citation-viewport="true"
           >
+            <div
+              aria-hidden
+              className="pointer-events-none absolute inset-x-0 top-0"
+              style={{ bottom: contentInsetEndAdjustment }}
+              data-chat-readout-boundary
+            />
             {onCiteAssistantText && citationThreadRef ? (
               <AssistantSelectionToolbar
                 viewport={timelineViewportElement}

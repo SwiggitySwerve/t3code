@@ -12,11 +12,12 @@ import {
   type WorkflowQaFrame,
   type WorkflowQaTheme,
 } from "@t3tools/shared/testing/workflowQa";
-import { vi } from "vite-plus/test";
+import { expect, vi } from "vite-plus/test";
 import { commands, page, server } from "vite-plus/test/browser";
 
 import { fakeTimers, render, type Screen } from "../render";
 import { WORKFLOW_QA_NOW } from "./workflowFixtures";
+import { workflowClientSettings } from "./settings";
 
 const CAPTURE = import.meta.env.VITE_T3_WORKFLOW_QA === "1";
 export class WorkflowQaSelectorError extends Error {
@@ -24,6 +25,8 @@ export class WorkflowQaSelectorError extends Error {
 }
 
 export interface SurfaceSpec {
+  readonly verboseGraph?: boolean;
+  readonly themes?: ReadonlyArray<WorkflowQaTheme>;
   /** Lowercase words joined by hyphens, for example `workflow-block-graph`. */
   readonly surface: string;
   readonly state: string;
@@ -159,9 +162,11 @@ async function recordFrame(
 /** Renders `spec` across the matrix and returns the frames it recorded. */
 export async function captureSurface(spec: SurfaceSpec): Promise<ReadonlyArray<WorkflowQaFrame>> {
   const original = { width: window.innerWidth, height: window.innerHeight };
-  const themes = CAPTURE ? WORKFLOW_QA_THEMES : WORKFLOW_QA_THEMES.slice(0, 1);
+  const requestedThemes = spec.themes ?? WORKFLOW_QA_THEMES;
+  const themes = CAPTURE ? requestedThemes : requestedThemes.slice(0, 1);
   const viewports = CAPTURE ? WORKFLOW_QA_VIEWPORTS : WORKFLOW_QA_VIEWPORTS.slice(0, 1);
   const frames: Array<WorkflowQaFrame> = [];
+  await commands.mockWorkflowAcpIcon(true);
   try {
     for (const theme of themes) {
       for (const viewport of viewports) {
@@ -171,8 +176,13 @@ export async function captureSurface(spec: SurfaceSpec): Promise<ReadonlyArray<W
         // Only the clock is frozen: elapsed times are fixed, while timers still run.
         using _clock = fakeTimers({ toFake: ["Date"] });
         vi.setSystemTime(WORKFLOW_QA_NOW);
+        using _settings = workflowClientSettings(spec.verboseGraph);
         await using screen = await render(spec.element(), { router: spec.router ? "/" : false });
         await spec.settle?.(screen);
+        if (screen.container.querySelector('[data-workflow-identity="acp"]'))
+          await expect
+            .poll(() => screen.container.querySelector('[data-workflow-image-status="loaded"]'))
+            .not.toBeNull();
         if (spec.keepInteraction !== true) {
           if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
           await commands.resetPointer();
@@ -181,6 +191,7 @@ export async function captureSurface(spec: SurfaceSpec): Promise<ReadonlyArray<W
       }
     }
   } finally {
+    await commands.mockWorkflowAcpIcon(false);
     await page.viewport(original.width, original.height);
   }
   return frames;
