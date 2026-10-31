@@ -171,6 +171,17 @@ describe("a workflow's row in the Lineage panel", () => {
           expect(new Set(stateColours).size).toBe(1);
           expect(cellColours.size).toBeGreaterThan(1);
           expect(cellColours.has(stateColours[0]!)).toBe(false);
+          const failedPhases = screen.getByRole("button", { name: / phase, failed$/ }).all();
+          expect(failedPhases.length).toBeGreaterThan(0);
+          for (const phaseRow of failedPhases) {
+            const word = getComputedStyle(
+              phaseRow.getByText("failed", { exact: true }).element(),
+            ).color;
+            expect(word).toBe(
+              getComputedStyle(phaseRow.element().querySelector('[aria-label$=" settled"]')!).color,
+            );
+            expect(cellColours.has(word)).toBe(false);
+          }
           const rows = screen.container.querySelectorAll("[data-workflow-unstarted-row]");
           expect(rows).toHaveLength(3);
           expect([...rows].map((row) => row.getAttribute("aria-label"))).toEqual([

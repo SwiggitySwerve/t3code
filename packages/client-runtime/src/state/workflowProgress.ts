@@ -377,7 +377,8 @@ export function deriveWorkflowPhaseGroups(
   return { groups, memory: unchanged ? memory : { expandedRunning, keys } };
 }
 
-// A fold keeps the key any of its phases had in a fold of the same kind.
+// A fold keeps the key any of its phases had in a fold of the same kind. When two folds merge,
+// the earlier one's key wins and the later disclosure is replaced.
 function foldKey(
   kind: CollapseKind,
   run: ReadonlyArray<WorkflowPhaseProgress>,
