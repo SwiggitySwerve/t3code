@@ -20,7 +20,7 @@ import { workflowMemberStatusLabel } from "./workflowStatusText";
 import { WorkflowAgentIdentity } from "./WorkflowAgentIdentity";
 import { WorkflowProgressTrack } from "./WorkflowProgressTrack";
 import { resolveWorkflowIdentity } from "./workflowIdentity";
-import { WORKFLOW_STATE_TEXT, WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
+import { WORKFLOW_STATE_MARKER } from "./workflowStatusAppearance";
 import { cn } from "../../lib/utils";
 import { ThreadDetailsControl } from "./ThreadDetailsControl";
 import { CollapsibleSectionHeader } from "../ui/collapsible-section-header";
@@ -137,12 +137,7 @@ function WorkflowMemberRow({
               label={identity.modelName}
             />
             <div className="flex items-center justify-between gap-4">
-              <span
-                className={cn(
-                  "inline-flex items-center gap-1 font-medium",
-                  WORKFLOW_STATE_TEXT[state],
-                )}
-              >
+              <span className="inline-flex items-center gap-1 font-medium">
                 <span aria-hidden className={cn("size-2", WORKFLOW_STATE_MARKER[state])} />
                 {state}
               </span>
@@ -297,8 +292,8 @@ export function ThreadLineageWorkflowRow({
                           }
                         >
                           {workflowSettledFraction(phase.counts)}
-                          {/* The unit goes first in a narrow panel, so the count and time stay whole. */}
-                          <span className="@max-[18rem]/lineage:hidden">
+                          {/* The unit goes before the bar does: it shows once a failed row fits both. */}
+                          <span className="@max-[20.75rem]/lineage:hidden">
                             {phase.counts.total === 1 ? " agent" : " agents"}
                           </span>
                         </TooltipTrigger>
@@ -316,7 +311,7 @@ export function ThreadLineageWorkflowRow({
                         // One width for every label, so all bars start together. It stays 3rem until
                         // the row also fits its bar, "failed", "100/100" and "12m 30s" (and the
                         // "agents" unit once counts show it); a row that still lacks room hides its bar.
-                        <span className="block w-[clamp(3rem,100cqw_-_15.625rem,34cqw)] truncate @min-[18rem]/lineage:w-[clamp(3rem,100cqw_-_17.75rem,34cqw)] @max-[16rem]/lineage:w-auto @max-[16rem]/lineage:max-w-[24cqw]" />
+                        <span className="block w-[clamp(3rem,100cqw_-_15.625rem,34cqw)] truncate @min-[20.75rem]/lineage:w-[clamp(3rem,100cqw_-_17.75rem,34cqw)] @max-[16rem]/lineage:w-auto @max-[16rem]/lineage:max-w-[24cqw]" />
                       }
                     >
                       {phase.title}
