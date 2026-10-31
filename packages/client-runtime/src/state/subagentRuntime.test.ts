@@ -255,6 +255,24 @@ describe("compact workflow presentation", () => {
     ]);
   });
 
+  it("gives a split fold's later part a new key when the earlier part keeps the old one", () => {
+    const grown = deriveWorkflowPhaseGroups(
+      phasesOf([["running"], ["completed"], ["completed"], ["completed"]]),
+      deriveWorkflowPhaseGroups(phasesOf([["running"], ["running"], ["running"], ["completed"]]))
+        .memory,
+    );
+    expect(shape(grown).at(-1)).toEqual(["Phases 2–4", "done", "done:phase:3"]);
+    const split = deriveWorkflowPhaseGroups(
+      phasesOf([["running"], ["completed"], ["running"], ["completed"]]),
+      grown.memory,
+    );
+    expect(shape(split).slice(1)).toEqual([
+      ["Phase 2", "done", "done:phase:3"],
+      ["Phase 3", null, "phase:2"],
+      ["Phase 4", "done", "done:phase:3#1"],
+    ]);
+  });
+
   it("respects declared running, stopped and unobserved phases without inventing completions", () => {
     const progress = deriveWorkflowProgress(
       groupsOf([

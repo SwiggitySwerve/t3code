@@ -292,8 +292,8 @@ export function ThreadLineageWorkflowRow({
                           }
                         >
                           {workflowSettledFraction(phase.counts)}
-                          {/* The unit goes before the bar does: it shows once a failed row fits both. */}
-                          <span className="@max-[20.75rem]/lineage:hidden">
+                          {/* Only once labels reach their cap, so the unit never takes a bar's room. */}
+                          <span className="@max-[27rem]/lineage:hidden">
                             {phase.counts.total === 1 ? " agent" : " agents"}
                           </span>
                         </TooltipTrigger>
@@ -309,9 +309,9 @@ export function ThreadLineageWorkflowRow({
                     <TooltipTrigger
                       render={
                         // One width for every label, so all bars start together. It stays 3rem until
-                        // the row also fits its bar, "failed", "100/100" and "12m 30s" (and the
-                        // "agents" unit once counts show it); a row that still lacks room hides its bar.
-                        <span className="block w-[clamp(3rem,100cqw_-_15.625rem,34cqw)] truncate @min-[20.75rem]/lineage:w-[clamp(3rem,100cqw_-_17.75rem,34cqw)] @max-[16rem]/lineage:w-auto @max-[16rem]/lineage:max-w-[24cqw]" />
+                        // the row also fits its bar, "failed", "100/100" and "12m 30s"; a row that
+                        // still lacks room hides its bar.
+                        <span className="block w-[clamp(3rem,100cqw_-_15.625rem,34cqw)] truncate @max-[16rem]/lineage:w-auto @max-[16rem]/lineage:max-w-[24cqw]" />
                       }
                     >
                       {phase.title}
