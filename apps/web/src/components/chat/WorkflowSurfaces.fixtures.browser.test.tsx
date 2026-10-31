@@ -22,6 +22,7 @@ import {
   WORKFLOW_QA_STRESS,
   workflowCollapseFixture,
   workflowFixture,
+  workflowLongElapsedFixture,
   workflowPhaseTitlesFixture,
   type WorkflowQaVariant,
 } from "../../../test/workflow-fixtures/workflowFixtures";
@@ -236,6 +237,7 @@ it.each([
   ["long-titles", "script", "long-labels", false, null, null],
   ["script-titles", "script", "titles", false, 4, null],
   ["agent-rows", "graph", "collapse", false, 16, "Phase 16"],
+  ["long-elapsed", "graph", "elapsed", false, null, null],
 ] as const)("lineage phase bars, %s", async (state, kind, source, narrow, shown, open) => {
   await captureSurface({
     surface: "lineage-phase-bars",
@@ -251,7 +253,11 @@ it.each([
         <LineageRowSurface
           kind={kind}
           fixture={
-            source === "titles" ? workflowPhaseTitlesFixture() : workflowCollapseFixture(kind, 256)
+            source === "titles"
+              ? workflowPhaseTitlesFixture()
+              : source === "elapsed"
+                ? workflowLongElapsedFixture()
+                : workflowCollapseFixture(kind, 256)
           }
           narrow={narrow}
         />

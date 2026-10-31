@@ -166,7 +166,8 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           )}
           {overview === null || overview.terminal ? null : (
             // Needs attention shows failures; this region announces them only when they change.
-            // A failure and an activity change in one update are each announced once.
+            // A failure and an activity change in one update are each announced once; one
+            // atomic region would re-read the failure on every activity change.
             <p
               aria-live="polite"
               aria-atomic="true"

@@ -1047,6 +1047,29 @@ export function workflowPlannedIdentityFixture(
   return { ...seed, row, opening, group: opening.group! };
 }
 
+/** The 256-agent run after 12m 30s, so every started phase shows a realistic elapsed time. */
+export function workflowLongElapsedFixture(): WorkflowQaFixture {
+  const seed = workflowCollapseFixture("graph", 256);
+  const workflow = seed.row.workflow!;
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    workflow: {
+      ...workflow,
+      agents: workflow.agents.map((agent) =>
+        agent.startedAt === undefined
+          ? agent
+          : {
+              ...agent,
+              startedAt: WORKFLOW_QA_NOW - 750_000,
+              ...(agent.completedAt === undefined ? {} : { completedAt: WORKFLOW_QA_NOW }),
+            },
+      ),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return { ...seed, row, opening, group: opening.group! };
+}
+
 /** A 40-agent script run whose phase titles range from one word to a sentence. */
 export function workflowPhaseTitlesFixture(): WorkflowQaFixture {
   const seed = workflowCollapseFixture("script", 40);

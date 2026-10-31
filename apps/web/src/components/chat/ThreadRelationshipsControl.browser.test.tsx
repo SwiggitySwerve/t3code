@@ -141,6 +141,7 @@ describe("a workflow's row in the Lineage panel", () => {
           await expandWorkflowPhases(screen);
           const progress = deriveWorkflowProgress(fixture.group);
           const stateColours: string[] = [];
+          const cellColours = new Set<string>();
           for (const phase of progress.phases) {
             for (const task of phase.tasks) {
               const row = task.member
@@ -155,6 +156,10 @@ describe("a workflow's row in the Lineage panel", () => {
               const rowState = row.getByText(task.state, { exact: true }).element();
               expect(getComputedStyle(rowState).textTransform).toBe("none");
               stateColours.push(getComputedStyle(rowState).color);
+              if (["done", "running", "failed"].includes(task.state))
+                cellColours.add(
+                  getComputedStyle(icon.querySelector("[data-workflow-identity]")!).color,
+                );
             }
             expect(
               screen.container.querySelector(
@@ -164,6 +169,8 @@ describe("a workflow's row in the Lineage panel", () => {
           }
           // Only a phase's bar carries state colour in the Lineage panel; the words stay neutral.
           expect(new Set(stateColours).size).toBe(1);
+          expect(cellColours.size).toBeGreaterThan(1);
+          expect(cellColours.has(stateColours[0]!)).toBe(false);
           const rows = screen.container.querySelectorAll("[data-workflow-unstarted-row]");
           expect(rows).toHaveLength(3);
           expect([...rows].map((row) => row.getAttribute("aria-label"))).toEqual([

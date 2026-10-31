@@ -391,6 +391,7 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
     "long-titles",
     "script-titles",
     "agent-rows",
+    "long-elapsed",
   ],
   "sidebar-status": WORKFLOW_QA_SIDEBAR_STATES,
   "settings-agents": WORKFLOW_QA_SETTINGS_STATES,
