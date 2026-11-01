@@ -46,13 +46,15 @@ import * as ServerSettings from "../serverSettings.ts";
 import * as ContextHandoffService from "./ContextHandoffService.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import { ULTRACODE_TURN_NOTE } from "@t3tools/provider-core/server/ultracode";
-import type { UltracodeMode } from "@t3tools/contracts/settings";
+import type { WorkflowStartMode } from "@t3tools/contracts/settings";
 import { formatComposerContextReference } from "@t3tools/shared/composerContextReferences";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
-import { applyTurnTriggers } from "@t3tools/provider-core/server/workflowTrigger";
+import {
+  applyTurnTriggers,
+  EVERY_TURN_WORKFLOW_NOTE,
+} from "@t3tools/provider-core/server/workflowTrigger";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as ProviderSessionManager from "./ProviderSessionManager.ts";
 import * as ProviderTurnStart from "./ProviderTurnStartService.ts";
@@ -91,13 +93,16 @@ const layerWorktreeLocation = (
     settings,
   );
 
-/** Settings whose ultracode value is the next of `values` on each read, the last one repeating. */
-const layerUltracodeReads = (values: ReadonlyArray<UltracodeMode>, reads: { count: number }) =>
+/** Settings whose workflowStart is the next of `values` on each read, the last one repeating. */
+const layerWorkflowStartReads = (
+  values: ReadonlyArray<WorkflowStartMode>,
+  reads: { count: number },
+) =>
   Layer.mock(ServerSettings.ServerSettingsService)({
     getSettings: Effect.sync(() => ({
       ...DEFAULT_SERVER_SETTINGS,
       workflows: true,
-      ultracode: values[Math.min(reads.count++, values.length - 1)]!,
+      workflowStart: values[Math.min(reads.count++, values.length - 1)]!,
     })),
   });
 
@@ -329,8 +334,10 @@ function makeLocalCommandHarness(input: {
     readonly handoff?: "injected" | "inline";
   };
   readonly attachments?: OrchestrationV2ThreadProjection["messages"][number]["attachments"];
-  /** The ultracode setting on each successive read; the last value repeats. */
-  readonly ultracodeReads?: ReadonlyArray<UltracodeMode>;
+  /** The workflowStart setting on every read. */
+  readonly workflowStart?: WorkflowStartMode;
+  /** The workflowStart setting on each successive read; the last value repeats. */
+  readonly workflowStartReads?: ReadonlyArray<WorkflowStartMode>;
   readonly workflowsSetting?: boolean;
   readonly sessionWorkflows?: boolean;
   /** The resumed native session already holds this much of its context window. */
@@ -749,9 +756,9 @@ function makeLocalCommandHarness(input: {
           ...root.message,
           text: applyTurnTriggers({
             workflows: root.turnTriggers.workflows,
+            workflowStart: root.turnTriggers.workflowStart,
             workflowTriggers: root.turnTriggers.workflowTriggers,
             workflowPresets: root.turnTriggers.workflowPresets,
-            ultracode: root.turnTriggers.ultracode,
             typedText: root.typedText,
             driver: root.providerThread.driver,
             text: root.message.text,
@@ -872,9 +879,12 @@ function makeLocalCommandHarness(input: {
         IdAllocator.layer,
         layerWorktreeLocation(
           input.worktreesDir,
-          input.ultracodeReads === undefined
-            ? ServerSettings.layerTest({ workflows: input.workflowsSetting ?? true })
-            : layerUltracodeReads(input.ultracodeReads, settingsReads),
+          input.workflowStartReads === undefined
+            ? ServerSettings.layerTest({
+                workflows: input.workflowsSetting ?? true,
+                workflowStart: input.workflowStart ?? "keyword",
+              })
+            : layerWorkflowStartReads(input.workflowStartReads, settingsReads),
           input.sessionWorkflows ?? true,
         ),
         input.fileSystem === undefined
@@ -1626,8 +1636,9 @@ for (const previousMessages of [[], ["/compact", " /COMPACT "]]) {
   );
 }
 
-const HOOKED_TEXT = "Ship the fix with ultracode";
-const HOOKED_TURN_TEXT = `${HOOKED_TEXT}\n\n${ULTRACODE_TURN_NOTE}`;
+// Under "always" a plain person's turn gets the every-turn note: the hook these tests deliver.
+const HOOKED_TEXT = "Ship the fix";
+const HOOKED_TURN_TEXT = `${HOOKED_TEXT}\n\n${EVERY_TURN_WORKFLOW_NOTE}`;
 const COMPLETED_PREVIOUS_TURN = { runStatus: "completed", turnStatus: "completed" } as const;
 const screenshot = {
   type: "image",
@@ -1657,6 +1668,7 @@ effectIt.effect.each([
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({
       text: HOOKED_TEXT,
+      workflowStart: "always",
       attachments: [screenshot],
       previousTurn: COMPLETED_PREVIOUS_TURN,
       delivery,
@@ -1668,7 +1680,7 @@ effectIt.effect.each([
     const delivered = harness.deliveredTurns[0]!;
     expect(delivered.message.text).toBe(expected);
     expect(delivered.message.attachments).toEqual([screenshot]);
-    expect(delivered.message.text.split(ULTRACODE_TURN_NOTE)).toHaveLength(2);
+    expect(delivered.message.text.split(EVERY_TURN_WORKFLOW_NOTE)).toHaveLength(2);
     // A restart continuation is prompted by its own text; the source run id is
     // not part of what the provider adapter receives.
     expect(delivered.restartContinuationOfRunId).toBeUndefined();
@@ -1680,6 +1692,7 @@ effectIt.effect("the delivery wrapper keeps the hook's note after inline handoff
   Effect.gen(function* () {
     const harness = makeLocalCommandHarness({
       text: HOOKED_TEXT,
+      workflowStart: "always",
       previousTurn: COMPLETED_PREVIOUS_TURN,
       delivery: { handoff: "inline" },
     });
@@ -1690,18 +1703,19 @@ effectIt.effect("the delivery wrapper keeps the hook's note after inline handoff
     expect(text).toContain("Earlier question");
     expect(text.endsWith(`User message:\n${HOOKED_TURN_TEXT}`)).toBe(true);
     expect(text.split("User message:\n")).toHaveLength(2);
-    expect(text.split(ULTRACODE_TURN_NOTE)).toHaveLength(2);
+    expect(text.split(EVERY_TURN_WORKFLOW_NOTE)).toHaveLength(2);
   }),
 );
 
 // A 128,000-token window holding 95,000 leaves the handoff 971 tokens for a short message, and 529
-// once the ultracode note is added. The pending history fits only without the note.
+// once the every-turn note is added. The pending history fits only without the note.
 effectIt.effect(
   "a resume that cannot take the pending context with the turn's note falls back to a fresh session",
   () =>
     Effect.gen(function* () {
       const harness = makeLocalCommandHarness({
         text: HOOKED_TEXT,
+        workflowStart: "always",
         previousTurn: COMPLETED_PREVIOUS_TURN,
         delivery: { handoff: "inline" },
         nativeContextUsage: { usedTokens: 95_000, maxTokens: 128_000 },
@@ -1713,11 +1727,11 @@ effectIt.effect(
       expect(harness.deliveredTurns).toHaveLength(1);
       const text = harness.deliveredTurns[0]!.message.text;
       expect(text).toContain("Recovered conversation.");
-      expect(text.split(ULTRACODE_TURN_NOTE)).toHaveLength(2);
+      expect(text.split(EVERY_TURN_WORKFLOW_NOTE)).toHaveLength(2);
     }),
 );
 
-// Turn start reads the trigger settings once. Ultracode changing from off to keyword while the
+// Turn start reads the trigger settings once. workflowStart changing from off to always while the
 // session recovers must not give the delivered text a note the handoff was not budgeted for.
 effectIt.effect(
   "a settings change while the session recovers does not change the budgeted turn",
@@ -1728,19 +1742,19 @@ effectIt.effect(
         previousTurn: COMPLETED_PREVIOUS_TURN,
         delivery: { handoff: "inline" },
         nativeContextUsage: { usedTokens: 95_000, maxTokens: 128_000 },
-        ultracodeReads: ["off", "keyword"],
+        workflowStartReads: ["off", "always"],
       });
 
       yield* harness.start;
 
       expect(harness.settingsReads.count).toBe(1);
-      expect(harness.startRootRun.mock.calls[0]?.[0].turnTriggers.ultracode).toBe("off");
+      expect(harness.startRootRun.mock.calls[0]?.[0].turnTriggers.workflowStart).toBe("off");
       // Budgeted and delivered without the note: the pending context fits, so no fresh session.
       expect(harness.freshSession).not.toHaveBeenCalled();
       expect(harness.deliveredTurns).toHaveLength(1);
       const text = harness.deliveredTurns[0]!.message.text;
       expect(text).toContain("Earlier question");
-      expect(text).not.toContain(ULTRACODE_TURN_NOTE);
+      expect(text).not.toContain(EVERY_TURN_WORKFLOW_NOTE);
     }),
 );
 
@@ -1761,8 +1775,8 @@ effectIt.effect("a turn the hook leaves alone is delivered unchanged after conte
 );
 
 effectIt.effect.each([
-  { issued: false, text: HOOKED_TEXT, note: ULTRACODE_TURN_NOTE },
-  { issued: true, text: HOOKED_TEXT, note: ULTRACODE_TURN_NOTE },
+  { issued: false, text: HOOKED_TEXT, note: EVERY_TURN_WORKFLOW_NOTE },
+  { issued: true, text: HOOKED_TEXT, note: EVERY_TURN_WORKFLOW_NOTE },
   { issued: false, text: "Use a workflow to ship this", note: "<t3-workflow>" },
   { issued: true, text: "Use a workflow to ship this", note: "<t3-workflow>" },
 ])(
@@ -1775,6 +1789,7 @@ effectIt.effect.each([
         delivery: { handoff: "injected" },
         sessionWorkflows: issued,
         workflowsSetting: !issued,
+        workflowStart: "always",
       });
       yield* harness.start;
       expect(harness.startRootRun.mock.calls[0]?.[0].turnTriggers.workflows).toBe(issued);

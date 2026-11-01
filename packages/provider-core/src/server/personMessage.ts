@@ -1,6 +1,6 @@
 /**
  * Whether a person typed a message into a web or mobile client. Hooks that start orchestration
- * from a message's words (ultracode, workflow triggers) ask this first: agent text, server
+ * from a message (the workflowStart setting's triggers) ask this first: agent text, server
  * wakes and canned replies must not start anything, or every child could start another fan-out.
  */
 import type { OrchestrationV2Actor, OrchestrationV2CreationSource } from "@t3tools/contracts";

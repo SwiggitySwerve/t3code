@@ -134,12 +134,9 @@ it.effect(
           presets: [{ ...worker, fallbacks: [{ ...target, model: "gpt-5.5" }] }],
           defaultPresetId: "worker",
         },
-        workflowTriggers: { enabled: false, extras: ["orchestrate", "fan out"] },
+        workflowTriggers: { extras: ["orchestrate", "fan out"] },
       });
-      assert.deepEqual(saved.workflowTriggers, {
-        enabled: false,
-        extras: ["orchestrate", "fan out"],
-      });
+      assert.deepEqual(saved.workflowTriggers, { extras: ["orchestrate", "fan out"] });
       const persisted = yield* decodeServerSettingsJson(
         yield* fs.readFileString(config.settingsPath),
       );
@@ -147,7 +144,7 @@ it.effect(
         { ...target, model: "gpt-5.5" },
       ]);
       assert.deepEqual(persisted.workflowTriggers, saved.workflowTriggers);
-      yield* service.updateSettings({ workflowTriggers: { enabled: true, extras: [] } });
+      yield* service.updateSettings({ workflowTriggers: { extras: [] } });
       assert.equal(
         "workflowTriggers" in JSON.parse(yield* fs.readFileString(config.settingsPath)),
         false,
@@ -172,14 +169,14 @@ it.effect("keeps profiles saved before name rules and lets unrelated settings ch
     yield* fs.writeFileString(config.settingsPath, JSON.stringify({ workflowPresets: legacy }));
     const loaded = yield* service.getSettings;
     assert.deepEqual(loaded.workflowPresets, legacy);
-    assert.deepEqual(loaded.workflowTriggers, { enabled: true, extras: [] });
-    yield* service.updateSettings({ ultracode: "off" });
+    assert.deepEqual(loaded.workflowTriggers, { extras: [] });
+    yield* service.updateSettings({ workflowStart: "off" });
     yield* service.updateSettings({ workflowTriggers: { extras: ["fan out"] } });
     const persisted = yield* decodeServerSettingsJson(
       yield* fs.readFileString(config.settingsPath),
     );
     assert.deepEqual(persisted.workflowPresets, legacy);
-    assert.equal(persisted.ultracode, "off");
+    assert.equal(persisted.workflowStart, "off");
     // Writing the same profiles back is not a new violation; adding another "same" is.
     yield* service.updateSettings({ workflowPresets: legacy });
     const refused = yield* service
@@ -191,6 +188,25 @@ it.effect("keeps profiles saved before name rules and lets unrelated settings ch
       })
       .pipe(Effect.flip);
     assert.equal(refused._tag, "ServerSettingsError");
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("drops a stored trigger switch, leaving workflowStart the only on and off", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    yield* fs.writeFileString(
+      config.settingsPath,
+      JSON.stringify({ workflowTriggers: { enabled: false, extras: ["fan out"] } }),
+    );
+    const loaded = yield* service.getSettings;
+    assert.deepEqual(loaded.workflowTriggers, { extras: ["fan out"] });
+    assert.equal(loaded.workflowStart, "keyword");
+    yield* service.updateSettings({ workflowStart: "always" });
+    const written = JSON.parse(yield* fs.readFileString(config.settingsPath));
+    assert.deepEqual(written.workflowTriggers, { extras: ["fan out"] });
+    assert.equal(written.workflowStart, "always");
   }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 

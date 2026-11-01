@@ -969,11 +969,12 @@ export const ResponseStreamingMode = Schema.Literals(["turn", "paragraph"]);
 export type ResponseStreamingMode = typeof ResponseStreamingMode.Type;
 
 /**
- * Ultracode asks agents to orchestrate substantive work as a workflow. "keyword" opts in a
- * turn whose message contains the word ultracode, "always" opts in every turn, "off" never.
+ * Whether a person's message starts a workflow. "keyword" plans one when the message contains
+ * "workflow" or a trigger extra; "always" does that and asks every other person-typed turn to
+ * run substantive work as a workflow; "off" never starts one from a message.
  */
-export const UltracodeMode = Schema.Literals(["keyword", "always", "off"]);
-export type UltracodeMode = typeof UltracodeMode.Type;
+export const WorkflowStartMode = Schema.Literals(["keyword", "always", "off"]);
+export type WorkflowStartMode = typeof WorkflowStartMode.Type;
 
 const StorageRetentionDays = Schema.NullOr(
   Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 3650 })),
@@ -1038,7 +1039,7 @@ export const PROJECT_SCOPED_SERVER_SETTING_KEYS = [
   "sidebarAutoSettleKeepPullRequests",
   "continueThreadsAfterServerUpdate",
   "responseStreamingMode",
-  "ultracode",
+  "workflowStart",
 ] as const;
 export type ProjectScopedServerSettingKey = (typeof PROJECT_SCOPED_SERVER_SETTING_KEYS)[number];
 
@@ -1076,7 +1077,7 @@ export const ProjectSettingsOverrides = Schema.Struct({
   sidebarAutoSettleKeepPullRequests: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   responseStreamingMode: Schema.optionalKey(ResponseStreamingMode),
-  ultracode: Schema.optionalKey(UltracodeMode),
+  workflowStart: Schema.optionalKey(WorkflowStartMode),
   providerInstances: Schema.optionalKey(
     Schema.Record(ProviderInstanceId, ProjectProviderInstanceOverride),
   ),
@@ -1204,12 +1205,11 @@ export const WorkflowPresets = Schema.Struct({
 export type WorkflowPresets = typeof WorkflowPresets.Type;
 
 /**
- * Words that put the coordinator into graph planning (see `@t3tools/shared/workflowIntent`).
- * The built-in word "workflow" is not stored here; `enabled: false` turns off every trigger,
- * the built-in one included.
+ * Extra words that put the coordinator into graph planning (see `@t3tools/shared/workflowIntent`).
+ * The built-in word "workflow" is not stored here; `workflowStart` decides whether any trigger
+ * applies.
  */
 export const WorkflowTriggers = Schema.Struct({
-  enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   extras: Schema.Array(TrimmedNonEmptyString).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type WorkflowTriggers = typeof WorkflowTriggers.Type;
@@ -1247,7 +1247,9 @@ export const ServerSettings = Schema.Struct({
   maxRunningDelegatedTasks: MaxRunningDelegatedTasks.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_MAX_RUNNING_DELEGATED_TASKS)),
   ),
-  ultracode: UltracodeMode.pipe(Schema.withDecodingDefault(Effect.succeed("keyword" as const))),
+  workflowStart: WorkflowStartMode.pipe(
+    Schema.withDecodingDefault(Effect.succeed("keyword" as const)),
+  ),
 
   enableAgentBrowserAccess: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   projectAgentBrowserAccessOverrides: Schema.Record(ProjectId, Schema.Boolean).pipe(
@@ -1572,7 +1574,6 @@ export const ServerSettingsPatch = Schema.Struct({
   workflowPresets: Schema.optionalKey(WorkflowPresets),
   workflowTriggers: Schema.optionalKey(
     Schema.Struct({
-      enabled: Schema.optionalKey(Schema.Boolean),
       extras: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),
     }),
   ),
@@ -1629,7 +1630,7 @@ export const ServerSettingsPatch = Schema.Struct({
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterServerUpdate: Schema.optionalKey(Schema.Boolean),
   maxRunningDelegatedTasks: Schema.optionalKey(MaxRunningDelegatedTasks),
-  ultracode: Schema.optionalKey(UltracodeMode),
+  workflowStart: Schema.optionalKey(WorkflowStartMode),
   enableAgentBrowserAccess: Schema.optionalKey(Schema.Boolean),
   projectAgentBrowserAccessOverrides: Schema.optionalKey(
     Schema.Record(ProjectId, Schema.NullOr(Schema.Boolean)),

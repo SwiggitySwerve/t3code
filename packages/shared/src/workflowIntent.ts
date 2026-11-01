@@ -11,13 +11,13 @@ import { unified } from "unified";
 import { upgradeLegacyContextMessage } from "./composerContextLegacy.ts";
 import { replaceComposerContextReferences } from "./composerContextReferences.ts";
 
-/** Always matched while triggers are on; it cannot be removed. */
+/** Always matched while messages can start a workflow; it cannot be removed. */
 const BUILT_IN_WORKFLOW_TRIGGER = "workflow";
 /** A phrase is a word or short phrase, not a sentence; the settings write boundary enforces it. */
 export const WORKFLOW_TRIGGER_PHRASE_MAX_CHARS = 64;
 
+/** The user's extra words or phrases; whether any trigger applies is `workflowStart`'s call. */
 export interface WorkflowTriggerSettings {
-  readonly enabled: boolean;
   readonly extras: ReadonlyArray<string>;
 }
 
@@ -26,7 +26,7 @@ export interface WorkflowIntent {
   readonly keyword: string;
 }
 
-const DEFAULT_TRIGGERS: WorkflowTriggerSettings = { enabled: true, extras: [] };
+const DEFAULT_TRIGGERS: WorkflowTriggerSettings = { extras: [] };
 
 // Dashes separate words in prose ("workflow—now"); a hyphen inside a word does not.
 const TOKEN = /[^\s\u2013\u2014]+/gu;
@@ -199,13 +199,12 @@ function isCiCompound(tokens: ReadonlyArray<string>, index: number, length: numb
 
 /**
  * The first valid trigger in a person's message, or null. `triggers` defaults to the built-in
- * word alone; `enabled: false` returns null for every word, the built-in one included.
+ * word alone. Callers that honor the `workflowStart` setting skip this when it is "off".
  */
 export function detectWorkflowIntent(
   text: string,
   triggers: WorkflowTriggerSettings = DEFAULT_TRIGGERS,
 ): WorkflowIntent | null {
-  if (!triggers.enabled) return null;
   const phrases = [BUILT_IN_WORKFLOW_TRIGGER, ...triggers.extras].flatMap((keyword) => {
     const words = normalizeWorkflowTriggerPhrase(keyword).split(" ");
     return words[0] === "" ? [] : [{ keyword: keyword.trim(), words }];

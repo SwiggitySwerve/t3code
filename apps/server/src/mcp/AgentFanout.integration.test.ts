@@ -5594,6 +5594,7 @@ describe("workflow approval", () => {
         threadId: parentThreadId,
         messageId,
         typedText,
+        workflowStart: (yield* settings.getSettings).workflowStart,
         workflowTriggers: (yield* settings.getSettings).workflowTriggers,
         createdBy: "user",
         creationSource: "web",

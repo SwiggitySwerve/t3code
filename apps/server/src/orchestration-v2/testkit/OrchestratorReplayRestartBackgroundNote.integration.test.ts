@@ -18,7 +18,10 @@ import {
   makeClaudeRestartReplayHarness,
 } from "../Adapters/ClaudeAdapterV2.testkit.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
-import { workflowTurnNote } from "@t3tools/provider-core/server/workflowTrigger";
+import {
+  CLAUDE_NATIVE_ORCHESTRATION_KEYWORD,
+  workflowTurnNote,
+} from "@t3tools/provider-core/server/workflowTrigger";
 import * as EffectWorker from "../EffectWorker.ts";
 import * as EventSink from "../EventSink.ts";
 import * as Orchestrator from "../Orchestrator.ts";
@@ -309,7 +312,7 @@ describe("restart-cancelled background work", () => {
 });
 
 // The real hook, delivery wrapper and Claude adapter: the workflow note must reach the provider
-// after the restart note, on a driver whose own ultracode a keyword would otherwise start.
+// after the restart note, on a driver whose own orchestration keyword "always" would otherwise add.
 describe("workflow trigger on the first turn after a restart", () => {
   const PROFILES = {
     presets: [
@@ -328,7 +331,7 @@ describe("workflow trigger on the first turn after a restart", () => {
   const run = (input: {
     readonly typed: string;
     readonly resumedPrompt: string;
-    /** The next message does not ask for a workflow, so only the ultracode setting shapes it. */
+    /** The next message does not ask for a workflow, so only workflowStart "always" shapes it. */
     readonly secondPrompt?: string;
     readonly serverSettings: ProviderReplayHarness.ReplayServerSettings;
   }) =>
@@ -364,23 +367,23 @@ describe("workflow trigger on the first turn after a restart", () => {
     },
   );
 
-  it.effect("prefers the workflow note over ultracode and adds no native trigger word", () => {
-    const typed = "ultracode: finish the background audit as a workflow";
+  it.effect("prefers the plan-first note under always and adds no native trigger word", () => {
+    const typed = "Finish the background audit as a workflow";
     return run({
       typed,
       resumedPrompt: `${NOTE}\n\nUser message:\n${typed}\n\n${workflowTurnNote({ presets: [], defaultPresetId: null })}`,
-      // Claude's own ultracode keyword is added only where the person did not ask for a workflow.
-      secondPrompt: `${SECOND_AFTER_RESTART}\n\nultracode`,
-      serverSettings: { ultracode: "always" },
+      // Claude Code's own trigger is added only where the person did not ask for a workflow.
+      secondPrompt: `${SECOND_AFTER_RESTART}\n\n${CLAUDE_NATIVE_ORCHESTRATION_KEYWORD}`,
+      serverSettings: { workflowStart: "always" },
     });
   });
 
-  it.effect("sends the message as typed when workflow triggers are off", () => {
+  it.effect("sends the message as typed when workflowStart is off", () => {
     const typed = "Finish the background audit as a workflow";
     return run({
       typed,
       resumedPrompt: `${NOTE}\n\nUser message:\n${typed}`,
-      serverSettings: { ultracode: "off", workflowTriggers: { enabled: false, extras: [] } },
+      serverSettings: { workflowStart: "off" },
     });
   });
 });

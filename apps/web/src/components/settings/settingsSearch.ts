@@ -211,11 +211,18 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
 export const SETTINGS_SEARCH_ITEMS = [
   {
     id: "workflow-presets",
-    title: "Workflow",
+    title: "Agent Roles",
     to: "/settings/agents",
-    searchTerms: ["workflow worker presets agent presets default provider model options"],
+    searchTerms: ["workflow worker presets agent roles default provider model effort options"],
     environmentOnly: true,
     scope: "environment",
+  },
+  {
+    id: "workflow-start",
+    title: "Start a workflow",
+    to: "/settings/agents",
+    scope: "project-defaults",
+    searchTerms: ["workflow keyword trigger message orchestration multi agent parallel every turn"],
   },
   {
     id: "storage-worktree-keep-when",
@@ -542,13 +549,6 @@ export const SETTINGS_SEARCH_ITEMS = [
     to: "/settings/threads",
     scope: "project-defaults",
     searchTerms: ["output token paragraph buffered wait turn legacy"],
-  },
-  {
-    id: "ultracode",
-    title: "Ultracode",
-    to: "/settings/threads",
-    scope: "project-defaults",
-    searchTerms: ["workflow orchestration multi agent keyword parallel subagents"],
   },
   {
     id: "hide-whitespace-changes",

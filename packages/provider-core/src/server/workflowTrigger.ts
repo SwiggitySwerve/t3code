@@ -1,18 +1,21 @@
 /**
- * Per-turn hooks that turn a person's workflow request into graph planning, which wins over the
- * ultracode note. Only a person's message on a non-delegated thread can ask. The server refuses
- * graph_start and workflow_start until the user approves (`orchestration-v2/WorkflowApprovalGate.ts`).
+ * Per-turn hooks for `workflowStart`, the one owner of whether a person's message starts a
+ * workflow: a request gets graph planning, and under "always" every other person's turn gets the
+ * every-turn note. graph_start and workflow_start wait for approval (`WorkflowApprovalGate.ts`).
  */
 import type {
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   ProviderDriverKind,
 } from "@t3tools/contracts";
-import type { UltracodeMode, WorkflowPresets, WorkflowTriggers } from "@t3tools/contracts/settings";
-import { detectWorkflowIntent, personTypedWords } from "@t3tools/shared/workflowIntent";
+import type {
+  WorkflowPresets,
+  WorkflowStartMode,
+  WorkflowTriggers,
+} from "@t3tools/contracts/settings";
+import { detectWorkflowIntent } from "@t3tools/shared/workflowIntent";
 
 import { isPersonTypedMessage } from "./personMessage.ts";
-import { applyUltracode } from "./ultracode.ts";
 
 const MAX_LISTED_PROFILES = 12;
 const MAX_LISTED_NAME_CHARS = 60;
@@ -65,17 +68,38 @@ export function workflowTurnNote(presets: WorkflowPresets): string {
   ].join("\n");
 }
 
+const CLAUDE_DRIVER = "claudeAgent";
+
+/**
+ * Claude Code's own trigger for its native multi-agent orchestration. Only a Claude turn gets
+ * it, in place of the every-turn note; the stored message never shows it.
+ */
+export const CLAUDE_NATIVE_ORCHESTRATION_KEYWORD = "ultracode";
+
+/** The note for a person's turn that `workflowStart: "always"` runs as a workflow. */
+export const EVERY_TURN_WORKFLOW_NOTE = [
+  "<t3-workflow-every-turn>",
+  "The user asked T3 to run every turn as a workflow: multi-agent orchestration.",
+  "For substantive work, plan it as a workflow and run it with the T3 workflow_start tool:",
+  "phases, parallel agents, and agents that check each other's findings before you report.",
+  "Pick agents' providers and models with orchestrator_capabilities.",
+  "Stay solo only for conversational replies or trivial edits. Token cost is not a constraint.",
+  "</t3-workflow-every-turn>",
+].join("\n");
+
 /** What a turn's message asks of the workflow trigger. */
 export type WorkflowRequest =
   /** A person's new message asks for a workflow. */
   | "requested"
-  /** A person's new message does not. */
+  /** A person's new message does not, or `workflowStart` is "off". */
   | "plain"
   /** Not a person's new request (agent text, wakes, schedules, delegated threads, resumes). */
   | "ignored";
 
 export interface WorkflowRequestInput {
   readonly workflows?: boolean;
+  /** "off" means no message asks for a workflow; "keyword" and "always" read the triggers. */
+  readonly workflowStart: WorkflowStartMode;
   readonly workflowTriggers: WorkflowTriggers;
   /** The message as stored, before provider context projection: what the person wrote. */
   readonly typedText: string;
@@ -103,18 +127,20 @@ export function workflowRequestOf(input: WorkflowRequestInput): WorkflowRequest 
   ) {
     return "ignored";
   }
-  return detectWorkflowIntent(input.typedText, input.workflowTriggers) === null
+  // Off still reads as a person's plain message, so it lifts a waiting request as one would.
+  return input.workflowStart === "off" ||
+    detectWorkflowIntent(input.typedText, input.workflowTriggers) === null
     ? "plain"
     : "requested";
 }
 
 /**
- * The text the provider receives for this turn: the workflow note, else the ultracode result.
- * `request` is the answer `workflowRequestOf` already gave for this message.
+ * The text the provider receives for this turn: the plan-first note for a request, the every-turn
+ * note for another person's turn under "always", else the text unchanged. `request` is the answer
+ * `workflowRequestOf` already gave for this message.
  */
 export function applyTurnTriggers(
   input: WorkflowRequestInput & {
-    readonly ultracode: UltracodeMode;
     readonly workflowPresets: WorkflowPresets;
     readonly driver: ProviderDriverKind;
     /** The text the provider would receive. */
@@ -126,15 +152,10 @@ export function applyTurnTriggers(
   if (request === "requested") {
     return `${input.text}\n\n${workflowTurnNote(input.workflowPresets)}`;
   }
-  return applyUltracode({
-    mode: input.ultracode,
-    driver: input.driver,
-    text: input.text,
-    typedWords: personTypedWords(input.typedText),
-    createdBy: input.createdBy,
-    creationSource: input.creationSource,
-    scheduledTaskId: input.scheduledTaskId,
-    senderThreadId: input.senderThreadId,
-    delegatedThread: input.delegatedThread,
-  });
+  // "ignored" covers agent text, server messages (approved workflow instructions among them),
+  // wakes, schedules, delegated threads and resumes: none of them opts in on its own.
+  if (request !== "plain" || input.workflowStart !== "always") return input.text;
+  return input.driver === CLAUDE_DRIVER
+    ? `${input.text}\n\n${CLAUDE_NATIVE_ORCHESTRATION_KEYWORD}`
+    : `${input.text}\n\n${EVERY_TURN_WORKFLOW_NOTE}`;
 }

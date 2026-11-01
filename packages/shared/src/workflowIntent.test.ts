@@ -9,7 +9,7 @@ import {
   workflowTriggerExtrasProblems,
 } from "./workflowIntent.ts";
 
-const on = (extras: ReadonlyArray<string> = []) => ({ enabled: true, extras });
+const on = (extras: ReadonlyArray<string> = []) => ({ extras });
 const keyword = (text: string, extras: ReadonlyArray<string> = []) =>
   detectWorkflowIntent(text, on(extras))?.keyword ?? null;
 
@@ -156,16 +156,16 @@ describe("detectWorkflowIntent", () => {
     const chip = formatComposerContextReference({
       kind: "mention",
       contextId: "ctx-1" as never,
-      label: "ultracode.ts",
+      label: "workflow.ts",
     });
-    expect(personTypedWords(`look at ${chip} now`)).not.toContain("ultracode");
+    expect(personTypedWords(`look at ${chip} now`)).not.toContain("workflow");
     expect(personTypedWords(`look at ${chip} now`)).toContain("look at");
     expect(personTypedWords(`look at ${chip} now`)).toContain("now");
     expect(
       personTypedWords(
-        "look\n\n<terminal_context>\n- build line 1:\n  1 | ultracode\n</terminal_context>",
+        "look\n\n<terminal_context>\n- build line 1:\n  1 | workflow\n</terminal_context>",
       ),
-    ).not.toContain("ultracode");
+    ).not.toContain("workflow");
     expect(personTypedWords("plain words")).toBe("plain words");
   });
 
@@ -193,13 +193,6 @@ describe("detectWorkflowIntent", () => {
     expect(keyword("open src/orchestrate/a.ts", ["orchestrate"])).toBeNull();
     expect(keyword("the orchestrate file", ["orchestrate"])).toBeNull();
     expect(keyword("the orchestrate plan", ["orchestrate"])).toBe("orchestrate");
-  });
-
-  it("turns off every word, the built-in one included, when disabled", () => {
-    expect(detectWorkflowIntent("a workflow", { enabled: false, extras: [] })).toBeNull();
-    expect(
-      detectWorkflowIntent("orchestrate", { enabled: false, extras: ["orchestrate"] }),
-    ).toBeNull();
   });
 
   it("keeps the built-in word when extras are empty or blank", () => {

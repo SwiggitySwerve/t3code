@@ -211,8 +211,7 @@ const views = [
   { name: "13-running-fold", thread: "workflow-live", width: 1440 },
   { name: "14-relationships-phases", thread: "workflow-live", width: 1440 },
   { name: "15-settings-workflow", thread: "workflow-small", width: 1440 },
-  { name: "16-settings-preset-editor", thread: "workflow-small", width: 1440 },
-  { name: "17-settings-ultracode", thread: "workflow-small", width: 1440 },
+  { name: "17-settings-workflow-start", thread: "workflow-small", width: 1440 },
   { name: "18-plan-review", thread: "workflow-review", width: 1440 },
 ] as const;
 
@@ -349,25 +348,18 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
       await expect.element(toggle).toBeInTheDocument();
       toggle.element().scrollIntoView({ block: "center" });
     }
-    if (name === "15-settings-workflow" || name === "16-settings-preset-editor") {
+    if (name === "15-settings-workflow" || name === "17-settings-workflow-start") {
       await act(() => router.navigate({ to: "/settings/agents" }));
       await expect.element(page.getByRole("switch", { name: "Enable workflows" })).toBeChecked();
       await expect
-        .element(page.getByRole("switch", { name: "Workflow worker default: Worker" }))
+        .element(page.getByRole("switch", { name: "Default role: Worker" }))
         .toBeChecked();
     }
-    if (name === "16-settings-preset-editor") {
-      await userEvent.click(page.getByRole("button", { name: "Edit Worker", exact: true }));
+    if (name === "17-settings-workflow-start") {
+      await userEvent.click(page.getByRole("combobox", { name: "Start a workflow" }));
       await expect
-        .element(page.getByRole("textbox", { name: "Preset name" }))
-        .toHaveValue("Worker");
-      page.getByRole("form", { name: "Worker preset" }).element().scrollIntoView({ block: "end" });
-    }
-    if (name === "17-settings-ultracode") {
-      await act(() => router.navigate({ to: "/settings/threads" }));
-      const ultracode = page.getByRole("combobox", { name: "Ultracode" });
-      await expect.element(ultracode).toBeEnabled();
-      ultracode.element().scrollIntoView({ block: "center" });
+        .element(page.getByRole("option", { name: "When a message says workflow" }))
+        .toBeVisible();
     }
     if (name === "10-verbose-graph") {
       await userEvent.click(page.getByRole("button", { name: "Graph details", exact: true }));
@@ -375,7 +367,8 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
         .element(page.elementLocator(container.querySelector("[data-workflow-waves]")!))
         .toBeVisible();
     }
-    if (name !== "06-anchored-readout") {
+    // View 17 keeps its menu open, so it keeps focus and the pointer where they are.
+    if (name !== "06-anchored-readout" && name !== "17-settings-workflow-start") {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       await commands.resetPointer();
     }

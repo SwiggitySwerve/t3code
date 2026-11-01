@@ -46,6 +46,10 @@ import type { PendingOrchestrationEffectV2 } from "./EffectOutbox.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import {
+  CLAUDE_NATIVE_ORCHESTRATION_KEYWORD,
+  EVERY_TURN_WORKFLOW_NOTE,
+} from "@t3tools/provider-core/server/workflowTrigger";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
 import * as McpAppModelContext from "../mcpApps/McpAppModelContext.ts";
@@ -58,8 +62,8 @@ import * as WorkflowApprovalGate from "./WorkflowApprovalGate.ts";
 const driver = ProviderDriverKind.make("codex");
 const DEFAULT_TURN_TRIGGERS: RunExecutionService.RunExecutionTurnTriggers = {
   workflows: true,
+  workflowStart: DEFAULT_SERVER_SETTINGS.workflowStart,
   workflowTriggers: DEFAULT_SERVER_SETTINGS.workflowTriggers,
-  ultracode: DEFAULT_SERVER_SETTINGS.ultracode,
   workflowPresets: DEFAULT_SERVER_SETTINGS.workflowPresets,
 };
 const rootAppThread = (id: ThreadId) =>
@@ -3062,69 +3066,78 @@ it.effect("stops a provider turn that starts after Stop settled its run", () =>
   }),
 );
 
-it.effect("sends an ultracode turn to the provider with the workflow note", () =>
+it.effect("sends a person's plain turn with the every-turn note when workflowStart is always", () =>
   Effect.gen(function* () {
     const sent = yield* Ref.make<ReadonlyArray<string>>([]);
     yield* captureRootRunTermination({
-      key: "ultracode-turn",
-      messageText: "Review the parser. ultracode",
+      key: "every-turn-workflow",
+      messageText: "Review the parser",
+      settings: { workflowStart: "always" },
       shouldFinalizeRun: () => Effect.succeed(true),
       events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
       startTurn: (turn) => Ref.update(sent, (texts) => [...texts, turn.message.text]),
     });
-    const [text] = yield* Ref.get(sent);
-    assert.isTrue(text?.startsWith("Review the parser. ultracode\n\n<t3-ultracode>"));
+    assert.deepEqual(yield* Ref.get(sent), [`Review the parser\n\n${EVERY_TURN_WORKFLOW_NOTE}`]);
+    // Keyword mode leaves the same message alone.
+    const [keyword] = yield* providerTextsFor({
+      key: "every-turn-workflow-keyword",
+      messageText: "Review the parser",
+    });
+    assert.equal(keyword, "Review the parser");
   }),
 );
 
 it.effect("shapes the turn from the settings turn start read, not from a later read", () =>
   Effect.gen(function* () {
-    // Turn start read ultracode as "keyword" and budgeted the handoff for the note; the server
+    // Turn start read workflowStart as "always" and budgeted the handoff for the note; the server
     // setting says "off" by the time the run starts. The turn must carry the note it budgeted.
     const [text] = yield* providerTextsFor({
-      key: "ultracode-settings-snapshot",
-      messageText: "Review the parser. ultracode",
-      settings: { ultracode: "off" },
-      turnTriggers: { ...DEFAULT_TURN_TRIGGERS, ultracode: "keyword" },
+      key: "workflow-start-settings-snapshot",
+      messageText: "Review the parser",
+      settings: { workflowStart: "off" },
+      turnTriggers: { ...DEFAULT_TURN_TRIGGERS, workflowStart: "always" },
     });
-    assert.isTrue(text?.startsWith("Review the parser. ultracode\n\n<t3-ultracode>"));
+    assert.equal(text, `Review the parser\n\n${EVERY_TURN_WORKFLOW_NOTE}`);
     const [disabled] = yield* providerTextsFor({
       key: "workflow-feature-snapshot-off",
-      messageText: "ultracode: run a workflow",
+      messageText: "run a workflow",
       settings: { workflows: true },
-      turnTriggers: { ...DEFAULT_TURN_TRIGGERS, workflows: false, ultracode: "always" },
+      turnTriggers: { ...DEFAULT_TURN_TRIGGERS, workflows: false, workflowStart: "always" },
     });
-    assert.equal(disabled, "ultracode: run a workflow");
+    assert.equal(disabled, "run a workflow");
     // And the other way: a note that was not budgeted is not added.
     const [plain] = yield* providerTextsFor({
-      key: "ultracode-settings-snapshot-off",
-      messageText: "Review the parser. ultracode",
-      settings: { ultracode: "keyword" },
-      turnTriggers: { ...DEFAULT_TURN_TRIGGERS, ultracode: "off" },
+      key: "workflow-start-settings-snapshot-off",
+      messageText: "Review the parser as a workflow",
+      settings: { workflowStart: "always" },
+      turnTriggers: { ...DEFAULT_TURN_TRIGGERS, workflowStart: "off" },
     });
-    assert.equal(plain, "Review the parser. ultracode");
+    assert.equal(plain, "Review the parser as a workflow");
   }),
 );
 
-it.effect("sends a delegated child's task text unchanged even when it says ultracode", () =>
-  Effect.gen(function* () {
-    const sent = yield* Ref.make<ReadonlyArray<string>>([]);
-    yield* captureRootRunTermination({
-      key: "ultracode-child-turn",
-      messageText: "Review the parser. ultracode",
-      // delegate_task and workflow agents dispatch the task as the calling agent, over MCP.
-      messageAuthor: { createdBy: "agent", creationSource: "mcp" },
-      appThreadLineage: {
-        parentThreadId: ThreadId.make("thread:ultracode-parent"),
-        relationshipToParent: "subagent",
-        rootThreadId: ThreadId.make("thread:ultracode-parent"),
-      },
-      shouldFinalizeRun: () => Effect.succeed(true),
-      events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
-      startTurn: (turn) => Ref.update(sent, (texts) => [...texts, turn.message.text]),
-    });
-    assert.deepEqual(yield* Ref.get(sent), ["Review the parser. ultracode"]);
-  }),
+it.effect(
+  "sends a delegated child's task text unchanged under always, even when it says workflow",
+  () =>
+    Effect.gen(function* () {
+      const sent = yield* Ref.make<ReadonlyArray<string>>([]);
+      yield* captureRootRunTermination({
+        key: "workflow-child-turn",
+        messageText: "Review the parser as a workflow",
+        settings: { workflowStart: "always" },
+        // delegate_task and workflow agents dispatch the task as the calling agent, over MCP.
+        messageAuthor: { createdBy: "agent", creationSource: "mcp" },
+        appThreadLineage: {
+          parentThreadId: ThreadId.make("thread:workflow-child-parent"),
+          relationshipToParent: "subagent",
+          rootThreadId: ThreadId.make("thread:workflow-child-parent"),
+        },
+        shouldFinalizeRun: () => Effect.succeed(true),
+        events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
+        startTurn: (turn) => Ref.update(sent, (texts) => [...texts, turn.message.text]),
+      });
+      assert.deepEqual(yield* Ref.get(sent), ["Review the parser as a workflow"]);
+    }),
 );
 
 const WORKFLOW_PROFILES = {
@@ -3170,40 +3183,43 @@ it.effect("asks every driver's coordinator to plan a workflow when a person says
       );
       assert.include(text, "graph_review");
       assert.include(text, '"Fast worker" (id "profile-fast")');
-      assert.notInclude(text, "<t3-ultracode>");
+      assert.notInclude(text, "<t3-workflow-every-turn>");
     }
   }),
 );
 
-it.effect("lets the workflow note win over ultracode and adds no native trigger word", () =>
+it.effect("plans a requested workflow instead of the every-turn note, with no native trigger", () =>
   Effect.gen(function* () {
     for (const providerDriver of ["codex", "claudeAgent"]) {
       const [text] = yield* providerTextsFor({
-        key: `workflow-over-ultracode-${providerDriver}`,
-        messageText: "ultracode this: run it as a workflow",
+        key: `workflow-over-every-turn-${providerDriver}`,
+        messageText: "run it as a workflow",
         providerDriver: ProviderDriverKind.make(providerDriver),
-        settings: { ultracode: "always" },
+        settings: { workflowStart: "always" },
       });
       assert.include(text, "<t3-workflow>");
-      assert.notInclude(text, "<t3-ultracode>");
-      assert.isFalse(text?.trimEnd().endsWith("\nultracode"), providerDriver);
+      assert.notInclude(text, "<t3-workflow-every-turn>");
+      assert.isFalse(
+        text?.trimEnd().endsWith(`\n${CLAUDE_NATIVE_ORCHESTRATION_KEYWORD}`),
+        providerDriver,
+      );
     }
-    // Without the word, the ultracode setting still decides.
+    // Without the word, a Claude turn gets Claude Code's own trigger instead of the note.
     const [claudeText] = yield* providerTextsFor({
-      key: "ultracode-without-workflow-claude",
+      key: "every-turn-without-workflow-claude",
       messageText: "Audit the parser",
       providerDriver: ProviderDriverKind.make("claudeAgent"),
-      settings: { ultracode: "always" },
+      settings: { workflowStart: "always" },
     });
-    assert.equal(claudeText, "Audit the parser\n\nultracode");
+    assert.equal(claudeText, `Audit the parser\n\n${CLAUDE_NATIVE_ORCHESTRATION_KEYWORD}`);
   }),
 );
 
-it.effect("sends the turn unchanged when workflow triggers are off, built-in word included", () =>
+it.effect("sends the turn unchanged when workflowStart is off, built-in word included", () =>
   Effect.gen(function* () {
     const settings = {
-      ultracode: "off",
-      workflowTriggers: { enabled: false, extras: ["fan out"] },
+      workflowStart: "off",
+      workflowTriggers: { extras: ["fan out"] },
     } as const;
     for (const messageText of ["Run it as a workflow", "please fan out the audit"]) {
       const sent = yield* providerTextsFor({
@@ -3221,7 +3237,7 @@ it.effect("starts a workflow from the user's own trigger words", () =>
     const [text] = yield* providerTextsFor({
       key: "workflow-extra-word",
       messageText: "Please fan out the audit",
-      settings: { workflowTriggers: { enabled: true, extras: ["fan out"] } },
+      settings: { workflowTriggers: { extras: ["fan out"] } },
     });
     assert.include(text, "<t3-workflow>");
   }),
@@ -3303,7 +3319,7 @@ it.effect("never starts a workflow from anything but a person's new message", ()
       const sent = yield* providerTextsFor({
         key: `workflow-refused-${index}`,
         messageText: "Run it as a workflow",
-        settings: { ultracode: "off" },
+        settings: { workflowStart: "always" },
         ...input,
       });
       assert.deepEqual(sent, ["Run it as a workflow"], name);
@@ -3320,7 +3336,6 @@ const gateRefusalsAfter = (
     const refused = yield* Ref.make<ReadonlyArray<string>>([]);
     yield* captureRootRunTermination({
       messageText: "Run it as a workflow",
-      settings: { ultracode: "off" },
       ...input,
       shouldFinalizeRun: () => Effect.succeed(true),
       events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
@@ -3359,13 +3374,13 @@ it.effect("keeps an armed request when a plain steering restart follows it", () 
     yield* captureRootRunTermination({
       messageText: "Also check the tests",
       attemptReason: "steering_restart",
-      settings: { ultracode: "off" },
       key,
       shouldFinalizeRun: () => Effect.succeed(true),
       events: (ids) => Stream.make(rootTerminalEvent(ids, "completed")),
       beforeTurn: (gate) =>
         gate.observeTurn({
-          workflowTriggers: { enabled: true, extras: [] },
+          workflowStart: "keyword",
+          workflowTriggers: { extras: [] },
           typedText: "Run it as a workflow",
           threadId: backgroundScenarioIds(key).threadId,
           messageId: MessageId.make("message:earlier-request"),
@@ -3397,6 +3412,17 @@ it.effect("arms the approval gate for a person's workflow request and for nothin
       yield* armedBy({ key: "gate-plain", messageText: "Audit the parser" }),
       [],
       "a plain message leaves it open",
+    );
+    // workflowStart decides with the note: always arms like keyword, off never arms.
+    assert.deepEqual(
+      yield* armedBy({ key: "gate-always", settings: { workflowStart: "always" } }),
+      ["script-not-allowed"],
+      "always arms the gate for a request",
+    );
+    assert.deepEqual(
+      yield* armedBy({ key: "gate-off", settings: { workflowStart: "off" } }),
+      [],
+      "off never arms it",
     );
     // The same messages the note refuses: the gate reads the same provenance and attempt facts.
     const threadId = ThreadId.make("thread:gate-refused");
@@ -3450,7 +3476,6 @@ it.effect("reads the typed words, not the context projected into the provider te
       key: "workflow-projected-context",
       messageText: projected,
       typedText: "Look at this",
-      settings: { ultracode: "off" },
     });
     assert.equal(unchanged, projected);
     const [triggered] = yield* providerTextsFor({
@@ -3463,40 +3488,20 @@ it.effect("reads the typed words, not the context projected into the provider te
   }),
 );
 
-it.effect("reads the ultracode keyword from the typed words, not the projected context", () =>
+it.effect("does not read a context chip's label as a typed trigger word", () =>
   Effect.gen(function* () {
-    const projected = 'Look at this\n\n<t3_context version="1">\nthe ultracode log\n</t3_context>';
-    for (const providerDriver of ["codex", "claudeAgent"]) {
-      const [unchanged] = yield* providerTextsFor({
-        key: `ultracode-projected-context-${providerDriver}`,
-        messageText: projected,
-        typedText: "Look at this",
-        providerDriver: ProviderDriverKind.make(providerDriver),
-        settings: { ultracode: "keyword" },
-      });
-      assert.equal(unchanged, projected, providerDriver);
-    }
-    // A chip labelled with the word is not typed either: a file called ultracode.ts.
     const chip = formatComposerContextReference({
       kind: "terminal",
       contextId: "ctx-log" as never,
-      label: "ultracode.log",
+      label: "workflow.log",
     });
+    const messageText = `Look at ${chip}\n\n<t3_context version="1">\nbuild output\n</t3_context>`;
     const [chipText] = yield* providerTextsFor({
-      key: "ultracode-chip-label",
-      messageText: `Look at ${chip}\n\n<t3_context version="1">\nbuild output\n</t3_context>`,
+      key: "workflow-chip-label",
+      messageText,
       typedText: `Look at ${chip}`,
-      settings: { ultracode: "keyword" },
     });
-    assert.notInclude(chipText, "<t3-ultracode>");
-    const [codexText] = yield* providerTextsFor({
-      key: "ultracode-typed-keyword",
-      messageText: projected,
-      typedText: "Look at this, ultracode",
-      settings: { ultracode: "keyword" },
-    });
-    assert.isTrue(codexText?.startsWith(projected), "keeps the projected text ahead of the note");
-    assert.include(codexText, "<t3-ultracode>");
+    assert.equal(chipText, messageText);
   }),
 );
 it.effect("keeps completed runs completed when pull request refresh fails", () =>
@@ -3659,13 +3664,13 @@ function captureRootRunTermination(input: {
       Effect.map(
         ({
           workflows,
+          workflowStart,
           workflowTriggers,
-          ultracode,
           workflowPresets,
         }): RunExecutionService.RunExecutionTurnTriggers => ({
           workflows,
+          workflowStart,
           workflowTriggers,
-          ultracode,
           workflowPresets,
         }),
       ),
