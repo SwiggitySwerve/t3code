@@ -25,6 +25,7 @@ import {
   type OrchestrationV2ThreadShell,
   type OrchestrationV2ThreadStreamItem,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2WorkflowReviewRecord,
   type ServerProvider,
 } from "@t3tools/contracts";
 import type {
@@ -159,6 +160,17 @@ export function assistantItem(
     streaming,
     ...(streaming ? { status: "running" as const, completedAt: null } : {}),
   } satisfies OrchestrationV2TurnItem;
+}
+
+/** The approval record the server writes beside a `graph_review` call. */
+export function workflowReviewItem(
+  threadId: ThreadId,
+  runId: RunId,
+  id: string,
+  ordinal: number,
+  record: OrchestrationV2WorkflowReviewRecord,
+) {
+  return { ...base(threadId, runId, id, ordinal), ...record } satisfies OrchestrationV2TurnItem;
 }
 
 function run(threadId: ThreadId, id: RunId, ordinal: number, userMessageId: string) {
@@ -418,9 +430,14 @@ const encodedDescriptor = Schema.encodeSync(ExecutionEnvironmentDescriptor)(
 export function installFakeEnvironment(
   fixtures: ReadonlyArray<FakeThread>,
   providers: ReadonlyArray<ServerProvider> = [],
+  settings: Partial<ServerConfig["settings"]> = {},
 ): Disposable {
   threads = fixtures;
-  fixtureConfig = { ...serverConfig, providers: [...serverConfig.providers, ...providers] };
+  fixtureConfig = {
+    ...serverConfig,
+    providers: [...serverConfig.providers, ...providers],
+    settings: { ...serverConfig.settings, ...settings },
+  };
   globalThis.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : String(input), window.location.href);
     if (url.origin !== window.location.origin) return realFetch(input, init);
