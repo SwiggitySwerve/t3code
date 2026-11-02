@@ -620,13 +620,15 @@ const WorkflowReportCheck = Schema.Literals([
 ]);
 
 /**
- * How an attempt's cost was found. modelPriced: complete usage at its model's list price;
- * partialUsage: a lower bound. The rest leave the cost null, never 0.
+ * How an attempt's cost was found. modelPriced: complete usage at its model's list price for its
+ * service tier; partialUsage: a lower bound, as when some usage or its cache split is missing.
+ * The rest leave the cost null, never 0; tierUnpriced: its tier is unknown or has no list price.
  */
 export const WorkflowReportCostSource = Schema.Literals([
   "modelPriced",
   "partialUsage",
   "unpriced",
+  "tierUnpriced",
   "noUsage",
   "noRates",
 ]);
@@ -641,6 +643,8 @@ export const OrchestratorMcpWorkflowReportAttempt = Schema.Struct({
   options: Schema.NullOr(
     Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Boolean])),
   ),
+  /** The service tier it bills at; null when the row does not record it. */
+  speed: Schema.NullOr(Schema.Literals(["standard", "fast", "ultrafast"])),
   state: Schema.String,
   totalTokens: Schema.NullOr(NonNegativeInt),
   costUsd: Schema.NullOr(Schema.Number),

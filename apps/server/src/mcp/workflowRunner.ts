@@ -38,6 +38,8 @@ import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
+import type { UsageSpeed } from "@t3tools/provider-core/server/usage";
+
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { freshCommandId, isCommandIdSpent } from "../orchestration-v2/WorkflowCommandRetry.ts";
 import {
@@ -165,6 +167,8 @@ export interface WorkflowAgentStart {
   readonly model: string | null;
   /** The model options the provider resolver settled on for this attempt. */
   readonly options?: ReadonlyArray<ProviderOptionSelection> | undefined;
+  /** The service tier those options bill at, as the driver's usage reader decides. */
+  readonly speed?: UsageSpeed | undefined;
   readonly providerInstanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
 }

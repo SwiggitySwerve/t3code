@@ -16,7 +16,6 @@ import type {
 
 import type { UsageSpeed } from "@t3tools/provider-core/server/usage";
 
-import { codexSpeed } from "../provider/Drivers/codexUsage.ts";
 import { lookupRate, priceUsage, type RateTable } from "../usage/usagePricing.ts";
 import { modelFamily } from "./workflowAdvisory.ts";
 
@@ -34,50 +33,50 @@ interface Cost {
   readonly costSource: WorkflowReportCostSource;
 }
 
-/** The service tier an attempt's options bill at: T3's `serviceTier` and `fastMode` option ids. */
-function speedOf(options: Readonly<Record<string, string | boolean>> | undefined): UsageSpeed {
-  const tier = codexSpeed(options?.serviceTier);
-  return tier === "standard" && options?.fastMode === true ? "fast" : tier;
-}
-
-/** One attempt's usage at its own model's base list price; unknown stays null, never $0. */
+/**
+ * One attempt's usage at its own model's base list price for the service tier it billed at;
+ * unknown stays null, never $0, and a tier the table lacks is never priced at the standard rate.
+ */
 export function attemptCost(
   rates: RateTable,
-  attempt: {
-    readonly model?: string | undefined;
-    readonly options?: Readonly<Record<string, string | boolean>> | undefined;
-  },
+  attempt: { readonly model?: string | undefined; readonly speed?: UsageSpeed | undefined },
   usage: OrchestratorMcpWorkflowUsage | undefined,
 ): Cost {
-  const { model } = attempt;
+  const { model, speed } = attempt;
   if (rates.size === 0) return { costUsd: null, costSource: "noRates" };
   if (usage === undefined || usage.status === "unavailable") {
     return { costUsd: null, costSource: "noUsage" };
   }
-  if (model === undefined || lookupRate(rates, model) === null) {
-    return { costUsd: null, costSource: "unpriced" };
+  const rate = model === undefined ? null : lookupRate(rates, model);
+  if (model === undefined || rate === null) return { costUsd: null, costSource: "unpriced" };
+  if (speed === undefined || (speed !== "standard" && rate[speed] === null)) {
+    return { costUsd: null, costSource: "tierUnpriced" };
   }
+  const input = usage.inputTokens;
   const cachedInputTokens = usage.cachedInputTokens ?? 0;
   const cacheCreationTokens = usage.cacheCreationTokens ?? 0;
+  const uncachedInputTokens = usage.uncachedInputTokens ?? 0;
+  // The usage owns the cache split: it is null, or short of the input, when a turn gave none.
+  const splitKnown =
+    input !== null &&
+    (input === 0 ||
+      (usage.uncachedInputTokens !== null &&
+        uncachedInputTokens + cachedInputTokens + cacheCreationTokens >= input));
   const priced = priceUsage(rates, {
     model,
     totals: {
-      // From the totals: a turn that reports no cache split is all uncached input.
-      uncachedInputTokens: Math.max(
-        0,
-        (usage.inputTokens ?? 0) - cachedInputTokens - cacheCreationTokens,
-      ),
+      uncachedInputTokens,
       cachedInputTokens,
       cacheCreationTokens,
       outputTokens: usage.outputTokens ?? 0,
       reasoningTokens: 0,
     },
-    speed: speedOf(attempt.options),
+    speed,
     reportedCostUsd: null,
   });
   return {
     costUsd: priced.costUsd,
-    costSource: usage.status === "complete" ? "modelPriced" : "partialUsage",
+    costSource: usage.status === "complete" && splitKnown ? "modelPriced" : "partialUsage",
   };
 }
 
@@ -133,6 +132,7 @@ export function workflowReport(
       model: attempt.model ?? null,
       effort: attempt.effort ?? null,
       options: attempt.options ?? null,
+      speed: attempt.speed ?? null,
       state: attempt.state,
       totalTokens: attempt.totalTokens ?? null,
       ...attemptCost(pricing.rates, attempt, pricing.attemptUsage.get(attempt.taskId)),

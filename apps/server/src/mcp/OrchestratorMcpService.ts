@@ -133,6 +133,7 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { selectionSpeed } from "../usage/selectionSpeed.ts";
 import * as UsageService from "../usage/UsageService.ts";
 import { lookupRate, type RateTable } from "../usage/usagePricing.ts";
 import {
@@ -2260,6 +2261,7 @@ const make = Effect.gen(function* () {
           childThreadId: started.childThreadId,
           model: prepared.target.modelSelection.model,
           options: prepared.target.modelSelection.options,
+          speed: selectionSpeed(started.driver, prepared.target.modelSelection.options ?? []),
           providerInstanceId: started.providerInstanceId,
           driver: started.driver,
         };

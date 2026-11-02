@@ -296,7 +296,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
 }
 
 /** Missing, default and standard tiers bill as standard; fast aliases priority. */
-export function codexSpeed(serviceTier: unknown): UsageSpeed {
+function codexSpeed(serviceTier: unknown): UsageSpeed {
   if (serviceTier === "priority" || serviceTier === "fast") return "fast";
   if (serviceTier === "ultrafast") return "ultrafast";
   return "standard";
@@ -339,6 +339,12 @@ export const codexUsageReader: ProviderUsageReader<
   kind: "transcripts",
   provider: "codex",
   format: codexUsageFormat,
+  // The tier a turn records; T3's fastMode toggle asks for the fast one.
+  selectionSpeed: (options) => {
+    const tier = codexSpeed(options.find((option) => option.id === "serviceTier")?.value);
+    const fastMode = options.some((option) => option.id === "fastMode" && option.value === true);
+    return tier === "standard" && fastMode ? "fast" : tier;
+  },
   resolveServiceTiers: Effect.fn("codexUsageReader.resolveServiceTiers")(function* (records) {
     const history = yield* CodexUsageHistory.CodexUsageHistory;
     const requests = new Map<CodexUsageHistory.CodexUsageHistoryRequest, UsageRecord>();

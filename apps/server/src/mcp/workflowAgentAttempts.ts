@@ -229,6 +229,7 @@ export async function runAttempts(
     entry.agentId = started.value.taskId;
     entry.attemptTaskIds = [...new Set([...(entry.attemptTaskIds ?? []), started.value.taskId])];
     const resolved = resolvedOptions(started.value.options);
+    const { speed } = started.value;
     const recordAttempt = (outcome?: WorkflowAgentOutcome) => {
       const history = (entry.attemptHistory ?? []).filter(
         (record) => record.taskId !== started.value.taskId,
@@ -244,6 +245,7 @@ export async function runAttempts(
           ...(started.value.model === null ? {} : { model: started.value.model }),
           ...(resolved?.effort === undefined ? {} : { effort: resolved.effort }),
           ...(resolved === undefined ? {} : { options: resolved.byId }),
+          ...(speed === undefined ? {} : { speed }),
           ...(stoppedBy === undefined ? {} : { stoppedBy }),
           state:
             outcome !== undefined && TERMINAL_TASK_STATUSES.has(outcome.status)

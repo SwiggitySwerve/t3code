@@ -28,6 +28,7 @@ const attempt = (
   attempt: index,
   state,
   providerInstanceId: codex,
+  speed: "standard" as const,
   ...target,
   ...(target.effort === undefined ? {} : { options: { reasoningEffort: target.effort } }),
   usageStatus: "complete" as const,
@@ -287,6 +288,7 @@ describe("workflow report", () => {
         model: "gpt-5.4-mini",
         effort: "low",
         options: { reasoningEffort: "low" },
+        speed: "standard",
         state: "completed",
         totalTokens: null,
         costUsd: expect.closeTo(0.00135, 10),
@@ -298,6 +300,7 @@ describe("workflow report", () => {
         model: "gpt-5.4",
         effort: "high",
         options: { reasoningEffort: "high" },
+        speed: "standard",
         state: "completed",
         totalTokens: null,
         costUsd: expect.closeTo(0.01, 10),
@@ -354,12 +357,40 @@ describe("workflow report", () => {
     });
   });
 
-  it("prices an attempt at the service tier its options asked for", () => {
-    const fast = (options: Readonly<Record<string, string | boolean>>) =>
-      attemptCost(rates, { model: "gpt-5.4", options }, usage(2_000, 600)).costUsd;
-    expect(fast({})).toBeCloseTo(0.01, 10);
-    expect(fast({ serviceTier: "fast" })).toBeCloseTo(0.02, 10);
-    expect(fast({ fastMode: true })).toBeCloseTo(0.02, 10);
+  it("prices an attempt at the tier it billed at, and labels a tier the table cannot price", () => {
+    const priced = (attempt: Parameters<typeof attemptCost>[1]) =>
+      attemptCost(rates, attempt, usage(2_000, 600));
+    expect(priced({ model: "gpt-5.4", speed: "standard" })).toEqual({
+      costUsd: expect.closeTo(0.01, 10),
+      costSource: "modelPriced",
+    });
+    expect(priced({ model: "gpt-5.4", speed: "fast" }).costUsd).toBeCloseTo(0.02, 10);
+    // Never the standard rate for a faster tier: the mini model lists none.
+    expect(priced({ model: "gpt-5.4-mini", speed: "fast" })).toEqual({
+      costUsd: null,
+      costSource: "tierUnpriced",
+    });
+    // A row that does not record the tier cannot say which rate applies.
+    expect(priced({ model: "gpt-5.4" })).toEqual({ costUsd: null, costSource: "tierUnpriced" });
+  });
+
+  it("prices only the known part of input whose cache split is missing, as a lower bound", () => {
+    const noSplit = {
+      ...usage(2_000, 600),
+      cachedInputTokens: null,
+      cacheCreationTokens: null,
+      uncachedInputTokens: null,
+    };
+    // Output alone, 600 tokens at $10/M; never all 2,000 input tokens as uncached.
+    expect(attemptCost(rates, { model: "gpt-5.4", speed: "standard" }, noSplit)).toEqual({
+      costUsd: expect.closeTo(0.006, 10),
+      costSource: "partialUsage",
+    });
+    // Some turns gave a split and some did not: the split covers less than the input.
+    const shortSplit = { ...usage(2_000, 600), uncachedInputTokens: 400, cachedInputTokens: 600 };
+    expect(attemptCost(rates, { model: "gpt-5.4", speed: "standard" }, shortSplit).costSource).toBe(
+      "partialUsage",
+    );
   });
 
   it("prints the same report as text", () => {

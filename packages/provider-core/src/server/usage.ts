@@ -1,5 +1,6 @@
 import type {
   ProviderInstanceId,
+  ProviderOptionSelection,
   ServerSettings,
   UsageProviderKind,
   UsageReadError,
@@ -104,7 +105,13 @@ export interface ProviderUsageScanInput<Config> {
   readonly awaitRefresh: boolean;
 }
 
-export type ProviderUsageReader<Config, R> =
+export type ProviderUsageReader<Config, R> = {
+  /**
+   * The speed a turn started with these resolved model options bills at. Absent: standard, as
+   * this reader's records are.
+   */
+  readonly selectionSpeed?: (options: ReadonlyArray<ProviderOptionSelection>) => UsageSpeed;
+} & (
   | {
       readonly kind: "transcripts";
       readonly provider: UsageProviderKind;
@@ -127,4 +134,5 @@ export type ProviderUsageReader<Config, R> =
       readonly scan: (
         input: ProviderUsageScanInput<Config>,
       ) => Effect.Effect<ReadonlyArray<ProviderUsageScan>, UsageReadError, R>;
-    };
+    }
+);

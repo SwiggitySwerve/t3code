@@ -917,6 +917,8 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
             Schema.Union([TrimmedNonEmptyString, Schema.Boolean]),
           ),
         ),
+        /** The service tier it bills at, from its driver's usage reader; absent on older rows. */
+        speed: Schema.optional(Schema.Literals(["standard", "fast", "ultrafast"])),
         /** Why the runner stopped it, so a resumed run retries it as the stopping run would. */
         stoppedBy: Schema.optional(Schema.Literals(["stalled", "timed_out"])),
         totalTokens: Schema.optional(NonNegativeInt),
