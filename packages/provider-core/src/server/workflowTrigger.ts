@@ -53,7 +53,7 @@ export const EVERY_TURN_WORKFLOW_NOTE = [
   "For substantive work, plan it as a workflow and run it with the T3 workflow_start tool:",
   "phases, parallel agents, and agents that check each other's findings before you report.",
   ...ASSIGNMENT_RULES,
-  "Stay solo only for conversational replies or trivial edits. Token cost is not a constraint.",
+  "Stay solo only for conversational replies or trivial edits.",
   "</t3-workflow-every-turn>",
 ].join("\n");
 
