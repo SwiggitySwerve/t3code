@@ -93,6 +93,7 @@ describe("applyTurnTriggers", () => {
       expect(note).toContain("Prefer lowering effort to switching to a much weaker model");
       expect(note).toContain("run a planning agent on a stronger model first");
       expect(note).toContain("different model family than its worker");
+      expect(note).toContain("{ type: 'judgment', rubric, target }");
       expect(note).not.toMatch(/preset|profile|Settings/iu);
     }
   });

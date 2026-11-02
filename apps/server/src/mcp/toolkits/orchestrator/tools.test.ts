@@ -3,6 +3,7 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 
+import { advertisedJsonSchema } from "../../advertisedJsonSchema.ts";
 import { OrchestratorToolkit } from "./tools.ts";
 
 // Oversized page sizes clamp on decode, so the schema has no `maximum`; Codex also drops
@@ -26,4 +27,17 @@ it("refuses a t3_thread_update whose fields do not fit its action", () => {
   expect(Exit.isSuccess(decode({ action: "rename", title: "New", environmentId: undefined }))).toBe(
     true,
   );
+});
+
+// A Claude Code coordinator once hand-rolled a judge because no advertised text named `verify`.
+it("advertises the verify checks where a coordinator reads workflow_start and graph_review", () => {
+  for (const name of ["workflow_start", "graph_review"] as const) {
+    const tool = OrchestratorToolkit.tools[name];
+    expect(tool.description, name).toContain("{ type: 'judgment', rubric");
+    expect(tool.description, name).toContain("{ type: 'process', argv }");
+  }
+  const schema = advertisedJsonSchema(OrchestratorToolkit.tools.workflow_start) as {
+    readonly properties: Readonly<Record<string, { readonly description?: string }>>;
+  };
+  expect(schema.properties.script?.description).toContain("{ type: 'judgment', rubric, target? }");
 });

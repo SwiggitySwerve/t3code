@@ -21,7 +21,7 @@ const ASSIGNMENT_RULES = [
   "You choose every worker's and every check's target: providerInstanceId, model and options such as effort, from orchestrator_capabilities. Never invent ids.",
   "Give each agent the smallest model and effort you expect to succeed first time (pass its check, if it has one), and more to ambiguous, multi-file or previously failed work. Prefer lowering effort to switching to a much weaker model.",
   "Split work you cannot scope into smaller agents; for a part too large to scope, run a planning agent on a stronger model first.",
-  "Give a judgment check a target from a different model family than its worker when one is enabled.",
+  "Check work with verify: { type: 'process', argv }, or { type: 'judgment', rubric, target } on a different model family than its worker when one is enabled.",
 ];
 
 const WORKFLOW_TURN_NOTE = [
