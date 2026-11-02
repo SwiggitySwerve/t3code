@@ -2422,7 +2422,7 @@ describe("workflow resume", () => {
       }).pipe(Effect.provide(layerTest)),
   );
 
-  it.effect("starts a failed agent again, up to three attempts in all", () =>
+  it.effect("starts an agent its provider failed again, up to two retries", () =>
     Effect.gen(function* () {
       yield* startParent;
       const started = yield* startWorkflow('return await agent("flaky")');
@@ -2450,7 +2450,7 @@ describe("workflow resume", () => {
         const started = yield* startWorkflow(
           'return await agent("slow", { attemptTimeoutMs: 60000 })',
         );
-        for (const attempt of [1, 2, 3]) {
+        for (const attempt of [1, 2]) {
           yield* awaitMember(started.workflowId, attempt);
           yield* TestClock.adjust("2 minutes");
         }
@@ -2671,7 +2671,7 @@ describe("workflow checks", () => {
         expect(ended.agents[1]).toMatchObject({
           status: "failed",
           outcomeCategory: "check_failed",
-          verification: { attempts: 3 },
+          verification: { attempts: 2 },
         });
         expect(ended.agents[1]?.verification?.detail).toContain("exit code 3");
       }).pipe(Effect.provide(layerTest)),
@@ -4402,16 +4402,16 @@ describe("graphs", () => {
           `The workflow failed: Graph failed: 1 node failed, 1 skipped. Produce: ${reason}`,
         );
         expect(ended.agents).toHaveLength(1);
-        expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 3 });
+        expect(ended.agents[0]?.verification).toMatchObject({ type: "outputs", attempts: 2 });
         // The row itself records both nodes, including the one that never started an agent.
         const row = (yield* (yield* Orchestrator.OrchestratorV2).getThreadProjection(
           parentThreadId,
         )).subagents.find((task) => task.id === started.workflowId);
         expect(row?.workflow?.agents.map((agent) => agent.graphNodeKey)).toEqual(["produce"]);
         const attempts = row?.workflow?.agents[0]?.attemptHistory;
-        expect(attempts).toHaveLength(3);
-        expect(new Set(attempts?.map((attempt) => attempt.taskId)).size).toBe(3);
-        expect(attempts?.map((attempt) => attempt.attempt)).toEqual([0, 1, 2]);
+        expect(attempts).toHaveLength(2);
+        expect(new Set(attempts?.map((attempt) => attempt.taskId)).size).toBe(2);
+        expect(attempts?.map((attempt) => attempt.attempt)).toEqual([0, 1]);
         expect(
           attempts?.every(
             (attempt) => attempt.state === "completed" && attempt.childThreadId.length > 0,
@@ -4420,7 +4420,7 @@ describe("graphs", () => {
         const recorded = {
           produce: {
             status: "failed",
-            attempts: 3,
+            attempts: 2,
             reason,
             inputs: { source: sha256("source") },
           },

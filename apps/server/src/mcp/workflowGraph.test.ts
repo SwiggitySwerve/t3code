@@ -547,8 +547,8 @@ describe("graph review write conflicts", () => {
 describe("graph capacity", () => {
   // A workflow starts at most this many agents (workflowRunner.test.ts pins the runner's side).
   const CAPACITY = 1000;
-  // A judgment check adds a judge agent for each of the three attempts at its node.
-  const JUDGES_PER_NODE = 3;
+  // A judgment check adds a judge agent for each of the two work attempts at its node.
+  const JUDGES_PER_NODE = 2;
   const many = (count: number, make: (index: number) => unknown = () => node()) =>
     Object.fromEntries(Array.from({ length: count }, (_, index) => [`n${index}`, make(index)]));
   const judged = () => node({ verify: { type: "judgment", rubric: ["Correct"] } });
@@ -559,7 +559,15 @@ describe("graph capacity", () => {
     expect(reviewed.digest).not.toBeNull();
     expect(reviewed.layers).toHaveLength(1);
     const perNode = 1 + JUDGES_PER_NODE;
-    const full = reviewGraph(graph(many(CAPACITY / perNode, judged)), {});
+    const judgedNodes = Math.floor(CAPACITY / perNode);
+    const full = reviewGraph(
+      graph(
+        many(CAPACITY - judgedNodes * JUDGES_PER_NODE, (index) =>
+          index < judgedNodes ? judged() : node(),
+        ),
+      ),
+      {},
+    );
     expect(full.blockers).toEqual([]);
     expect(full.digest).not.toBeNull();
   });
@@ -581,7 +589,7 @@ describe("graph capacity", () => {
 
   it("counts the judge agents a judgment check can add at every attempt", () => {
     const perNode = 1 + JUDGES_PER_NODE;
-    const fits = CAPACITY / perNode;
+    const fits = Math.floor(CAPACITY / perNode);
     const over = graph(many(fits + 1, judged));
     const reviewed = reviewGraph(over, {});
     expect(reviewed.blockers).toHaveLength(1);

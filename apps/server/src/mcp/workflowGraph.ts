@@ -16,7 +16,7 @@ import {
   scopesOverlap,
   type WorkflowCheck,
 } from "./workflowChecks.ts";
-import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW, maxAgentsPerCall } from "./workflowLimits.ts";
+import { MAX_AGENTS_PER_WORKFLOW, MAX_WORK_ATTEMPTS, maxAgentsPerCall } from "./workflowLimits.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
 
 type AttemptBudget = "short" | "standard" | "long";
@@ -375,7 +375,7 @@ export function parseGraph(value: unknown): ParseResult {
       ok: false,
       problems: [
         ...problems,
-        `graph can start up to ${agentsNeeded} agents (each node, plus up to ${MAX_AGENT_ATTEMPTS} judges for each judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
+        `graph can start up to ${agentsNeeded} agents (each node, plus up to ${MAX_WORK_ATTEMPTS} judges for each judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
       ],
     };
   const paths = new Map<string, string>();

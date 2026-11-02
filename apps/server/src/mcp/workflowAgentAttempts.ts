@@ -38,7 +38,7 @@ import {
   judgedResultFits,
   taskOutputAt,
 } from "./workflowHandoff.ts";
-import { MAX_AGENT_ATTEMPTS } from "./workflowLimits.ts";
+import { MAX_AGENT_ATTEMPTS, MAX_INFRA_RETRIES, MAX_WORK_ATTEMPTS } from "./workflowLimits.ts";
 import type { WaitingAgent } from "./workflowSweep.ts";
 import type {
   WorkflowAgentOutcome,
@@ -178,6 +178,9 @@ export async function runAttempts(
     ...outputs.map((ref) => [`output:${ref.id}`, ref.path] as const),
   ]);
   let feedback = "";
+  // Work failures use the agent's attempts; infrastructure faults retry beside them.
+  let workFailures = 0;
+  let infraFaults = 0;
   for (let attempt = 0; ; attempt += 1) {
     const item = itemFor(feedback);
     if (Exit.isFailure(item)) {
@@ -285,7 +288,8 @@ export async function runAttempts(
       entry.outcomeCategory = outcome.value.outcomeCategory;
     if (status !== "completed" && host.timedOut.has(started.value.taskId)) {
       const passed = `passed its time budget of ${attemptTimeoutMs} ms and was stopped`;
-      if (attempt + 1 < MAX_AGENT_ATTEMPTS) {
+      workFailures += 1;
+      if (workFailures < MAX_WORK_ATTEMPTS) {
         feedback = `\n\nYour previous attempt ${passed}. Work more directly and finish within the budget.`;
         host.setProgress(`agent "${label}" ${passed}; starting it again.`);
         continue;
@@ -295,12 +299,12 @@ export async function runAttempts(
       return null;
     }
     if (status !== "completed") {
-      const retry =
-        attempt + 1 < MAX_AGENT_ATTEMPTS &&
-        (status === "failed" ||
-          ((status === "cancelled" || status === "interrupted") &&
-            (outcome.value.cancelledByServerRestart || host.stalled.has(started.value.taskId))));
-      if (retry) {
+      const fault =
+        status === "failed" ||
+        ((status === "cancelled" || status === "interrupted") &&
+          (outcome.value.cancelledByServerRestart || host.stalled.has(started.value.taskId)));
+      if (fault) infraFaults += 1;
+      if (fault && infraFaults <= MAX_INFRA_RETRIES) {
         host.setProgress(`agent "${label}" ended ${status}; starting it again.`);
         continue;
       }
@@ -367,7 +371,8 @@ export async function runAttempts(
     }
     // A failed check is a judgment on the work, so the agent tries again with what the
     // check saw. A check that could not run is not, and retrying the agent would not fix it.
-    if (checked.outcome === "failed" && attempt + 1 < MAX_AGENT_ATTEMPTS) {
+    if (checked.outcome === "failed") workFailures += 1;
+    if (checked.outcome === "failed" && workFailures < MAX_WORK_ATTEMPTS) {
       feedback = checkFeedback(checkType, checked);
       host.setProgress(`agent "${label}" failed its ${checkType} check; starting it again.`);
       entry.state = "running";

@@ -551,8 +551,8 @@ These follow the `omx graph` execution graph's protected verifiers
     `{ outcome: "passed" | "failed", reasons }`. A judge can be wrong; its reasons are kept.
     The judge grades the returned result and works in the caller's checkout, so it does not
     see files a worktree agent changed; check those with a process check instead.
-    A failed check starts the agent again with what the check saw appended to its task,
-    within the same three attempts. A check that cannot run (timeout, too much output, a
+    A failed check starts the agent once more with what the check saw appended to its
+    task: an agent gets two attempts at its work. A check that cannot run (timeout, too much output, a
     missing executable, no verdict) fails the agent without retrying. When the agent was
     given a `schema`, a result that does not match it fails a `structured` check first,
     whatever else is checked. `workflow_status`
@@ -702,9 +702,11 @@ Stop. Agents open their own threads. The row stores the script with a settings l
   `agent()` call back to its task, so finished agents return their stored
   results at once and running ones are waited on again; no agent starts twice.
   Recovery marks the runs it cancels with `cancelledByServerRestart`.
-- **Retries.** An agent runs at most three times in all. It runs again when it
-  failed, when a server restart cancelled it, or when it stalled. An agent a user
-  stopped is not retried; the script sees `null`.
+- **Retries.** An agent gets two attempts at its work: a failed check or a passed
+  attempt deadline starts it once more with what went wrong. When its task failed,
+  a server restart cancelled it, or it stalled, it runs again on the same target
+  without using an attempt, up to two times. An agent a user stopped is not
+  retried; the script sees `null`.
 - **Stalls.** Every 30 seconds the runner checks each waited-on agent's thread.
   If its last update has not changed for `stallTimeoutMs` (default 20 minutes,
   at least 1 minute), the runner stops the agent and starts it again.

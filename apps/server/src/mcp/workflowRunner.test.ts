@@ -1269,11 +1269,11 @@ describe("workflow runner", () => {
         const report = JSON.parse(yield* Deferred.await(completed));
         expect(report).toMatchObject({
           ok: false,
-          attempts: 3,
-          verification: { type: "structured", outcome: "failed", attempts: 3 },
+          attempts: 2,
+          verification: { type: "structured", outcome: "failed", attempts: 2 },
         });
         expect(report.verification.detail).toContain("output out (out.json) is not JSON");
-        expect(spawned()).toBe(3);
+        expect(spawned()).toBe(2);
       }),
     );
     it.effect("fails a missing pointer in the output", () =>
@@ -1317,9 +1317,9 @@ describe("workflow runner", () => {
     );
     it.effect("stops an attempt past its deadline and starts it again", () =>
       Effect.gen(function* () {
-        // The first two attempts hang; the third finishes.
+        // The first attempt hangs; the second finishes.
         const { runner, completed, spawned, stops } = yield* makeHarness({
-          finish: (n) => (n < 3 ? "hang" : "completed"),
+          finish: (n) => (n < 2 ? "hang" : "completed"),
         });
         yield* launch(
           runner,
@@ -1327,9 +1327,9 @@ describe("workflow runner", () => {
         );
         yield* sweepUntilDone(completed);
         const report = JSON.parse(yield* Deferred.await(completed));
-        expect(report).toMatchObject({ ok: true, attempts: 3 });
-        expect(spawned()).toBe(3);
-        expect(stops).toEqual(["node:agent-1:timed_out", "node:agent-2:timed_out"]);
+        expect(report).toMatchObject({ ok: true, attempts: 2 });
+        expect(spawned()).toBe(2);
+        expect(stops).toEqual(["node:agent-1:timed_out"]);
       }),
     );
     it.effect("asks again to stop an attempt past its deadline when the first request failed", () =>
@@ -1382,16 +1382,16 @@ describe("workflow runner", () => {
           runner,
           'return await agent("x", { attemptTimeoutMs: 60000, stallTimeoutMs: 3600000, report: true })',
         );
-        for (const attempt of [1, 2, 3]) {
+        for (const attempt of [1, 2]) {
           expect(yield* Queue.take(attempts)).toBe(`node:agent-${attempt}`);
           yield* TestClock.adjust("90 seconds");
         }
         const report = JSON.parse(yield* Deferred.await(completed));
-        expect(report).toMatchObject({ ok: false, attempts: 3 });
+        expect(report).toMatchObject({ ok: false, attempts: 2 });
         expect(report.reason).toBe(
           "Every attempt passed its time budget of 60000 ms and was stopped.",
         );
-        expect(spawned()).toBe(3);
+        expect(spawned()).toBe(2);
       }),
     );
   });
@@ -1602,9 +1602,9 @@ describe("workflow runner", () => {
         'return await agent("x", { schema: { type: "object" }, verify: { type: "process", argv: ["node"] }, report: true })',
       );
       const report = JSON.parse(yield* Deferred.await(completed));
-      expect(report).toMatchObject({ ok: false, attempts: 3 });
+      expect(report).toMatchObject({ ok: false, attempts: 2 });
       expect(report.verification).toMatchObject({ type: "structured", outcome: "failed" });
-      expect(spawned()).toBe(3);
+      expect(spawned()).toBe(2);
     }),
   );
 
@@ -2018,10 +2018,36 @@ return errors`,
             "worker",
             0,
             1,
-            2,
           ]);
-          expect(spawned()).toBe(6);
+          expect(spawned()).toBe(4);
         }),
+    );
+    it.effect("retries a provider failure on the same target without using a work attempt", () =>
+      Effect.gen(function* () {
+        const { runner, completed, workflowUpdates, spawned } = yield* makeHarness({
+          finish: (n) => (n === 1 ? "failed" : "completed"),
+          judgment: () => false,
+        });
+        yield* launch(
+          runner,
+          'return await agent("x", { node: "a", verify: { type: "judgment", rubric: ["Correct"] } })',
+          twoNodePlan,
+        );
+        yield* Deferred.await(completed);
+        // Both work attempts were judged after the failed one, still within maxAgentsPerCall.
+        const agents = workflowUpdates.at(-1)!.agents;
+        expect(agents.map((agent) => agent.judgmentFor?.attempt ?? "worker")).toEqual([
+          "worker",
+          1,
+          2,
+        ]);
+        expect(agents[0]?.attemptHistory?.map((attempt) => attempt.state)).toEqual([
+          "failed",
+          "completed",
+          "completed",
+        ]);
+        expect(spawned()).toBe(5);
+      }),
     );
     it.effect(
       "keeps checker associations through a judgment retry and duplicate worker labels",

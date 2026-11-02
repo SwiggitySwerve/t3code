@@ -178,17 +178,28 @@ return { ok: draft.ok, result: draft.result, first };`,
             agent.checkOutcome,
           ]),
         ).toEqual([
-          ["summary", "worker", instanceId, "low", 3, "failed"],
-          ["check summary", "checker", claudeInstanceId, null, 1, "failed"],
+          ["summary", "worker", instanceId, "low", 2, "failed"],
           ["check summary", "checker", claudeInstanceId, null, 1, "failed"],
           ["check summary", "checker", claudeInstanceId, null, 1, "failed"],
           ["summary again", "worker", instanceId, "high", 1, "passed"],
           ["check summary again", "checker", claudeInstanceId, null, 1, "passed"],
         ]);
         expect(report.agents.every((agent) => agent.targetSource === "target")).toBe(true);
+        // Each attempt keeps the effort it ran at; with no rate table every cost stays unknown.
+        expect(
+          report.agents.flatMap((agent) =>
+            agent.attemptCosts.map((attempt) => [agent.label, attempt.effort, attempt.costSource]),
+          ),
+        ).toEqual(
+          expect.arrayContaining([
+            ["summary", "low", "noRates"],
+            ["summary again", "high", "noRates"],
+          ]),
+        );
+        expect(report.agents.every((agent) => agent.costUsd === null)).toBe(true);
         expect(groupsOf(report)).toEqual([
-          ["checker", "claude", "none", 4, 1, 0],
-          ["worker", "gpt", "judgment", 2, 0.5, 2],
+          ["checker", "claude", "none", 3, 1, 0],
+          ["worker", "gpt", "judgment", 2, 0.5, 1],
         ]);
       }).pipe(Effect.provide(layerTest)),
   );
@@ -324,7 +335,7 @@ return { kept: reports.filter((entry) => entry.ok).map((entry) => entry.result),
         kept: ["reviewed module a", "reviewed module c"],
         failed: 1,
       });
-      // The failing branch had all three attempts; the others one each.
+      // A provider failure is retried twice beside the work attempts; the others ran once.
       expect(yield* expectSettled(started.workflowId)).toHaveLength(5);
       const report = yield* reportOf(started.workflowId);
       expect(
@@ -529,7 +540,8 @@ const seeded = (seed: number) => {
 
 const BUDGET = 2_500;
 const CAP = 4;
-const MAX_ATTEMPTS = 3;
+// Two work attempts, plus two same-target retries after provider failures.
+const MAX_ATTEMPTS = 4;
 const redoUntilPass = `for (let round = 0; round < ${CAP}; round++) {
   let report;
   try {
