@@ -602,6 +602,8 @@ class WorkflowSession {
       { target: options.target, model },
       this.workflow.workerTarget,
     );
+    // Accepted loss: a workflow stored before `presetTargets` snapshots resolves no preset, so on
+    // resume its preset agents fail, finished ones too: the target in their request key changed.
     const legacy =
       selected.source === "target" || selected.source === "model"
         ? undefined

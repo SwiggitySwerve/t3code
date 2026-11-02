@@ -211,15 +211,49 @@ export function graphAdvisory(
 
 // Claude Code accepts its family's bare aliases as model ids.
 const CLAUDE_ALIASES: ReadonlySet<string> = new Set(["opus", "sonnet", "haiku", "fable"]);
+// Vendor, router and region segments some catalogs put before a model's own name.
+const MODEL_ID_PREFIXES: ReadonlySet<string> = new Set([
+  "anthropic",
+  "openai",
+  "google",
+  "meta",
+  "mistral",
+  "openrouter",
+  "bedrock",
+  "vertex",
+  "azure",
+  "us",
+  "eu",
+  "apac",
+  "global",
+]);
+// Ids that name a router's choice or a default rather than one model.
+const PLACEHOLDER_MODELS: ReadonlySet<string> = new Set(["auto", "default"]);
+
+/** The model's own name: the first `/` or `.` segment that is not a vendor or region. */
+function modelName(model: string): string {
+  const segments = model
+    .trim()
+    .toLowerCase()
+    .split(/[/.]/u)
+    .filter((segment) => segment.length > 0);
+  return segments.find((segment) => !MODEL_ID_PREFIXES.has(segment)) ?? segments.at(-1) ?? "";
+}
 
 /**
- * A model id's family, for advice only: the leading letters of its last path segment, so
- * "gpt-5.4" and "gpt-5.4-mini" are both "gpt" and "anthropic/claude-x" is "claude".
+ * A model id's family, for advice only: the leading letters of its own name, so "gpt-5.4",
+ * "o3" and "o4-mini" are "gpt" and "us.anthropic.claude-x" and "anthropic/claude-x" "claude".
  */
 export function modelFamily(model: string): string {
-  const name = model.toLowerCase().split("/").at(-1) ?? "";
+  const name = modelName(model);
+  if (/^o\d/u.test(name)) return "gpt";
   const family = /^[a-z]+/u.exec(name)?.[0] ?? name;
   return CLAUDE_ALIASES.has(family) ? "claude" : family;
+}
+
+/** The family of a model a coordinator can target; undefined for a placeholder such as "auto". */
+export function concreteModelFamily(model: string): string | undefined {
+  return PLACEHOLDER_MODELS.has(modelName(model)) ? undefined : modelFamily(model) || undefined;
 }
 
 /** One reviewed node's assignment, as graph review resolved it. */

@@ -37,30 +37,6 @@ const isWindows = (): boolean =>
 /** The only provider instances a lane gets; the rest of the dev home's providers stay behind. */
 export const QA_PROVIDER_INSTANCES = ["cliproxy", "claudeproxy"] as const;
 
-/**
- * Targets that keep a lane's workflows cheap: a QA run passes `worker` as workflow_start or
- * graph_review `workerTarget` and `verifier` as a judgment check's `target`. Settings no longer
- * choose agents, so the lane seeds none.
- */
-export const QA_TARGETS = {
-  worker: {
-    providerInstanceId: "cliproxy",
-    model: "claude-haiku-5-5",
-    options: [
-      { id: "reasoningEffort", value: "medium" },
-      { id: "serviceTier", value: "default" },
-    ],
-  },
-  verifier: {
-    providerInstanceId: "cliproxy",
-    model: "claude-opus-5-5",
-    options: [
-      { id: "reasoningEffort", value: "high" },
-      { id: "serviceTier", value: "default" },
-    ],
-  },
-} as const;
-
 type Json = Record<string, unknown>;
 
 const isRecord = (value: unknown): value is Json =>

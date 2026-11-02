@@ -4,6 +4,7 @@ import {
   type AdvisoryDrivers,
   graphAdvisory,
   graphAssignmentNotes,
+  concreteModelFamily,
   modelFamily,
 } from "./workflowAdvisory.ts";
 import { parseGraph, reviewGraph } from "./workflowGraph.ts";
@@ -301,13 +302,28 @@ describe("graph advisory budget for a read-heavy fan-in (review 7, G5)", () => {
 });
 
 describe("assignment notes", () => {
-  it("reads a model family from the id, aliases and vendor prefixes included", () => {
-    expect(modelFamily("gpt-5.4")).toBe("gpt");
-    expect(modelFamily("gpt-5.4-mini")).toBe("gpt");
-    expect(modelFamily("claude-haiku-5-5")).toBe("claude");
-    expect(modelFamily("anthropic/claude-opus-5-5")).toBe("claude");
-    expect(modelFamily("opus")).toBe("claude");
-    expect(modelFamily("Gemini-2.5-pro")).toBe("gemini");
+  it.each([
+    ["claude-haiku-5-5", "claude"],
+    ["anthropic/claude-opus-5-5", "claude"],
+    ["anthropic.claude-sonnet-4-5-20250929-v1:0", "claude"],
+    ["us.anthropic.claude-opus-4-1-20250805-v1:0", "claude"],
+    ["opus", "claude"],
+    ["gpt-5.4", "gpt"],
+    ["gpt-5.4-mini", "gpt"],
+    ["o3", "gpt"],
+    ["o4-mini", "gpt"],
+    ["openai/o3", "gpt"],
+    ["Gemini-2.5-pro", "gemini"],
+    ["auto", "auto"],
+  ])("reads %s as the %s family", (id, family) => {
+    expect(modelFamily(id)).toBe(family);
+  });
+
+  it("names no family for a placeholder id the coordinator cannot target", () => {
+    expect(concreteModelFamily("auto")).toBeUndefined();
+    expect(concreteModelFamily("default")).toBeUndefined();
+    expect(concreteModelFamily("openrouter/auto")).toBeUndefined();
+    expect(concreteModelFamily("o4-mini")).toBe("gpt");
   });
 
   it("flags fallbacks to the coordinator's model and same-family checks, and nothing else", () => {

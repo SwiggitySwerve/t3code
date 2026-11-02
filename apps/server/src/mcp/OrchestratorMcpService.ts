@@ -167,7 +167,7 @@ import {
   workflowTurnUsage,
 } from "./workflowUsage.ts";
 import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
-import { graphAssignmentNotes, modelFamily } from "./workflowAdvisory.ts";
+import { concreteModelFamily, graphAssignmentNotes } from "./workflowAdvisory.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -2649,7 +2649,11 @@ const make = Effect.gen(function* () {
           instanceId: provider.instanceId,
         });
         if (!enabled) continue;
-        for (const model of provider.models) enabledFamilies.add(modelFamily(model.slug));
+        // Only a model the coordinator can target names a family; "auto" names none.
+        for (const model of provider.models) {
+          const family = concreteModelFamily(model.slug);
+          if (family !== undefined) enabledFamilies.add(family);
+        }
       }
     }
     const assignmentNotes = graphAssignmentNotes({

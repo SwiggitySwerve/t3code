@@ -87,10 +87,12 @@ describe("applyTurnTriggers", () => {
     for (const note of [workflowTurnNote(), EVERY_TURN_WORKFLOW_NOTE]) {
       expect(note).toContain("every worker's and every check's target");
       expect(note).toContain("from orchestrator_capabilities. Never invent ids.");
-      expect(note).toContain("smallest model and effort you expect to pass its check first time");
+      expect(note).toContain(
+        "Give each agent the smallest model and effort you expect to succeed first time (pass its check, if it has one)",
+      );
       expect(note).toContain("Prefer lowering effort to switching to a much weaker model");
-      expect(note).toContain("a planning node on a stronger model");
-      expect(note).toContain("different provider or model family than its worker");
+      expect(note).toContain("run a planning agent on a stronger model first");
+      expect(note).toContain("different model family than its worker");
       expect(note).not.toMatch(/preset|profile|Settings/iu);
     }
   });
