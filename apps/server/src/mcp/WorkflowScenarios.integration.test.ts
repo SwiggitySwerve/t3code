@@ -488,9 +488,7 @@ return done;`;
       }).pipe(Effect.provide(layerRefusedTargets)),
     );
 
-    // Bug: the worker's check detail reads "The checker gave no usable verdict." when its
-    // checker never started; the provider refusal is only on the checker's own row.
-    it.effect.fails("names why the checker could not start in the worker's failed check", () =>
+    it.effect("names why the checker could not start in the worker's failed check", () =>
       Effect.gen(function* () {
         yield* startParent;
         yield* answerWorkflowAgents(() => "done");

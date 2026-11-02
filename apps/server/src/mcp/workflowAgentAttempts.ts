@@ -498,7 +498,11 @@ async function runCheck(
       );
     }
   }
-  const outcome = judgmentOutcome(verdict.value);
+  // A checker that did not finish gave no verdict; the reason it settled with says why.
+  const outcome: CheckOutcome =
+    verdict.entry.state === "completed"
+      ? judgmentOutcome(verdict.value)
+      : { outcome: "error", detail: verdict.entry.result ?? "The checker did not finish." };
   verdict.entry.judgmentOutcome = outcome.outcome;
   host.scheduleUpdate();
   return outcome;
