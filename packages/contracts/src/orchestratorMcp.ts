@@ -1093,9 +1093,9 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
       listPrice: Schema.optional(
         Schema.NullOr(
           Schema.Struct({
-            inputUsdPerMTok: Schema.Number,
-            cachedInputUsdPerMTok: Schema.Number,
-            outputUsdPerMTok: Schema.Number,
+            inputUsdPerMTok: Schema.Finite,
+            cachedInputUsdPerMTok: Schema.Finite,
+            outputUsdPerMTok: Schema.Finite,
           }),
         ),
       ),
