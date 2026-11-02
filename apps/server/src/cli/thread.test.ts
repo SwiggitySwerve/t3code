@@ -36,8 +36,8 @@ it.effect("--wait follows the sent run to its continuation's terminal status", (
     assert.deepStrictEqual(
       calls.filter((entry) => entry.tool === "t3_thread_wait").map((entry) => entry.args),
       [
-        { threadId, runId, timeoutMs: 15_000 },
-        { threadId, runId, timeoutMs: 15_000 },
+        { threadId, runId, timeoutMs: 15_000, untilDelegatedWorkSettled: true },
+        { threadId, runId, timeoutMs: 15_000, untilDelegatedWorkSettled: true },
       ],
     );
   }),
@@ -57,12 +57,44 @@ it.effect("--wait stops when the thread waits for an answer instead of polling f
   }),
 );
 
-it.effect("--wait reports its run's result when a later run is the one waiting", () =>
+it.effect("--wait reports the run a workflow's completion wakes, not the first turn", () =>
+  Effect.gen(function* () {
+    const wake = RunId.make("run-2");
+    const { tools } = scriptedTools({
+      t3_thread_wait: [
+        // The first turn ended, but its workflow is still running.
+        { threadId, runId, status: "completed", timedOut: true },
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId: wake, status: "completed" },
+        },
+      ],
+      t3_thread_read: [{ thread: { pendingRequestCount: 0 } }],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "ended",
+      runId: wake,
+      status: "completed",
+    });
+  }),
+);
+
+it.effect("--wait reports the answered run when a request clears before the recheck", () =>
   Effect.gen(function* () {
     const { tools } = scriptedTools({
       t3_thread_wait: [
         { threadId, runId, status: "running", timedOut: true },
-        { threadId, runId, status: "completed", timedOut: false },
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId, status: "completed" },
+        },
       ],
       t3_thread_read: [{ thread: { pendingRequestCount: 1 } }],
     });

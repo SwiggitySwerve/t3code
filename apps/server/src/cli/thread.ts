@@ -382,8 +382,9 @@ type WaitOutcome =
   | { readonly type: "needs_input" };
 
 /**
- * Waits for this exact run, following a restart to its continuation, so a
- * message another client sends meanwhile cannot stand in for its result.
+ * Waits for this run, following a restart to its continuation, and then for
+ * the work it started: a workflow or delegated task wakes the thread for
+ * another run when it ends. The outcome is the run with the thread's answer.
  */
 export const waitForRun = Effect.fn("cli.thread.waitForRun")(function* (
   tools: ThreadTools,
@@ -391,22 +392,29 @@ export const waitForRun = Effect.fn("cli.thread.waitForRun")(function* (
   runId: RunId,
 ) {
   const waitSlice = (timeoutMs: number) =>
-    tools.call("t3_thread_wait", { threadId, runId, timeoutMs }, OrchestratorMcpThreadWaitResult);
+    tools.call(
+      "t3_thread_wait",
+      { threadId, runId, timeoutMs, untilDelegatedWorkSettled: true },
+      OrchestratorMcpThreadWaitResult,
+    );
   const ended = (waited: OrchestratorMcpThreadWaitResult) =>
-    ({ type: "ended", runId: waited.runId, status: waited.status }) satisfies WaitOutcome;
+    ({
+      type: "ended",
+      runId: waited.resultRun?.runId ?? waited.runId,
+      status: waited.resultRun?.status ?? waited.status,
+    }) satisfies WaitOutcome;
   while (true) {
     const waited = yield* waitSlice(WAIT_SLICE_MS);
     if (!waited.timedOut) return ended(waited);
-    // A pending request on this run, or on an earlier run this one is queued
-    // behind, blocks it until someone answers.
+    // A pending request on any of the thread's runs blocks it settling until
+    // someone answers.
     const { thread } = yield* tools.call(
       "t3_thread_read",
       { threadId, limit: 1, runLimit: 1 },
       OrchestratorMcpThreadReadResult,
     );
     if (thread.pendingRequestCount > 0) {
-      // The count is thread-wide: if this run ended since the slice, the
-      // request belongs to a later run.
+      // The request may have been answered since the slice.
       const recheck = yield* waitSlice(1);
       return recheck.timedOut ? ({ type: "needs_input" } satisfies WaitOutcome) : ended(recheck);
     }
@@ -483,7 +491,7 @@ const jsonFlag = Flag.Boolean("json").pipe(
 );
 const waitFlag = Flag.Boolean("wait").pipe(
   Flag.withDescription(
-    "Wait for the agent to finish and print its reply. Exits 1 if the run fails and 2 if it waits for an answer.",
+    "Wait until the agent and the workflows and tasks it started have finished, then print its last reply. Exits 1 if that run fails and 2 if it waits for an answer.",
   ),
   Flag.withDefault(false),
 );
