@@ -7,10 +7,14 @@ import type {
   OrchestrationV2Subagent,
   OrchestratorMcpWorkflowReport,
   OrchestratorMcpWorkflowReportAgent,
+  OrchestratorMcpWorkflowReportAttempt,
   OrchestratorMcpWorkflowReportGroup,
   OrchestratorMcpWorkflowResult,
+  OrchestratorMcpWorkflowUsage,
+  WorkflowReportCostSource,
 } from "@t3tools/contracts";
 
+import { lookupRate, priceUsage, type RateTable } from "../usage/usagePricing.ts";
 import { modelFamily } from "./workflowAdvisory.ts";
 
 const TERMINAL = new Set(["completed", "failed", "cancelled", "interrupted"]);
@@ -22,10 +26,78 @@ function median(values: ReadonlyArray<number>): number | null {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
+interface Cost {
+  readonly costUsd: number | null;
+  readonly costSource: WorkflowReportCostSource;
+}
+
+/** One attempt's usage at its own model's base list price; unknown stays null, never $0. */
+export function attemptCost(
+  rates: RateTable,
+  model: string | undefined,
+  usage: OrchestratorMcpWorkflowUsage | undefined,
+): Cost {
+  if (rates.size === 0) return { costUsd: null, costSource: "noRates" };
+  if (usage === undefined || usage.status === "unavailable") {
+    return { costUsd: null, costSource: "noUsage" };
+  }
+  if (model === undefined || lookupRate(rates, model) === null) {
+    return { costUsd: null, costSource: "unpriced" };
+  }
+  const cachedInputTokens = usage.cachedInputTokens ?? 0;
+  const cacheCreationTokens = usage.cacheCreationTokens ?? 0;
+  const priced = priceUsage(rates, {
+    model,
+    totals: {
+      uncachedInputTokens:
+        usage.uncachedInputTokens ??
+        Math.max(0, (usage.inputTokens ?? 0) - cachedInputTokens - cacheCreationTokens),
+      cachedInputTokens,
+      cacheCreationTokens,
+      outputTokens: usage.outputTokens ?? 0,
+      reasoningTokens: 0,
+    },
+    speed: "standard",
+    reportedCostUsd: null,
+  });
+  return {
+    costUsd: priced.costUsd,
+    costSource: usage.status === "complete" ? "modelPriced" : "partialUsage",
+  };
+}
+
+/** An agent's cost: null when any attempt's is unknown; a lower bound when some are partial. */
+function agentCost(
+  attempts: ReadonlyArray<OrchestratorMcpWorkflowReportAttempt>,
+  attemptCount: number,
+  rates: RateTable,
+): Cost {
+  if (attempts.length === 0) {
+    return { costUsd: null, costSource: rates.size === 0 ? "noRates" : "noUsage" };
+  }
+  const unknown = attempts.find((attempt) => attempt.costUsd === null);
+  if (unknown !== undefined) return { costUsd: null, costSource: unknown.costSource };
+  const partial =
+    attempts.length < attemptCount ||
+    attempts.some((attempt) => attempt.costSource === "partialUsage");
+  return {
+    costUsd: attempts.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0),
+    costSource: partial ? "partialUsage" : "modelPriced",
+  };
+}
+
+export interface WorkflowReportPricing {
+  /** Each attempt's own usage, by its task id. */
+  readonly attemptUsage: ReadonlyMap<string, OrchestratorMcpWorkflowUsage>;
+  /** The base rate table, never price overrides; empty when none could be read. */
+  readonly rates: RateTable;
+}
+
 /** `result` must be `workflowResult` of the same row. */
 export function workflowReport(
   row: OrchestrationV2Subagent,
   result: OrchestratorMcpWorkflowResult,
+  pricing: WorkflowReportPricing,
 ): OrchestratorMcpWorkflowReport {
   const record = row.workflow;
   const joined = new Map(result.agents.map((agent) => [agent.index, agent]));
@@ -42,6 +114,17 @@ export function workflowReport(
       agent.graphNodeKey === undefined ? undefined : plan.get(agent.graphNodeKey)?.features?.check;
     const declared = agent.declaredCheck ?? planned;
     const ended = agent.state === "completed" || agent.state === "failed";
+    const attemptCosts = history.map((attempt): OrchestratorMcpWorkflowReportAttempt => ({
+      attempt: attempt.attempt,
+      provider: attempt.providerInstanceId,
+      model: attempt.model ?? null,
+      effort: attempt.effort ?? null,
+      options: attempt.options ?? null,
+      state: attempt.state,
+      totalTokens: attempt.totalTokens ?? null,
+      ...attemptCost(pricing.rates, attempt.model, pricing.attemptUsage.get(attempt.taskId)),
+    }));
+    const attempts = Math.max(history.length, started ? (agent.attempt ?? 0) + 1 : 0);
     return {
       index: agent.index,
       label: agent.label,
@@ -58,8 +141,10 @@ export function workflowReport(
       cachedInputTokens: read?.usage.cachedInputTokens ?? null,
       outputTokens: read?.usage.outputTokens ?? null,
       totalTokens: read?.usage.totalTokens ?? null,
+      ...agentCost(attemptCosts, attempts, pricing.rates),
+      attemptCosts,
       durationMs: durations.length === 0 ? null : durations.reduce((sum, ms) => sum + ms, 0),
-      attempts: Math.max(history.length, started ? (agent.attempt ?? 0) + 1 : 0),
+      attempts,
       status: read?.status ?? agent.state,
       outcome: read?.outcomeCategory ?? agent.outcomeCategory ?? null,
       check: checker ? "none" : (agent.verification?.type ?? declared ?? "none"),
@@ -119,6 +204,7 @@ export function workflowReport(
 }
 
 const count = (value: number | null) => (value === null ? "-" : String(Math.round(value)));
+const usd = (value: number | null) => (value === null ? "-" : `$${value.toFixed(4)}`);
 
 function duration(ms: number | null): string {
   if (ms === null) return "-";
@@ -153,6 +239,7 @@ export function formatWorkflowReport(report: OrchestratorMcpWorkflowReport): str
       "effort",
       "source",
       "in/cached/out",
+      "cost",
       "time",
       "tries",
       "outcome",
@@ -167,6 +254,7 @@ export function formatWorkflowReport(report: OrchestratorMcpWorkflowReport): str
       agent.effort ?? "-",
       agent.targetSource ?? "-",
       `${count(agent.inputTokens)}/${count(agent.cachedInputTokens)}/${count(agent.outputTokens)}`,
+      usd(agent.costUsd),
       duration(agent.durationMs),
       String(agent.attempts),
       agent.outcome ?? agent.status,

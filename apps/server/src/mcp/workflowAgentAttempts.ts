@@ -214,6 +214,7 @@ export async function runAttempts(
     }
     entry.agentId = started.value.taskId;
     entry.attemptTaskIds = [...new Set([...(entry.attemptTaskIds ?? []), started.value.taskId])];
+    const resolved = resolvedOptions(started.value.options);
     const recordAttempt = (outcome?: WorkflowAgentOutcome) => {
       const history = (entry.attemptHistory ?? []).filter(
         (record) => record.taskId !== started.value.taskId,
@@ -226,6 +227,8 @@ export async function runAttempts(
           attempt,
           providerInstanceId: started.value.providerInstanceId,
           ...(started.value.model === null ? {} : { model: started.value.model }),
+          ...(resolved?.effort === undefined ? {} : { effort: resolved.effort }),
+          ...(resolved === undefined ? {} : { options: resolved.byId }),
           state:
             outcome !== undefined && TERMINAL_TASK_STATUSES.has(outcome.status)
               ? (outcome.status as "completed" | "failed" | "cancelled" | "interrupted")
@@ -242,7 +245,6 @@ export async function runAttempts(
     entry.childThreadId = started.value.childThreadId;
     if (started.value.model !== null) entry.model = started.value.model;
     else delete entry.model;
-    const resolved = resolvedOptions(started.value.options);
     if (resolved === undefined) delete entry.options;
     else entry.options = resolved.byId;
     if (resolved?.effort === undefined) delete entry.effort;

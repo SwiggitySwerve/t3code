@@ -11,17 +11,25 @@ import {
 } from "@t3tools/contracts";
 import * as Schema from "effect/Schema";
 
+import { parseRateTable } from "../usage/usagePricing.ts";
 import { formatWorkflowReport, workflowReport } from "./workflowReport.ts";
 
 const decodeWorkflow = Schema.decodeUnknownSync(OrchestrationV2SubagentWorkflow);
 const codex = ProviderInstanceId.make("codex");
 const claude = ProviderInstanceId.make("claude");
-const attempt = (index: number, durationMs: number, state: "completed" | "failed") => ({
+const attempt = (
+  index: number,
+  durationMs: number,
+  state: "completed" | "failed",
+  target: { readonly model?: string; readonly effort?: string } = {},
+) => ({
   taskId: NodeId.make(`task:${index}`),
   childThreadId: ThreadId.make(`thread:child-${index}`),
   attempt: index,
   state,
   providerInstanceId: codex,
+  ...target,
+  ...(target.effort === undefined ? {} : { options: { reasoningEffort: target.effort } }),
   usageStatus: "complete" as const,
   durationMs,
   timingComplete: true,
@@ -46,7 +54,11 @@ const stored = {
       phaseTitle: "Write",
       agentId: "task:1",
       attempt: 1,
-      attemptHistory: [attempt(0, 1_500, "completed"), attempt(1, 2_500, "completed")],
+      // Escalated after a failed check: each attempt is priced at its own model.
+      attemptHistory: [
+        attempt(0, 1_500, "completed", { model: "gpt-5.4-mini", effort: "low" }),
+        attempt(1, 2_500, "completed", { model: "gpt-5.4", effort: "high" }),
+      ],
       providerInstanceId: codex,
       driver: "codex",
       model: "gpt-5.4",
@@ -148,6 +160,21 @@ const result: OrchestratorMcpWorkflowResult = {
 };
 const row = (workflow: OrchestrationV2Subagent["workflow"]) =>
   ({ workflow, driver: ProviderDriverKind.make("codex") }) as OrchestrationV2Subagent;
+const rates = parseRateTable({
+  "gpt-5.4": { input_cost_per_token: 2e-6, output_cost_per_token: 10e-6 },
+  "gpt-5.4-mini": {
+    input_cost_per_token: 0.5e-6,
+    output_cost_per_token: 2e-6,
+    cache_read_input_token_cost: 0.05e-6,
+  },
+});
+const pricing = {
+  rates,
+  attemptUsage: new Map([
+    ["task:0", usage(2_000, 400)],
+    ["task:1", usage(2_000, 600)],
+  ]),
+};
 
 describe("workflow report", () => {
   it("decodes rows stored before options, target source and plan features were recorded", () => {
@@ -156,7 +183,7 @@ describe("workflow report", () => {
       agents: [{ index: 0, label: "old", state: "completed", model: "gpt-5.4", effort: "low" }],
       plan: { nodes: [{ key: "a", label: "A", wave: 0, dependsOn: [] }] },
     });
-    const report = workflowReport(row(old), { ...result, agents: [] });
+    const report = workflowReport(row(old), { ...result, agents: [] }, pricing);
     expect(report.kind).toBe("graph");
     expect(report.agents[0]).toMatchObject({
       label: "old",
@@ -168,7 +195,7 @@ describe("workflow report", () => {
   });
 
   it("joins the record with the read usage, one row per agent and groups by family and check", () => {
-    const report = workflowReport(row(decodeWorkflow(stored)), result);
+    const report = workflowReport(row(decodeWorkflow(stored)), result, pricing);
     expect(
       report.agents.map((agent) => [
         agent.label,
@@ -246,15 +273,67 @@ describe("workflow report", () => {
     expect(JSON.parse(JSON.stringify(report))).toEqual(report);
   });
 
+  it("prices each attempt at its own model and leaves unknown costs null, never 0", () => {
+    const report = workflowReport(row(decodeWorkflow(stored)), result, pricing);
+    expect(report.agents[0]!.attemptCosts).toEqual([
+      {
+        attempt: 0,
+        provider: "codex",
+        model: "gpt-5.4-mini",
+        effort: "low",
+        options: { reasoningEffort: "low" },
+        state: "completed",
+        totalTokens: null,
+        costUsd: expect.closeTo(0.00135, 10),
+        costSource: "modelPriced",
+      },
+      {
+        attempt: 1,
+        provider: "codex",
+        model: "gpt-5.4",
+        effort: "high",
+        options: { reasoningEffort: "high" },
+        state: "completed",
+        totalTokens: null,
+        costUsd: expect.closeTo(0.01, 10),
+        costSource: "modelPriced",
+      },
+    ]);
+    expect(report.agents[0]).toMatchObject({
+      costUsd: expect.closeTo(0.01135, 10),
+      costSource: "modelPriced",
+    });
+    // Checkers here kept no attempt record, so their cost is unknown rather than free.
+    expect(report.agents[1]).toMatchObject({ costUsd: null, costSource: "noUsage" });
+
+    const unknownModel = workflowReport(row(decodeWorkflow(stored)), result, {
+      ...pricing,
+      rates: parseRateTable({
+        "gpt-5.4": { input_cost_per_token: 1e-6, output_cost_per_token: 1e-6 },
+      }),
+    });
+    expect(unknownModel.agents[0]!.attemptCosts.map((entry) => entry.costSource)).toEqual([
+      "unpriced",
+      "modelPriced",
+    ]);
+    expect(unknownModel.agents[0]).toMatchObject({ costUsd: null, costSource: "unpriced" });
+
+    const noRates = workflowReport(row(decodeWorkflow(stored)), result, {
+      ...pricing,
+      rates: new Map(),
+    });
+    expect(noRates.agents[0]).toMatchObject({ costUsd: null, costSource: "noRates" });
+  });
+
   it("prints the same report as text", () => {
-    expect(formatWorkflowReport(workflowReport(row(decodeWorkflow(stored)), result))).toBe(
+    expect(formatWorkflowReport(workflowReport(row(decodeWorkflow(stored)), result, pricing))).toBe(
       [
         "Fixture (workflow:fixture): script, failed",
-        "#  label        phase     role     provider/model            effort  source  in/cached/out   time  tries  outcome         check",
-        "0  draft        Write     worker   codex/gpt-5.4             high    target  4000/2000/1000  4.0s  2      completed       judgment:passed",
-        "1  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1000/500/200    -     1      completed       verdict:failed",
-        "2  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1200/600/300    -     1      completed       verdict:passed",
-        "3  research     Research  worker   claude/claude-sonnet-4-6  -       caller  -/-/-           -     3      provider_error  process:not_run",
+        "#  label        phase     role     provider/model            effort  source  in/cached/out   cost     time  tries  outcome         check",
+        "0  draft        Write     worker   codex/gpt-5.4             high    target  4000/2000/1000  $0.0114  4.0s  2      completed       judgment:passed",
+        "1  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1000/500/200    -        -     1      completed       verdict:failed",
+        "2  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1200/600/300    -        -     1      completed       verdict:passed",
+        "3  research     Research  worker   claude/claude-sonnet-4-6  -       caller  -/-/-           -        -     3      provider_error  process:not_run",
         "",
         "role     family  check     agents  first-try pass  retries  median tokens/passed",
         "checker  claude  none      2       100%            0        1350",
@@ -270,6 +349,7 @@ describe("workflow report", () => {
     const report = workflowReport(
       row(decodeWorkflow({ ...stored, budget: { limit: 20_000, exhausted: true } })),
       result,
+      pricing,
     );
     expect(report.loop.endedBy).toBe("budget");
   });

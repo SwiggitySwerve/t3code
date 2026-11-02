@@ -2600,6 +2600,48 @@ describe("UsageService", () => {
       }).pipe(Effect.scoped),
   );
 
+  it.live("peeks at the rate table from memory or its disk cache, never the network", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const requests: HttpClientRequest.HttpClientRequest[] = [];
+      const serviceLayer = layerService({
+        prefix: "usage-service-peek-test",
+        home,
+        settings,
+        onRatesFetch: (request) => requests.push(request),
+      });
+      const { service, stateDir } = yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        return { service: yield* UsageService.make, stateDir: config.stateDir };
+      }).pipe(Effect.provide(serviceLayer));
+      const ratesFile = NodePath.join(stateDir, "usage-model-rates.json");
+      const writeRates = (inputCostPerToken: number, mtimeSeconds: number) =>
+        Effect.promise(async () => {
+          await NodeFSP.mkdir(stateDir, { recursive: true });
+          const document = {
+            "fake-model": { input_cost_per_token: inputCostPerToken, output_cost_per_token: 2e-6 },
+          };
+          await NodeFSP.writeFile(ratesFile, JSON.stringify({ fetchedAtMs: 0, document }));
+          await NodeFSP.utimes(ratesFile, mtimeSeconds, mtimeSeconds);
+        });
+
+      const none = yield* service.peekRates;
+      assert.strictEqual(none.pricing.status, "unavailable");
+      assert.strictEqual(none.table.size, 0);
+
+      yield* writeRates(1e-6, 1_000);
+      const cached = yield* service.peekRates;
+      assert.strictEqual(cached.pricing.status, "cached");
+      assert.strictEqual(cached.table.get("fake-model")?.inputCostPerToken, 1e-6);
+
+      // Another writer's newer cache file is read again.
+      yield* writeRates(3e-6, 2_000);
+      const rewritten = yield* service.peekRates;
+      assert.strictEqual(rewritten.table.get("fake-model")?.inputCostPerToken, 3e-6);
+      assert.strictEqual(requests.length, 0);
+    }).pipe(Effect.scoped),
+  );
+
   it.live("does not orphan an in-flight scan when its first caller is interrupted", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;

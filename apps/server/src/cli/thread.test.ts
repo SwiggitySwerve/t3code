@@ -134,6 +134,9 @@ it.effect("workflow-report prints a thread's reports as text, or as JSON with --
               cachedInputTokens: 5,
               outputTokens: 2,
               totalTokens: 12,
+              costUsd: 0.0001,
+              costSource: "modelPriced",
+              attemptCosts: [],
               durationMs: 1_000,
               attempts: 1,
               status: "completed",
@@ -165,6 +168,7 @@ it.effect("workflow-report prints a thread's reports as text, or as JSON with --
           },
         },
       ],
+      pricing: { status: "cached", source: "rates.json", fetchedAt: null },
     };
     const { tools, calls } = scriptedTools({ t3_workflow_report: [report, report] });
     yield* printWorkflowReport(tools, threadId, false);
@@ -172,8 +176,8 @@ it.effect("workflow-report prints a thread's reports as text, or as JSON with --
     const [text, json] = (yield* TestConsole.logLines).map(String);
     expect(text?.split("\n")).toEqual([
       "One (workflow:one): script, completed",
-      "#  label  phase  role    provider/model  effort  source  in/cached/out  time  tries  outcome    check",
-      "0  work   -      worker  codex/gpt-5.4   high    target  10/5/2         1.0s  1      completed  -",
+      "#  label  phase  role    provider/model  effort  source  in/cached/out  cost     time  tries  outcome    check",
+      "0  work   -      worker  codex/gpt-5.4   high    target  10/5/2         $0.0001  1.0s  1      completed  -",
       "",
       "role    family  check  agents  first-try pass  retries  median tokens/passed",
       "worker  gpt     none   1       100%            0        12",

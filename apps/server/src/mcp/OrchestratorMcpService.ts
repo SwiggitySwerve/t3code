@@ -133,6 +133,8 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as UsageService from "../usage/UsageService.ts";
+import type { RateTable } from "../usage/usagePricing.ts";
 import {
   clientModeCeiling,
   type McpInvocationScope,
@@ -1150,6 +1152,16 @@ const make = Effect.gen(function* () {
   const workflowApprovalGate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  // Optional so test layers need no usage reader; without it every price is unknown.
+  const usageService = yield* Effect.serviceOption(UsageService.UsageService);
+  const peekRates = Option.match(usageService, {
+    onNone: () =>
+      Effect.succeed({
+        table: new Map() as RateTable,
+        pricing: { status: "unavailable" as const, source: "none", fetchedAt: null },
+      }),
+    onSome: (usage) => usage.peekRates,
+  });
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -2934,7 +2946,8 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const workflowResult = Effect.fn("OrchestratorMcpService.workflowResult")(function* (
+  /** The workflow's result, and each attempt's own usage by task id for pricing it. */
+  const workflowReadings = Effect.fn("OrchestratorMcpService.workflowResult")(function* (
     projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
     workflow: OrchestrationV2Subagent,
   ) {
@@ -2967,6 +2980,9 @@ const make = Effect.gen(function* () {
       { concurrency: 8 },
     );
     const usage = aggregateWorkflowUsage(records.flatMap((record) => record.usage));
+    const attemptUsage = new Map(
+      records.map((record) => [record.member.id as string, aggregateWorkflowUsage(record.usage)]),
+    );
     const nodes = workflow.workflow?.nodeOutcomes;
     const phaseProgress =
       workflow.workflow?.phases.filter((phase) => phase.progress !== undefined) ?? [];
@@ -2976,7 +2992,7 @@ const make = Effect.gen(function* () {
       const known = values.filter((value) => value !== null);
       return known.length === 0 ? null : latest ? Math.max(...known) : Math.min(...known);
     };
-    return {
+    const result = {
       workflowId: workflow.id,
       status:
         workflow.status === "completed" ||
@@ -3059,7 +3075,12 @@ const make = Effect.gen(function* () {
       // A graph's stored provenance: what its result may leave out when it is large.
       ...(nodes === undefined || Object.keys(nodes).length === 0 ? {} : { nodes }),
     } satisfies OrchestratorMcpWorkflowResult;
+    return { result, attemptUsage };
   });
+  const workflowResult = (
+    projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
+    workflow: OrchestrationV2Subagent,
+  ) => workflowReadings(projection, workflow).pipe(Effect.map((readings) => readings.result));
 
   // Agents act with the starting thread's authority, which comes from the thread itself;
   // the session that started the workflow is gone after a restart, so only the thread,
@@ -3926,10 +3947,19 @@ const make = Effect.gen(function* () {
         (task) =>
           task.origin === "app_owned" && task.workflow !== undefined && task.childThreadId === null,
       );
+      const { table: rates, pricing } = yield* peekRates;
       const workflows = yield* Effect.forEach(rows, (row) =>
-        workflowResult(projection, row).pipe(Effect.map((result) => workflowReport(row, result))),
+        workflowReadings(projection, row).pipe(
+          Effect.map(({ result, attemptUsage }) =>
+            workflowReport(row, result, { attemptUsage, rates }),
+          ),
+        ),
       );
-      return { threadId: input.threadId, workflows };
+      return {
+        threadId: input.threadId,
+        workflows,
+        pricing: { status: pricing.status, source: pricing.source, fetchedAt: pricing.fetchedAt },
+      };
     }),
     workflowStop: Effect.fn("OrchestratorMcpService.workflowStop")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "workflow_stop");

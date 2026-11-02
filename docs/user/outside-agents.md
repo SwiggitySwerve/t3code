@@ -123,8 +123,11 @@ and check kind, and the run's attempts and token budget. A check that was
 declared but never ran, for example after a provider error, shows as
 `not_run`. `retries` counts the runner's extra attempts, always on the same
 target; when the coordinator redoes work with another agent, that agent is a
-row of its own. `--json` prints the same report, with each agent's child
-thread id, for comparing runs.
+row of its own. `cost` prices each attempt at the model it ran on, at the
+list prices usage reports use and without your price overrides. It shows `-`
+when a model has no list price or reported no tokens, never `$0`. `--json`
+prints the same report, with each agent's child thread id and per-attempt
+costs, for comparing runs.
 
 ## Remove an agent
 

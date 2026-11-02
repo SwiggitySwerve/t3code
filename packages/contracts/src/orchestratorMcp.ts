@@ -619,6 +619,35 @@ const WorkflowReportCheck = Schema.Literals([
   "outputs",
 ]);
 
+/**
+ * How an attempt's cost was found. modelPriced: complete usage at its model's list price;
+ * partialUsage: a lower bound. The rest leave the cost null, never 0.
+ */
+export const WorkflowReportCostSource = Schema.Literals([
+  "modelPriced",
+  "partialUsage",
+  "unpriced",
+  "noUsage",
+  "noRates",
+]);
+export type WorkflowReportCostSource = typeof WorkflowReportCostSource.Type;
+
+/** One attempt of an agent, priced at the model it ran on. */
+export const OrchestratorMcpWorkflowReportAttempt = Schema.Struct({
+  attempt: NonNegativeInt,
+  provider: Schema.String,
+  model: Schema.NullOr(Schema.String),
+  effort: Schema.NullOr(Schema.String),
+  options: Schema.NullOr(
+    Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Boolean])),
+  ),
+  state: Schema.String,
+  totalTokens: Schema.NullOr(NonNegativeInt),
+  costUsd: Schema.NullOr(Schema.Number),
+  costSource: WorkflowReportCostSource,
+});
+export type OrchestratorMcpWorkflowReportAttempt = typeof OrchestratorMcpWorkflowReportAttempt.Type;
+
 /** One agent of a workflow: who ran it, what it cost and how it ended. */
 export const OrchestratorMcpWorkflowReportAgent = Schema.Struct({
   index: NonNegativeInt,
@@ -638,6 +667,10 @@ export const OrchestratorMcpWorkflowReportAgent = Schema.Struct({
   cachedInputTokens: Schema.NullOr(NonNegativeInt),
   outputTokens: Schema.NullOr(NonNegativeInt),
   totalTokens: Schema.NullOr(NonNegativeInt),
+  /** The sum of its attempts' costs; null when any attempt's cost is unknown. */
+  costUsd: Schema.NullOr(Schema.Number),
+  costSource: WorkflowReportCostSource,
+  attemptCosts: Schema.Array(OrchestratorMcpWorkflowReportAttempt),
   durationMs: Schema.NullOr(NonNegativeInt),
   attempts: NonNegativeInt,
   status: OrchestratorMcpWorkflowAgent.fields.status,
@@ -691,6 +724,12 @@ export type OrchestratorMcpWorkflowReport = typeof OrchestratorMcpWorkflowReport
 export const OrchestratorMcpWorkflowReportResult = Schema.Struct({
   threadId: ThreadId,
   workflows: Schema.Array(OrchestratorMcpWorkflowReport),
+  /** The list-price table the costs came from; unavailable leaves every cost null. */
+  pricing: Schema.Struct({
+    status: Schema.Literals(["fresh", "cached", "unavailable"]),
+    source: Schema.String,
+    fetchedAt: Schema.NullOr(Schema.String),
+  }),
 });
 export type OrchestratorMcpWorkflowReportResult = typeof OrchestratorMcpWorkflowReportResult.Type;
 

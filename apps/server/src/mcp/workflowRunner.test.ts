@@ -31,6 +31,7 @@ import {
   makeWorkflowRunner,
   type WorkflowRunnerDeps,
   type WorkflowAgentOutcome,
+  type WorkflowAgentStart,
 } from "./workflowRunner.ts";
 import { aggregateWorkflowUsage } from "./workflowUsage.ts";
 import { agentRequestKey } from "./workflowAgentAttempts.ts";
@@ -75,6 +76,7 @@ interface HarnessOptions {
   readonly timing?: (spawned: number) => WorkflowAgentOutcome["timing"];
   readonly judgment?: (spawned: number) => boolean;
   readonly model?: (spawned: number) => string | null;
+  readonly startOptions?: (spawned: number) => WorkflowAgentStart["options"];
   /** Whether the nth agent (1-based) finishes on its own, and how; otherwise it hangs. */
   readonly finish?: (spawned: number) => "completed" | "failed" | "hang";
   /** Workspace files by path, for declared outputs. */
@@ -299,6 +301,9 @@ const makeHarness = (options: HarnessOptions = {}) =>
             taskId,
             childThreadId: ThreadId.make(`thread:agent-${spawned}`),
             model: options.model?.(spawned) ?? null,
+            ...(options.startOptions === undefined
+              ? {}
+              : { options: options.startOptions(spawned) }),
             providerInstanceId: ProviderInstanceId.make("codex"),
             driver: ProviderDriverKind.make("codex"),
           };
@@ -1766,12 +1771,15 @@ describe("workflow runner", () => {
       }),
     );
     it.effect(
-      "persists each attempt's usage, timing and identity without charging checkers twice",
+      "persists each attempt's usage, timing, identity and effort without charging checkers twice",
       () =>
         Effect.gen(function* () {
           const { runner, completed, workflowUpdates } = yield* makeHarness({
             judgment: (spawned) => spawned !== 2,
             model: (spawned) => `model-${spawned}`,
+            startOptions: (spawned) => [
+              { id: "reasoningEffort", value: spawned === 1 ? "low" : "high" },
+            ],
             usage: (spawned) => ({
               ...aggregateWorkflowUsage([]),
               status: "complete",
@@ -1799,6 +1807,8 @@ describe("workflow runner", () => {
               attempt: 0,
               providerInstanceId: "codex",
               model: "model-1",
+              effort: "low",
+              options: { reasoningEffort: "low" },
               state: "completed",
               usageStatus: "complete",
               totalTokens: 10,
@@ -1812,6 +1822,8 @@ describe("workflow runner", () => {
               attempt: 1,
               providerInstanceId: "codex",
               model: "model-3",
+              effort: "high",
+              options: { reasoningEffort: "high" },
               state: "completed",
               usageStatus: "complete",
               totalTokens: 30,

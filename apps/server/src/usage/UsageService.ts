@@ -145,6 +145,11 @@ export class UsageService extends Context.Service<
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
     readonly refreshRates: Effect.Effect<UsagePricing>;
+    /** The base rate table without waiting: memory, else the disk cache; never the network. */
+    readonly peekRates: Effect.Effect<{
+      readonly table: RateTable;
+      readonly pricing: UsagePricing;
+    }>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -253,6 +258,42 @@ export const make = Effect.gen(function* () {
     Effect.map(pricing),
     Effect.withSpan("UsageService.refreshRates"),
   );
+
+  // Skips ratesLock, which a fetch can hold for its 10 s timeout; re-reads the file when it changes.
+  let peeked: { readonly mtimeMs: number; readonly table: RateTable; readonly at: number } | null =
+    null;
+  const peekRates = Effect.gen(function* () {
+    if (rates.size > 0) return { table: rates, pricing: pricing() };
+    const unavailable = { table: new Map() as RateTable, pricing: pricing() };
+    const info = yield* fileSystem.stat(ratesCachePath).pipe(Effect.option);
+    if (Option.isNone(info)) return unavailable;
+    const mtimeMs = Option.getOrElse(
+      Option.map(info.value.mtime, (date) => date.getTime()),
+      () => 0,
+    );
+    if (peeked?.mtimeMs !== mtimeMs) {
+      const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
+        Effect.flatMap((raw) => decodeRatesCache(raw)),
+        Effect.option,
+      );
+      if (Option.isNone(fromDisk)) return unavailable;
+      peeked = {
+        mtimeMs,
+        table: parseRateTable(fromDisk.value.document),
+        at: fromDisk.value.fetchedAtMs,
+      };
+    }
+    if (peeked.table.size === 0) return unavailable;
+    return {
+      table: peeked.table,
+      pricing: {
+        status: "cached" as const,
+        source: LITELLM_RATES_URL,
+        fetchedAt: DateTime.formatIso(DateTime.makeUnsafe(peeked.at)),
+        knownModels: peeked.table.size,
+      },
+    };
+  }).pipe(Effect.withSpan("UsageService.peekRates"));
 
   const readSettings = settingsService.getSettings.pipe(
     Effect.catchCause(
@@ -900,7 +941,7 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
-  return { readSummary, refreshRates, awaitPersisted } as const;
+  return { readSummary, refreshRates, peekRates, awaitPersisted } as const;
 });
 
 export const layer = Layer.effect(UsageService, make);

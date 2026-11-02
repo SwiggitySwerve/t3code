@@ -909,6 +909,14 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
         state: Schema.Literals(["running", "completed", "failed", "cancelled", "interrupted"]),
         providerInstanceId: ProviderInstanceId,
         model: Schema.optional(TrimmedNonEmptyString),
+        /** The resolved effort and options this attempt started with; absent on older rows. */
+        effort: Schema.optional(TrimmedNonEmptyString),
+        options: Schema.optional(
+          Schema.Record(
+            TrimmedNonEmptyString,
+            Schema.Union([TrimmedNonEmptyString, Schema.Boolean]),
+          ),
+        ),
         totalTokens: Schema.optional(NonNegativeInt),
         usageStatus: Schema.Literals(["complete", "partial", "unavailable"]),
         durationMs: Schema.optional(NonNegativeInt),
