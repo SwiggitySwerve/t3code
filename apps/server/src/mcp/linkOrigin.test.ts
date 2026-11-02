@@ -46,6 +46,7 @@ import * as PeerForwarding from "../peer/PeerForwarding.ts";
 import * as ThreadSearch from "../orchestration-v2/ThreadSearch.ts";
 import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
 import * as PeerLinks from "../peer/PeerLinks.ts";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 // A linked environment's session drives this one's real orchestrator through
 // its real T3 tools. What the link starts carries its origin, and the link
@@ -130,6 +131,7 @@ const layerTools = Layer.mergeAll(
     }),
   ),
   Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+  Layer.provide(UsageServiceTestkit.layerRates()),
   Layer.provide(
     Layer.mock(ProjectService.ProjectService)({
       getById: () => Effect.succeedNone,

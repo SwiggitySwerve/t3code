@@ -67,15 +67,22 @@ import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
 import * as WorkflowApprovalGateTestkit from "../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
-const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
-  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-  Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestrator-mcp-test-" })),
-);
+/** The service with no list prices, unless a test gives it a usage service with a table. */
+const layerOrchestratorServiceWith = (
+  usage: Layer.Layer<UsageService.UsageService> = UsageServiceTestkit.layerRates(),
+) =>
+  OrchestratorMcpService.layer.pipe(
+    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+    Layer.provide(usage),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestrator-mcp-test-" })),
+  );
+const layerOrchestratorService = layerOrchestratorServiceWith();
 
 describe("OrchestratorMcpService", () => {
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
@@ -1379,13 +1386,13 @@ describe("OrchestratorMcpService provider resolution", () => {
       },
     ];
 
-    const capabilitiesWith = (search?: string, usage: Layer.Layer<never> = Layer.empty) =>
+    const capabilitiesWith = (search?: string, usage?: Layer.Layer<UsageService.UsageService>) =>
       Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.capabilities(scope, search === undefined ? {} : { search });
       }).pipe(
         Effect.provide(
-          layerOrchestratorService.pipe(
+          layerOrchestratorServiceWith(usage).pipe(
             Layer.provide(
               Layer.mergeAll(
                 NodeServices.layer,
@@ -1410,7 +1417,6 @@ describe("OrchestratorMcpService provider resolution", () => {
                 Layer.mock(SecretRequests.SecretRequests)({}),
                 Layer.mock(RemoteDelegation.RemoteDelegation)({}),
                 Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
-                usage,
               ),
             ),
           ),
@@ -1505,13 +1511,8 @@ describe("OrchestratorMcpService provider resolution", () => {
             cache_read_input_token_cost: 0.125e-6,
           },
         });
-        const usage = Layer.mock(UsageService.UsageService)({
-          peekRates: Effect.succeed({
-            table: rates,
-            pricing: { status: "cached", source: "rates", fetchedAt: null, knownModels: 1 },
-          }),
-        });
-        const codex = (yield* capabilitiesWith(undefined, usage)).providers[0];
+        const codex = (yield* capabilitiesWith(undefined, UsageServiceTestkit.layerRates(rates)))
+          .providers[0];
         assert.deepEqual(
           codex?.models.map((entry) => [entry.id, entry.listPrice]),
           [
@@ -1525,6 +1526,9 @@ describe("OrchestratorMcpService provider resolution", () => {
             ["my-alpha", null],
           ],
         );
+        // Without a table no price is advertised at all, rather than every price as unknown.
+        const unpriced = (yield* capabilitiesWith()).providers[0];
+        assert.isTrue(unpriced?.models.every((entry) => !("listPrice" in entry)));
       }),
     );
   });

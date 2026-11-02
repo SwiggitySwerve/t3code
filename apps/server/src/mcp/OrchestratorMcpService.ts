@@ -1165,16 +1165,8 @@ const make = Effect.gen(function* () {
   const workflowApprovalGate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
-  // Optional so test layers need no usage reader; without it every price is unknown.
-  const usageService = yield* Effect.serviceOption(UsageService.UsageService);
-  const peekRates = Option.match(usageService, {
-    onNone: () =>
-      Effect.succeed({
-        table: new Map() as RateTable,
-        pricing: { status: "unavailable" as const, source: "none", fetchedAt: null },
-      }),
-    onSome: (usage) => usage.peekRates,
-  });
+  // Required, so a composition that drops the usage layer fails to build instead of losing prices.
+  const { peekRates } = yield* UsageService.UsageService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
@@ -4843,6 +4835,7 @@ export const layer: Layer.Layer<
   | ProjectService.ProjectService
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
+  | UsageService.UsageService
   | RemoteDelegation.RemoteDelegation
   | ChildProcessSpawner.ChildProcessSpawner
   | ServerConfig.ServerConfig

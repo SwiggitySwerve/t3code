@@ -67,6 +67,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 export const instanceId = ProviderInstanceId.make("codex");
 
@@ -208,6 +209,7 @@ export const makeLayerTest = (
     Layer.provideMerge(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
     Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(McpProviderSessions.layer),
+    Layer.provideMerge(UsageServiceTestkit.layerRates()),
   );
 };
 

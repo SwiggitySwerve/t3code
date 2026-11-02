@@ -65,6 +65,7 @@ import {
   type ServedPeer,
 } from "./PeerLinks.testkit.ts";
 import * as RemoteDelegation from "./RemoteDelegation.ts";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 // The laptop's agent asks the user to link the box. The laptop is its real
 // orchestrator and toolkit; the box is its real descriptor and MCP OAuth on a
@@ -162,6 +163,7 @@ const makeLaptop = Effect.gen(function* () {
     Layer.provide(Layer.mock(ProviderRegistry.ProviderRegistry)({})),
     Layer.provide(Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({})),
     Layer.provide(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
+    Layer.provide(UsageServiceTestkit.layerRates()),
     Layer.provide(Layer.mock(ProjectService.ProjectService)({})),
     Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
     Layer.provide(Layer.mock(ThreadLaunch.ThreadLaunchService)({})),

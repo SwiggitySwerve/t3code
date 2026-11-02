@@ -32,11 +32,13 @@ import * as ServerConfig from "../config.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as WorkflowApprovalGateTestkit from "../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 import { liveThreadShell } from "./McpToolAccess.testkit.ts";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
   Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+  Layer.provide(UsageServiceTestkit.layerRates()),
   Layer.provide(
     ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestrator-mcp-activity-test-" }),
   ),

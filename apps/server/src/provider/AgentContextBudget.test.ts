@@ -48,6 +48,7 @@ import { DocumentText } from "./DocumentText.ts";
 import { ProviderRegistry } from "./ProviderRegistry.ts";
 import * as McpInvocationContext from "../mcp/McpInvocationContext.ts";
 import budget from "./agentContextBudget.json" with { type: "json" };
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 // Registration only stores tool definitions, so the handlers' services are never called.
 const toolHandlerServices = Layer.mergeAll(
@@ -71,6 +72,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(PullRequestReviewGuideService)({}),
   Layer.mock(RemoteDelegation)({}),
   Layer.mock(ScheduledTaskService)({}),
+  UsageServiceTestkit.layerRates(),
   Layer.mock(SecretRequests)({}),
   ServerConfig.layerTest(process.cwd(), { prefix: "t3-agent-context-budget-" }),
   Layer.mock(ServerEnvironment)({}),
