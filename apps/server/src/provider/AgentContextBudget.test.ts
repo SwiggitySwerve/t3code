@@ -163,13 +163,13 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
         delegate_task: "6f83830505b869c81dac98847c7ec9b88f244a33505aba3c26e1cee2d92227a1",
         delegate_tasks: "e7251b8547635577fc2914a9fd0cb058c36bb3618308ccb0eb6c8ff289e71146",
         task_wait: "4b88f18d8ec39ca2e4b104e0578a9e13282316a6603b6da0b99d5419340c97a3",
-        workflow_start: "5e04ceee2d6748093bc522ee7c7af7f2f8d70a5c00b1ebfcf0924e566c2396b2",
+        workflow_start: "aceeacd9a0e3dbefea76fa3299e8493feb1e31a70ee5d42b623ca49f3c74fc4e",
         workflow_status: "ecc96395ab4a603896377c9b77548913813eab8874f757167f8c79ee8da99e9c",
         workflow_stop: "8370d8ffc7f9aafde23cc4f0a2d294a46c009fd3daaa7e80c20da9793d3fd1ae",
-        graph_review: "1fee075670c447d19e5bb644b2d1f29e23a80bacc4f394b21c570a5a67546518",
-        graph_start: "c7f0918aa9861c38999d142e6079cc455f67c552ea5a4fbe4c717c00b85a372b",
+        graph_review: "a62fefb90a6b4df23e836014d57100edcd276ad3ea24c026da4755bd535f26cf",
+        graph_start: "876ba001b00d8dd943ac0fb9438dd3ed41f03a8df12e30dd025237a4d6c9692b",
         create_threads: "1ac22ad0de594beb374692af1f768e2493d3f225a708f4cc40f3aa2c05110ee8",
-        t3_worktree_remove: "8db2aa11f6b4aa14946f11cfa64d72c2e75fd8f3ce34b4eeccf6137d3dd9657f",
+        t3_worktree_remove: "e3570c6c5ba463201941d89475a278817ddb24af12169c7e42c5376da6e538bd",
       };
       for (const [name, digest] of Object.entries(expected)) {
         const { tool } = mcp.tools.find(({ tool }) => tool.name === name)!;
