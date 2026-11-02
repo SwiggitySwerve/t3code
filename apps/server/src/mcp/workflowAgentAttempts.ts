@@ -295,7 +295,7 @@ export async function runAttempts(
         continue;
       }
       entry.outcomeCategory = "timed_out";
-      settle("failed", `Every attempt ${passed}.`);
+      settle("failed", `Its last work attempt ${passed}.`);
       return null;
     }
     if (status !== "completed") {

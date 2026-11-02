@@ -14,6 +14,9 @@ import type {
   WorkflowReportCostSource,
 } from "@t3tools/contracts";
 
+import type { UsageSpeed } from "@t3tools/provider-core/server/usage";
+
+import { codexSpeed } from "../provider/Drivers/codexUsage.ts";
 import { lookupRate, priceUsage, type RateTable } from "../usage/usagePricing.ts";
 import { modelFamily } from "./workflowAdvisory.ts";
 
@@ -31,12 +34,22 @@ interface Cost {
   readonly costSource: WorkflowReportCostSource;
 }
 
+/** The service tier an attempt's options bill at: T3's `serviceTier` and `fastMode` option ids. */
+function speedOf(options: Readonly<Record<string, string | boolean>> | undefined): UsageSpeed {
+  const tier = codexSpeed(options?.serviceTier);
+  return tier === "standard" && options?.fastMode === true ? "fast" : tier;
+}
+
 /** One attempt's usage at its own model's base list price; unknown stays null, never $0. */
 export function attemptCost(
   rates: RateTable,
-  model: string | undefined,
+  attempt: {
+    readonly model?: string | undefined;
+    readonly options?: Readonly<Record<string, string | boolean>> | undefined;
+  },
   usage: OrchestratorMcpWorkflowUsage | undefined,
 ): Cost {
+  const { model } = attempt;
   if (rates.size === 0) return { costUsd: null, costSource: "noRates" };
   if (usage === undefined || usage.status === "unavailable") {
     return { costUsd: null, costSource: "noUsage" };
@@ -49,15 +62,17 @@ export function attemptCost(
   const priced = priceUsage(rates, {
     model,
     totals: {
-      uncachedInputTokens:
-        usage.uncachedInputTokens ??
-        Math.max(0, (usage.inputTokens ?? 0) - cachedInputTokens - cacheCreationTokens),
+      // From the totals: a turn that reports no cache split is all uncached input.
+      uncachedInputTokens: Math.max(
+        0,
+        (usage.inputTokens ?? 0) - cachedInputTokens - cacheCreationTokens,
+      ),
       cachedInputTokens,
       cacheCreationTokens,
       outputTokens: usage.outputTokens ?? 0,
       reasoningTokens: 0,
     },
-    speed: "standard",
+    speed: speedOf(attempt.options),
     reportedCostUsd: null,
   });
   return {
@@ -66,20 +81,18 @@ export function attemptCost(
   };
 }
 
-/** An agent's cost: null when any attempt's is unknown; a lower bound when some are partial. */
+/** An agent's cost: null when any attempt's is unknown or unrecorded; a lower bound when partial. */
 function agentCost(
   attempts: ReadonlyArray<OrchestratorMcpWorkflowReportAttempt>,
   attemptCount: number,
   rates: RateTable,
 ): Cost {
-  if (attempts.length === 0) {
+  if (attempts.length === 0 || attempts.length < attemptCount) {
     return { costUsd: null, costSource: rates.size === 0 ? "noRates" : "noUsage" };
   }
   const unknown = attempts.find((attempt) => attempt.costUsd === null);
   if (unknown !== undefined) return { costUsd: null, costSource: unknown.costSource };
-  const partial =
-    attempts.length < attemptCount ||
-    attempts.some((attempt) => attempt.costSource === "partialUsage");
+  const partial = attempts.some((attempt) => attempt.costSource === "partialUsage");
   return {
     costUsd: attempts.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0),
     costSource: partial ? "partialUsage" : "modelPriced",
@@ -122,7 +135,7 @@ export function workflowReport(
       options: attempt.options ?? null,
       state: attempt.state,
       totalTokens: attempt.totalTokens ?? null,
-      ...attemptCost(pricing.rates, attempt.model, pricing.attemptUsage.get(attempt.taskId)),
+      ...attemptCost(pricing.rates, attempt, pricing.attemptUsage.get(attempt.taskId)),
     }));
     const attempts = Math.max(history.length, started ? (agent.attempt ?? 0) + 1 : 0);
     return {
@@ -204,7 +217,7 @@ export function workflowReport(
 }
 
 const count = (value: number | null) => (value === null ? "-" : String(Math.round(value)));
-const usd = (value: number | null) => (value === null ? "-" : `$${value.toFixed(4)}`);
+const usd = (value: number | null | undefined) => (value == null ? "-" : `$${value.toFixed(4)}`);
 
 function duration(ms: number | null): string {
   if (ms === null) return "-";

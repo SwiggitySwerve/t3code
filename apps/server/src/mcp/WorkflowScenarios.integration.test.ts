@@ -188,7 +188,11 @@ return { ok: draft.ok, result: draft.result, first };`,
         // Each attempt keeps the effort it ran at; with no rate table every cost stays unknown.
         expect(
           report.agents.flatMap((agent) =>
-            agent.attemptCosts.map((attempt) => [agent.label, attempt.effort, attempt.costSource]),
+            (agent.attemptCosts ?? []).map((attempt) => [
+              agent.label,
+              attempt.effort,
+              attempt.costSource,
+            ]),
           ),
         ).toEqual(
           expect.arrayContaining([

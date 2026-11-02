@@ -667,10 +667,10 @@ export const OrchestratorMcpWorkflowReportAgent = Schema.Struct({
   cachedInputTokens: Schema.NullOr(NonNegativeInt),
   outputTokens: Schema.NullOr(NonNegativeInt),
   totalTokens: Schema.NullOr(NonNegativeInt),
-  /** The sum of its attempts' costs; null when any attempt's cost is unknown. */
-  costUsd: Schema.NullOr(Schema.Number),
-  costSource: WorkflowReportCostSource,
-  attemptCosts: Schema.Array(OrchestratorMcpWorkflowReportAttempt),
+  /** The sum of its attempts' costs; null when any attempt's cost is unknown. Absent from older servers. */
+  costUsd: Schema.optional(Schema.NullOr(Schema.Number)),
+  costSource: Schema.optional(WorkflowReportCostSource),
+  attemptCosts: Schema.optional(Schema.Array(OrchestratorMcpWorkflowReportAttempt)),
   durationMs: Schema.NullOr(NonNegativeInt),
   attempts: NonNegativeInt,
   status: OrchestratorMcpWorkflowAgent.fields.status,
@@ -725,11 +725,13 @@ export const OrchestratorMcpWorkflowReportResult = Schema.Struct({
   threadId: ThreadId,
   workflows: Schema.Array(OrchestratorMcpWorkflowReport),
   /** The list-price table the costs came from; unavailable leaves every cost null. */
-  pricing: Schema.Struct({
-    status: Schema.Literals(["fresh", "cached", "unavailable"]),
-    source: Schema.String,
-    fetchedAt: Schema.NullOr(Schema.String),
-  }),
+  pricing: Schema.optional(
+    Schema.Struct({
+      status: Schema.Literals(["fresh", "cached", "unavailable"]),
+      source: Schema.String,
+      fetchedAt: Schema.NullOr(Schema.String),
+    }),
+  ),
 });
 export type OrchestratorMcpWorkflowReportResult = typeof OrchestratorMcpWorkflowReportResult.Type;
 

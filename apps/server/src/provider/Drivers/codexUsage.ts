@@ -296,7 +296,7 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
 }
 
 /** Missing, default and standard tiers bill as standard; fast aliases priority. */
-function codexSpeed(serviceTier: unknown): UsageSpeed {
+export function codexSpeed(serviceTier: unknown): UsageSpeed {
   if (serviceTier === "priority" || serviceTier === "fast") return "fast";
   if (serviceTier === "ultrafast") return "ultrafast";
   return "standard";

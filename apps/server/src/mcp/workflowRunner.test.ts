@@ -1389,7 +1389,7 @@ describe("workflow runner", () => {
         const report = JSON.parse(yield* Deferred.await(completed));
         expect(report).toMatchObject({ ok: false, attempts: 2 });
         expect(report.reason).toBe(
-          "Every attempt passed its time budget of 60000 ms and was stopped.",
+          "Its last work attempt passed its time budget of 60000 ms and was stopped.",
         );
         expect(spawned()).toBe(2);
       }),
@@ -2021,6 +2021,23 @@ return errors`,
           ]);
           expect(spawned()).toBe(4);
         }),
+    );
+    it.effect("keeps a failed check's feedback through a provider failure that follows it", () =>
+      Effect.gen(function* () {
+        const { runner, completed, keys } = yield* makeHarness({
+          finish: (n) => (n === 3 ? "failed" : "completed"),
+          judgment: () => false,
+        });
+        yield* launch(
+          runner,
+          'return await agent("x", { node: "a", verify: { type: "judgment", rubric: ["Correct"] } })',
+          twoNodePlan,
+        );
+        yield* Deferred.await(completed);
+        // Spawns: work, judge (fails), work with feedback (provider fails), work again, judge.
+        const retried = [...keys].filter(([prompt]) => prompt.includes("Your previous attempt"));
+        expect(retried.map(([, key]) => key.slice(-3))).toEqual(["-r2"]);
+      }),
     );
     it.effect("retries a provider failure on the same target without using a work attempt", () =>
       Effect.gen(function* () {

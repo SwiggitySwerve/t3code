@@ -12,7 +12,7 @@ import {
 import * as Schema from "effect/Schema";
 
 import { parseRateTable } from "../usage/usagePricing.ts";
-import { formatWorkflowReport, workflowReport } from "./workflowReport.ts";
+import { attemptCost, formatWorkflowReport, workflowReport } from "./workflowReport.ts";
 
 const decodeWorkflow = Schema.decodeUnknownSync(OrchestrationV2SubagentWorkflow);
 const codex = ProviderInstanceId.make("codex");
@@ -161,7 +161,12 @@ const result: OrchestratorMcpWorkflowResult = {
 const row = (workflow: OrchestrationV2Subagent["workflow"]) =>
   ({ workflow, driver: ProviderDriverKind.make("codex") }) as OrchestrationV2Subagent;
 const rates = parseRateTable({
-  "gpt-5.4": { input_cost_per_token: 2e-6, output_cost_per_token: 10e-6 },
+  "gpt-5.4": {
+    input_cost_per_token: 2e-6,
+    output_cost_per_token: 10e-6,
+    input_cost_per_token_priority: 4e-6,
+    output_cost_per_token_priority: 20e-6,
+  },
   "gpt-5.4-mini": {
     input_cost_per_token: 0.5e-6,
     output_cost_per_token: 2e-6,
@@ -312,7 +317,7 @@ describe("workflow report", () => {
         "gpt-5.4": { input_cost_per_token: 1e-6, output_cost_per_token: 1e-6 },
       }),
     });
-    expect(unknownModel.agents[0]!.attemptCosts.map((entry) => entry.costSource)).toEqual([
+    expect(unknownModel.agents[0]!.attemptCosts?.map((entry) => entry.costSource)).toEqual([
       "unpriced",
       "modelPriced",
     ]);
@@ -323,6 +328,38 @@ describe("workflow report", () => {
       rates: new Map(),
     });
     expect(noRates.agents[0]).toMatchObject({ costUsd: null, costSource: "noRates" });
+
+    // A row that kept only its latest attempt cannot price the earlier one.
+    const latestOnly = workflowReport(
+      row(
+        decodeWorkflow({
+          ...stored,
+          agents: [
+            {
+              ...stored.agents[0],
+              attemptHistory: [
+                attempt(1, 2_500, "completed", { model: "gpt-5.4", effort: "high" }),
+              ],
+            },
+          ],
+        }),
+      ),
+      { ...result, agents: [result.agents[0]!] },
+      pricing,
+    );
+    expect(latestOnly.agents[0]).toMatchObject({
+      attempts: 2,
+      costUsd: null,
+      costSource: "noUsage",
+    });
+  });
+
+  it("prices an attempt at the service tier its options asked for", () => {
+    const fast = (options: Readonly<Record<string, string | boolean>>) =>
+      attemptCost(rates, { model: "gpt-5.4", options }, usage(2_000, 600)).costUsd;
+    expect(fast({})).toBeCloseTo(0.01, 10);
+    expect(fast({ serviceTier: "fast" })).toBeCloseTo(0.02, 10);
+    expect(fast({ fastMode: true })).toBeCloseTo(0.02, 10);
   });
 
   it("prints the same report as text", () => {

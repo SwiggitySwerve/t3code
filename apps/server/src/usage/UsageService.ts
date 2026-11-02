@@ -260,7 +260,7 @@ export const make = Effect.gen(function* () {
   );
 
   // Skips ratesLock, which a fetch can hold for its 10 s timeout; re-reads the file when it changes.
-  let peeked: { readonly mtimeMs: number; readonly table: RateTable; readonly at: number } | null =
+  let peeked: { readonly stamp: string; readonly table: RateTable; readonly at: number } | null =
     null;
   const peekRates = Effect.gen(function* () {
     if (rates.size > 0) return { table: rates, pricing: pricing() };
@@ -271,17 +271,21 @@ export const make = Effect.gen(function* () {
       Option.map(info.value.mtime, (date) => date.getTime()),
       () => 0,
     );
-    if (peeked?.mtimeMs !== mtimeMs) {
+    const stamp = `${mtimeMs}:${info.value.size}`;
+    if (peeked?.stamp !== stamp) {
       const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
         Effect.flatMap((raw) => decodeRatesCache(raw)),
         Effect.option,
       );
-      if (Option.isNone(fromDisk)) return unavailable;
-      peeked = {
-        mtimeMs,
-        table: parseRateTable(fromDisk.value.document),
-        at: fromDisk.value.fetchedAtMs,
-      };
+      // An unreadable file is remembered as empty, so it is not decoded again until it changes.
+      peeked = Option.match(fromDisk, {
+        onNone: () => ({ stamp, table: new Map() as RateTable, at: 0 }),
+        onSome: (cache) => ({
+          stamp,
+          table: parseRateTable(cache.document),
+          at: cache.fetchedAtMs,
+        }),
+      });
     }
     if (peeked.table.size === 0) return unavailable;
     return {
