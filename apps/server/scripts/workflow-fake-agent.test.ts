@@ -237,12 +237,18 @@ describe("workflow fake agent replies", () => {
   });
 });
 
+/** A run's own catalog: price and skill set apart, under names that say neither. */
+const catalog = {
+  "kestrel-ash": { ...FAKE_MODELS["gpt-fake-large"]!, inputPerMTok: 0.3, outputPerMTok: 1.2 },
+  "osprey-elm": { ...FAKE_MODELS["gpt-fake-small"]!, inputPerMTok: 4, outputPerMTok: 20 },
+};
+
 describe("workflow fake agent over stdio", () => {
-  it("advertises fake models and effort, applies them, and logs each prompt", async () => {
+  const startAgent = (run: Partial<FakeFixture>) => {
     const dir = NodeFS.mkdtempSync(NodePath.join(NodeOS.tmpdir(), "workflow-fake-"));
     const config = NodePath.join(dir, "fixture.json");
     const log = NodePath.join(dir, "log.ndjson");
-    NodeFS.writeFileSync(config, JSON.stringify({ ...fixture, log, replyDelayMs: 0 }));
+    NodeFS.writeFileSync(config, JSON.stringify({ ...fixture, ...run, log, replyDelayMs: 0 }));
     const agent = NodeChildProcess.spawn(
       process.execPath,
       [
@@ -265,6 +271,54 @@ describe("workflow fake agent over stdio", () => {
         notes.push(message);
       }
     };
+    const stop = () => {
+      agent.kill();
+      NodeFS.rmSync(dir, { recursive: true, force: true });
+    };
+    return { dir, log, call, stop };
+  };
+
+  it("advertises a run's own catalog and default model, and prices work from it", async () => {
+    const { dir, log, call, stop } = startAgent({ catalog, defaultModel: "osprey-elm" });
+    try {
+      const created = await call(1, "session/new", { cwd: dir });
+      expect(created.message.result.models).toEqual({
+        currentModelId: "osprey-elm",
+        availableModels: [
+          { modelId: "kestrel-ash", name: "kestrel-ash" },
+          { modelId: "osprey-elm", name: "osprey-elm" },
+        ],
+      });
+      const sessionId = created.message.result.sessionId as string;
+      const refused = await call(2, "session/set_model", { sessionId, modelId: "gpt-fake-large" });
+      expect(refused.message.error?.code).toBe(-32602);
+      await call(3, "session/prompt", {
+        sessionId,
+        prompt: [{ type: "text", text: "[task:FX-1]" }],
+      });
+      const [line] = NodeFS.readFileSync(log, "utf8")
+        .trim()
+        .split("\n")
+        .map((entry) => JSON.parse(entry));
+      const runTables = tablesOf({ catalog });
+      expect(line).toMatchObject({ model: "osprey-elm", costUsd: expect.any(Number) });
+      expect(line.costUsd).toBeCloseTo(
+        (line.inputTokens * 4 + line.outputTokens * 20) / 1_000_000,
+        12,
+      );
+      // The catalog's skill, not its name or price, sets the chance of passing.
+      expect(passProbability(runTables, "kestrel-ash", "low", 0.5)).toBeGreaterThan(
+        passProbability(runTables, "osprey-elm", "low", 0.5),
+      );
+      // Neutral names still split into two families for cross-family checks.
+      expect(Object.keys(catalog).map(modelFamily)).toEqual(["kestrel", "osprey"]);
+    } finally {
+      stop();
+    }
+  });
+
+  it("advertises fake models and effort, applies them, and logs each prompt", async () => {
+    const { dir, log, call, stop } = startAgent({});
     try {
       const created = await call(1, "session/new", { cwd: dir });
       const sessionId = created.message.result.sessionId as string;
@@ -295,8 +349,7 @@ describe("workflow fake agent over stdio", () => {
         runId: "run-1",
       });
     } finally {
-      agent.kill();
-      NodeFS.rmSync(dir, { recursive: true, force: true });
+      stop();
     }
   });
 });

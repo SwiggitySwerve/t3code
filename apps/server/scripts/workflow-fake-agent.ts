@@ -90,6 +90,10 @@ export interface FakeFixture {
   readonly secret: string;
   readonly log: string;
   readonly items: Readonly<Record<string, FixtureItem>>;
+  /** Replaces the default models for this run: ids, skill, accuracy, tokens and prices. */
+  readonly catalog?: Readonly<Record<string, FakeModel>>;
+  /** The model a new session starts on; otherwise the default, or the catalog's first. */
+  readonly defaultModel?: string;
   readonly models?: Readonly<Record<string, Partial<FakeModel>>>;
   readonly efforts?: Readonly<Record<string, Partial<FakeEffort>>>;
   /** Milliseconds a reply takes, so the UI and stall sweep see a live turn. */
@@ -102,7 +106,7 @@ export interface Tables {
 }
 
 /** The fixture's model and effort tables over the defaults. */
-export function tablesOf(fixture: Pick<FakeFixture, "models" | "efforts">): Tables {
+export function tablesOf(fixture: Pick<FakeFixture, "models" | "efforts" | "catalog">): Tables {
   const merge = <T>(
     base: Readonly<Record<string, T>>,
     extra?: Readonly<Record<string, Partial<T>>>,
@@ -111,9 +115,18 @@ export function tablesOf(fixture: Pick<FakeFixture, "models" | "efforts">): Tabl
       Object.entries(base).map(([id, value]) => [id, { ...value, ...extra?.[id] }]),
     ) as Record<string, T>;
   return {
-    models: merge(FAKE_MODELS, fixture.models),
+    models: fixture.catalog ?? merge(FAKE_MODELS, fixture.models),
     efforts: merge(FAKE_EFFORTS, fixture.efforts),
   };
+}
+
+/** The model a new session starts on. */
+export function defaultModelOf(fixture: Pick<FakeFixture, "defaultModel" | "catalog">): string {
+  const ids = Object.keys(fixture.catalog ?? FAKE_MODELS);
+  if (fixture.defaultModel !== undefined && ids.includes(fixture.defaultModel)) {
+    return fixture.defaultModel;
+  }
+  return ids.includes(DEFAULT_MODEL) ? DEFAULT_MODEL : ids[0]!;
 }
 
 /** A uniform number in [0, 1) from a hash of the parts, the same in every process. */
@@ -123,7 +136,7 @@ export function uniform(parts: ReadonlyArray<string | number>): number {
 }
 
 function modelOf(tables: Tables, model: string): FakeModel {
-  return tables.models[model] ?? tables.models[DEFAULT_MODEL]!;
+  return tables.models[model] ?? tables.models[DEFAULT_MODEL] ?? Object.values(tables.models)[0]!;
 }
 
 function effortOf(tables: Tables, effort: string): FakeEffort {
@@ -629,12 +642,14 @@ function runAgent(configPath: string): void {
         // One agent process per thread, so ids must be unique across processes.
         const sessionId =
           message.method === "session/load" ? String(params.sessionId) : NodeCrypto.randomUUID();
-        sessions.set(sessionId, { model: DEFAULT_MODEL, effort: DEFAULT_EFFORT });
+        const fixture = readFixture(configPath);
+        const model = defaultModelOf(fixture);
+        sessions.set(sessionId, { model, effort: DEFAULT_EFFORT });
         return {
           ...(message.method === "session/new" ? { sessionId } : {}),
           models: {
-            currentModelId: DEFAULT_MODEL,
-            availableModels: Object.keys(FAKE_MODELS).map((modelId) => ({
+            currentModelId: model,
+            availableModels: Object.keys(tablesOf(fixture).models).map((modelId) => ({
               modelId,
               name: modelId,
             })),
@@ -644,7 +659,7 @@ function runAgent(configPath: string): void {
       }
       case "session/set_model": {
         const session = sessionOf(params);
-        if (!Object.hasOwn(FAKE_MODELS, String(params.modelId))) {
+        if (!Object.hasOwn(tablesOf(readFixture(configPath)).models, String(params.modelId))) {
           throw Object.assign(new Error(`Unknown fake model ${String(params.modelId)}`), {
             code: -32602,
           });
