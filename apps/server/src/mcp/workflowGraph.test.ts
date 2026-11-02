@@ -8,7 +8,6 @@ import {
   parseGraph,
   reviewGraph,
 } from "./workflowGraph.ts";
-import { selectWorkflowTarget } from "./workflowRunner.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 
 const HASH = "a".repeat(64);
@@ -36,38 +35,33 @@ const problems = (value: unknown) => {
 };
 
 describe("graph parsing", () => {
-  it("projects explicit and preset plans without exposing options or inventing unknown identity", () => {
+  it("projects explicit plans without exposing options or inventing unknown identity", () => {
     const primary = {
       providerInstanceId: ProviderInstanceId.make("primary"),
       model: "gpt-6.1-sol",
     };
-    const fallback = {
-      providerInstanceId: ProviderInstanceId.make("fallback"),
-      model: "gpt-6-luna",
-    };
-    const selected = selectWorkflowTarget({ preset: "review" }, undefined, {
-      presets: [{ id: "review", name: "Review", target: primary, fallbacks: [fallback] }],
-      defaultPresetId: null,
-    });
     const plan = graphPlan(
       normalized(
         graph({
           explicit: node({ target: { ...primary, options: { reasoningEffort: "high" } } }),
-          preset: node({ target: fallback }),
           model: node({ model: "claude-haiku-5-5" }),
           none: node(),
         }),
       ),
-      new Map([["preset", selected.preference?.entries[0]]]),
     );
     expect(
       Object.fromEntries(plan.nodes.map((entry) => [entry.key, entry.plannedIdentity])),
     ).toEqual({
       explicit: primary,
-      preset: primary,
       model: { model: "claude-haiku-5-5" },
       none: undefined,
     });
+  });
+
+  it("refuses a node that still names an agent preset", () => {
+    expect(problems(graph({ a: node({ preset: "worker" }) }))).toContain(
+      "Agent presets were removed; set target from orchestrator_capabilities.",
+    );
   });
   it("normalizes shared paths, defaults, scopes and checks", () => {
     const parsed = normalized(

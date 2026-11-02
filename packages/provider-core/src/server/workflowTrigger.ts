@@ -8,64 +8,34 @@ import type {
   OrchestrationV2CreationSource,
   ProviderDriverKind,
 } from "@t3tools/contracts";
-import type {
-  WorkflowPresets,
-  WorkflowStartMode,
-  WorkflowTriggers,
-} from "@t3tools/contracts/settings";
+import type { WorkflowStartMode, WorkflowTriggers } from "@t3tools/contracts/settings";
 import { detectWorkflowIntent } from "@t3tools/shared/workflowIntent";
 
 import { isPersonTypedMessage } from "./personMessage.ts";
 
-const MAX_LISTED_PROFILES = 12;
-const MAX_LISTED_NAME_CHARS = 60;
-
 /**
- * A free-form value as a JSON string with angle brackets escaped: it stays on one line and
- * cannot open or close a tag in the note.
+ * How the coordinator assigns agents, shared by both notes. These lines are prompt tokens on
+ * every workflow turn, so they stay short.
  */
-function quoted(value: string, maxChars?: number): string {
-  const characters = Array.from(value.replace(/\s+/gu, " ").trim());
-  const shown =
-    maxChars !== undefined && characters.length > maxChars
-      ? `${characters.slice(0, maxChars).join("")}\u2026`
-      : characters.join("");
-  return JSON.stringify(shown).replace(/</gu, "\\u003c").replace(/>/gu, "\\u003e");
-}
+const ASSIGNMENT_RULES = [
+  "You choose every worker's and every check's target: providerInstanceId, model and options such as effort, from orchestrator_capabilities. Never invent ids.",
+  "Give each node the smallest model and effort you expect to pass its check first time, and more to ambiguous, multi-file or previously failed work. Prefer lowering effort to switching to a much weaker model.",
+  "Split work you cannot scope into smaller nodes; for a part too large to scope, add a planning node on a stronger model first.",
+  "Give a judgment check a target from a different provider or model family than its worker when one is enabled.",
+];
 
-function profilesLine(presets: WorkflowPresets): string {
-  if (presets.presets.length === 0) {
-    return "The user has saved no profiles: leave preset out, and pick a check's target from orchestrator_capabilities.";
-  }
-  const describe = (profile: WorkflowPresets["presets"][number]) =>
-    `${quoted(profile.name, MAX_LISTED_NAME_CHARS)} (id ${quoted(profile.id)}${
-      profile.id === presets.defaultPresetId ? ", default" : ""
-    })`;
-  const shown = presets.presets.slice(0, MAX_LISTED_PROFILES);
-  const omitted = presets.presets.slice(MAX_LISTED_PROFILES);
-  const more =
-    omitted.length > 0
-      ? `, and ${omitted.length} more (all are in orchestrator_capabilities workflowPresets)`
-      : "";
-  // The stored order stays as saved; a default past the cap is named so it is never lost.
-  const hiddenDefault = omitted.find((profile) => profile.id === presets.defaultPresetId);
-  const defaultNote =
-    hiddenDefault === undefined ? "" : ` The default profile is ${describe(hiddenDefault)}.`;
-  return `The user saved these profiles in Settings: ${shown.map(describe).join(", ")}${more}.${defaultNote} Use a profile id from here or from orchestrator_capabilities; never invent one.`;
-}
+const WORKFLOW_TURN_NOTE = [
+  "<t3-workflow>",
+  "The user asked for a workflow, so plan it before anything runs.",
+  "1. Split the work into graph nodes with dependencies, add a verify check to any node whose result needs checking, and call graph_review.",
+  ...ASSIGNMENT_RULES.map((rule, index) => `${index + 2}. ${rule}`),
+  `${ASSIGNMENT_RULES.length + 2}. End your turn once graph_review has returned the plan. The user approves it in T3 Code, which then sends you a message with the approved digest: do not call graph_start or workflow_start before that message.`,
+  "</t3-workflow>",
+].join("\n");
 
 /** The plan-first note for a turn that asks for a workflow; one text for every driver. */
-export function workflowTurnNote(presets: WorkflowPresets): string {
-  return [
-    "<t3-workflow>",
-    "The user asked for a workflow, so plan it before anything runs.",
-    "1. Split the work into graph nodes with dependencies and call graph_review.",
-    "2. Set a worker node's preset to a saved profile's id.",
-    "3. Add a verify check to any node whose result needs checking. A check takes no preset: set its target to a concrete providerInstanceId, model and options copied from an available entry of one profile (its target, then its fallbacks) in orchestrator_capabilities workflowPresets. Pick the entry yourself; T3 does not try other entries for a check.",
-    "4. End your turn once graph_review has returned the plan. The user approves it in T3 Code, which then sends you a message with the approved digest: do not call graph_start or workflow_start before that message.",
-    profilesLine(presets),
-    "</t3-workflow>",
-  ].join("\n");
+export function workflowTurnNote(): string {
+  return WORKFLOW_TURN_NOTE;
 }
 
 const CLAUDE_DRIVER = "claudeAgent";
@@ -82,7 +52,7 @@ export const EVERY_TURN_WORKFLOW_NOTE = [
   "The user asked T3 to run every turn as a workflow: multi-agent orchestration.",
   "For substantive work, plan it as a workflow and run it with the T3 workflow_start tool:",
   "phases, parallel agents, and agents that check each other's findings before you report.",
-  "Pick agents' providers and models with orchestrator_capabilities.",
+  ...ASSIGNMENT_RULES,
   "Stay solo only for conversational replies or trivial edits. Token cost is not a constraint.",
   "</t3-workflow-every-turn>",
 ].join("\n");
@@ -141,7 +111,6 @@ export function workflowRequestOf(input: WorkflowRequestInput): WorkflowRequest 
  */
 export function applyTurnTriggers(
   input: WorkflowRequestInput & {
-    readonly workflowPresets: WorkflowPresets;
     readonly driver: ProviderDriverKind;
     /** The text the provider would receive. */
     readonly text: string;
@@ -150,7 +119,7 @@ export function applyTurnTriggers(
 ): string {
   if (input.workflows === false) return input.text;
   if (request === "requested") {
-    return `${input.text}\n\n${workflowTurnNote(input.workflowPresets)}`;
+    return `${input.text}\n\n${workflowTurnNote()}`;
   }
   // "ignored" covers agent text, server messages (approved workflow instructions among them),
   // wakes, schedules, delegated threads and resumes: none of them opts in on its own.

@@ -208,3 +208,57 @@ export function graphAdvisory(
     overshootBoundTokens,
   };
 }
+
+// Claude Code accepts its family's bare aliases as model ids.
+const CLAUDE_ALIASES: ReadonlySet<string> = new Set(["opus", "sonnet", "haiku", "fable"]);
+
+/**
+ * A model id's family, for advice only: the leading letters of its last path segment, so
+ * "gpt-5.4" and "gpt-5.4-mini" are both "gpt" and "anthropic/claude-x" is "claude".
+ */
+export function modelFamily(model: string): string {
+  const name = model.toLowerCase().split("/").at(-1) ?? "";
+  const family = /^[a-z]+/u.exec(name)?.[0] ?? name;
+  return CLAUDE_ALIASES.has(family) ? "claude" : family;
+}
+
+/** One reviewed node's assignment, as graph review resolved it. */
+export interface AssignmentReview {
+  readonly nodeId: string;
+  /** "caller" means the node set no target and runs on the coordinator's model. */
+  readonly source: string;
+  readonly model: string;
+  /** Present for a judgment check; `ownTarget` is false when it inherits the worker's. */
+  readonly judgment?: { readonly model: string; readonly ownTarget: boolean };
+}
+
+/**
+ * Notes on how a graph assigns models: a worker or judgment check that falls back to the
+ * coordinator's own model, and a judgment check of the worker's own family while a model of
+ * another family is enabled. Advice only; it never feeds the digest or readiness.
+ */
+export function graphAssignmentNotes(input: {
+  readonly coordinatorModel: string;
+  readonly nodes: ReadonlyArray<AssignmentReview>;
+  readonly enabledFamilies: ReadonlySet<string>;
+}): ReadonlyArray<string> {
+  const own = `your own model (${input.coordinatorModel})`;
+  return input.nodes.flatMap((node) => {
+    const notes: string[] = [];
+    if (node.source === "caller") notes.push(`${node.nodeId}: no target, so it runs on ${own}.`);
+    const judgment = node.judgment;
+    if (judgment === undefined) return notes;
+    if (!judgment.ownTarget && node.source === "caller") {
+      notes.push(`${node.nodeId} judgment: no target, so it runs on ${own}.`);
+      return notes;
+    }
+    const family = modelFamily(node.model);
+    const otherEnabled = [...input.enabledFamilies].some((enabled) => enabled !== family);
+    if (modelFamily(judgment.model) === family && otherEnabled) {
+      notes.push(
+        `${node.nodeId} judgment: same model family as its worker (${family}) while another family is enabled.`,
+      );
+    }
+    return notes;
+  });
+}

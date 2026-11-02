@@ -64,7 +64,6 @@ const DEFAULT_TURN_TRIGGERS: RunExecutionService.RunExecutionTurnTriggers = {
   workflows: true,
   workflowStart: DEFAULT_SERVER_SETTINGS.workflowStart,
   workflowTriggers: DEFAULT_SERVER_SETTINGS.workflowTriggers,
-  workflowPresets: DEFAULT_SERVER_SETTINGS.workflowPresets,
 };
 const rootAppThread = (id: ThreadId) =>
   ({
@@ -3140,17 +3139,6 @@ it.effect(
     }),
 );
 
-const WORKFLOW_PROFILES = {
-  presets: [
-    {
-      id: "profile-fast",
-      name: "Fast worker",
-      target: { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
-    },
-  ],
-  defaultPresetId: null,
-};
-
 const providerTextsFor = (
   input: Omit<
     Parameters<typeof captureRootRunTermination>[0],
@@ -3175,14 +3163,13 @@ it.effect("asks every driver's coordinator to plan a workflow when a person says
         key: `workflow-turn-${providerDriver}`,
         messageText: "Split the parser audit into a workflow",
         providerDriver: ProviderDriverKind.make(providerDriver),
-        settings: { workflowPresets: WORKFLOW_PROFILES },
       });
       assert.isTrue(
         text?.startsWith("Split the parser audit into a workflow\n\n<t3-workflow>"),
         providerDriver,
       );
       assert.include(text, "graph_review");
-      assert.include(text, '"Fast worker" (id "profile-fast")');
+      assert.include(text, "from orchestrator_capabilities");
       assert.notInclude(text, "<t3-workflow-every-turn>");
     }
   }),
@@ -3666,12 +3653,10 @@ function captureRootRunTermination(input: {
           workflows,
           workflowStart,
           workflowTriggers,
-          workflowPresets,
         }): RunExecutionService.RunExecutionTurnTriggers => ({
           workflows,
           workflowStart,
           workflowTriggers,
-          workflowPresets,
         }),
       ),
       Effect.provide(ServerSettings.layerTest({ workflows: true, ...input.settings })),

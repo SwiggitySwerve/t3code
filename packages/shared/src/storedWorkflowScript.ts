@@ -10,8 +10,6 @@ export interface StoredWorkflowSettings {
   readonly budgetTokens?: number;
   readonly workerTarget?: unknown;
   readonly workerTargetSnapshot?: unknown;
-  readonly workflowPresets?: unknown;
-  readonly presetTargets?: unknown;
   /** Caller model/options frozen at start, independently of its current authority. */
   readonly callerSelection?: unknown;
   /** The reviewed graph's plan, for workflows started from one; the reader decodes it. */
@@ -38,6 +36,7 @@ export function parseStoredWorkflowScript(stored: string): {
   readonly plan: unknown;
   readonly workerTarget: unknown;
   readonly workerTargetSnapshot: unknown;
+  /** Legacy, read only: workflows started before agent presets were removed stored these. */
   readonly workflowPresets: unknown;
   readonly presetTargets: unknown;
   readonly callerSelection: unknown;

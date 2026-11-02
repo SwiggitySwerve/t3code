@@ -26,8 +26,6 @@ import {
   type WorkflowAgentOutcomeCategory,
   type OrchestratorMcpWorkflowUsage,
   type ModelSelection,
-  type WorkflowPresets,
-  type WorkflowPresetTarget,
   type OrchestratorMcpTarget,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -71,7 +69,7 @@ import {
   runAttempts,
   TERMINAL_TASK_STATUSES,
 } from "./workflowAgentAttempts.ts";
-import { GRAPH_DRIVER_SCRIPT } from "./workflowGraph.ts";
+import { GRAPH_DRIVER_SCRIPT, REMOVED_PRESET_MESSAGE } from "./workflowGraph.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { WorkflowPhases } from "./workflowPhases.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
@@ -94,10 +92,8 @@ export interface WorkflowContext {
   readonly args: unknown;
   readonly workerTarget?: unknown;
   readonly workerTargetError?: string;
-  readonly workflowPresets?: WorkflowPresets;
-  readonly presetTargets?: Readonly<
-    Record<string, { readonly target: OrchestratorMcpTarget } | { readonly error: string }>
-  >;
+  /** Only for workflows started before agent presets were removed; see `legacyPresetSelection`. */
+  readonly legacyPresets?: LegacyPresetSnapshots;
   readonly callerSelection?: ModelSelection;
   /** New agents stop starting once recorded child usage reaches this limit. */
   readonly budgetTokens?: number;
@@ -108,94 +104,56 @@ export interface WorkflowContext {
   readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
 }
 
-export interface WorkflowPreference {
-  readonly presetId: string;
-  readonly presetName: string;
-  readonly entries: ReadonlyArray<WorkflowPresetTarget>;
-}
-
 /**
- * Whether two profile entries are the same choice: provider instance, model and options. An
- * entry without `options` inherits the caller's, so it is not the same as one with `options: []`.
+ * What a workflow started before agent presets were removed stored at its start: the default
+ * preset's id and the target each preset resolved to. A resumed script that still names a
+ * preset gets that frozen target, so its agents keep their identities.
  */
-export function sameWorkflowPresetTarget(
-  a: WorkflowPresetTarget,
-  b: WorkflowPresetTarget,
-): boolean {
-  if (a.providerInstanceId !== b.providerInstanceId || a.model !== b.model) return false;
-  const left = a.options;
-  const right = b.options;
-  if (left === undefined || right === undefined) return left === right;
-  return (
-    left.length === right.length &&
-    left.every(
-      (option, index) => option.id === right[index]!.id && option.value === right[index]!.value,
-    )
-  );
-}
-
-/** A profile's model preference order: its primary target, then its fallbacks. */
-export function presetPreference(preset: WorkflowPresets["presets"][number]): WorkflowPreference {
-  return {
-    presetId: preset.id,
-    presetName: preset.name,
-    entries: [preset.target, ...(preset.fallbacks ?? [])],
-  };
+export interface LegacyPresetSnapshots {
+  readonly defaultPresetId: string | null;
+  readonly targets: Readonly<
+    Record<string, { readonly target: OrchestratorMcpTarget } | { readonly error: string }>
+  >;
 }
 
 /**
- * Select one whole request before the provider resolver applies caller inheritance. A preset
- * without a frozen snapshot also reports its `preference` order, whose first entry is `target`;
- * a snapshot is the resolved choice and carries no order, so a resume never re-reads one.
+ * Select one whole request before the provider resolver applies caller inheritance: the agent's
+ * own target or model, then the workflow's workerTarget, then the caller's model.
  */
 export function selectWorkflowTarget(
-  own: {
-    readonly target?: unknown;
-    readonly model?: string | undefined;
-    readonly preset?: unknown;
-  },
+  own: { readonly target?: unknown; readonly model?: string | undefined },
   workerTarget?: unknown,
-  presets?: WorkflowPresets,
-  snapshots?: WorkflowContext["presetTargets"],
 ): {
   readonly target: unknown;
-  readonly plannedTarget?: unknown;
-  readonly source: "target" | "model" | "preset" | "workerTarget" | "defaultPreset" | "caller";
-  readonly error?: string;
-  readonly preference?: WorkflowPreference;
+  readonly source: "target" | "model" | "workerTarget" | "caller";
 } {
   if (own.target !== undefined) return { target: own.target, source: "target" };
   if (own.model !== undefined) return { target: { model: own.model }, source: "model" };
-  if (own.preset !== undefined && (typeof own.preset !== "string" || !own.preset.trim())) {
-    return {
-      target: undefined,
-      source: "preset",
-      error: "Workflow preset must be a non-empty id.",
-    };
-  }
-  const presetId =
-    own.preset ?? (workerTarget === undefined ? presets?.defaultPresetId : undefined);
-  if (presetId !== undefined && presetId !== null) {
-    const source = own.preset !== undefined ? "preset" : "defaultPreset";
-    const preset = presets?.presets.find((preset) => preset.id === presetId);
-    if (preset === undefined)
-      return {
-        target: undefined,
-        source,
-        error: `Workflow preset ${String(presetId)} was not found.`,
-      };
-    const snapshot = snapshots?.[preset.id];
-    if (snapshot !== undefined)
-      return {
-        target: "target" in snapshot ? snapshot.target : undefined,
-        plannedTarget: preset.target,
-        source,
-        ...("error" in snapshot ? { error: snapshot.error } : {}),
-      };
-    return { target: preset.target, source, preference: presetPreference(preset) };
-  }
   if (workerTarget !== undefined) return { target: workerTarget, source: "workerTarget" };
   return { target: undefined, source: "caller" };
+}
+
+/**
+ * A script's `preset` option, which ranked below its own target or model and above workerTarget,
+ * with the stored default preset applying only without a workerTarget. It resolves only from a
+ * legacy snapshot; without one the agent fails. Undefined when no preset applies.
+ */
+export function legacyPresetSelection(
+  preset: unknown,
+  workerTarget: unknown,
+  legacy: LegacyPresetSnapshots | undefined,
+): { readonly target: unknown; readonly error?: string } | undefined {
+  const presetId =
+    preset ?? (workerTarget === undefined ? legacy?.defaultPresetId : undefined) ?? undefined;
+  if (presetId === undefined) return undefined;
+  const snapshot =
+    typeof presetId === "string" && legacy !== undefined && Object.hasOwn(legacy.targets, presetId)
+      ? legacy.targets[presetId]
+      : undefined;
+  if (snapshot === undefined) return { target: undefined, error: REMOVED_PRESET_MESSAGE };
+  return "target" in snapshot
+    ? { target: snapshot.target }
+    : { target: undefined, error: snapshot.error };
 }
 
 export interface WorkflowAgentStart {
@@ -634,17 +592,21 @@ class WorkflowSession {
       throw new Error("Use bar.agent() to join a progress phase.");
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
-    const {
-      target,
-      source,
-      error,
-      plannedTarget = target,
-    } = selectWorkflowTarget(
-      { target: options.target, model, preset: options.preset },
+    const selected = selectWorkflowTarget(
+      { target: options.target, model },
       this.workflow.workerTarget,
-      this.workflow.workflowPresets,
-      this.workflow.presetTargets,
     );
+    const legacy =
+      selected.source === "target" || selected.source === "model"
+        ? undefined
+        : legacyPresetSelection(
+            options.preset,
+            this.workflow.workerTarget,
+            this.workflow.legacyPresets,
+          );
+    const target = legacy === undefined ? selected.target : legacy.target;
+    const source = legacy === undefined ? selected.source : "preset";
+    const error = legacy?.error;
     let check: WorkflowCheck | undefined;
     let scopes: FileScopes | undefined;
     let inputs: ReadonlyArray<FileRef> = [];
@@ -772,7 +734,7 @@ class WorkflowSession {
     const plannedIdentity =
       previous?.plannedIdentity ??
       this.workflow.plan?.nodes.find((node) => node.key === graphNodeKey)?.plannedIdentity ??
-      workflowPlannedIdentity(plannedTarget);
+      workflowPlannedIdentity(target);
     const entry: MutableAgent = {
       index: previous?.index ?? this.nextAgentIndex++,
       requestKey,

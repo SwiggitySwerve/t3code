@@ -1,7 +1,6 @@
 import { createMemoryHistory } from "@tanstack/react-router";
 import {
   NodeId,
-  ProviderInstanceId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2Subagent,
@@ -166,16 +165,6 @@ function reviewThread(): FakeThread {
   };
 }
 
-const preset = (id: string, name: string, model: string, effort?: string) => ({
-  id,
-  name,
-  target: {
-    providerInstanceId: ProviderInstanceId.make("cliproxy"),
-    model,
-    options: effort ? [{ id: "reasoningEffort", value: effort }] : [],
-  },
-});
-
 const threads = [
   reviewThread(),
   ...workflowThread("workflow-small", 4, "running"),
@@ -183,18 +172,7 @@ const threads = [
   ...workflowThread("workflow-finished", 256, "completed"),
   ...workflowThread("workflow-failed", 256, "failed"),
 ];
-installFakeEnvironment(threads, QA_PROVIDERS, {
-  workflows: true,
-  workflowPresets: {
-    presets: [
-      preset("planner", "Planner", "claude-opus-5-5"),
-      preset("worker", "Worker", "claude-haiku-5-5", "high"),
-      preset("scout", "Scout (cheaper)", "claude-haiku-5-5", "medium"),
-      preset("verifier", "Verifier", "claude-opus-5-5"),
-    ],
-    defaultPresetId: "worker",
-  },
-});
+installFakeEnvironment(threads, QA_PROVIDERS, { workflows: true });
 
 const views = [
   { name: "01-small-running", thread: "workflow-small", width: 1440 },
@@ -352,8 +330,11 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
       await act(() => router.navigate({ to: "/settings/agents" }));
       await expect.element(page.getByRole("switch", { name: "Enable workflows" })).toBeChecked();
       await expect
-        .element(page.getByRole("switch", { name: "Default role: Worker" }))
-        .toBeChecked();
+        .element(page.getByRole("combobox", { name: "Start a workflow" }))
+        .toBeInTheDocument();
+      // The coordinator assigns every agent; the page has no roles or defaults to pick.
+      expect(page.getByText("Agent Roles").elements()).toHaveLength(0);
+      expect(page.getByRole("button", { name: "Add role" }).elements()).toHaveLength(0);
     }
     if (name === "17-settings-workflow-start") {
       await userEvent.click(page.getByRole("combobox", { name: "Start a workflow" }));

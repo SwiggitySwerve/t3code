@@ -46,7 +46,6 @@ import {
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
-import { WorkflowPresets } from "./settings.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -361,7 +360,7 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   }),
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), progress.phase(title, { total }, callback), log(...values), budget. agent options: label, phase, model or target, preset (a saved agent preset id), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), progress.phase(title, { total }, callback), log(...values), budget. agent options: label, phase, model or target, isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -403,34 +402,11 @@ export const OrchestratorMcpGraphReviewInput = Schema.Struct({
   workerTarget: OrchestratorMcpWorkflowStartInput.fields.workerTarget,
   graph: Schema.Unknown.annotate({
     description:
-      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to keep the reviewed targets after preset edits. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result). Complete valid example: " +
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to run exactly the reviewed targets. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result). Complete valid example: " +
       GRAPH_EXAMPLE,
   }),
 });
 export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
-
-/**
- * How a profile chose a worker: the first entry in its model preference order that is enabled,
- * serves the exact model and supports the options. The chosen target is part of the digest;
- * this record only explains it.
- */
-export const OrchestratorMcpProfileChoice = Schema.Struct({
-  presetId: Schema.String,
-  presetName: Schema.String,
-  chosenIndex: NonNegativeInt.annotate({
-    description:
-      "Position of the chosen entry in the model preference order; 0 is the first choice.",
-  }),
-  skipped: Schema.Array(
-    Schema.Struct({
-      index: NonNegativeInt,
-      providerInstanceId: ProviderInstanceId,
-      model: Schema.String,
-      reason: Schema.String,
-    }),
-  ).annotate({ description: "Entries tried before the chosen one, each with why it was skipped." }),
-});
-export type OrchestratorMcpProfileChoice = typeof OrchestratorMcpProfileChoice.Type;
 
 const LowHighRange = Schema.Struct({ low: NonNegativeInt, high: NonNegativeInt });
 
@@ -475,6 +451,10 @@ export const OrchestratorMcpGraphAdvisory = Schema.Struct({
     description:
       "About how far past budgetTokens one wave of running agents can go before it stops.",
   }),
+  assignmentNotes: Schema.optional(Schema.Array(Schema.String)).annotate({
+    description:
+      "Workers or judgment checks with no target, which run on your own model, and checks on the same model family as their worker. Absent when there are none.",
+  }),
 });
 export type OrchestratorMcpGraphAdvisory = typeof OrchestratorMcpGraphAdvisory.Type;
 
@@ -494,38 +474,18 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   ready: Schema.Boolean,
   expandedGraph: Schema.NullOr(Schema.Unknown).annotate({
     description:
-      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to keep the reviewed assignments after preset edits.",
+      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to run exactly the reviewed assignments.",
   }),
   targets: Schema.Array(
     Schema.Struct({
       nodeId: Schema.String,
-      source: Schema.Literals([
-        "target",
-        "model",
-        "preset",
-        "workerTarget",
-        "defaultPreset",
-        "caller",
-      ]),
+      source: Schema.Literals(["target", "model", "workerTarget", "caller"]),
       target: OrchestratorMcpTarget,
       judgmentTarget: Schema.optional(OrchestratorMcpTarget),
-      presetId: Schema.optional(Schema.String).annotate({
-        description: "The profile that chose this worker; its choice is listed once in profiles.",
-      }),
     }),
   ).annotate({
     description:
-      "Concrete worker and judgment assignments included in the digest; source describes only how the worker was selected. presetId appears when a profile chose the worker.",
-  }),
-  profiles: Schema.optional(Schema.Array(OrchestratorMcpProfileChoice)).annotate({
-    description:
-      "One entry per profile that chose a worker in this review, with the entry chosen and why earlier ones were skipped. Look a node's profile up by its targets[].presetId.",
-  }),
-  availableProfiles: Schema.optional(
-    Schema.Array(Schema.Struct({ presetId: Schema.String, presetName: Schema.String })),
-  ).annotate({
-    description:
-      "Profiles the user saved in Settings, which nodes may use as their preset; absent when the user saved none. Read a profile's models from orchestrator_capabilities workflowPresets, for example to pick a verifier's target.",
+      "Concrete worker and judgment assignments included in the digest; source describes only how the worker was selected, and caller means your own model.",
   }),
   layers: Schema.Array(Schema.Array(Schema.String)),
   writeConflicts: Schema.Array(
@@ -1034,10 +994,6 @@ export type OrchestratorMcpEnvironmentLinksResult =
   typeof OrchestratorMcpEnvironmentLinksResult.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
-  workflowPresets: Schema.optional(WorkflowPresets).annotate({
-    description:
-      "Named worker presets and the configured workflow worker default in this environment. Use a preset id in workflow agent options or graph nodes. A preset lists its model preference order as target, then fallbacks; T3 picks the first entry that is available when the graph is reviewed or the script starts, and keeps it for the run. Presets do not affect delegate_task.",
-  }),
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),

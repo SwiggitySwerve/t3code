@@ -1,11 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import {
-  EventId,
-  ProviderDriverKind,
-  ProviderInstanceId,
-  type ProviderReplayEntry,
-} from "@t3tools/contracts";
+import { EventId, ProviderDriverKind, type ProviderReplayEntry } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -314,20 +309,6 @@ describe("restart-cancelled background work", () => {
 // The real hook, delivery wrapper and Claude adapter: the workflow note must reach the provider
 // after the restart note, on a driver whose own orchestration keyword "always" would otherwise add.
 describe("workflow trigger on the first turn after a restart", () => {
-  const PROFILES = {
-    presets: [
-      {
-        id: "profile-fast",
-        name: "Fast worker",
-        target: {
-          providerInstanceId: ProviderInstanceId.make("claudeAgent"),
-          model: "claude-haiku-4-5",
-        },
-      },
-    ],
-    defaultPresetId: null,
-  };
-  const NOTE_FOR_PROFILES = workflowTurnNote(PROFILES);
   const run = (input: {
     readonly typed: string;
     readonly resumedPrompt: string;
@@ -355,23 +336,20 @@ describe("workflow trigger on the first turn after a restart", () => {
       ),
     );
 
-  it.effect(
-    "keeps the plan-first note after the restart note and lists the user's profiles",
-    () => {
-      const typed = "Plan a workflow to finish the background audit";
-      return run({
-        typed,
-        resumedPrompt: `${NOTE}\n\nUser message:\n${typed}\n\n${NOTE_FOR_PROFILES}`,
-        serverSettings: { workflowPresets: PROFILES },
-      });
-    },
-  );
+  it.effect("keeps the plan-first note after the restart note", () => {
+    const typed = "Plan a workflow to finish the background audit";
+    return run({
+      typed,
+      resumedPrompt: `${NOTE}\n\nUser message:\n${typed}\n\n${workflowTurnNote()}`,
+      serverSettings: {},
+    });
+  });
 
   it.effect("prefers the plan-first note under always and adds no native trigger word", () => {
     const typed = "Finish the background audit as a workflow";
     return run({
       typed,
-      resumedPrompt: `${NOTE}\n\nUser message:\n${typed}\n\n${workflowTurnNote({ presets: [], defaultPresetId: null })}`,
+      resumedPrompt: `${NOTE}\n\nUser message:\n${typed}\n\n${workflowTurnNote()}`,
       // Claude Code's own trigger is added only where the person did not ask for a workflow.
       secondPrompt: `${SECOND_AFTER_RESTART}\n\n${CLAUDE_NATIVE_ORCHESTRATION_KEYWORD}`,
       serverSettings: { workflowStart: "always" },

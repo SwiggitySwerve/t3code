@@ -37,33 +37,29 @@ const isWindows = (): boolean =>
 /** The only provider instances a lane gets; the rest of the dev home's providers stay behind. */
 export const QA_PROVIDER_INSTANCES = ["cliproxy", "claudeproxy"] as const;
 
-/** Workflow profiles that exist only in a lane's home: a cheap worker and a stronger verifier. */
-export const QA_PROFILES = [
-  {
-    id: "qa-worker",
-    name: "QA worker (Haiku)",
-    target: {
-      providerInstanceId: "cliproxy",
-      model: "claude-haiku-5-5",
-      options: [
-        { id: "reasoningEffort", value: "medium" },
-        { id: "serviceTier", value: "default" },
-      ],
-    },
+/**
+ * Targets that keep a lane's workflows cheap: a QA run passes `worker` as workflow_start or
+ * graph_review `workerTarget` and `verifier` as a judgment check's `target`. Settings no longer
+ * choose agents, so the lane seeds none.
+ */
+export const QA_TARGETS = {
+  worker: {
+    providerInstanceId: "cliproxy",
+    model: "claude-haiku-5-5",
+    options: [
+      { id: "reasoningEffort", value: "medium" },
+      { id: "serviceTier", value: "default" },
+    ],
   },
-  {
-    id: "qa-verifier",
-    name: "QA verifier (Opus)",
-    target: {
-      providerInstanceId: "cliproxy",
-      model: "claude-opus-5-5",
-      options: [
-        { id: "reasoningEffort", value: "high" },
-        { id: "serviceTier", value: "default" },
-      ],
-    },
+  verifier: {
+    providerInstanceId: "cliproxy",
+    model: "claude-opus-5-5",
+    options: [
+      { id: "reasoningEffort", value: "high" },
+      { id: "serviceTier", value: "default" },
+    ],
   },
-] as const;
+} as const;
 
 type Json = Record<string, unknown>;
 
@@ -77,8 +73,8 @@ export interface LaneProviderHomes {
 }
 
 /**
- * What a lane's settings.json holds, built from an allowlist: the lane's providers, the QA
- * profiles, and the dev home's default model when a lane provider serves it. Nothing else in the
+ * What a lane's settings.json holds, built from an allowlist: the lane's providers and the dev
+ * home's default model when a lane provider serves it. Nothing else in the
  * dev settings is copied, so a setting added later never reaches a lane by accident. The input is
  * never modified.
  */
@@ -118,7 +114,6 @@ export function buildLaneSettings(source: unknown, homes: LaneProviderHomes): Js
     (QA_PROVIDER_INSTANCES as ReadonlyArray<string>).includes(selection.instanceId);
   return {
     providerInstances: kept,
-    workflowPresets: { presets: structuredClone(QA_PROFILES), defaultPresetId: "qa-worker" },
     ...(selectionServed ? { defaultModelSelection: structuredClone(selection) } : {}),
   };
 }

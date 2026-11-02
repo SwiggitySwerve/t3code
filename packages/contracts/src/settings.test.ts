@@ -19,7 +19,6 @@ import {
   ServerSettingsOperation,
   ServerSettingsPatch,
   withIdleCompaction,
-  requiredScopesForServerSettingsPatch,
 } from "./settings.ts";
 
 const decodeClientSettings = Schema.decodeUnknownSync(ClientSettingsSchema);
@@ -40,85 +39,23 @@ const decodeServerSettingsPatch = Schema.decodeUnknownSync(ServerSettingsPatch);
 const encodeServerSettings = Schema.encodeSync(ServerSettings);
 const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
 
-describe("workflow preset settings", () => {
-  const preset = {
-    id: "reviewer",
-    name: "Reviewer",
-    target: { providerInstanceId: "codex", model: "gpt-5.4", options: [] },
-  };
-  it("C4 decodes defaults and a complete preset settings patch", () => {
+describe("removed workflow presets", () => {
+  it("still decodes settings saved with presets, which are dropped, and patches without them", () => {
     expect(decodeServerSettings({}).workflows).toBe(false);
     expect(decodeServerSettingsPatch({ workflows: true })).toEqual({ workflows: true });
-    expect(decodeServerSettings({}).workflowPresets).toEqual({
-      presets: [],
-      defaultPresetId: null,
-    });
-    const patch = { workflowPresets: { presets: [preset], defaultPresetId: preset.id } };
-    expect(decodeServerSettingsPatch(patch)).toEqual(patch);
-    expect(requiredScopesForServerSettingsPatch(decodeServerSettingsPatch(patch))).toEqual([
-      "settings:write",
-    ]);
-  });
-  it("C4 rejects duplicate and empty identities, incomplete targets and missing defaults", () => {
-    for (const workflowPresets of [
-      { presets: [preset, preset], defaultPresetId: null },
-      { presets: [{ ...preset, id: " " }], defaultPresetId: null },
-      { presets: [{ ...preset, name: " " }], defaultPresetId: null },
-      { presets: [{ ...preset, target: { model: "gpt-5.4" } }], defaultPresetId: null },
-      {
-        presets: [{ ...preset, target: { providerInstanceId: "codex", model: " " } }],
-        defaultPresetId: null,
-      },
-      { presets: [], defaultPresetId: "missing" },
-    ]) {
-      expect(() => decodeServerSettingsPatch({ workflowPresets })).toThrow();
-      expect(() => decodeServerSettings({ workflowPresets })).toThrow();
-    }
-  });
-});
-
-describe("workflow profile compatibility", () => {
-  const target = { providerInstanceId: "codex", model: "gpt-5.4" };
-  it("decodes presets stored before profiles unchanged, duplicate and very long names included", () => {
-    const longName = "N".repeat(400);
-    const stored = {
-      presets: [
-        { id: "a", name: "Same", target },
-        { id: "b", name: "Same", target },
-        { id: "c", name: longName, target },
-      ],
-      defaultPresetId: "a",
-    };
-    const decoded = decodeServerSettings({ workflowPresets: stored });
-    expect(decoded.workflowPresets).toEqual(stored);
-    expect(decoded.workflowPresets.presets[2]?.name).toBe(longName);
-    expect("fallbacks" in decoded.workflowPresets.presets[0]!).toBe(false);
-    expect(decodeServerSettingsPatch({ workflowPresets: stored })).toEqual({
-      workflowPresets: stored,
-    });
-  });
-
-  it("keeps an ordered fallback list next to the primary target", () => {
-    const fallbacks = [
-      { providerInstanceId: "claude", model: "sonnet", options: [{ id: "effort", value: "high" }] },
-      { providerInstanceId: "codex", model: "gpt-5.5" },
-    ];
+    // Settings written before presets were removed, malformed entries included.
     const workflowPresets = {
-      presets: [{ id: "a", name: "A", target, fallbacks }],
-      defaultPresetId: null,
+      presets: [
+        { id: "a", name: "Same", target: { providerInstanceId: "codex", model: "gpt-5.4" } },
+        { id: "a", name: " ", target: { model: "no-instance" } },
+      ],
+      defaultPresetId: "missing",
     };
-    expect(decodeServerSettings({ workflowPresets }).workflowPresets).toEqual(workflowPresets);
-    expect(encodeServerSettings(decodeServerSettings({ workflowPresets })).workflowPresets).toEqual(
-      workflowPresets,
-    );
-    expect(() =>
-      decodeServerSettings({
-        workflowPresets: {
-          presets: [{ id: "a", name: "A", target, fallbacks: [{ model: "no-instance" }] }],
-          defaultPresetId: null,
-        },
-      }),
-    ).toThrow();
+    const decoded = decodeServerSettings({ workflows: true, workflowPresets });
+    expect(decoded.workflows).toBe(true);
+    expect(decoded).not.toHaveProperty("workflowPresets");
+    expect(encodeServerSettings(decoded)).not.toHaveProperty("workflowPresets");
+    expect(decodeServerSettingsPatch({ workflowPresets })).toEqual({});
   });
 });
 

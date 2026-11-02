@@ -346,7 +346,7 @@ const make = Effect.gen(function* () {
       threadId: input.threadId,
       messageId: input.messageId,
     });
-    return request === "requested" ? workflowTurnNote(settings.workflowPresets) : undefined;
+    return request === "requested" ? workflowTurnNote() : undefined;
   });
 
   const beginReview: WorkflowApprovalGate["Service"]["beginReview"] = Effect.fn(

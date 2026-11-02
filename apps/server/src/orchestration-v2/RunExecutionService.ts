@@ -557,7 +557,7 @@ export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
  */
 export type RunExecutionTurnTriggers = Pick<
   ServerSettingsValue,
-  "workflows" | "workflowStart" | "workflowTriggers" | "workflowPresets"
+  "workflows" | "workflowStart" | "workflowTriggers"
 >;
 
 export interface RunExecutionServiceV2StartRootRunInput {
@@ -1720,7 +1720,6 @@ export const layer: Layer.Layer<
             text: applyTurnTriggers(
               {
                 ...workflowRequest,
-                workflowPresets: input.turnTriggers.workflowPresets,
                 driver: input.providerThread.driver,
                 text: input.message.text,
               },

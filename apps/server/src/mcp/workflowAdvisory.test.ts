@@ -1,6 +1,11 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { type AdvisoryDrivers, graphAdvisory } from "./workflowAdvisory.ts";
+import {
+  type AdvisoryDrivers,
+  graphAdvisory,
+  graphAssignmentNotes,
+  modelFamily,
+} from "./workflowAdvisory.ts";
 import { parseGraph, reviewGraph } from "./workflowGraph.ts";
 
 const node = (overrides: Record<string, unknown> = {}) => ({
@@ -292,5 +297,68 @@ describe("graph advisory budget for a read-heavy fan-in (review 7, G5)", () => {
     expect(review.advisory!.suggestedBudgetTokens).toBeGreaterThan(
       RECORDED_BEFORE_MERGE + costliestExtract,
     );
+  });
+});
+
+describe("assignment notes", () => {
+  it("reads a model family from the id, aliases and vendor prefixes included", () => {
+    expect(modelFamily("gpt-5.4")).toBe("gpt");
+    expect(modelFamily("gpt-5.4-mini")).toBe("gpt");
+    expect(modelFamily("claude-haiku-5-5")).toBe("claude");
+    expect(modelFamily("anthropic/claude-opus-5-5")).toBe("claude");
+    expect(modelFamily("opus")).toBe("claude");
+    expect(modelFamily("Gemini-2.5-pro")).toBe("gemini");
+  });
+
+  it("flags fallbacks to the coordinator's model and same-family checks, and nothing else", () => {
+    const notes = graphAssignmentNotes({
+      coordinatorModel: "gpt-5.4",
+      enabledFamilies: new Set(["gpt", "claude"]),
+      nodes: [
+        { nodeId: "a", source: "caller", model: "gpt-5.4" },
+        {
+          nodeId: "b",
+          source: "caller",
+          model: "gpt-5.4",
+          judgment: { model: "gpt-5.4", ownTarget: false },
+        },
+        {
+          nodeId: "c",
+          source: "target",
+          model: "claude-haiku-5-5",
+          judgment: { model: "opus", ownTarget: true },
+        },
+        {
+          nodeId: "d",
+          source: "target",
+          model: "claude-haiku-5-5",
+          judgment: { model: "gpt-5.4", ownTarget: true },
+        },
+        { nodeId: "e", source: "workerTarget", model: "claude-haiku-5-5" },
+      ],
+    });
+    expect(notes).toEqual([
+      "a: no target, so it runs on your own model (gpt-5.4).",
+      "b: no target, so it runs on your own model (gpt-5.4).",
+      "b judgment: no target, so it runs on your own model (gpt-5.4).",
+      "c judgment: same model family as its worker (claude) while another family is enabled.",
+    ]);
+  });
+
+  it("does not ask for another family when only one is enabled", () => {
+    expect(
+      graphAssignmentNotes({
+        coordinatorModel: "claude-opus-5-5",
+        enabledFamilies: new Set(["claude"]),
+        nodes: [
+          {
+            nodeId: "a",
+            source: "target",
+            model: "claude-haiku-5-5",
+            judgment: { model: "claude-opus-5-5", ownTarget: true },
+          },
+        ],
+      }),
+    ).toEqual([]);
   });
 });

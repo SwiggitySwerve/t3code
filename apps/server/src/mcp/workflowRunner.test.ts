@@ -516,15 +516,18 @@ describe("workflow runner", () => {
           afterSequence: 0,
           args: null,
           source: `return agent("work", ${JSON.stringify(request)})`,
-          workflowPresets: {
-            presets: [{ id: "review", name: "Review", target: primary, fallbacks: [fallback] }],
-            defaultPresetId: null,
-          },
-          presetTargets: { review: { target: fallback } },
+          // A workflow started before presets were removed resolves its frozen choice.
+          legacyPresets: { defaultPresetId: null, targets: { review: { target: fallback } } },
         });
         const projection = (yield* Deferred.await(queued)).agents[0]!;
         expect(projection.plannedIdentity).toEqual(
-          choice === "none" ? undefined : choice === "model" ? { model: primary.model } : primary,
+          choice === "none"
+            ? undefined
+            : choice === "model"
+              ? { model: primary.model }
+              : choice === "preset"
+                ? fallback
+                : primary,
         );
         expect(projection.providerInstanceId).toBeUndefined();
         expect(projection.model).toBeUndefined();

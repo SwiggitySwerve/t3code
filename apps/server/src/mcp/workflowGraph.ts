@@ -35,6 +35,10 @@ type GraphInput =
       readonly outputId: string;
     };
 
+/** Agent presets were a Settings feature; a graph node or script that still names one is told so. */
+export const REMOVED_PRESET_MESSAGE =
+  "Agent presets were removed; set target from orchestrator_capabilities.";
+
 interface GraphNode {
   readonly subject: string;
   readonly description: string;
@@ -42,7 +46,6 @@ interface GraphNode {
   readonly phase?: string;
   readonly target?: unknown;
   readonly model?: string;
-  readonly preset?: string;
   readonly role?: string;
   readonly schema?: unknown;
   readonly scopes?: FileScopes;
@@ -211,7 +214,7 @@ function parseNode(value: unknown): NodeParse {
   const description = field(problems, () => text(node.description, "description"));
   const phase = optional(node.phase, (raw) => text(raw, "phase"));
   const model = optional(node.model, (raw) => text(raw, "model"));
-  const preset = optional(node.preset, (raw) => text(raw, "preset"));
+  if (node.preset !== undefined) problems.push("preset: " + REMOVED_PRESET_MESSAGE);
   const role = optional(node.role, (raw) => text(raw, "role"));
   const scopes = optional(node.scopes, parseScopes);
   const inputs = fileList(
@@ -239,7 +242,6 @@ function parseNode(value: unknown): NodeParse {
       ...(phase === undefined ? {} : { phase }),
       ...(node.target === undefined ? {} : { target: node.target }),
       ...(model === undefined ? {} : { model }),
-      ...(preset === undefined ? {} : { preset }),
       ...(role === undefined ? {} : { role }),
       ...(node.schema === undefined ? {} : { schema: node.schema }),
       ...(scopes === undefined ? {} : { scopes }),
@@ -271,18 +273,13 @@ function graphLayers(graph: WorkflowGraph): string[][] {
 }
 
 /** The graph as the app shows it: each node's label, wave and dependencies, without prompts. */
-export function graphPlan(
-  graph: WorkflowGraph,
-  plannedTargets?: ReadonlyMap<string, unknown>,
-): OrchestrationV2WorkflowPlan {
+export function graphPlan(graph: WorkflowGraph): OrchestrationV2WorkflowPlan {
   return {
     nodes: graphLayers(graph).flatMap((layer, wave) =>
       layer.map((key) => {
         const node = graph.nodes[key]!;
         const plannedIdentity = workflowPlannedIdentity(
-          plannedTargets?.get(key) ??
-            node.target ??
-            (node.model ? { model: node.model } : undefined),
+          node.target ?? (node.model ? { model: node.model } : undefined),
         );
         return {
           key,

@@ -6,7 +6,7 @@ import * as NodePath from "node:path";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
-  QA_PROFILES,
+  QA_TARGETS,
   buildLaneSettings,
   commandHasOption,
   isStaticCodexAuth,
@@ -136,15 +136,11 @@ describe("lane settings and home", () => {
   it("builds the settings from an allowlist, with lane-local provider homes", () => {
     const source = devSettings();
     const lane = buildLaneSettings(source, HOMES) as ReturnType<typeof devSettings>;
-    expect(Object.keys(lane).sort()).toEqual([
-      "defaultModelSelection",
-      "providerInstances",
-      "workflowPresets",
-    ]);
-    expect(lane.workflowPresets.presets.map((preset) => preset.id)).toEqual(
-      QA_PROFILES.map((profile) => profile.id),
-    );
-    expect(lane.workflowPresets.defaultPresetId).toBe("qa-worker");
+    // The dev home's old presets stay behind; QA runs pass QA_TARGETS explicitly instead.
+    expect(Object.keys(lane).sort()).toEqual(["defaultModelSelection", "providerInstances"]);
+    for (const target of Object.values(QA_TARGETS)) {
+      expect(Object.keys(lane.providerInstances)).toContain(target.providerInstanceId);
+    }
     // Both stock instances the app enables by default are written disabled; fireworks is gone.
     expect(Object.keys(lane.providerInstances).sort()).toEqual([
       "claudeAgent",
