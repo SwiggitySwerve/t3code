@@ -4,6 +4,7 @@ import {
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitResult,
+  OrchestratorMcpWorkflowReportResult,
   ProjectId,
   RunId,
   ThreadId,
@@ -29,6 +30,7 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
+import { formatWorkflowReport } from "../mcp/workflowReport.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -700,6 +702,38 @@ const threadShowCommand = Command.make("show", {
   ),
 );
 
+/** Prints a thread's workflow reports; JSON keeps every field, for aggregating across runs. */
+export const printWorkflowReport = Effect.fn("cli.thread.printWorkflowReport")(function* (
+  tools: ThreadTools,
+  threadId: ThreadId,
+  json: boolean,
+) {
+  const report = yield* tools.call(
+    "t3_workflow_report",
+    { threadId },
+    OrchestratorMcpWorkflowReportResult,
+  );
+  if (json) return yield* printJson(report);
+  if (report.workflows.length === 0) return yield* Console.log("This thread has no workflows.");
+  yield* Console.log(report.workflows.map(formatWorkflowReport).join("\n\n"));
+});
+
+const threadWorkflowReportCommand = Command.make("workflow-report", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Report a thread's workflows: one row per agent, groups by model family and check, and loop totals.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      yield* withThreadTools(flags, (tools) => printWorkflowReport(tools, threadId, flags.json));
+    }).pipe(reportThreadErrors),
+  ),
+);
+
 export const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Start, message, and read threads on the running server."),
   Command.withSubcommands([
@@ -707,5 +741,6 @@ export const threadCommand = Command.make("thread").pipe(
     threadStartCommand,
     threadSendCommand,
     threadShowCommand,
+    threadWorkflowReportCommand,
   ]),
 );

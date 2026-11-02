@@ -27,6 +27,8 @@ import {
   type OrchestratorMcpWorkflowUsage,
   type ModelSelection,
   type OrchestratorMcpTarget,
+  type ProviderOptionSelection,
+  type WorkflowAgentTargetSource,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -160,6 +162,8 @@ export interface WorkflowAgentStart {
   readonly taskId: NodeId;
   readonly childThreadId: ThreadId;
   readonly model: string | null;
+  /** The model options the provider resolver settled on for this attempt. */
+  readonly options?: ReadonlyArray<ProviderOptionSelection> | undefined;
   readonly providerInstanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
 }
@@ -560,6 +564,8 @@ class WorkflowSession {
     /** The label its retry key uses, when not the script's own; null keys it by content alone. */
     readonly keyLabel?: string | null;
     readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
+    /** A checker's source when it reuses its worker's target, which then reads as its own. */
+    readonly targetSource?: WorkflowAgentTargetSource | undefined;
   }): Promise<{
     readonly value: unknown;
     readonly entry: MutableAgent;
@@ -731,10 +737,20 @@ class WorkflowSession {
       })
     )
       throw new Error(`Cannot establish workflow agent identity for "${label}".`);
+    const planNode = (key: string | undefined) =>
+      key === undefined ? undefined : this.workflow.plan?.nodes.find((node) => node.key === key);
     const plannedIdentity =
       previous?.plannedIdentity ??
-      this.workflow.plan?.nodes.find((node) => node.key === graphNodeKey)?.plannedIdentity ??
+      planNode(graphNodeKey)?.plannedIdentity ??
       workflowPlannedIdentity(target);
+    // Review writes a concrete target into every graph node, so a graph agent's own source is
+    // always "target"; the plan keeps the source review found.
+    const targetSource =
+      (request.judgmentFor === undefined
+        ? planNode(graphNodeKey)?.targetSource
+        : planNode(request.judgmentFor.graphNodeKey)?.checkTargetSource) ??
+      request.targetSource ??
+      (source === "preset" ? "legacyPreset" : source);
     const entry: MutableAgent = {
       index: previous?.index ?? this.nextAgentIndex++,
       requestKey,
@@ -742,6 +758,7 @@ class WorkflowSession {
       ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
       ...(request.judgmentFor === undefined ? {} : { judgmentFor: request.judgmentFor }),
       state: "queued",
+      targetSource,
       ...(plannedIdentity === undefined ? {} : { plannedIdentity }),
       ...(phaseRow === undefined ? {} : { phaseIndex: phaseRow.index, phaseTitle: phaseRow.title }),
       prompt: promptPreview,

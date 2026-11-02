@@ -9,6 +9,7 @@ import type {
   OrchestrationV2WorkflowAgent,
   OrchestratorMcpDelegateTasksItem,
   ThreadId,
+  WorkflowAgentTargetSource,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -41,6 +42,7 @@ import { MAX_AGENT_ATTEMPTS } from "./workflowLimits.ts";
 import type { WaitingAgent } from "./workflowSweep.ts";
 import type {
   WorkflowAgentOutcome,
+  WorkflowAgentStart,
   WorkflowContext,
   WorkflowRunnerDeps,
 } from "./workflowRunner.ts";
@@ -72,6 +74,14 @@ export function agentRequestKey(attemptKey: string): string | undefined {
 function numberOption(options: Readonly<Record<string, unknown>>, key: string) {
   const value = options[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+/** The resolved options by id, and the effort among them under either provider's name. */
+function resolvedOptions(options: WorkflowAgentStart["options"]) {
+  if (options === undefined || options.length === 0) return undefined;
+  const byId = Object.fromEntries(options.map((option) => [option.id, option.value]));
+  const effort = byId.reasoningEffort ?? byId.effort;
+  return { byId, effort: typeof effort === "string" ? effort : undefined };
 }
 
 function failureMessage<A>(
@@ -114,6 +124,7 @@ export interface AgentAttemptHost {
     readonly options: Readonly<Record<string, unknown>>;
     readonly keyLabel: null;
     readonly judgmentFor: NonNullable<OrchestrationV2WorkflowAgent["judgmentFor"]>;
+    readonly targetSource?: WorkflowAgentTargetSource | undefined;
   }): Promise<{ readonly value: unknown; readonly entry: MutableAgent }>;
 }
 
@@ -231,6 +242,11 @@ export async function runAttempts(
     entry.childThreadId = started.value.childThreadId;
     if (started.value.model !== null) entry.model = started.value.model;
     else delete entry.model;
+    const resolved = resolvedOptions(started.value.options);
+    if (resolved === undefined) delete entry.options;
+    else entry.options = resolved.byId;
+    if (resolved?.effort === undefined) delete entry.effort;
+    else entry.effort = resolved.effort;
     entry.providerInstanceId = started.value.providerInstanceId;
     entry.driver = started.value.driver;
     if (attempt > 0) entry.attempt = attempt;
@@ -320,6 +336,7 @@ export async function runAttempts(
         target,
         taskId: started.value.taskId,
         childThreadId: started.value.childThreadId,
+        workerSource: entry.targetSource,
         summary,
         structuredResult,
         structuredResultError,
@@ -405,6 +422,7 @@ async function runCheck(
     readonly target: unknown;
     readonly taskId: NodeId;
     readonly childThreadId: ThreadId;
+    readonly workerSource: WorkflowAgentTargetSource | undefined;
     readonly summary: string | null;
     readonly structuredResult: unknown;
     readonly structuredResultError: string | undefined;
@@ -460,6 +478,7 @@ async function runCheck(
       // Its prompt already pins the work it judges; a generated worker label would not.
       keyLabel: null,
       judgmentFor: input.judgmentFor,
+      targetSource: check.target === undefined ? input.workerSource : "target",
       options: {
         label: `check ${input.label}`,
         ...(input.phase === undefined ? {} : { phase: input.phase }),

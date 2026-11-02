@@ -114,6 +114,12 @@ the message to read it from stdin.
 2 when the agent waits for an answer you give in the app. Add `--json` for a
 result that always includes the thread id.
 
+`t3 thread workflow-report <thread>` prints each workflow the thread ran: one
+row per agent with its provider, model, effort, how its target was chosen,
+tokens, time, attempts, outcome and check, then agents grouped by model family
+and check kind, and the run's attempts and token budget. `--json` prints the
+same report for comparing runs.
+
 ## Remove an agent
 
 Approved agents appear under **Settings → Sharing & access** like other clients.

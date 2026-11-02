@@ -33,6 +33,8 @@ import {
   OrchestratorMcpTaskStatusInput,
   OrchestratorMcpTaskWaitInput,
   OrchestratorMcpWorkflowInput,
+  OrchestratorMcpWorkflowReportInput,
+  OrchestratorMcpWorkflowReportResult,
   OrchestratorMcpWorkflowResult,
   OrchestratorMcpWorkflowStartInput,
   OrchestratorMcpWorkflowStopInput,
@@ -180,6 +182,23 @@ const WorkflowStatusTool = Tool.make("workflow_status", {
   .annotate(Tool.Destructive, false)
   .annotate(Tool.Idempotent, true)
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
+
+// For the t3 CLI and outside clients only: agents inside T3 Code never list it, so it costs
+// them no catalog tokens.
+const WorkflowReportTool = Tool.make("t3_workflow_report", {
+  description:
+    "Report every workflow of a thread: one row per agent with its model, effort, target source, tokens, time, attempts and check, plus groups by model family and check.",
+  parameters: OrchestratorMcpWorkflowReportInput,
+  success: OrchestratorMcpWorkflowReportResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Report a thread's workflows")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromThreads);
 
 const WorkflowRunStopTool = Tool.make("workflow_stop", {
   description:
@@ -467,6 +486,7 @@ export const OrchestratorToolkit = Toolkit.make(
   TaskWaitTool,
   WorkflowStartTool,
   WorkflowStatusTool,
+  WorkflowReportTool,
   WorkflowRunStopTool,
   GraphReviewTool,
   GraphStartTool,

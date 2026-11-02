@@ -810,6 +810,24 @@ export const OrchestrationV2WorkflowPlannedIdentity = Schema.Struct({
 export type OrchestrationV2WorkflowPlannedIdentity =
   typeof OrchestrationV2WorkflowPlannedIdentity.Type;
 
+/**
+ * How a workflow agent's target was chosen: its own target or model, the workflow's workerTarget,
+ * the coordinator's own model, or a preset snapshot of a workflow started before presets were
+ * removed. A graph agent keeps what review found, since review writes a target into every node.
+ */
+export const WorkflowAgentTargetSource = Schema.Literals([
+  "target",
+  "model",
+  "workerTarget",
+  "caller",
+  "legacyPreset",
+]);
+export type WorkflowAgentTargetSource = typeof WorkflowAgentTargetSource.Type;
+
+/** The kind of check a graph node declares; `none` when it declares none. */
+export const WorkflowCheckKind = Schema.Literals(["none", "process", "structured", "judgment"]);
+export type WorkflowCheckKind = typeof WorkflowCheckKind.Type;
+
 /** A node of a reviewed graph, as the app shows it: no prompts or inputs, so updates stay small. */
 export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
   key: TrimmedNonEmptyString,
@@ -818,6 +836,23 @@ export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
   wave: NonNegativeInt,
   dependsOn: Schema.Array(TrimmedNonEmptyString),
   plannedIdentity: Schema.optional(OrchestrationV2WorkflowPlannedIdentity),
+  /** How review chose the worker's target, and its judgment check's when it has one. */
+  targetSource: Schema.optional(WorkflowAgentTargetSource),
+  checkTargetSource: Schema.optional(WorkflowAgentTargetSource),
+  /**
+   * Shape facts the server derives from the graph, never from the coordinator: dependencies in
+   * and dependents out, the check kind, and how many paths it reads (scopes and inputs) and
+   * writes (scopes and outputs). Absent on plans stored before they were recorded.
+   */
+  features: Schema.optional(
+    Schema.Struct({
+      fanIn: NonNegativeInt,
+      fanOut: NonNegativeInt,
+      check: WorkflowCheckKind,
+      reads: NonNegativeInt,
+      writes: NonNegativeInt,
+    }),
+  ),
 });
 export type OrchestrationV2WorkflowPlanNode = typeof OrchestrationV2WorkflowPlanNode.Type;
 
@@ -899,6 +934,11 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
   phaseIndex: Schema.optional(NonNegativeInt),
   phaseTitle: Schema.optional(TrimmedNonEmptyString),
   model: Schema.optional(TrimmedNonEmptyString),
+  /** The resolved model options its latest attempt started with, by option id. */
+  options: Schema.optional(
+    Schema.Record(TrimmedNonEmptyString, Schema.Union([TrimmedNonEmptyString, Schema.Boolean])),
+  ),
+  targetSource: Schema.optional(WorkflowAgentTargetSource),
   effort: Schema.optional(TrimmedNonEmptyString),
   speed: Schema.optional(TrimmedNonEmptyString),
   attempt: Schema.optional(NonNegativeInt),

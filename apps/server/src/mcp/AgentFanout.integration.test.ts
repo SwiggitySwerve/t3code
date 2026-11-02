@@ -1494,6 +1494,13 @@ describe("workflow_start", () => {
           "completed",
         ]),
       );
+      // The record keeps the options each attempt resolved to, and either provider's effort.
+      expect(
+        row?.workflow?.agents.map((agent) => [agent.options, agent.effort, agent.targetSource]),
+      ).toEqual([
+        [{ reasoningEffort: "high" }, "high", "target"],
+        [{ effort: "max", fastMode: true }, "max", "target"],
+      ]);
       expect(
         parent.subagents.filter((task) => task.parentNodeId === started.workflowId),
       ).toHaveLength(2);
@@ -4474,6 +4481,72 @@ describe("graphs", () => {
         providerInstanceId: claudeInstanceId,
         model: claudeModel,
       });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("records the source review found for each graph agent and its checker", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents((prompt) =>
+        prompt.includes("independent checker")
+          ? `\`\`\`json\n${JSON.stringify({ outcome: "passed", reasons: "Fine." })}\n\`\`\``
+          : "done",
+      );
+      const workerTarget = { providerInstanceId: claudeInstanceId, model: claudeModel };
+      const graph = {
+        schemaVersion: 1,
+        nodes: {
+          a: {
+            subject: "first",
+            description: "work a",
+            dependsOn: [],
+            verify: {
+              type: "judgment",
+              rubric: ["It is done."],
+              target: { providerInstanceId: instanceId, model },
+            },
+          },
+          // A bare model keeps the coordinator's provider.
+          b: { subject: "second", description: "work b", dependsOn: ["a"], model },
+        },
+      };
+      const reviewed = yield* decodeReview(
+        (yield* invoke("graph_review", { graph, workerTarget })).structuredContent,
+      );
+      expect(reviewed.blockers).toEqual([]);
+      const started = yield* decodeWorkflow(
+        (yield* invoke("graph_start", {
+          graph,
+          workerTarget,
+          acceptedDigest: reviewed.digest,
+        })).structuredContent,
+      );
+      expect((yield* awaitWorkflowEnd(started.workflowId)).status).toBe("completed");
+      const row = (yield* childTasks).find((task) => task.id === started.workflowId)!;
+      expect(
+        row.workflow?.plan?.nodes.map((entry) => [
+          entry.key,
+          entry.targetSource,
+          entry.checkTargetSource,
+          entry.features,
+        ]),
+      ).toEqual([
+        [
+          "a",
+          "workerTarget",
+          "target",
+          { fanIn: 0, fanOut: 1, check: "judgment", reads: 0, writes: 0 },
+        ],
+        ["b", "model", undefined, { fanIn: 1, fanOut: 0, check: "none", reads: 0, writes: 0 }],
+      ]);
+      // At run time every graph agent has a concrete target; the record keeps review's source.
+      expect(
+        row.workflow?.agents.map((agent) => [agent.label, agent.targetSource, agent.model]),
+      ).toEqual([
+        ["first", "workerTarget", claudeModel],
+        ["check first", "target", model],
+        ["second", "model", model],
+      ]);
     }).pipe(Effect.provide(layerTest)),
   );
 

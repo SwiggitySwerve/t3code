@@ -61,6 +61,13 @@ const handlers = {
       return yield* service.workflowStatus(scope, input);
     }),
   ),
+  t3_workflow_report: McpToolAccess.reads((input) =>
+    Effect.gen(function* () {
+      const scope = yield* McpInvocationContext.McpInvocationContext;
+      const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+      return yield* service.workflowReport(scope, input);
+    }),
+  ),
   workflow_stop: McpToolAccess.actsAsCaller((input) =>
     Effect.gen(function* () {
       const scope = yield* McpInvocationContext.McpInvocationContext;

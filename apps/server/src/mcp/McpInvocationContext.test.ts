@@ -63,3 +63,31 @@ it.effect("refuses thread-owned capabilities to a caller signed in from outside 
     expect(error.threadId).toBeUndefined();
   });
 });
+
+it.effect("lists a thread-hidden tool only to callers outside a thread, such as the t3 CLI", () => {
+  const thread: McpInvocationContext.McpInvocationScope = {
+    environmentId: EnvironmentId.make("environment-1"),
+    requestNamespace: "provider-session-1",
+    thread: {
+      threadId: ThreadId.make("thread-1"),
+      providerSessionId: "provider-session-1",
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    },
+    client: undefined,
+    capabilities: new Set(["orchestration", "workflows"]),
+    issuedAt: 1,
+  };
+  const cli: McpInvocationContext.McpInvocationScope = {
+    ...thread,
+    thread: undefined,
+    client: { sessionId: "cli", label: "t3 thread cli", access: "full-access" },
+  };
+  const listed = (scope: McpInvocationContext.McpInvocationScope) =>
+    Effect.sync(McpInvocationContext.hiddenFromThreads).pipe(
+      Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+    );
+  return Effect.gen(function* () {
+    expect(yield* listed(thread)).toBe(false);
+    expect(yield* listed(cli)).toBe(true);
+  });
+});

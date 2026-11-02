@@ -1019,6 +1019,15 @@ Without `runId`, it selects the newest interruptible run. A terminal run is
 returned unchanged, and a thread with no active provider turn returns
 `no_active_run`.
 
+### `t3_workflow_report`
+
+Reports every workflow of a readable thread: one row per agent (provider, model,
+effort, target source, tokens, duration, attempts, outcome and check), groups by
+role, model family and check kind, and the run's phase, attempt and budget
+totals. Usage and outcomes come from the same joins as `workflow_status`. Only
+callers outside a thread list it, such as `t3 thread workflow-report`, so agents
+in T3 Code pay no catalog tokens for it.
+
 ## Delegated Task Lifecycle
 
 The MCP server is a command ingress into V2. It does not call provider adapters

@@ -36,6 +36,7 @@ import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   WorkflowAgentOutcomeCategory,
+  WorkflowAgentTargetSource,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
@@ -604,6 +605,88 @@ export const OrchestratorMcpWorkflowResult = Schema.Struct({
   ),
 });
 export type OrchestratorMcpWorkflowResult = typeof OrchestratorMcpWorkflowResult.Type;
+
+export const OrchestratorMcpWorkflowReportInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type OrchestratorMcpWorkflowReportInput = typeof OrchestratorMcpWorkflowReportInput.Type;
+
+const WorkflowReportCheck = Schema.Literals([
+  "none",
+  "process",
+  "structured",
+  "judgment",
+  "outputs",
+]);
+
+/** One agent of a workflow: who ran it, what it cost and how it ended. */
+export const OrchestratorMcpWorkflowReportAgent = Schema.Struct({
+  index: NonNegativeInt,
+  label: Schema.String,
+  phase: Schema.NullOr(Schema.String),
+  /** A checker is the agent a judgment check started to judge a worker. */
+  role: Schema.Literals(["worker", "checker"]),
+  node: Schema.NullOr(Schema.String),
+  provider: Schema.NullOr(Schema.String),
+  model: Schema.NullOr(Schema.String),
+  effort: Schema.NullOr(Schema.String),
+  targetSource: Schema.NullOr(WorkflowAgentTargetSource),
+  usageStatus: Schema.Literals(["complete", "partial", "unavailable"]),
+  inputTokens: Schema.NullOr(NonNegativeInt),
+  cachedInputTokens: Schema.NullOr(NonNegativeInt),
+  outputTokens: Schema.NullOr(NonNegativeInt),
+  totalTokens: Schema.NullOr(NonNegativeInt),
+  durationMs: Schema.NullOr(NonNegativeInt),
+  attempts: NonNegativeInt,
+  status: OrchestratorMcpWorkflowAgent.fields.status,
+  outcome: Schema.NullOr(WorkflowAgentOutcomeCategory),
+  /** The worker's declared or last-run check; a checker's own is none. */
+  check: WorkflowReportCheck,
+  checkOutcome: Schema.NullOr(Schema.Literals(["passed", "failed", "error"])),
+});
+export type OrchestratorMcpWorkflowReportAgent = typeof OrchestratorMcpWorkflowReportAgent.Type;
+
+/** Agents grouped by role, model family and check kind. */
+export const OrchestratorMcpWorkflowReportGroup = Schema.Struct({
+  role: OrchestratorMcpWorkflowReportAgent.fields.role,
+  family: Schema.String,
+  check: WorkflowReportCheck,
+  agents: NonNegativeInt,
+  passed: NonNegativeInt,
+  /** Agents that passed on their first attempt, over all agents of the group. */
+  firstTryPassRate: Schema.Number,
+  /** Attempts past each agent's first. */
+  redos: NonNegativeInt,
+  medianTokensPerPassed: Schema.NullOr(Schema.Number),
+});
+export type OrchestratorMcpWorkflowReportGroup = typeof OrchestratorMcpWorkflowReportGroup.Type;
+
+export const OrchestratorMcpWorkflowReport = Schema.Struct({
+  workflowId: NodeId,
+  name: Schema.NullOr(Schema.String),
+  kind: Schema.Literals(["script", "graph"]),
+  status: OrchestratorMcpWorkflowResult.fields.status,
+  agents: Schema.Array(OrchestratorMcpWorkflowReportAgent),
+  summary: Schema.Array(OrchestratorMcpWorkflowReportGroup),
+  loop: Schema.Struct({
+    /** Phases the run recorded; a script adds them as it reaches them. */
+    phases: NonNegativeInt,
+    agents: NonNegativeInt,
+    attempts: NonNegativeInt,
+    settledAgents: NonNegativeInt,
+    totalTokens: Schema.NullOr(NonNegativeInt),
+    budgetTokens: Schema.NullOr(NonNegativeInt),
+    /** budget: the token budget refused an agent; settled: it ended otherwise. */
+    endedBy: Schema.Literals(["running", "settled", "budget"]),
+  }),
+});
+export type OrchestratorMcpWorkflowReport = typeof OrchestratorMcpWorkflowReport.Type;
+
+export const OrchestratorMcpWorkflowReportResult = Schema.Struct({
+  threadId: ThreadId,
+  workflows: Schema.Array(OrchestratorMcpWorkflowReport),
+});
+export type OrchestratorMcpWorkflowReportResult = typeof OrchestratorMcpWorkflowReportResult.Type;
 
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,

@@ -58,6 +58,49 @@ describe("graph parsing", () => {
     });
   });
 
+  it("derives each node's shape from the graph and keeps the sources review found", () => {
+    const judged = { type: "judgment", rubric: ["It is right."] };
+    const plan = graphPlan(
+      normalized(
+        graph({
+          scan: node({
+            scopes: { read: ["src", "docs"], write: [] },
+            inputs: [{ id: "spec", kind: "workspace_snapshot", path: "spec.md" }],
+            outputs: [{ id: "notes", path: "out/notes.md" }],
+          }),
+          left: node({ dependsOn: ["scan"], verify: judged }),
+          right: node({
+            dependsOn: ["scan"],
+            scopes: { read: [], write: ["out/right"] },
+            verify: { type: "process", argv: ["node", "check.js"] },
+          }),
+          join: node({ dependsOn: ["left", "right"] }),
+        }),
+      ),
+      new Map([
+        ["scan", { worker: "caller" as const }],
+        ["left", { worker: "target" as const, check: "workerTarget" as const }],
+      ]),
+    );
+    expect(
+      Object.fromEntries(
+        plan.nodes.map((entry) => [
+          entry.key,
+          [entry.features, entry.targetSource, entry.checkTargetSource],
+        ]),
+      ),
+    ).toEqual({
+      scan: [{ fanIn: 0, fanOut: 2, check: "none", reads: 3, writes: 1 }, "caller", undefined],
+      left: [
+        { fanIn: 1, fanOut: 1, check: "judgment", reads: 0, writes: 0 },
+        "target",
+        "workerTarget",
+      ],
+      right: [{ fanIn: 1, fanOut: 1, check: "process", reads: 0, writes: 1 }, undefined, undefined],
+      join: [{ fanIn: 2, fanOut: 0, check: "none", reads: 0, writes: 0 }, undefined, undefined],
+    });
+  });
+
   it("refuses a node that still names an agent preset", () => {
     expect(problems(graph({ a: node({ preset: "worker" }) }))).toContain(
       "Agent presets were removed; set target from orchestrator_capabilities.",

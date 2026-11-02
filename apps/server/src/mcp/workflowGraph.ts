@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- graph review hashes pure, normalized values synchronously.
 import * as NodeCrypto from "node:crypto";
 
-import type { OrchestrationV2WorkflowPlan } from "@t3tools/contracts";
+import type { OrchestrationV2WorkflowPlan, WorkflowAgentTargetSource } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
@@ -272,8 +272,23 @@ function graphLayers(graph: WorkflowGraph): string[][] {
   return layers;
 }
 
-/** The graph as the app shows it: each node's label, wave and dependencies, without prompts. */
-export function graphPlan(graph: WorkflowGraph): OrchestrationV2WorkflowPlan {
+/** How review chose a node's worker target, and its judgment check's when it has one. */
+export interface ReviewedTargetSources {
+  readonly worker: WorkflowAgentTargetSource;
+  readonly check?: WorkflowAgentTargetSource;
+}
+
+/**
+ * The graph as the app shows it: each node's label, wave and dependencies, without prompts, plus
+ * the shape facts the graph itself fixes and the target sources review found.
+ */
+export function graphPlan(
+  graph: WorkflowGraph,
+  sources?: ReadonlyMap<string, ReviewedTargetSources>,
+): OrchestrationV2WorkflowPlan {
+  const dependents = new Map<string, number>();
+  for (const node of Object.values(graph.nodes))
+    for (const dep of node.dependsOn) dependents.set(dep, (dependents.get(dep) ?? 0) + 1);
   return {
     nodes: graphLayers(graph).flatMap((layer, wave) =>
       layer.map((key) => {
@@ -281,12 +296,28 @@ export function graphPlan(graph: WorkflowGraph): OrchestrationV2WorkflowPlan {
         const plannedIdentity = workflowPlannedIdentity(
           node.target ?? (node.model ? { model: node.model } : undefined),
         );
+        const reviewed = sources?.get(key);
+        const reads = new Set([
+          ...(node.scopes?.read ?? []),
+          ...node.inputs.map((input) =>
+            input.kind === "workspace_snapshot" ? input.path : `${input.nodeId}#${input.outputId}`,
+          ),
+        ]);
         return {
           key,
           label: node.subject,
           wave,
           dependsOn: [...node.dependsOn],
           ...(plannedIdentity === undefined ? {} : { plannedIdentity }),
+          ...(reviewed === undefined ? {} : { targetSource: reviewed.worker }),
+          ...(reviewed?.check === undefined ? {} : { checkTargetSource: reviewed.check }),
+          features: {
+            fanIn: node.dependsOn.length,
+            fanOut: dependents.get(key) ?? 0,
+            check: node.verify?.type ?? "none",
+            reads: reads.size,
+            writes: writePaths(node).length,
+          },
         };
       }),
     ),

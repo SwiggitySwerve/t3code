@@ -40,6 +40,8 @@ import {
   type OrchestratorMcpGraphReviewResult,
   type OrchestratorMcpGraphStartInput,
   type OrchestratorMcpWorkflowInput,
+  type OrchestratorMcpWorkflowReportInput,
+  type OrchestratorMcpWorkflowReportResult,
   type OrchestratorMcpWorkflowResult,
   type OrchestratorMcpWorkflowStartInput,
   type OrchestratorMcpWorkflowStopInput,
@@ -175,6 +177,7 @@ import {
 } from "@t3tools/shared/storedWorkflowScript";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { checkWorkflowScript } from "./workflowScript.ts";
+import { workflowReport } from "./workflowReport.ts";
 import { workflowReviewRecord } from "./workflowReviewRecord.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -223,6 +226,11 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpWorkflowInput,
   ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
+  /** Every workflow of a readable thread, one row per agent; for the CLI and outside clients. */
+  readonly workflowReport: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpWorkflowReportInput,
+  ) => Effect.Effect<OrchestratorMcpWorkflowReportResult, OrchestratorMcpFailure>;
   readonly workflowStop: (
     scope: McpInvocationScope,
     input: OrchestratorMcpWorkflowStopInput,
@@ -2234,6 +2242,7 @@ const make = Effect.gen(function* () {
           taskId: started.taskId,
           childThreadId: started.childThreadId,
           model: prepared.target.modelSelection.model,
+          options: prepared.target.modelSelection.options,
           providerInstanceId: started.providerInstanceId,
           driver: started.driver,
         };
@@ -2689,7 +2698,23 @@ const make = Effect.gen(function* () {
         ? {
             source: GRAPH_DRIVER_SCRIPT,
             args: { graph: concreteGraph, inputs: review.inputs },
-            plan: graphPlan(concreteGraph),
+            plan: graphPlan(
+              concreteGraph,
+              new Map(
+                targets.map((entry) => {
+                  const judgment = judgments.get(entry.nodeId);
+                  return [
+                    entry.nodeId,
+                    {
+                      worker: entry.source,
+                      ...(judgment === undefined
+                        ? {}
+                        : { check: judgment.ownTarget ? ("target" as const) : entry.source }),
+                    },
+                  ] as const;
+                }),
+              ),
+            ),
             title: concreteGraph.name ?? "Graph",
           }
         : undefined;
@@ -3890,6 +3915,18 @@ const make = Effect.gen(function* () {
         return yield* workflowResult(projection, workflow);
       },
     ),
+    workflowReport: Effect.fn("OrchestratorMcpService.workflowReport")(function* (scope, input) {
+      yield* loadReadableThread(scope, input.threadId);
+      const projection = yield* loadProjection(input.threadId);
+      const rows = projection.subagents.filter(
+        (task) =>
+          task.origin === "app_owned" && task.workflow !== undefined && task.childThreadId === null,
+      );
+      const workflows = yield* Effect.forEach(rows, (row) =>
+        workflowResult(projection, row).pipe(Effect.map((result) => workflowReport(row, result))),
+      );
+      return { threadId: input.threadId, workflows };
+    }),
     workflowStop: Effect.fn("OrchestratorMcpService.workflowStop")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "workflow_stop");
       yield* requireCapability(scope);

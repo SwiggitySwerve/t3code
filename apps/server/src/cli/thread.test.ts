@@ -1,8 +1,9 @@
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import { RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as TestConsole from "effect/testing/TestConsole";
 
-import { type ThreadTools, waitForRun } from "./thread.ts";
+import { printWorkflowReport, type ThreadTools, waitForRun } from "./thread.ts";
 
 const threadId = ThreadId.make("thread-1");
 const runId = RunId.make("run-1");
@@ -72,4 +73,81 @@ it.effect("--wait reports its run's result when a later run is the one waiting",
       status: "completed",
     });
   }),
+);
+
+it.effect("workflow-report prints a thread's reports as text, or as JSON with --json", () =>
+  Effect.gen(function* () {
+    const report = {
+      threadId,
+      workflows: [
+        {
+          workflowId: "workflow:one",
+          name: "One",
+          kind: "script",
+          status: "completed",
+          agents: [
+            {
+              index: 0,
+              label: "work",
+              phase: null,
+              role: "worker",
+              node: null,
+              provider: "codex",
+              model: "gpt-5.4",
+              effort: "high",
+              targetSource: "target",
+              usageStatus: "complete",
+              inputTokens: 10,
+              cachedInputTokens: 5,
+              outputTokens: 2,
+              totalTokens: 12,
+              durationMs: 1_000,
+              attempts: 1,
+              status: "completed",
+              outcome: "completed",
+              check: "none",
+              checkOutcome: null,
+            },
+          ],
+          summary: [
+            {
+              role: "worker",
+              family: "gpt",
+              check: "none",
+              agents: 1,
+              passed: 1,
+              firstTryPassRate: 1,
+              redos: 0,
+              medianTokensPerPassed: 12,
+            },
+          ],
+          loop: {
+            phases: 0,
+            agents: 1,
+            attempts: 1,
+            settledAgents: 1,
+            totalTokens: 12,
+            budgetTokens: null,
+            endedBy: "settled",
+          },
+        },
+      ],
+    };
+    const { tools, calls } = scriptedTools({ t3_workflow_report: [report, report] });
+    yield* printWorkflowReport(tools, threadId, false);
+    yield* printWorkflowReport(tools, threadId, true);
+    const [text, json] = (yield* TestConsole.logLines).map(String);
+    expect(text?.split("\n")).toEqual([
+      "One (workflow:one): script, completed",
+      "#  label  phase  role    provider/model  effort  source  in/cached/out  time  tries  outcome    check",
+      "0  work   -      worker  codex/gpt-5.4   high    target  10/5/2         1.0s  1      completed  -",
+      "",
+      "role    family  check  agents  first-try pass  redos  median tokens/passed",
+      "worker  gpt     none   1       100%            0      12",
+      "",
+      "phases 0, agents 1 (1 settled), attempts 1, tokens 12, ended by settled",
+    ]);
+    expect(JSON.parse(json!)).toEqual(report);
+    expect(calls.map((entry) => entry.args)).toEqual([{ threadId }, { threadId }]);
+  }).pipe(Effect.provide(TestConsole.layer)),
 );
