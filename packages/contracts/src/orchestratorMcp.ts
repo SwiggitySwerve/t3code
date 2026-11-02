@@ -1089,6 +1089,16 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
       /** Omitted when it only restates the id. */
       label: Schema.optional(Schema.String),
       options: Schema.optional(Schema.Array(OrchestratorMcpModelOption)),
+      // From the usage pricing table, never price overrides: null when unknown, absent with no table.
+      listPrice: Schema.optional(
+        Schema.NullOr(
+          Schema.Struct({
+            inputUsdPerMTok: Schema.Number,
+            cachedInputUsdPerMTok: Schema.Number,
+            outputUsdPerMTok: Schema.Number,
+          }),
+        ),
+      ),
     }),
   ),
   /** Models left out of `models`: unlisted visible models, or matches past the cap with `search`. */

@@ -134,7 +134,7 @@ import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as UsageService from "../usage/UsageService.ts";
-import type { RateTable } from "../usage/usagePricing.ts";
+import { lookupRate, type RateTable } from "../usage/usagePricing.ts";
 import {
   clientModeCeiling,
   type McpInvocationScope,
@@ -443,6 +443,19 @@ function listCapabilityModels(input: {
   );
   const listed = visible.filter((model) => input.isPinned(model) || shown.has(model));
   return { listed, omitted: visible.length - listed.length };
+}
+
+/** A model's base list price in USD per million tokens; null when the table does not know it. */
+function listPriceOf(rates: RateTable, model: string) {
+  const rate = lookupRate(rates, model);
+  const perMTok = (perToken: number) => Math.round(perToken * 1e12) / 1e6;
+  return rate === null
+    ? null
+    : {
+        inputUsdPerMTok: perMTok(rate.inputCostPerToken),
+        cachedInputUsdPerMTok: perMTok(rate.cacheReadCostPerToken),
+        outputUsdPerMTok: perMTok(rate.outputCostPerToken),
+      };
 }
 
 /** Option ids and allowed values are all a delegating agent needs; labels are UI copy. */
@@ -3656,6 +3669,7 @@ const make = Effect.gen(function* () {
       );
       const inherited = parent?.thread.modelSelection;
       const searchTerms = input.search?.toLowerCase().split(/\s+/) ?? [];
+      const { table: rates } = yield* peekRates;
       return {
         parentThreadId: parent?.thread.id ?? null,
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
@@ -3692,6 +3706,7 @@ const make = Effect.gen(function* () {
                   ? {}
                   : { label: model.name }),
                 ...(options.length === 0 ? {} : { options: options.map(capabilityModelOption) }),
+                ...(rates.size === 0 ? {} : { listPrice: listPriceOf(rates, model.slug) }),
               };
             }),
             ...(omitted === 0 ? {} : { omittedModels: omitted }),

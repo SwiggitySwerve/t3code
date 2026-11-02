@@ -56,6 +56,8 @@ import { buildUnavailableProviderSnapshot } from "../provider/unavailableProvide
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as UsageService from "../usage/UsageService.ts";
+import { parseRateTable } from "../usage/usagePricing.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
@@ -1377,7 +1379,7 @@ describe("OrchestratorMcpService provider resolution", () => {
       },
     ];
 
-    const capabilitiesWith = (search?: string) =>
+    const capabilitiesWith = (search?: string, usage: Layer.Layer<never> = Layer.empty) =>
       Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.capabilities(scope, search === undefined ? {} : { search });
@@ -1408,6 +1410,7 @@ describe("OrchestratorMcpService provider resolution", () => {
                 Layer.mock(SecretRequests.SecretRequests)({}),
                 Layer.mock(RemoteDelegation.RemoteDelegation)({}),
                 Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+                usage,
               ),
             ),
           ),
@@ -1490,6 +1493,38 @@ describe("OrchestratorMcpService provider resolution", () => {
           { id: "gpt-3" },
           { id: "my-alpha" },
         ]);
+      }),
+    );
+
+    it.effect("lists each model's base list price only when a rate table is at hand", () =>
+      Effect.gen(function* () {
+        const rates = parseRateTable({
+          "gpt-6": {
+            input_cost_per_token: 1.25e-6,
+            output_cost_per_token: 10e-6,
+            cache_read_input_token_cost: 0.125e-6,
+          },
+        });
+        const usage = Layer.mock(UsageService.UsageService)({
+          peekRates: Effect.succeed({
+            table: rates,
+            pricing: { status: "cached", source: "rates", fetchedAt: null, knownModels: 1 },
+          }),
+        });
+        const codex = (yield* capabilitiesWith(undefined, usage)).providers[0];
+        assert.deepEqual(
+          codex?.models.map((entry) => [entry.id, entry.listPrice]),
+          [
+            [
+              "gpt-6",
+              { inputUsdPerMTok: 1.25, cachedInputUsdPerMTok: 0.125, outputUsdPerMTok: 10 },
+            ],
+            // Unknown is null, not free.
+            ["gpt-4", null],
+            ["gpt-3", null],
+            ["my-alpha", null],
+          ],
+        );
       }),
     );
   });
