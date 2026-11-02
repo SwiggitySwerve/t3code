@@ -193,6 +193,36 @@ describe("workflow fake agent replies", () => {
     expect(work2.line.role).toBe("worker");
   });
 
+  // Seen in a run: T3's ACP wrapper says "review", and the worker relayed a planner's report.
+  it("treats a wrapped work prompt that relays a planner's proof as work", () => {
+    const plan = answerPrompt(fixture, [], {
+      text: "[task:FX-9] Plan the change only.",
+      model: "claude-fake-large",
+      effort: "high",
+    });
+    const text = [
+      "<t3_code_instructions>",
+      "Review the T3 tools before you use them; verify what they return.",
+      "</t3_code_instructions>",
+      "",
+      "<user_request>",
+      `[task:FX-9] Make the change. Follow this plan:\n${plan.text}`,
+      "</user_request>",
+    ].join("\n");
+    const work = answerPrompt(fixture, [logged(plan)], {
+      text,
+      model: "claude-fake-large",
+      effort: "high",
+    });
+    expect(work.line.role).toBe("worker");
+    const judge = answerPrompt(fixture, [logged(plan)], {
+      text: text.replace("Make the change. Follow this plan:", "Judge this report:"),
+      model: "gpt-fake-large",
+      effort: "high",
+    });
+    expect(judge.line.role).toBe("checker");
+  });
+
   it("reports discovery as incomplete with tagged follow-ups until they pass", () => {
     const prompt = { text: "Investigate [task:FX-D].", model: "claude-fake-large", effort: "high" };
     const first = answerPrompt(fixture, [], prompt);
