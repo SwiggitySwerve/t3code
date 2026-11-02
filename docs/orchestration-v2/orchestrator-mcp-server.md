@@ -219,7 +219,10 @@ Returns:
 
 - the inherited provider instance and model;
 - the parent runtime and interaction modes;
-- registered provider instances and advertised models;
+- registered provider instances and advertised models, each with its
+  `listPrice` (USD per million input, cached input and output tokens) from the
+  usage pricing table, never your price overrides: `null` when the table has
+  no price for the model, and absent when no table could be read;
 - whether each provider can run a child task; and
 - feature flags for polling, cancellation, and batch thread creation.
 

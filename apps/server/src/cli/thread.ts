@@ -30,7 +30,7 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
-import { formatWorkflowReport } from "../mcp/workflowReport.ts";
+import { formatWorkflowReports } from "../mcp/workflowReport.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -723,7 +723,7 @@ export const printWorkflowReport = Effect.fn("cli.thread.printWorkflowReport")(f
   );
   if (json) return yield* printJson(report);
   if (report.workflows.length === 0) return yield* Console.log("This thread has no workflows.");
-  yield* Console.log(report.workflows.map(formatWorkflowReport).join("\n\n"));
+  yield* Console.log(formatWorkflowReports(report));
 });
 
 const threadWorkflowReportCommand = Command.make("workflow-report", {

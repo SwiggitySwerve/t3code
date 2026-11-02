@@ -12,7 +12,12 @@ import {
 import * as Schema from "effect/Schema";
 
 import { parseRateTable } from "../usage/usagePricing.ts";
-import { attemptCost, formatWorkflowReport, workflowReport } from "./workflowReport.ts";
+import {
+  attemptCost,
+  formatWorkflowReport,
+  formatWorkflowReports,
+  workflowReport,
+} from "./workflowReport.ts";
 
 const decodeWorkflow = Schema.decodeUnknownSync(OrchestrationV2SubagentWorkflow);
 const codex = ProviderInstanceId.make("codex");
@@ -397,11 +402,11 @@ describe("workflow report", () => {
     expect(formatWorkflowReport(workflowReport(row(decodeWorkflow(stored)), result, pricing))).toBe(
       [
         "Fixture (workflow:fixture): script, failed",
-        "#  label        phase     role     provider/model            effort  source  in/cached/out   cost     time  tries  outcome         check",
-        "0  draft        Write     worker   codex/gpt-5.4             high    target  4000/2000/1000  $0.0114  4.0s  2      completed       judgment:passed",
-        "1  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1000/500/200    -        -     1      completed       verdict:failed",
-        "2  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1200/600/300    -        -     1      completed       verdict:passed",
-        "3  research     Research  worker   claude/claude-sonnet-4-6  -       caller  -/-/-           -        -     3      provider_error  process:not_run",
+        "#  label        phase     role     provider/model            effort  source  in/cached/out   cost      time  tries  outcome         check",
+        "0  draft        Write     worker   codex/gpt-5.4             high    target  4000/2000/1000  $0.0114   4.0s  2      completed       judgment:passed",
+        "1  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1000/500/200    no usage  -     1      completed       verdict:failed",
+        "2  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1200/600/300    no usage  -     1      completed       verdict:passed",
+        "3  research     Research  worker   claude/claude-sonnet-4-6  -       caller  -/-/-           no usage  -     3      provider_error  process:not_run",
         "",
         "role     family  check     agents  first-try pass  retries  median tokens/passed",
         "checker  claude  none      2       100%            0        1350",
@@ -411,6 +416,32 @@ describe("workflow report", () => {
         "phases 2, agents 4 (4 settled), attempts 7, tokens 7700 of 20000, ended by settled",
       ].join("\n"),
     );
+  });
+
+  it("says why a cost is unknown or a lower bound, and which list prices it used", () => {
+    const report = workflowReport(row(decodeWorkflow(stored)), result, {
+      ...pricing,
+      rates: new Map(),
+    });
+    const partial = {
+      ...report,
+      agents: [{ ...report.agents[0]!, costUsd: 0.0021, costSource: "partialUsage" as const }],
+    };
+    const cell = (text: string) => text.split("\n")[2]!.split(/\s{2,}/)[8];
+    expect(cell(formatWorkflowReport(report))).toBe("no rates");
+    expect(cell(formatWorkflowReport(partial))).toBe(">=$0.0021");
+    const text = (status: "fresh" | "cached" | "unavailable", fetchedAt: string | null) =>
+      formatWorkflowReports({
+        threadId: ThreadId.make("thread:parent"),
+        workflows: [report],
+        pricing: { status, source: "rates.json", fetchedAt },
+      })
+        .split("\n")
+        .at(-1);
+    expect(text("cached", "2026-11-01T00:00:00.000Z")).toBe(
+      "list prices: cached, fetched 2026-11-01T00:00:00.000Z",
+    );
+    expect(text("unavailable", null)).toBe("list prices: unavailable, so every cost is unknown");
   });
 
   it("says a workflow stopped at its budget", () => {

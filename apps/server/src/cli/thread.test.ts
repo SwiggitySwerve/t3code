@@ -183,6 +183,8 @@ it.effect("workflow-report prints a thread's reports as text, or as JSON with --
       "worker  gpt     none   1       100%            0        12",
       "",
       "phases 0, agents 1 (1 settled), attempts 1, tokens 12, ended by settled",
+      "",
+      "list prices: cached",
     ]);
     expect(JSON.parse(json!)).toEqual(report);
     expect(calls.map((entry) => entry.args)).toEqual([{ threadId }, { threadId }]);

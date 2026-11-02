@@ -9,6 +9,7 @@ import type {
   OrchestratorMcpWorkflowReportAgent,
   OrchestratorMcpWorkflowReportAttempt,
   OrchestratorMcpWorkflowReportGroup,
+  OrchestratorMcpWorkflowReportResult,
   OrchestratorMcpWorkflowResult,
   OrchestratorMcpWorkflowUsage,
   WorkflowReportCostSource,
@@ -217,7 +218,27 @@ export function workflowReport(
 }
 
 const count = (value: number | null) => (value === null ? "-" : String(Math.round(value)));
-const usd = (value: number | null | undefined) => (value == null ? "-" : `$${value.toFixed(4)}`);
+
+/** Why a cost is unknown, in the text report's cost column. */
+const UNKNOWN_COST: Readonly<
+  Record<Exclude<WorkflowReportCostSource, "modelPriced" | "partialUsage">, string>
+> = {
+  noRates: "no rates",
+  noUsage: "no usage",
+  unpriced: "unpriced",
+  tierUnpriced: "tier unpriced",
+};
+
+function cost(agent: OrchestratorMcpWorkflowReportAgent): string {
+  const source = agent.costSource;
+  if (agent.costUsd == null) {
+    return source === undefined || source === "modelPriced" || source === "partialUsage"
+      ? "-"
+      : UNKNOWN_COST[source];
+  }
+  // A lower bound says so.
+  return `${source === "partialUsage" ? ">=" : ""}$${agent.costUsd.toFixed(4)}`;
+}
 
 function duration(ms: number | null): string {
   if (ms === null) return "-";
@@ -267,7 +288,7 @@ export function formatWorkflowReport(report: OrchestratorMcpWorkflowReport): str
       agent.effort ?? "-",
       agent.targetSource ?? "-",
       `${count(agent.inputTokens)}/${count(agent.cachedInputTokens)}/${count(agent.outputTokens)}`,
-      usd(agent.costUsd),
+      cost(agent),
       duration(agent.durationMs),
       String(agent.attempts),
       agent.outcome ?? agent.status,
@@ -299,4 +320,18 @@ export function formatWorkflowReport(report: OrchestratorMcpWorkflowReport): str
     "",
     `phases ${loop.phases}, agents ${loop.agents} (${loop.settledAgents} settled), attempts ${loop.attempts}, tokens ${count(loop.totalTokens)}${loop.budgetTokens === null ? "" : ` of ${loop.budgetTokens}`}, ended by ${loop.endedBy}`,
   ].join("\n");
+}
+
+/** Every workflow's report, then the list prices the costs came from when the server says. */
+export function formatWorkflowReports(result: OrchestratorMcpWorkflowReportResult): string {
+  const { pricing } = result;
+  const prices =
+    pricing === undefined
+      ? []
+      : [
+          pricing.status === "unavailable"
+            ? "list prices: unavailable, so every cost is unknown"
+            : `list prices: ${pricing.status}${pricing.fetchedAt === null ? "" : `, fetched ${pricing.fetchedAt}`}`,
+        ];
+  return [result.workflows.map(formatWorkflowReport).join("\n\n"), ...prices].join("\n\n");
 }
