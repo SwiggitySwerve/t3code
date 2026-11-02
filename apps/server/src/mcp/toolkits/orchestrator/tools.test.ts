@@ -40,4 +40,5 @@ it("advertises the verify checks where a coordinator reads workflow_start and gr
     readonly properties: Readonly<Record<string, { readonly description?: string }>>;
   };
   expect(schema.properties.script?.description).toContain("{ type: 'judgment', rubric, target? }");
+  expect(schema.properties.script?.description).toContain("{{result}}");
 });
