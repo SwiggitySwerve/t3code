@@ -4,25 +4,18 @@ import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-
 import { describe, expect, it, vi } from "@effect/vitest";
-import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
   EventId,
   EnvironmentId,
   MessageId,
   NodeId,
-  OrchestratorMcpDelegateTasksResult,
   OrchestratorMcpGraphReviewResult,
-  OrchestratorMcpTaskWaitResult,
-  OrchestratorMcpWorkflowResult,
   OrchestrationV2ThreadStreamItem,
   type OrchestrationV2SubagentWorkflow,
-  type OrchestrationV2Run,
   type ModelSelection,
   type OrchestrationV2Subagent,
-  ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
   ProviderThreadId,
@@ -32,7 +25,6 @@ import {
   RunId,
   RunAttemptId,
   type ServerProvider,
-  type TurnTokenUsage,
   ThreadId,
   TurnItemId,
 } from "@t3tools/contracts";
@@ -66,28 +58,14 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
-
-import * as ServerSecretStore from "../auth/ServerSecretStore.ts";
-import {
-  CLAUDE_PROVIDER,
-  ClaudeProviderCapabilitiesV2,
-} from "../orchestration-v2/Adapters/ClaudeAdapterV2.ts";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
-import * as CommandReceiptStore from "../orchestration-v2/CommandReceiptStore.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
 import * as EffectWorker from "../orchestration-v2/EffectWorker.ts";
 import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
-import * as ProviderAdapterRegistry from "../orchestration-v2/ProviderAdapterRegistry.ts";
-import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
-import * as PeerForwarding from "../peer/PeerForwarding.ts";
-import * as PeerLinkRequests from "../peer/PeerLinkRequests.ts";
-import * as PeerLinks from "../peer/PeerLinks.ts";
-import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import * as WorkflowApprovalGate from "../orchestration-v2/WorkflowApprovalGate.ts";
 import * as WorkflowApprovalService from "../orchestration-v2/WorkflowApprovalService.ts";
 import * as ProjectionStore from "../orchestration-v2/ProjectionStore.ts";
-import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import { EnvironmentToolkit } from "./toolkits/environment/tools.ts";
 import { HtmlToolkit } from "./toolkits/html/tools.ts";
 import { OrchestratorToolkit } from "./toolkits/orchestrator/tools.ts";
@@ -95,367 +73,48 @@ import { PreviewControlsToolkit } from "./toolkits/previewControls/tools.ts";
 import { ProjectToolkit } from "./toolkits/project/tools.ts";
 import { ThreadToolkit } from "./toolkits/thread/tools.ts";
 import { WorktreeRemovalToolkit, WorktreeToolkit } from "./toolkits/worktree/tools.ts";
-import * as SqlitePersistence from "../persistence/Sqlite.ts";
-import * as ProjectService from "../project/ProjectService.ts";
-import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
-import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
-import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
-import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
-import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
-
-const instanceId = ProviderInstanceId.make("codex");
-const model = "gpt-5.4";
-const modelSelection = { instanceId, model };
-const parentThreadId = ThreadId.make("thread:delegate-tasks-parent");
-
-const adapter = {
+import {
+  adapter,
+  answerWorkflowAgents,
+  awaitCheckers,
+  awaitMember,
+  awaitWorkflowEnd,
+  childTasks,
+  claudeAdapter,
+  claudeInstanceId,
+  claudeModel,
+  claudeProvider,
+  client,
+  completeChild,
+  decodeReview,
+  decodeStarted,
+  decodeWait,
+  decodeWorkflow,
+  errorText,
   instanceId,
-  driver: ProviderDriverKind.make("codex"),
-  getCapabilities: () => Effect.succeed(CodexProviderCapabilitiesV2),
-  planSelectionTransition: () => Effect.succeed({ type: "apply_on_next_turn" as const }),
-  openSession: () => Effect.die("Runs here never reach a provider"),
-} as ProviderAdapter.ProviderAdapterV2["Service"];
-
-const provider: ServerProvider = {
-  instanceId,
-  driver: ProviderDriverKind.make("codex"),
-  enabled: true,
-  installed: true,
-  version: "test",
-  status: "ready",
-  auth: { status: "authenticated" },
-  checkedAt: "2026-10-22T00:00:00.000Z",
-  models: [{ slug: model, name: model, isCustom: false, capabilities: null }],
-  slashCommands: [],
-  skills: [],
-};
-
-const claudeInstanceId = ProviderInstanceId.make("claude-test");
-const claudeModel = "claude-sonnet-4-6";
-const claudeAdapter: ProviderAdapter.ProviderAdapterV2["Service"] = {
-  ...adapter,
-  instanceId: claudeInstanceId,
-  driver: CLAUDE_PROVIDER,
-  getCapabilities: () => Effect.succeed(ClaudeProviderCapabilitiesV2),
-};
-const claudeProvider: ServerProvider = {
-  ...provider,
-  instanceId: claudeInstanceId,
-  driver: claudeAdapter.driver,
-  models: [{ slug: claudeModel, name: claudeModel, isCustom: false, capabilities: null }],
-};
-
-const layerDatabase = SqlitePersistence.layerMemory;
-const makeLayerTest = (
-  maxRunningDelegatedTasks?: number,
-  providers: ReadonlyArray<ServerProvider> = [provider, claudeProvider],
-  runtime?: {
-    readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
-    readonly cwd: string;
-  },
-) => {
-  const layerAdapters = ProviderAdapterRegistry.layerFromAdapters([
-    runtime?.adapter ?? adapter,
-    claudeAdapter,
-  ]);
-  const layerOrchestrator = ProviderReplayHarness.layerWithRegistry(
-    { name: "delegate-tasks" },
-    layerAdapters,
-    {
-      databaseLayer: layerDatabase,
-      runEffectWorker: runtime !== undefined,
-      configureMcp: runtime !== undefined,
-      serverSettings: { workflows: true },
-      ...(maxRunningDelegatedTasks === undefined ? {} : { maxRunningDelegatedTasks }),
-    },
-  );
-  const layerOrchestration = ThreadManagementService.layer.pipe(
-    Layer.provideMerge(layerOrchestrator),
-    Layer.provideMerge(
-      ServerSettings.layerTest({
-        workflows: true,
-        providerInstances: Object.fromEntries(
-          providers.map((provider) => [
-            provider.instanceId,
-            {
-              driver: provider.driver,
-              enabled: provider.enabled,
-              config: {},
-            },
-          ]),
-        ),
-      }),
-    ),
-    Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
-  );
-  const layerSecretStore = Layer.sync(ServerSecretStore.ServerSecretStore, () =>
-    ServerSecretStore.ServerSecretStore.of({
-      get: () => Effect.succeedNone,
-      set: () => Effect.void,
-      create: () => Effect.void,
-      getOrCreateRandom: (_name, bytes) => Effect.succeed(new Uint8Array(bytes)),
-      remove: () => Effect.void,
-    }),
-  );
-  return McpHttpServer.layerOrchestratorToolkit.pipe(
-    // Enough checkout for isolation "worktree": the run preparation itself is not under test.
-    Layer.provideMerge(
-      Layer.mock(ThreadLaunchService.ThreadLaunchService)({ prepareRun: () => Effect.void }),
-    ),
-    Layer.provideMerge(
-      Layer.mock(GitVcsDriver.GitVcsDriver)({
-        resolveCommit: () => Effect.succeed({ commitSha: "0123456789abcdef" } as never),
-      }),
-    ),
-    Layer.provideMerge(McpServer.McpServer.layer),
-    Layer.provideMerge(WorkflowApprovalService.layer),
-    Layer.provideMerge(layerOrchestration),
-    Layer.provideMerge(layerAdapters),
-    Layer.provideMerge(ProviderRegistryMock.layer(providers)),
-    Layer.provideMerge(Layer.mock(ScheduledTaskService.ScheduledTaskService)({})),
-    Layer.provideMerge(
-      Layer.mock(ProjectService.ProjectService)({
-        getById: (projectId) =>
-          Effect.succeedSome({
-            id: projectId,
-            title: "Delegate tasks",
-            // A real directory, so process checks have somewhere to run.
-            workspaceRoot: runtime?.cwd ?? process.cwd(),
-          } as never),
-      }),
-    ),
-    Layer.provideMerge(
-      SecretRequests.layer.pipe(Layer.provide(layerSecretStore), Layer.provide(layerOrchestration)),
-    ),
-    // Where the checkers' whole-answer files go: the server's own folder, not this checkout.
-    Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-agent-fanout-test-" })),
-    // Linked environments are not under test here.
-    Layer.provideMerge(Layer.mock(PeerForwarding.PeerForwarding)({})),
-    Layer.provideMerge(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-    Layer.provideMerge(Layer.mock(PeerLinks.PeerLinks)({})),
-    Layer.provideMerge(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-    Layer.provideMerge(NodeServices.layer),
-    Layer.provideMerge(McpProviderSessions.layer),
-  );
-};
-const layerTest = makeLayerTest();
-
-const client = McpSchema.McpServerClient.of({
-  clientId: 1,
-  protocolVersion: "2025-06-18",
-  clientCapabilities: {},
-  clientInfo: { name: "delegate-tasks-test", version: "1.0.0" },
-  initializePayload: {
-    protocolVersion: "2025-06-18",
-    capabilities: {},
-    clientInfo: { name: "delegate-tasks-test", version: "1.0.0" },
-  },
-  getClient: Effect.die("unused"),
-});
-
-const invocation: McpInvocationContext.McpInvocationScope = {
-  environmentId: EnvironmentId.make("environment:delegate-tasks"),
-  requestNamespace: "provider-session:delegate-tasks",
-  thread: {
-    threadId: parentThreadId,
-    providerSessionId: "provider-session:delegate-tasks",
-    providerInstanceId: instanceId,
-  },
-  client: undefined,
-  capabilities: new Set(["orchestration", "workflows"]),
-  issuedAt: 1,
-};
-
-const invoke = (name: string, args: Record<string, unknown>) =>
-  Effect.gen(function* () {
-    const server = yield* McpServer.McpServer;
-    return yield* server
-      .callTool({ name, arguments: args })
-      .pipe(
-        Effect.provideService(McpInvocationContext.McpInvocationContext, invocation),
-        Effect.provideService(McpSchema.McpServerClient, client),
-      );
-  });
-
-const errorText = (result: McpSchema.CallToolResult) =>
-  result.content.map((part) => ("text" in part ? part.text : "")).join("");
-
-const startParentWithSelection = (
-  selection: ModelSelection,
-  text = "Fan out work.",
-  worktreePath: string | null = null,
-) =>
-  Effect.gen(function* () {
-    yield* (yield* McpProviderSessions.McpProviderSessions).set({
-      environmentId: invocation.environmentId,
-      threadId: parentThreadId,
-      providerSessionId: invocation.thread!.providerSessionId,
-      providerInstanceId: selection.instanceId,
-      endpoint: "http://127.0.0.1/mcp",
-      authorizationHeader: "Bearer test-parent",
-      browserToolsAvailable: false,
-      capabilities: invocation.capabilities,
-    });
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
-      type: "thread.create",
-      createdBy: "user",
-      creationSource: "web",
-      commandId: CommandId.make("command:delegate-tasks:create"),
-      threadId: parentThreadId,
-      projectId: ProjectId.make("project:delegate-tasks"),
-      title: "Delegate tasks parent",
-      modelSelection: selection,
-      runtimeMode: "full-access",
-      interactionMode: "default",
-      branch: null,
-      worktreePath,
-    });
-    yield* orchestrator.dispatch({
-      type: "message.dispatch",
-      createdBy: "user",
-      creationSource: "web",
-      commandId: CommandId.make("command:delegate-tasks:start"),
-      threadId: parentThreadId,
-      messageId: MessageId.make("message:delegate-tasks:start"),
-      text,
-      attachments: [],
-      modelSelection: selection,
-      dispatchMode: { type: "start_immediately" },
-    });
-  });
-const startParent = startParentWithSelection(modelSelection);
-
-const childTasks = Effect.gen(function* () {
-  const orchestrator = yield* Orchestrator.OrchestratorV2;
-  return (yield* orchestrator.getThreadProjection(parentThreadId)).subagents.filter(
-    (task) => task.origin === "app_owned",
-  );
-});
-
-/** Finishes a delegated child's run as if its provider replied with `text`. */
-const completeChild = (
-  childThreadId: ThreadId,
-  text: string,
-  runPatch: Partial<OrchestrationV2Run> = { status: "completed" },
-  tokens?: number | ReadonlyArray<TurnTokenUsage>,
-) =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const sink = yield* EventSink.EventSinkV2;
-    const child = yield* orchestrator.getThreadProjection(childThreadId);
-    const run = child.runs.at(-1)!;
-    const usages: ReadonlyArray<TurnTokenUsage> =
-      typeof tokens === "number"
-        ? [
-            {
-              usageStatus: "complete",
-              usageScope: "main_agent",
-              hasSubagents: false,
-              inputTokens: tokens,
-              cachedInputTokens: Math.floor(tokens / 2),
-              cacheCreationTokens: 0,
-              outputTokens: 0,
-            },
-          ]
-        : (tokens ?? []);
-    const now = yield* DateTime.now;
-    yield* sink.commitCommand({
-      commandId: CommandId.make(`command:test-complete:${run.id}`),
-      threadId: childThreadId,
-      commandType: "test.complete",
-      acceptedAt: now,
-      effects: [],
-      events: [
-        {
-          id: EventId.make(`event:test-reply:${run.id}`),
-          type: "message.updated",
-          threadId: childThreadId,
-          runId: run.id,
-          occurredAt: now,
-          payload: {
-            id: MessageId.make(`message:test-reply:${run.id}`),
-            threadId: childThreadId,
-            runId: run.id,
-            nodeId: run.rootNodeId,
-            role: "assistant",
-            text,
-            attachments: [],
-            streaming: false,
-            createdBy: "agent",
-            creationSource: "provider",
-            createdAt: now,
-            updatedAt: now,
-          },
-        },
-        ...usages.flatMap((usage, index) =>
-          run.providerThreadId === null || run.rootNodeId === null
-            ? []
-            : [
-                {
-                  id: EventId.make(`event:test-turn:${run.id}:${index}`),
-                  type: "provider-turn.updated" as const,
-                  threadId: childThreadId,
-                  runId: run.id,
-                  occurredAt: now,
-                  payload: {
-                    id: ProviderTurnId.make(`provider-turn:test:${run.id}:${index}`),
-                    providerThreadId: run.providerThreadId,
-                    nodeId: run.rootNodeId,
-                    runAttemptId: run.activeAttemptId,
-                    nativeTurnRef: null,
-                    ordinal: index + 1,
-                    status: "completed" as const,
-                    startedAt: now,
-                    completedAt: now,
-                    // Context occupancy deliberately differs from cumulative response usage.
-                    tokenUsage: { usedTokens: 7, updatedAt: DateTime.formatIso(now) },
-                    turnTokenUsage: usage,
-                  },
-                },
-              ],
-        ),
-        {
-          id: EventId.make(`event:test-complete:${run.id}`),
-          type: "run.updated",
-          threadId: childThreadId,
-          runId: run.id,
-          occurredAt: now,
-          payload: { ...run, status: "completed", startedAt: now, completedAt: now, ...runPatch },
-        },
-      ],
-    });
-  });
-
-const decodeStarted = Schema.decodeUnknownEffect(OrchestratorMcpDelegateTasksResult);
-const decodeWait = Schema.decodeUnknownEffect(OrchestratorMcpTaskWaitResult);
-const decodeWorkflow = Schema.decodeUnknownEffect(OrchestratorMcpWorkflowResult);
-
-const refusedTargets = [
-  {
-    name: "unregistered provider",
-    target: { providerInstanceId: "missing-provider", model },
-    reason: "Provider instance missing-provider is not registered.",
-  },
-  {
-    name: "disabled provider",
-    target: { providerInstanceId: claudeInstanceId, model: claudeModel },
-    reason: `Provider ${claudeInstanceId} cannot run a child task:`,
-  },
-  {
-    name: "unknown model",
-    target: { providerInstanceId: instanceId, model: "unknown-model" },
-    reason: `Model unknown-model is not advertised by provider ${instanceId}.`,
-  },
-];
-const layerRefusedTargets = makeLayerTest(undefined, [
+  invocation,
+  invoke,
+  layerDatabase,
+  layerRefusedTargets,
+  layerTest,
+  makeLayerTest,
+  model,
+  modelSelection,
+  parentThreadId,
   provider,
-  { ...claudeProvider, enabled: false },
-]);
+  refusedTargets,
+  reviewGraph,
+  startParent,
+  startParentWithSelection,
+  startWorkflow,
+  stopChild,
+  withScratchDir,
+  withServerProcess,
+} from "./WorkflowHarness.testkit.ts";
 
 describe("delegate_tasks", () => {
   it.effect("starts every task in one call, in request order, and retries without duplicates", () =>
@@ -565,16 +224,6 @@ const startThree = Effect.gen(function* () {
   );
 });
 
-const stopChild = (childThreadId: ThreadId) =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator.dispatch({
-      type: "thread.stop",
-      commandId: CommandId.make(`command:delegate-tasks:stop:${childThreadId}`),
-      threadId: childThreadId,
-    });
-  });
-
 describe("task_wait", () => {
   it.effect("any returns the tasks that are ready and lists the rest as pending", () =>
     Effect.gen(function* () {
@@ -655,66 +304,6 @@ describe("delegate_tasks over the running limit", () => {
     }).pipe(Effect.provide(makeLayerTest(2))),
   );
 });
-
-/**
- * Answers every agent a workflow starts, as its provider would, with `reply(prompt)`.
- * Agents whose reply is undefined are left running.
- */
-const answerWorkflowAgents = (reply: (prompt: string) => string | undefined, tokens?: number) =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const answered = new Set<string>();
-    return yield* orchestrator
-      .streamStoredEventsFrom({
-        threadId: parentThreadId,
-        afterSequence: 0,
-        eventType: "subagent.updated",
-      })
-      .pipe(
-        Stream.runForEach((stored) =>
-          Effect.gen(function* () {
-            if (stored.event.type !== "subagent.updated") return;
-            const task = stored.event.payload;
-            if (
-              task.childThreadId === null ||
-              task.status !== "running" ||
-              answered.has(task.id) ||
-              !String(task.parentNodeId).startsWith("workflow:")
-            )
-              return;
-            const text = reply(task.prompt);
-            if (text === undefined) return;
-            answered.add(task.id);
-            yield* completeChild(task.childThreadId, text, { status: "completed" }, tokens);
-          }),
-        ),
-        Effect.forkChild,
-      );
-  });
-
-const awaitWorkflowEnd = (workflowId: string) =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    yield* orchestrator
-      .streamStoredEventsFrom({
-        threadId: parentThreadId,
-        afterSequence: 0,
-      })
-      .pipe(
-        Stream.filter(
-          (stored) =>
-            (stored.event.type === "subagent.updated" ||
-              stored.event.type === "workflow.updated") &&
-            stored.event.payload.id === workflowId &&
-            stored.event.payload.status !== undefined &&
-            stored.event.payload.status !== "running",
-        ),
-        Stream.runHead,
-      );
-    return yield* decodeWorkflow(
-      (yield* invoke("workflow_status", { workflowId })).structuredContent,
-    );
-  });
 
 it.effect("bounds full workflow replacements and sequences their revisions", () =>
   Effect.gen(function* () {
@@ -1237,16 +826,6 @@ it.effect("keeps a parent run that settles between workflow.complete's read and 
   }).pipe(Effect.provide(layerTest)),
 );
 
-const startWorkflow = (script: string, args?: unknown) =>
-  Effect.gen(function* () {
-    const result = yield* invoke("workflow_start", {
-      script,
-      title: "Test workflow",
-      ...(args === undefined ? {} : { args }),
-    });
-    return yield* decodeWorkflow(result.structuredContent);
-  });
-
 describe("workflow_start", () => {
   it.effect(
     "C4 preserves script target, legacy model, workflow default and caller precedence",
@@ -1596,14 +1175,22 @@ describe("workflow_start", () => {
         const started = yield* startWorkflow(
           planned
             ? `export const meta = { name: "review", phases: [{ title: "Scan", total: 5 }, { title: "Review", total: 8 }] }
+
 const scanned = await progress.phase("Scan", { total: 5 }, (bar) => parallel(args.files.map((file) => () => bar.agent("scan " + file, { label: file }))))
+
 log("scanned", scanned.length)
+
 const reviewed = await progress.phase("Review", { total: scanned.length }, (bar) => pipeline(scanned, (text) => bar.agent("review " + text, { label: "review" })))
+
 return { scanned, reviewed }`
             : `export const meta = { name: "review", phases: [{ title: "Scan" }, { title: "Review" }] }
+
 const scanned = await parallel(args.files.map((file) => () => agent("scan " + file, { label: file, phase: "Scan" })))
+
 log("scanned", scanned.length)
+
 const reviewed = await pipeline(scanned, (text) => agent("review " + text, { label: "review", phase: "Review" }))
+
 return { scanned, reviewed }`,
           { files: ["a", "b", "c"] },
         );
@@ -1660,6 +1247,7 @@ return { scanned, reviewed }`,
       yield* answerWorkflowAgents(() => 'Counted.\n```json\n{"lines": 42}\n```');
       const started = yield* startWorkflow(
         `const counted = await agent("count lines", { schema: { type: "object", required: ["lines"], properties: { lines: { type: "integer" } } } })
+
 return counted.lines + 1`,
       );
       const ended = yield* awaitWorkflowEnd(started.workflowId);
@@ -1785,68 +1373,6 @@ return counted.lines + 1`,
     }).pipe(Effect.provide(layerTest)),
   );
 });
-
-/** Waits for the workflow's `count`-th agent task, in start order. */
-const awaitMember = (workflowId: string, count: number) =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const seen: Array<OrchestrationV2Subagent> = [];
-    yield* orchestrator
-      .streamStoredEventsFrom({
-        threadId: parentThreadId,
-        afterSequence: 0,
-        eventType: "subagent.updated",
-      })
-      .pipe(
-        Stream.filter((stored) => {
-          if (stored.event.type !== "subagent.updated") return false;
-          const task = stored.event.payload;
-          if (task.parentNodeId !== workflowId || task.childThreadId === null) return false;
-          if (!seen.some((known) => known.id === task.id)) seen.push(task);
-          return seen.length >= count;
-        }),
-        Stream.runHead,
-      );
-    return seen[count - 1]!;
-  });
-
-/** Waits for the workflow's `count` checker tasks, which have a thread, in start order. */
-const awaitCheckers = (workflowId: string, count: number) =>
-  Effect.gen(function* () {
-    const orchestrator = yield* Orchestrator.OrchestratorV2;
-    const seen: Array<OrchestrationV2Subagent> = [];
-    yield* orchestrator
-      .streamStoredEventsFrom({
-        threadId: parentThreadId,
-        afterSequence: 0,
-        eventType: "subagent.updated",
-      })
-      .pipe(
-        Stream.filter((stored) => {
-          if (stored.event.type !== "subagent.updated") return false;
-          const task = stored.event.payload;
-          if (task.parentNodeId !== workflowId || task.childThreadId === null) return false;
-          if (!task.prompt.includes("independent checker")) return false;
-          if (!seen.some((known) => known.id === task.id)) seen.push(task);
-          return seen.length >= count;
-        }),
-        Stream.runHead,
-      );
-    return seen.slice(0, count);
-  });
-
-/** Runs `use` against a fresh workflow service, then shuts it down as a server stop would. */
-const withServerProcess = <A, E, R>(
-  use: (
-    service: OrchestratorMcpService.OrchestratorMcpService["Service"],
-  ) => Effect.Effect<A, E, R>,
-) =>
-  Effect.scoped(
-    Effect.gen(function* () {
-      const context = yield* Layer.build(Layer.fresh(OrchestratorMcpService.layer));
-      return yield* use(Context.get(context, OrchestratorMcpService.OrchestratorMcpService));
-    }),
-  );
 
 const twoStepScript =
   'const first = await agent("first")\nconst second = await agent("second after " + first)\nreturn [first, second]';
@@ -3088,15 +2614,6 @@ describe("workflow resume", () => {
   );
 });
 
-// Declared files live in the test project's checkout, the working directory, under a scratch folder.
-const withScratchDir = <A, E, R>(use: (dir: string) => Effect.Effect<A, E, R>) => {
-  const dir = `.t3-workflow-files-${NodeCrypto.randomUUID()}`;
-  NodeFS.mkdirSync(dir);
-  return use(dir).pipe(
-    Effect.ensuring(Effect.sync(() => NodeFS.rmSync(dir, { recursive: true, force: true }))),
-  );
-};
-
 describe("workflow checks", () => {
   const retried = (prompt: string) => prompt.includes("did not pass its");
 
@@ -3976,14 +3493,7 @@ const spendCommandId = (commandId: string) =>
     expect(again._tag).toBe("OrchestratorCommandPreviouslyRejectedError");
   });
 
-const decodeReview = Schema.decodeUnknownEffect(OrchestratorMcpGraphReviewResult);
 const sha256 = (text: string) => NodeCrypto.createHash("sha256").update(text).digest("hex");
-const reviewGraph = (graph: unknown) =>
-  Effect.gen(function* () {
-    const result = yield* invoke("graph_review", { graph });
-    expect(result.isError).not.toBe(true);
-    return yield* decodeReview(result.structuredContent);
-  });
 
 /** A producer that writes a JSON output from a pinned input, and a consumer of that output. */
 const serialGraph = (dir: string) => ({
