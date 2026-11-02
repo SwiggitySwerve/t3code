@@ -627,6 +627,8 @@ export const OrchestratorMcpWorkflowReportAgent = Schema.Struct({
   /** A checker is the agent a judgment check started to judge a worker. */
   role: Schema.Literals(["worker", "checker"]),
   node: Schema.NullOr(Schema.String),
+  /** The child thread of its latest attempt. */
+  childThreadId: Schema.NullOr(ThreadId),
   provider: Schema.NullOr(Schema.String),
   model: Schema.NullOr(Schema.String),
   effort: Schema.NullOr(Schema.String),
@@ -642,7 +644,8 @@ export const OrchestratorMcpWorkflowReportAgent = Schema.Struct({
   outcome: Schema.NullOr(WorkflowAgentOutcomeCategory),
   /** The worker's declared or last-run check; a checker's own is none. */
   check: WorkflowReportCheck,
-  checkOutcome: Schema.NullOr(Schema.Literals(["passed", "failed", "error"])),
+  /** not_run: the agent ended before its declared check ran, e.g. on a provider error. */
+  checkOutcome: Schema.NullOr(Schema.Literals(["passed", "failed", "error", "not_run"])),
 });
 export type OrchestratorMcpWorkflowReportAgent = typeof OrchestratorMcpWorkflowReportAgent.Type;
 
@@ -655,8 +658,11 @@ export const OrchestratorMcpWorkflowReportGroup = Schema.Struct({
   passed: NonNegativeInt,
   /** Agents that passed on their first attempt, over all agents of the group. */
   firstTryPassRate: Schema.Number,
-  /** Attempts past each agent's first. */
-  redos: NonNegativeInt,
+  /**
+   * Runner retries: attempts past each agent's first, always on the same target. A coordinator's
+   * redo is a new agent, which the record does not link to the work it redoes.
+   */
+  retries: NonNegativeInt,
   medianTokensPerPassed: Schema.NullOr(Schema.Number),
 });
 export type OrchestratorMcpWorkflowReportGroup = typeof OrchestratorMcpWorkflowReportGroup.Type;

@@ -759,6 +759,7 @@ class WorkflowSession {
       label,
       ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
       ...(request.judgmentFor === undefined ? {} : { judgmentFor: request.judgmentFor }),
+      ...(check === undefined ? {} : { declaredCheck: check.type }),
       state: "queued",
       targetSource,
       ...(plannedIdentity === undefined ? {} : { plannedIdentity }),

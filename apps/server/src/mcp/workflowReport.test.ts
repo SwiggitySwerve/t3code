@@ -27,7 +27,10 @@ const attempt = (index: number, durationMs: number, state: "completed" | "failed
   timingComplete: true,
 });
 
-/** A script run as stored: a worker redone after its checker failed it, and a failed researcher. */
+/**
+ * A script run as stored: a worker retried after its checker failed it, and a researcher whose
+ * declared process check never ran because its provider failed.
+ */
 const stored = {
   budget: { limit: 20_000, exhausted: false },
   phases: [
@@ -78,6 +81,7 @@ const stored = {
       providerInstanceId: claude,
       model: "claude-sonnet-4-6",
       targetSource: "caller",
+      declaredCheck: "process",
       outcomeCategory: "provider_error",
     },
   ],
@@ -165,11 +169,18 @@ describe("workflow report", () => {
 
   it("joins the record with the read usage, one row per agent and groups by family and check", () => {
     const report = workflowReport(row(decodeWorkflow(stored)), result);
-    expect(report.agents.map((agent) => [agent.label, agent.attempts, agent.durationMs])).toEqual([
-      ["draft", 2, 4_000],
-      ["check draft", 1, null],
-      ["check draft", 1, null],
-      ["research", 3, null],
+    expect(
+      report.agents.map((agent) => [
+        agent.label,
+        agent.attempts,
+        agent.durationMs,
+        agent.childThreadId,
+      ]),
+    ).toEqual([
+      ["draft", 2, 4_000, "thread:child-1"],
+      ["check draft", 1, null, null],
+      ["check draft", 1, null, null],
+      ["research", 3, null, null],
     ]);
     expect(report.agents[0]).toMatchObject({
       role: "worker",
@@ -188,6 +199,8 @@ describe("workflow report", () => {
       check: "none",
       checkOutcome: "failed",
     });
+    // A declared check that never ran is not the same as no check.
+    expect(report.agents[3]).toMatchObject({ check: "process", checkOutcome: "not_run" });
     expect(report.summary).toEqual([
       {
         role: "checker",
@@ -196,17 +209,17 @@ describe("workflow report", () => {
         agents: 2,
         passed: 2,
         firstTryPassRate: 1,
-        redos: 0,
+        retries: 0,
         medianTokensPerPassed: 1_350,
       },
       {
         role: "worker",
         family: "claude",
-        check: "none",
+        check: "process",
         agents: 1,
         passed: 0,
         firstTryPassRate: 0,
-        redos: 2,
+        retries: 2,
         medianTokensPerPassed: null,
       },
       {
@@ -216,7 +229,7 @@ describe("workflow report", () => {
         agents: 1,
         passed: 1,
         firstTryPassRate: 0,
-        redos: 1,
+        retries: 1,
         medianTokensPerPassed: 5_000,
       },
     ]);
@@ -241,12 +254,12 @@ describe("workflow report", () => {
         "0  draft        Write     worker   codex/gpt-5.4             high    target  4000/2000/1000  4.0s  2      completed       judgment:passed",
         "1  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1000/500/200    -     1      completed       verdict:failed",
         "2  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1200/600/300    -     1      completed       verdict:passed",
-        "3  research     Research  worker   claude/claude-sonnet-4-6  -       caller  -/-/-           -     3      provider_error  -",
+        "3  research     Research  worker   claude/claude-sonnet-4-6  -       caller  -/-/-           -     3      provider_error  process:not_run",
         "",
-        "role     family  check     agents  first-try pass  redos  median tokens/passed",
-        "checker  claude  none      2       100%            0      1350",
-        "worker   claude  none      1       0%              2      -",
-        "worker   gpt     judgment  1       0%              1      5000",
+        "role     family  check     agents  first-try pass  retries  median tokens/passed",
+        "checker  claude  none      2       100%            0        1350",
+        "worker   claude  process   1       0%              2        -",
+        "worker   gpt     judgment  1       0%              1        5000",
         "",
         "phases 2, agents 4 (4 settled), attempts 7, tokens 7700 of 20000, ended by settled",
       ].join("\n"),

@@ -119,8 +119,12 @@ result that always includes the thread id.
 `t3 thread workflow-report <thread>` prints each workflow the thread ran: one
 row per agent with its provider, model, effort, how its target was chosen,
 tokens, time, attempts, outcome and check, then agents grouped by model family
-and check kind, and the run's attempts and token budget. `--json` prints the
-same report for comparing runs.
+and check kind, and the run's attempts and token budget. A check that was
+declared but never ran, for example after a provider error, shows as
+`not_run`. `retries` counts the runner's extra attempts, always on the same
+target; when the coordinator redoes work with another agent, that agent is a
+row of its own. `--json` prints the same report, with each agent's child
+thread id, for comparing runs.
 
 ## Remove an agent
 

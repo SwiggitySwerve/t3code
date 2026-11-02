@@ -38,14 +38,17 @@ export function workflowReport(
       attempt.durationMs === undefined ? [] : [attempt.durationMs],
     );
     const checker = agent.judgmentFor !== undefined;
-    const declared =
+    const planned =
       agent.graphNodeKey === undefined ? undefined : plan.get(agent.graphNodeKey)?.features?.check;
+    const declared = agent.declaredCheck ?? planned;
+    const ended = agent.state === "completed" || agent.state === "failed";
     return {
       index: agent.index,
       label: agent.label,
       phase: agent.phaseTitle ?? null,
       role: checker ? "checker" : "worker",
       node: agent.graphNodeKey ?? agent.judgmentFor?.graphNodeKey ?? null,
+      childThreadId: history.at(-1)?.childThreadId ?? agent.childThreadId ?? null,
       provider: agent.providerInstanceId ?? agent.plannedIdentity?.providerInstanceId ?? null,
       model: agent.model ?? read?.model ?? agent.plannedIdentity?.model ?? null,
       effort: agent.effort ?? null,
@@ -62,7 +65,8 @@ export function workflowReport(
       check: checker ? "none" : (agent.verification?.type ?? declared ?? "none"),
       checkOutcome: checker
         ? (agent.judgmentOutcome ?? null)
-        : (agent.verification?.outcome ?? null),
+        : (agent.verification?.outcome ??
+          (ended && declared !== undefined && declared !== "none" ? "not_run" : null)),
     };
   });
   const groups = new Map<string, Array<OrchestratorMcpWorkflowReportAgent>>();
@@ -88,7 +92,7 @@ export function workflowReport(
         passed: passed.length,
         firstTryPassRate:
           passed.filter((agent) => agent.attempts === 1).length / Math.max(1, members.length),
-        redos: members.reduce((sum, agent) => sum + Math.max(0, agent.attempts - 1), 0),
+        retries: members.reduce((sum, agent) => sum + Math.max(0, agent.attempts - 1), 0),
         medianTokensPerPassed: median(
           passed.flatMap((agent) => (agent.totalTokens === null ? [] : [agent.totalTokens])),
         ),
@@ -174,14 +178,14 @@ export function formatWorkflowReport(report: OrchestratorMcpWorkflowReport): str
     ]),
   ]);
   const groups = table([
-    ["role", "family", "check", "agents", "first-try pass", "redos", "median tokens/passed"],
+    ["role", "family", "check", "agents", "first-try pass", "retries", "median tokens/passed"],
     ...report.summary.map((group) => [
       group.role,
       group.family,
       group.check,
       String(group.agents),
       `${Math.round(group.firstTryPassRate * 100)}%`,
-      String(group.redos),
+      String(group.retries),
       count(group.medianTokensPerPassed),
     ]),
   ]);

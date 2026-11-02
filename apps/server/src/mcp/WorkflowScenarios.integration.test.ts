@@ -98,7 +98,7 @@ const groupsOf = (report: OrchestratorMcpWorkflowReport) =>
     group.check,
     group.agents,
     group.firstTryPassRate,
-    group.redos,
+    group.retries,
   ]);
 
 describe("workflow scenarios", () => {
@@ -314,7 +314,9 @@ return { rounds: null };`;
           : { text: `reviewed ${prompt.slice(7)}`, tokens: 100 },
       );
       const started = yield* startWorkflow(
-        `const reports = await parallel(["module a", "module b", "module c"].map((name) => () => agent("review " + name, { label: name, report: true })));
+        // Only module b declares a check, which its failed attempts never reach.
+        `const verify = { type: "process", argv: ["node", "-e", "0"] };
+const reports = await parallel(["module a", "module b", "module c"].map((name) => () => agent("review " + name, { label: name, report: true, ...(name === "module b" ? { verify } : {}) })));
 return { kept: reports.filter((entry) => entry.ok).map((entry) => entry.result), failed: reports.filter((entry) => !entry.ok).length };`,
       );
       const ended = yield* awaitWorkflowEnd(started.workflowId);
@@ -325,12 +327,24 @@ return { kept: reports.filter((entry) => entry.ok).map((entry) => entry.result),
       // The failing branch had all three attempts; the others one each.
       expect(yield* expectSettled(started.workflowId)).toHaveLength(5);
       const report = yield* reportOf(started.workflowId);
-      expect(report.agents.map((agent) => [agent.label, agent.attempts, agent.outcome])).toEqual([
-        ["module a", 1, "completed"],
-        ["module b", 3, "provider_error"],
-        ["module c", 1, "completed"],
+      expect(
+        report.agents.map((agent) => [
+          agent.label,
+          agent.attempts,
+          agent.outcome,
+          agent.check,
+          agent.checkOutcome,
+        ]),
+      ).toEqual([
+        ["module a", 1, "completed", "none", null],
+        ["module b", 3, "provider_error", "process", "not_run"],
+        ["module c", 1, "completed", "none", null],
       ]);
-      expect(groupsOf(report)).toEqual([["worker", "gpt", "none", 3, 2 / 3, 2]]);
+      expect(report.agents.every((agent) => agent.childThreadId !== null)).toBe(true);
+      expect(groupsOf(report)).toEqual([
+        ["worker", "gpt", "none", 2, 1, 0],
+        ["worker", "gpt", "process", 1, 0, 2],
+      ]);
     }).pipe(Effect.provide(layerTest)),
   );
 

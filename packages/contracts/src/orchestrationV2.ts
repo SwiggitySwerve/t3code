@@ -920,6 +920,8 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
     ),
   ),
   judgmentOutcome: Schema.optional(Schema.Literals(["passed", "failed", "error"])),
+  /** The check its call declared, so one that never ran still shows; absent when none. */
+  declaredCheck: Schema.optional(WorkflowCheckKind),
   outcomeCategory: Schema.optional(WorkflowAgentOutcomeCategory),
   runnerSettledAt: Schema.optional(NonNegativeInt),
   index: NonNegativeInt,
