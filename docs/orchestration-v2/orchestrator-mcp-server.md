@@ -705,8 +705,10 @@ Stop. Agents open their own threads. The row stores the script with a settings l
 - **Retries.** An agent gets two attempts at its work: a failed check or a passed
   attempt deadline starts it once more with what went wrong. When its task failed,
   a server restart cancelled it, or it stalled, it runs again on the same target
-  without using an attempt, up to two times. An agent a user stopped is not
-  retried; the script sees `null`.
+  without using an attempt, up to two times, so one agent makes at most four
+  attempts. The runner records on the attempt why it stopped a stalled or late
+  one, so after a restart it is retried the same way. An agent a user stopped
+  is not retried; the script sees `null`.
 - **Stalls.** Every 30 seconds the runner checks each waited-on agent's thread.
   If its last update has not changed for `stallTimeoutMs` (default 20 minutes,
   at least 1 minute), the runner stops the agent and starts it again.

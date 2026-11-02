@@ -66,6 +66,7 @@ import {
 } from "./workflowHandoff.ts";
 import {
   type AgentAttemptHost,
+  type AttemptStopReason,
   type MutableAgent,
   agentAttemptKey,
   runAttempts,
@@ -322,8 +323,9 @@ class WorkflowSession {
   private readonly occurrences = new Map<string, number>();
   private readonly nodeOutcomes: Record<string, OrchestrationV2WorkflowNodeOutcome> = {};
   private readonly waiting = new Map<string, WaitingAgent>();
-  private readonly stalled = new Set<string>();
-  private readonly timedOut = new Set<string>();
+  /** Attempts this run stopped, and those an earlier run recorded as stopped. */
+  private readonly stops = new Map<string, AttemptStopReason>();
+  private readonly earlierStops: ReadonlyMap<string, AttemptStopReason>;
   private budgetExhausted = false;
   private sent: OrchestrationV2SubagentWorkflow = { phases: [], agents: [] };
   private sentProgress: string | undefined;
@@ -344,13 +346,19 @@ class WorkflowSession {
     this.deps = deps;
     this.sent = workflow.previousWorkflow ?? this.sent;
     this.budgetExhausted = workflow.previousWorkflow?.budget?.exhausted ?? false;
+    this.earlierStops = new Map(
+      (workflow.previousWorkflow?.agents ?? []).flatMap((agent) =>
+        (agent.attemptHistory ?? []).flatMap((record) =>
+          record.stoppedBy === undefined ? [] : [[record.taskId, record.stoppedBy] as const],
+        ),
+      ),
+    );
     this.attempts = {
       workflow,
       deps,
       signal: this.abort.signal,
       waiting: this.waiting,
-      stalled: this.stalled,
-      timedOut: this.timedOut,
+      stoppedBy: (taskId) => this.stops.get(taskId) ?? this.earlierStops.get(taskId),
       spentTokens: () => this.recordedUsage().spent ?? 0,
       markBudgetExhausted: () => {
         this.budgetExhausted = true;
@@ -368,12 +376,30 @@ class WorkflowSession {
     return [...this.waiting.entries()];
   }
 
-  markStalled(taskId: string): void {
-    this.stalled.add(taskId);
+  markStalled(taskId: string): Promise<void> {
+    // A passed deadline decides how the attempt is retried, whatever its silence.
+    return this.markStopped(taskId, this.stops.get(taskId) ?? "stalled");
   }
 
-  markTimedOut(taskId: string): void {
-    this.timedOut.add(taskId);
+  markTimedOut(taskId: string): Promise<void> {
+    return this.markStopped(taskId, "timed_out");
+  }
+
+  /**
+   * Records why the runner stops an attempt on its row and waits for the write, so a restart
+   * that replays the stopped attempt retries it as this run would have.
+   */
+  private async markStopped(taskId: string, reason: AttemptStopReason): Promise<void> {
+    this.stops.set(taskId, reason);
+    for (const agent of this.agents) {
+      if (!agent.attemptHistory?.some((record) => record.taskId === taskId)) continue;
+      agent.attemptHistory = agent.attemptHistory.map((record) =>
+        record.taskId === taskId ? { ...record, stoppedBy: reason } : record,
+      );
+    }
+    this.scheduleUpdate();
+    // A failed write leaves the stop to go ahead; only a restart loses the reason then.
+    while (this.updating !== undefined) await this.updating;
   }
 
   /** Finishes once the workflow is stopped or the server detaches this runner. */

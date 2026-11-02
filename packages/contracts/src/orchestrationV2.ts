@@ -917,6 +917,8 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
             Schema.Union([TrimmedNonEmptyString, Schema.Boolean]),
           ),
         ),
+        /** Why the runner stopped it, so a resumed run retries it as the stopping run would. */
+        stoppedBy: Schema.optional(Schema.Literals(["stalled", "timed_out"])),
         totalTokens: Schema.optional(NonNegativeInt),
         usageStatus: Schema.Literals(["complete", "partial", "unavailable"]),
         durationMs: Schema.optional(NonNegativeInt),

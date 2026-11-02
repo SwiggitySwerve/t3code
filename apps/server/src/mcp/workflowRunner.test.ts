@@ -78,7 +78,9 @@ interface HarnessOptions {
   readonly model?: (spawned: number) => string | null;
   readonly startOptions?: (spawned: number) => WorkflowAgentStart["options"];
   /** Whether the nth agent (1-based) finishes on its own, and how; otherwise it hangs. */
-  readonly finish?: (spawned: number) => "completed" | "failed" | "hang";
+  readonly finish?: (spawned: number) => "completed" | "failed" | "cancelled" | "hang";
+  /** Whether a retry key was started already, by this run or an earlier one. */
+  readonly agentStarted?: (requestKey: string) => boolean;
   /** Workspace files by path, for declared outputs. */
   readonly files?: Readonly<Record<string, string>>;
   /** What the nth agent (1-based) says last; "ok" otherwise. */
@@ -141,6 +143,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const taskUpdates = new Map<string, Queue.Queue<void>>();
     const stops: Array<string> = [];
     const keys = new Map<string, string>();
+    const spawns: Array<{ readonly task: string; readonly requestKey: string }> = [];
+    const rowsAtStop: Array<OrchestrationV2SubagentWorkflow | undefined> = [];
     // The files the runner stored for checkers, those a checker could read when it started, and
     // those removed afterwards.
     const checkerFiles = new Map<string, string>();
@@ -281,6 +285,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
           if (options.beforeSpawn !== undefined) yield* options.beforeSpawn;
           spawned += 1;
           keys.set(item.task, requestKey);
+          spawns.push({ task: item.task, requestKey });
           if (options.failSpawn)
             return yield* Effect.fail({
               code: "orchestration_error",
@@ -357,7 +362,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
             }),
           ),
         ),
-      agentStarted: () => Effect.succeed(false),
+      agentStarted: (_workflow, requestKey) =>
+        Effect.succeed(options.agentStarted?.(requestKey) ?? false),
       agentTaskId:
         options.agentTaskId ?? ((_workflow, key) => taskIds.get(key) ?? NodeId.make(`task:${key}`)),
       agentRequestKey: (_workflow, id) => {
@@ -395,6 +401,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
       stopAgent: (_workflow, taskId, _childThreadId, why) =>
         Effect.gen(function* () {
           stopRequests.push(`${taskId}:${why}`);
+          rowsAtStop.push(workflowUpdates.at(-1));
           if (options.failStop?.(stopRequests.length) === true) {
             return yield* Effect.fail({
               code: "orchestration_error",
@@ -420,6 +427,10 @@ const makeHarness = (options: HarnessOptions = {}) =>
       /** Done once the runner has dispatched its first workflow.complete. */
       firstCompletion,
       keys,
+      /** Every spawn in order, so attempts with the same prompt stay apart. */
+      spawns,
+      /** The last row update the runner sent before each stop request. */
+      rowsAtStop,
       checkerFiles,
       readableByChecker,
       removedCheckerFiles,
@@ -1396,6 +1407,150 @@ describe("workflow runner", () => {
     );
   });
 
+  describe("after a restart", () => {
+    const script = (options: string) => `return await agent("x", { ${options}, report: true })`;
+    const resume = (
+      previousWorkflow: OrchestrationV2SubagentWorkflow,
+      options: HarnessOptions,
+      source: string,
+    ) =>
+      Effect.gen(function* () {
+        const second = yield* makeHarness({ ...options, previousWorkflow });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          source,
+          args: null,
+          afterSequence: 0,
+          previousWorkflow,
+        });
+        return { second, report: JSON.parse(yield* Deferred.await(second.completed)) };
+      });
+    /** The row the first run left as it was stopping its only attempt, and its task ids. */
+    const stoppedRow = (source: string) =>
+      Effect.gen(function* () {
+        const first = yield* makeHarness({ finish: () => "hang", stopLeavesRunning: true });
+        yield* launch(first.runner, source);
+        yield* sweepUntil(() => first.stopRequests.length > 0);
+        yield* first.runner.detachAll;
+        return first;
+      });
+
+    it.effect("retries a stalled attempt as a provider fault, without its feedback", () =>
+      Effect.gen(function* () {
+        const source = script("stallTimeoutMs: 60000");
+        const first = yield* stoppedRow(source);
+        // The reason reached the row before the stop was asked for.
+        expect(first.rowsAtStop[0]?.agents[0]?.attemptHistory?.[0]?.stoppedBy).toBe("stalled");
+        const { second, report } = yield* resume(
+          first.workflowUpdates.at(-1)!,
+          { taskIds: first.taskIds, finish: (n) => (n === 1 ? "cancelled" : "completed") },
+          source,
+        );
+        expect(report).toMatchObject({ ok: true, attempts: 2 });
+        expect(second.spawns.map((spawn) => spawn.requestKey.slice(-3))).toEqual([
+          second.spawns[0]!.requestKey.slice(-3),
+          "-r1",
+        ]);
+        expect(second.spawns[1]!.task).not.toContain("Your previous attempt");
+      }),
+    );
+
+    it.effect("retries an attempt past its deadline as work, with what went wrong", () =>
+      Effect.gen(function* () {
+        const source = script("attemptTimeoutMs: 60000, stallTimeoutMs: 3600000");
+        const first = yield* stoppedRow(source);
+        expect(first.rowsAtStop[0]?.agents[0]?.attemptHistory?.[0]?.stoppedBy).toBe("timed_out");
+        const { second, report } = yield* resume(
+          first.workflowUpdates.at(-1)!,
+          { taskIds: first.taskIds, finish: (n) => (n === 1 ? "cancelled" : "completed") },
+          source,
+        );
+        expect(report).toMatchObject({ ok: true, attempts: 2 });
+        expect(second.spawns[1]!.task).toContain("passed its time budget of 60000 ms");
+        // The replayed record keeps the reason for a later restart.
+        expect(
+          second.workflowUpdates
+            .at(-1)
+            ?.agents[0]?.attemptHistory?.map((record) => record.stoppedBy),
+        ).toEqual(["timed_out", undefined]);
+      }),
+    );
+
+    it.effect("attaches a third attempt an older run started instead of orphaning it", () =>
+      Effect.gen(function* () {
+        const source = script('verify: { type: "process", argv: ["check"] }');
+        const failed = () => Effect.succeed({ outcome: "failed" as const, detail: "wrong" });
+        // Under this limit the first run stops after two failed checks.
+        const first = yield* makeHarness({ runCommandCheck: failed });
+        yield* launch(first.runner, source);
+        yield* Deferred.await(first.completed);
+        const agent = first.workflowUpdates.at(-1)!.agents[0]!;
+        const requestKey = agent.requestKey!;
+        // A run under the old limit of three went on to a third attempt, still running.
+        const third = NodeId.make("node:older-third");
+        const taskIds = new Map([...first.taskIds, [`${requestKey}-r2`, third]]);
+        const {
+          result: _result,
+          outcomeCategory: _category,
+          runnerSettledAt: _settled,
+          verification: _verification,
+          ...running
+        } = agent;
+        const previousWorkflow = {
+          ...first.workflowUpdates.at(-1)!,
+          agents: [
+            {
+              ...running,
+              state: "running" as const,
+              agentId: third,
+              attempt: 2,
+              attemptHistory: [
+                ...(agent.attemptHistory ?? []),
+                {
+                  taskId: third,
+                  childThreadId: ThreadId.make("thread:older-third"),
+                  attempt: 2,
+                  state: "running" as const,
+                  providerInstanceId: ProviderInstanceId.make("codex"),
+                  usageStatus: "unavailable" as const,
+                  timingComplete: false,
+                },
+              ],
+            },
+          ],
+        };
+        const { second, report } = yield* resume(
+          previousWorkflow,
+          {
+            taskIds,
+            agentStarted: (key) => taskIds.has(key),
+            runCommandCheck: (_workflow, childThreadId) =>
+              childThreadId === "thread:agent-3"
+                ? Effect.succeed({ outcome: "passed" as const, detail: "right" })
+                : failed(),
+          },
+          source,
+        );
+        expect(report).toMatchObject({ ok: true, attempts: 3, result: "ok" });
+        expect(second.spawns.map((spawn) => spawn.requestKey)).toEqual([
+          requestKey,
+          `${requestKey}-r1`,
+          `${requestKey}-r2`,
+        ]);
+        const row = second.workflowUpdates.at(-1)!.agents[0]!;
+        expect(row).toMatchObject({ state: "completed", agentId: third, result: "ok" });
+        expect(row.attemptHistory?.map((record) => record.taskId).at(-1)).toBe(third);
+      }),
+    );
+  });
+
+  it("recovers a request key from attempt keys up to the most attempts an agent makes", () => {
+    const key = `wf-${"a".repeat(24)}-0`;
+    expect([key, `${key}-r1`, `${key}-r3`].map(agentRequestKey)).toEqual([key, key, key]);
+    expect(agentRequestKey(`${key}-r4`)).toBeUndefined();
+  });
+
   describe("final completion", () => {
     const completionId = `command:workflow-complete:${workflowId}`;
 
@@ -2024,7 +2179,7 @@ return errors`,
     );
     it.effect("keeps a failed check's feedback through a provider failure that follows it", () =>
       Effect.gen(function* () {
-        const { runner, completed, keys } = yield* makeHarness({
+        const { runner, completed, spawns } = yield* makeHarness({
           finish: (n) => (n === 3 ? "failed" : "completed"),
           judgment: () => false,
         });
@@ -2035,8 +2190,17 @@ return errors`,
         );
         yield* Deferred.await(completed);
         // Spawns: work, judge (fails), work with feedback (provider fails), work again, judge.
-        const retried = [...keys].filter(([prompt]) => prompt.includes("Your previous attempt"));
-        expect(retried.map(([, key]) => key.slice(-3))).toEqual(["-r2"]);
+        const workers = spawns.filter((spawn) => !spawn.task.includes("independent checker"));
+        expect(workers.map((spawn) => spawn.requestKey.slice(-3))).toEqual([
+          workers[0]!.requestKey.slice(-3),
+          "-r1",
+          "-r2",
+        ]);
+        expect(workers.map((spawn) => spawn.task.includes("Your previous attempt"))).toEqual([
+          false,
+          true,
+          true,
+        ]);
       }),
     );
     it.effect("retries a provider failure on the same target without using a work attempt", () =>
