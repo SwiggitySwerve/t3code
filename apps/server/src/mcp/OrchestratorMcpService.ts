@@ -2761,6 +2761,13 @@ const make = Effect.gen(function* () {
     decision: Pick<OrchestratorMcpGraphReviewResult, "reviewId" | "approvalRequired">,
   ): OrchestratorMcpGraphReviewResult => ({
     ...decision,
+    // Said in the result itself: a coordinator that read approval into the schema's prose waited
+    // for one that was never asked for.
+    next: !isReviewReady(review)
+      ? "Fix the blockers, then call graph_review again."
+      : decision.approvalRequired
+        ? "End your turn. T3 Code sends you the approved digest once the user approves this review."
+        : "No approval is needed: call graph_start now with expandedGraph and acceptedDigest.",
     digest: review.digest,
     ready: isReviewReady(review),
     targets: review.targets,

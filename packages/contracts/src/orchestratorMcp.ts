@@ -462,11 +462,14 @@ export type OrchestratorMcpGraphAdvisory = typeof OrchestratorMcpGraphAdvisory.T
 export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   reviewId: Schema.String.annotate({
     description:
-      "Identifies this review. T3 Code shows the review to the user, who approves or dismisses it by this id and digest.",
+      "Identifies this review. When approvalRequired is true, the user approves or dismisses it in T3 Code by this id and digest.",
   }),
   approvalRequired: Schema.Boolean.annotate({
     description:
-      "true when the user asked for a workflow and must approve this review in T3 Code before graph_start runs it: end your turn, and T3 Code sends you a message with the approved digest. false when no approval is pending.",
+      "true when the user asked for a workflow and must approve this review in T3 Code before graph_start runs it: end your turn, and T3 Code sends you a message with the approved digest. false: no approval is needed, so call graph_start yourself.",
+  }),
+  next: Schema.optional(Schema.String).annotate({
+    description: "What to do now with this review.",
   }),
   digest: Schema.NullOr(Schema.String).annotate({
     description:

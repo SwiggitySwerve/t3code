@@ -29,7 +29,7 @@ const WORKFLOW_TURN_NOTE = [
   "The user asked for a workflow, so plan it before anything runs.",
   "1. Split the work into graph nodes with dependencies, add a verify check to any node whose result needs checking, and call graph_review.",
   ...ASSIGNMENT_RULES.map((rule, index) => `${index + 2}. ${rule}`),
-  `${ASSIGNMENT_RULES.length + 2}. End your turn once graph_review has returned the plan. The user approves it in T3 Code, which then sends you a message with the approved digest: do not call graph_start or workflow_start before that message.`,
+  `${ASSIGNMENT_RULES.length + 2}. When graph_review returns approvalRequired: true, end your turn. The user approves it in T3 Code, which then sends you a message with the approved digest: do not call graph_start or workflow_start before that message. When it returns false, call graph_start.`,
   "</t3-workflow>",
 ].join("\n");
 

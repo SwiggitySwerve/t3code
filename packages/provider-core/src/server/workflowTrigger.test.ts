@@ -81,6 +81,9 @@ describe("applyTurnTriggers", () => {
     expect(note).toContain("graph_review");
     expect(note).toContain("The user approves it in T3 Code");
     expect(note).toContain("do not call graph_start or workflow_start before that message");
+    // A review that needs no approval must not leave the coordinator waiting for one.
+    expect(note).toContain("When graph_review returns approvalRequired: true, end your turn.");
+    expect(note).toContain("When it returns false, call graph_start.");
   });
 
   it("leaves every assignment to the coordinator and asks for a cross-family check", () => {

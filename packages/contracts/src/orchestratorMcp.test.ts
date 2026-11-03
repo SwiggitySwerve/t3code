@@ -60,6 +60,11 @@ describe("orchestrator MCP contracts", () => {
       overshootBoundTokens: 288_000,
     };
     expect(decodeGraphReviewResult(base).advisory).toBeUndefined();
+    // An older server sends no next step.
+    expect(decodeGraphReviewResult(base).next).toBeUndefined();
+    expect(decodeGraphReviewResult({ ...base, next: "call graph_start now" }).next).toBe(
+      "call graph_start now",
+    );
     expect(decodeGraphReviewResult({ ...base, advisory }).advisory).toEqual(advisory);
     expect(() =>
       decodeGraphReviewResult({ ...base, advisory: { ...advisory, fanOut: "stop" } }),

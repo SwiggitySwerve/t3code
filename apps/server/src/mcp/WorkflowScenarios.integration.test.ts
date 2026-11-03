@@ -487,6 +487,7 @@ return done;`;
           })).structuredContent,
         );
         expect(reviewed.digest).toBeNull();
+        expect(reviewed.next).toBe("Fix the blockers, then call graph_review again.");
         expect(reviewed.blockers.join("\n")).toContain(
           `a judgment: Provider ${claudeInstanceId} cannot run a child task`,
         );

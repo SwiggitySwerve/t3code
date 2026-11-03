@@ -4891,6 +4891,7 @@ describe("workflow approval", () => {
         yield* askForWorkflow;
         const reviewed = yield* reviewGraph(oneNode);
         expect(reviewed).toMatchObject({ ready: true, approvalRequired: true });
+        expect(reviewed.next).toMatch(/^End your turn\./u);
         expect(reviewed.reviewId).not.toBe("");
         for (const graph of [oneNode, reviewed.expandedGraph]) {
           expect(refusal(yield* startGraph(graph, reviewed))).toMatchObject({
@@ -5461,6 +5462,10 @@ describe("workflow approval", () => {
       expect(yield* gate.observeTurn(yield* personTurn("Fan out work."))).toBe("plain");
       const reviewed = yield* reviewGraph(oneNode);
       expect(reviewed.approvalRequired).toBe(false);
+      // The result says to start it, so a coordinator does not wait for an approval nobody asks.
+      expect(reviewed.next).toBe(
+        "No approval is needed: call graph_start now with expandedGraph and acceptedDigest.",
+      );
       const started = yield* decodeWorkflow(
         (yield* startGraph(oneNode, reviewed)).structuredContent,
       );
