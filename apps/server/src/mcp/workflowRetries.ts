@@ -32,8 +32,15 @@ export function parseRetries(value: unknown): ReadonlyArray<RetryTarget> {
       throw new Error(`${what} must be a target object.`);
     const rung = entry as Readonly<Record<string, unknown>>;
     const extra = Object.keys(rung).find((key) => !RETRY_TARGET_KEYS.has(key));
+    // Every workflow agent runs in the caller's environment, so a retry never moves to another.
+    if (extra === "environmentId" || extra === "projectId")
+      throw new Error(
+        `${what} cannot set ${extra}: workflow agents run in this thread's environment.`,
+      );
     if (extra !== undefined)
-      throw new Error(`${what} takes providerInstanceId, model and options, not ${extra}.`);
+      throw new Error(
+        `${what} takes providerInstanceId, model, options and inheritOptions, not ${extra}.`,
+      );
     if (!nonEmpty(rung.providerInstanceId) || !nonEmpty(rung.model))
       throw new Error(
         `${what} needs a providerInstanceId and a model from orchestrator_capabilities.`,
@@ -60,19 +67,44 @@ export function attemptTarget(
   return retries[Math.min(workFailures, retries.length) - 1];
 }
 
+const recordOf = (value: unknown): Readonly<Record<string, unknown>> | undefined =>
+  typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+
+/** The effort a target's options set, in the list or the record form a target may use. */
+function effortOf(options: unknown): string | undefined {
+  const byId = new Map<unknown, unknown>(
+    Array.isArray(options)
+      ? options.map((option: unknown) => [recordOf(option)?.id, recordOf(option)?.value])
+      : Object.entries(recordOf(options) ?? {}),
+  );
+  const effort = byId.get("reasoningEffort") ?? byId.get("effort");
+  return typeof effort === "string" ? effort : undefined;
+}
+
+/**
+ * How progress names the move to a retry target: by its model, or by its effort alone when it
+ * keeps the model of the attempt before it.
+ */
+export function retryMoveText(previous: unknown, next: RetryTarget): string {
+  const effort = effortOf(next.options);
+  return recordOf(previous)?.model === next.model && effort !== undefined
+    ? `at ${effort} effort`
+    : `on ${next.model}`;
+}
+
 /**
  * A judgment check with no target of its own runs on the agent's first target. When a retry target
- * leaves that model's family, or the first target names no model, the check needs its own target.
+ * leaves that model's family, the check needs its own target. Both models are the resolved ones,
+ * so a first target that inherits the caller's model is judged by that model.
  */
 export function retriesCheckProblem(
-  targetModel: string | undefined,
-  retries: ReadonlyArray<{ readonly model?: string | undefined }> | undefined,
+  targetModel: string,
+  retries: ReadonlyArray<{ readonly model: string }>,
 ): string | undefined {
-  const family = targetModel === undefined ? undefined : modelFamily(targetModel);
-  const other = retries?.find(
-    (rung) =>
-      family === undefined || rung.model === undefined || modelFamily(rung.model) !== family,
-  );
+  const family = modelFamily(targetModel);
+  const other = retries.find((rung) => modelFamily(rung.model) !== family);
   if (other === undefined) return undefined;
-  return `retries runs ${other.model ?? "a model"} outside the model family of the first target, so the judgment check needs a target of its own.`;
+  return `retries runs ${other.model} outside the model family of the first target (${targetModel}), so the judgment check needs a target of its own.`;
 }

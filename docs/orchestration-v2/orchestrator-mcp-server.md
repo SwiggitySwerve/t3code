@@ -595,10 +595,13 @@ These follow the `omx graph` execution graph's protected verifiers
   without `retries` it repeats `target`, and `[]` leaves one attempt. A provider fault retries
   the attempt's own target and does not move along the list. The entry for an attempt follows
   from the list and how many work attempts failed, so a resumed run attaches each attempt by
-  its key on the target it started on. A judgment check without its own target runs on
-  `target`; when an entry leaves `target`'s model family, or `target` names no model, the
-  check needs a target of its own and the agent is refused otherwise. `retries` joins the
-  agent's retry key only when present.
+  its key on the target it started on. Before the first attempt each entry is resolved as
+  `graph_review` resolves a target, so a model the provider does not list or an option it
+  rejects refuses the agent before anything runs. A judgment check without its own target runs
+  on `target` as resolved, the caller's model when it names none; when an entry leaves that
+  model's family the check needs a target of its own and the agent is refused otherwise.
+  Entries cannot set `environmentId`: every workflow agent runs in the caller's environment.
+  `retries` joins the agent's retry key only when present.
 - `report: true` makes `agent()` always resolve to
   `{ ok, result, outputs, attempts, verification, reason }`, failed or not, instead of
   `null` on failure, so a script can record why an agent failed. A spent budget still

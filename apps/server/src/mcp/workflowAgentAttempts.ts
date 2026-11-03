@@ -39,7 +39,7 @@ import {
   taskOutputAt,
 } from "./workflowHandoff.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_INFRA_RETRIES, workAttempts } from "./workflowLimits.ts";
-import { attemptTarget, type RetryTarget } from "./workflowRetries.ts";
+import { attemptTarget, retryMoveText, type RetryTarget } from "./workflowRetries.ts";
 import type { WaitingAgent } from "./workflowSweep.ts";
 import type {
   WorkflowAgentOutcome,
@@ -192,9 +192,8 @@ export async function runAttempts(
   // Names the retry target the next attempt moves to, when it moves.
   const onNextTarget = () => {
     const next = attemptTarget(target, retries, workFailures);
-    return next === attemptTarget(target, retries, workFailures - 1)
-      ? ""
-      : ` on ${(next as RetryTarget).model}`;
+    const previous = attemptTarget(target, retries, workFailures - 1);
+    return next === previous ? "" : ` ${retryMoveText(previous, next as RetryTarget)}`;
   };
   // A run from before these limits may have started the next attempt already. It is attached
   // again rather than left running with no owner.

@@ -635,6 +635,54 @@ describe("11. coordinator-written retries", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect(
+    "a script's judgment check on the caller's model it inherits takes a same-family retry",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        yield* answerWorkflowAgents((prompt) => (isChecker(prompt) ? verdict(true, "ok") : "done"));
+        // No target: the worker and its check run on the caller's model, in the family of the retry.
+        const started = yield* startWorkflow(
+          `return await agent("do the work", { label: "work", retries: args, verify: { type: "judgment", rubric: ["It is done."] }, report: true })`,
+          [codex("high")],
+        );
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, attempts: 1 });
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      name: "a model its provider does not list",
+      bad: { providerInstanceId: instanceId, model: "unknown-model" },
+      reason: `retries[1]: Model unknown-model is not advertised by provider ${instanceId}.`,
+    },
+    {
+      name: "an option given twice",
+      bad: {
+        ...codex("high"),
+        options: [
+          { id: "reasoningEffort", value: "high" },
+          { id: "reasoningEffort", value: "low" },
+        ],
+      },
+      reason: `retries[1]: Model ${model} on provider ${instanceId} rejected options: Option reasoningEffort was specified more than once.`,
+    },
+  ])("a script's retry target with $name is refused before any attempt", ({ bad, reason }) =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents(() => json({ ok: false }));
+      const started = yield* startWorkflow(checkedScript, {
+        first: codex("low"),
+        retries: [codex("high"), bad],
+      });
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: false, attempts: 0 });
+      expect(JSON.parse(ended.result!).reason).toContain(reason);
+      expect(yield* membersOf(started.workflowId)).toEqual([]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   const node = (fields: Record<string, unknown>) => ({
     subject: "build",
     description: "build the parser",
@@ -718,7 +766,7 @@ describe("11. coordinator-written retries", () => {
     {
       name: "retries that leave the worker's family under an inherited judgment check",
       fields: { retries: [claude], verify: judged() },
-      blocker: `a judgment: retries runs ${claudeModel} outside the model family of the first target, so the judgment check needs a target of its own.`,
+      blocker: `a judgment: retries runs ${claudeModel} outside the model family of the first target (${model}), so the judgment check needs a target of its own.`,
     },
   ])("graph review blocks $name", ({ fields, blocker }) =>
     Effect.gen(function* () {

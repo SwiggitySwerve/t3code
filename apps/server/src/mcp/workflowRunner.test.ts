@@ -60,6 +60,9 @@ function clientCounts(workflow: OrchestrationV2SubagentWorkflow) {
   return deriveWorkflowProgress(deriveWorkflowGroups(runtime)[0]!).phases[0]!.counts;
 }
 
+/** The model a target that names none inherits from the caller. */
+const CALLER_MODEL = "gpt-5.4";
+
 interface HarnessOptions {
   readonly beforeSpawn?: Effect.Effect<void>;
   readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
@@ -81,6 +84,8 @@ interface HarnessOptions {
   readonly finish?: (spawned: number) => "completed" | "failed" | "cancelled" | "hang";
   /** Whether a retry key was started already, by this run or an earlier one. */
   readonly agentStarted?: (requestKey: string) => boolean;
+  /** How a target resolves; by default its own model, else the caller's, CALLER_MODEL. */
+  readonly resolveTarget?: WorkflowRunnerDeps["resolveTarget"];
   /** Workspace files by path, for declared outputs. */
   readonly files?: Readonly<Record<string, string>>;
   /** What the nth agent (1-based) says last; "ok" otherwise. */
@@ -366,6 +371,12 @@ const makeHarness = (options: HarnessOptions = {}) =>
             }),
           ),
         ),
+      resolveTarget:
+        options.resolveTarget ??
+        ((_workflow, target) => {
+          const model = (target as { readonly model?: unknown } | undefined)?.model;
+          return Effect.succeed({ model: typeof model === "string" ? model : CALLER_MODEL });
+        }),
       agentStarted: (_workflow, requestKey) =>
         Effect.succeed(options.agentStarted?.(requestKey) ?? false),
       agentTaskId:
@@ -1622,6 +1633,21 @@ describe("workflow runner", () => {
       }),
     );
 
+    it.effect.each([
+      { moves: "its effort alone", next: rung("medium"), says: "at medium effort" },
+      { moves: "to another model", next: { ...rung("low"), model: "n" }, says: "on n" },
+    ])("names a retry that moves $moves by what changes", ({ next, says }) =>
+      Effect.gen(function* () {
+        const { h } = yield* run(
+          `return await agent("x", { target: ${JSON.stringify(rung("low"))}, retries: ${JSON.stringify([next])}, ${checked}, report: true })`,
+          { runCommandCheck: passedOn("thread:agent-2") },
+        );
+        expect(
+          h.workflowCommands.map((command) => (command as { readonly progress?: string }).progress),
+        ).toContain(`agent "agent 1" failed its process check; starting it again ${says}.`);
+      }),
+    );
+
     it.effect("leaves one work attempt for an empty list", () =>
       Effect.gen(function* () {
         const { h, report } = yield* run(
@@ -1644,8 +1670,13 @@ describe("workflow runner", () => {
         reason: "retries[0] needs a providerInstanceId and a model",
       },
       {
+        retries: JSON.stringify([{ ...rung("a"), role: "reviewer" }]),
+        reason: "retries[0] takes providerInstanceId, model, options and inheritOptions, not role.",
+      },
+      {
         retries: JSON.stringify([{ ...rung("a"), environmentId: "elsewhere" }]),
-        reason: "retries[0] takes providerInstanceId, model and options, not environmentId.",
+        reason:
+          "retries[0] cannot set environmentId: workflow agents run in this thread's environment.",
       },
     ])("refuses retries of $retries before starting anything", ({ retries, reason }) =>
       Effect.gen(function* () {
@@ -1671,6 +1702,107 @@ describe("workflow runner", () => {
           { judgment: () => true },
         );
         expect(own.report.ok).toBe(true);
+      }),
+    );
+
+    // A judgment check without its own target runs on the worker's first target, as resolved.
+    const inheritedJudgment = (rungModel: string) =>
+      `return await agent("x", { retries: [{ providerInstanceId: "p", model: "${rungModel}" }], verify: { type: "judgment", rubric: ["ok"] }, report: true })`;
+
+    it.effect("accepts a same-family retry for a check on the caller's model it inherits", () =>
+      Effect.gen(function* () {
+        const { h, report } = yield* run(inheritedJudgment("gpt-5.5"), { judgment: () => true });
+        expect(report).toMatchObject({ ok: true, attempts: 1 });
+        // The worker, then its judge.
+        expect(h.spawns).toHaveLength(2);
+      }),
+    );
+
+    it.effect("refuses a retry outside the family of the caller's model the check inherits", () =>
+      Effect.gen(function* () {
+        const { h, report } = yield* run(inheritedJudgment("claude-sonnet-4-6"));
+        expect(report.reason).toContain(
+          `retries runs claude-sonnet-4-6 outside the model family of the first target (${CALLER_MODEL})`,
+        );
+        expect(h.spawns).toEqual([]);
+      }),
+    );
+
+    it.effect.each([
+      {
+        name: "a model its provider does not list",
+        bad: { providerInstanceId: "codex", model: "typo" },
+        reason: "retries[1]: Model typo is not advertised by provider codex.",
+      },
+      {
+        name: "an option value its model rejects",
+        bad: { providerInstanceId: "codex", model: "m", options: { effort: "huge" } },
+        reason: "retries[1]: Model m on provider codex rejected options: Option effort must be",
+      },
+    ])("refuses a retry target with $name before any attempt", ({ bad, reason }) =>
+      Effect.gen(function* () {
+        // Resolves as graph review does: a listed model and options it accepts.
+        const resolveTarget: WorkflowRunnerDeps["resolveTarget"] = (_workflow, value) => {
+          const target = value as { readonly model: string; readonly options?: unknown };
+          if (target.model === "typo")
+            return Effect.fail({
+              code: "model_unavailable",
+              message: "Model typo is not advertised by provider codex.",
+            } as never);
+          if (JSON.stringify(target.options ?? {}).includes("huge"))
+            return Effect.fail({
+              code: "invalid_request",
+              message:
+                "Model m on provider codex rejected options: Option effort must be one of: low, medium, high.",
+            } as never);
+          return Effect.succeed({ model: target.model });
+        };
+        const retries = JSON.stringify([rung("medium"), bad]);
+        const source = `return await agent("x", { target: ${JSON.stringify(rung("low"))}, retries: ${retries}, ${checked}, report: true })`;
+        const { h, report } = yield* run(source, { resolveTarget, runCommandCheck: failed });
+        expect(report).toMatchObject({ ok: false, attempts: 0 });
+        expect(report.reason).toContain(reason);
+        expect(h.spawns).toEqual([]);
+        // An agent an earlier run started may still be running, so it is attached, not refused.
+        const resumed = yield* run(source, {
+          resolveTarget,
+          agentStarted: () => true,
+          runCommandCheck: passedOn("thread:agent-1"),
+        });
+        expect(resumed.report).toMatchObject({ ok: true, attempts: 1 });
+      }),
+    );
+
+    it.effect("resumes past a stop at the attempt deadline on the next retry target", () =>
+      Effect.gen(function* () {
+        const source = `return await agent("x", { ${ladder}, attemptTimeoutMs: 60000, stallTimeoutMs: 3600000, report: true })`;
+        // The first run stops its first attempt at the deadline and records why, then detaches.
+        const first = yield* makeHarness({ finish: () => "hang", stopLeavesRunning: true });
+        yield* launch(first.runner, source);
+        yield* sweepUntil(() => first.stopRequests.length > 0);
+        yield* first.runner.detachAll;
+        const previousWorkflow = first.workflowUpdates.at(-1)!;
+        expect(previousWorkflow.agents[0]?.attemptHistory?.[0]?.stoppedBy).toBe("timed_out");
+        const second = yield* makeHarness({
+          previousWorkflow,
+          taskIds: first.taskIds,
+          finish: (n) => (n === 1 ? "cancelled" : "completed"),
+        });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          source,
+          args: null,
+          afterSequence: 0,
+          previousWorkflow,
+        });
+        expect(JSON.parse(yield* Deferred.await(second.completed))).toMatchObject({
+          ok: true,
+          attempts: 2,
+        });
+        // The stopped attempt counts as failed work, so the next runs on the first retry target.
+        expect(second.spawns.map((spawn) => spawn.target)).toEqual([sent("low"), sent("medium")]);
+        expect(second.spawns[1]!.task).toContain("passed its time budget of 60000 ms");
       }),
     );
 

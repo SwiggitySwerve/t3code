@@ -331,7 +331,9 @@ const decodeLegacyPresetDefault = Schema.decodeUnknownOption(
 const decodeLegacyPresetTargets = Schema.decodeUnknownOption(
   Schema.Record(Schema.String, WorkflowTargetSnapshot),
 );
-const concreteWorkflowTarget = (selection: ModelSelection): OrchestratorMcpTarget => ({
+/** A target as review and dispatch resolve it, so its model is always named. */
+type ConcreteWorkflowTarget = OrchestratorMcpTarget & { readonly model: string };
+const concreteWorkflowTarget = (selection: ModelSelection): ConcreteWorkflowTarget => ({
   providerInstanceId: selection.instanceId,
   model: selection.model,
   // The complete resolved options; ordering does not change selection.
@@ -2268,6 +2270,24 @@ const make = Effect.gen(function* () {
         };
       },
     ),
+    resolveTarget: Effect.fn("OrchestratorMcpService.resolveWorkflowAgentTarget")(
+      function* (workflow, value) {
+        const parent = yield* loadProjection(workflow.threadId);
+        const target =
+          value === undefined
+            ? undefined
+            : yield* decodeWorkflowTarget(value).pipe(
+                Effect.mapError(() => failure("invalid_request", "Invalid target.")),
+              );
+        // Resolved against the selection the agents inherit, as spawnAgent resolves them.
+        return yield* resolveAdvertisedTarget(
+          workflow.callerSelection === undefined
+            ? parent
+            : { ...parent, thread: { ...parent.thread, modelSelection: workflow.callerSelection } },
+          target,
+        );
+      },
+    ),
     agentStarted: Effect.fn("OrchestratorMcpService.workflowAgentStarted")(
       function* (workflow, requestKey) {
         const scope = workflowScopes.get(workflow.workflowId);
@@ -2606,7 +2626,7 @@ const make = Effect.gen(function* () {
         const selected = selectWorkflowTarget(node, workerTarget);
         const target = yield* resolveGraphTarget(selected.target, nodeId);
         // Each retry target is resolved and checked as target is, so the digest covers it.
-        const retries: OrchestratorMcpTarget[] = [];
+        const retries: ConcreteWorkflowTarget[] = [];
         for (const [index, rung] of (node.retries ?? []).entries()) {
           const resolved = yield* resolveGraphTarget(rung, `${nodeId} retries[${index}]`);
           if (resolved !== undefined) retries.push(resolved);

@@ -232,6 +232,14 @@ export interface WorkflowRunnerDeps {
     taskId: NodeId,
     onUpdate: (outcome: WorkflowAgentOutcome) => void,
   ) => Effect.Effect<WorkflowAgentOutcome, OrchestratorMcpFailure>;
+  /**
+   * Resolves an agent's target as its attempt would run, inheriting the caller's selection, and
+   * refuses a model the provider does not list or options it rejects, as graph review does.
+   */
+  readonly resolveTarget: (
+    workflow: WorkflowContext,
+    target: unknown,
+  ) => Effect.Effect<{ readonly model: string }, OrchestratorMcpFailure>;
   /** Whether an agent with this retry key was already started, by this run or an earlier one. */
   readonly agentStarted: (
     workflow: WorkflowContext,
@@ -657,12 +665,6 @@ class WorkflowSession {
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
       if (options.retries !== undefined) retries = parseRetries(options.retries);
-      const ownCheckTarget = check?.type === "judgment" && check.target !== undefined;
-      const retriesProblem =
-        check?.type === "judgment" && !ownCheckTarget
-          ? retriesCheckProblem(stringOption(asRecord(target), "model"), retries)
-          : undefined;
-      if (retriesProblem !== undefined) throw new Error(retriesProblem);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);
       if (options.inputs !== undefined) inputs = parseFileRefs(options.inputs, "inputs");
       if (options.outputs !== undefined) outputs = parseFileRefs(options.outputs, "outputs");
@@ -853,6 +855,11 @@ class WorkflowSession {
       settle("failed", `agent "${label}" has invalid options${invalid ? `: ${invalid}` : "."}`);
       return done(null);
     }
+    const retriesIssue = await this.retriesProblem(requestKey, target, retries, check);
+    if (retriesIssue !== undefined) {
+      settle("failed", `agent "${label}" has invalid options: ${retriesIssue}`);
+      return done(null);
+    }
     if (
       check?.type === "structured" &&
       check.outputId === undefined &&
@@ -902,6 +909,46 @@ class WorkflowSession {
     } finally {
       if (holdsWrites) this.releaseWrites(entry.index);
     }
+  }
+
+  /**
+   * Why an agent's retries cannot run, before its first attempt: a retry target that graph review
+   * would refuse, or one outside the family of the first target an inherited judgment runs on.
+   * Attempts still send targets as written. An agent an earlier run started may still be running,
+   * so it is never refused.
+   */
+  private async retriesProblem(
+    requestKey: string,
+    target: unknown,
+    retries: ReadonlyArray<RetryTarget> | undefined,
+    check: WorkflowCheck | undefined,
+  ): Promise<string | undefined> {
+    if (retries === undefined || retries.length === 0) return undefined;
+    const started = await Effect.runPromise(
+      this.deps
+        .agentStarted(this.workflow, agentAttemptKey(requestKey, 0))
+        .pipe(Effect.orElseSucceed(() => false)),
+    );
+    if (started) return undefined;
+    const resolve = (value: unknown) =>
+      Effect.runPromise(
+        this.deps.resolveTarget(this.workflow, value).pipe(
+          Effect.match({
+            onFailure: (failure) => ({ problem: failure.message }) as const,
+            onSuccess: (resolved) => ({ model: resolved.model }) as const,
+          }),
+        ),
+      );
+    const rungs: Array<{ readonly model: string }> = [];
+    for (const [index, rung] of retries.entries()) {
+      const resolved = await resolve(rung);
+      if ("problem" in resolved) return `retries[${index}]: ${resolved.problem}`;
+      rungs.push(resolved);
+    }
+    if (check?.type !== "judgment" || check.target !== undefined) return undefined;
+    const first = await resolve(target);
+    if ("problem" in first) return `target: ${first.problem}`;
+    return retriesCheckProblem(first.model, rungs);
   }
 
   /** Each input from a graph node with the stored result of the agent that ran it. */
