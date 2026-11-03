@@ -1781,6 +1781,8 @@ export const OrchestrationV2WorkflowReviewTask = Schema.Struct({
   worker: Schema.optional(OrchestrationV2WorkflowReviewTarget),
   /** The judge, when the task has a judgment check. */
   judge: Schema.optional(OrchestrationV2WorkflowReviewTarget),
+  /** The targets of its attempts after a failed check or deadline, in order, when declared. */
+  retries: Schema.optional(Schema.Array(OrchestrationV2WorkflowReviewTarget)),
   check: Schema.optional(Schema.Literals(["process", "structured", "judgment"])),
 });
 export type OrchestrationV2WorkflowReviewTask = typeof OrchestrationV2WorkflowReviewTask.Type;

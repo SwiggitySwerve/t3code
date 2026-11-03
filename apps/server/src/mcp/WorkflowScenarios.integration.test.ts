@@ -15,6 +15,7 @@ import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
+import { formatWorkflowReport } from "./workflowReport.ts";
 import {
   answerWorkflowAgents,
   awaitMember,
@@ -32,6 +33,7 @@ import {
   layerRefusedTargets,
   layerTest,
   model,
+  reviewGraph,
   parentThreadId,
   startParent,
   startWorkflow,
@@ -530,6 +532,218 @@ return done;`;
       }).pipe(Effect.provide(layerRefusedTargets)),
     );
   });
+});
+
+describe("11. coordinator-written retries", () => {
+  const codex = (effort: string) => ({
+    providerInstanceId: instanceId,
+    model,
+    options: { reasoningEffort: effort },
+  });
+  const claude = { providerInstanceId: claudeInstanceId, model: claudeModel };
+  const onClaude = (task: OrchestrationV2Subagent) => task.providerInstanceId === claudeInstanceId;
+  const attemptTargets = (report: OrchestratorMcpWorkflowReport) =>
+    report.agents.map((agent) =>
+      (agent.attemptCosts ?? []).map((attempt) => [
+        attempt.provider,
+        attempt.model,
+        attempt.effort,
+      ]),
+    );
+  const checkedScript = `return await agent("build the parser", { label: "build", target: args.first, retries: args.retries, schema: { type: "object", required: ["ok"] }, verify: { type: "structured", equals: { "/ok": true } }, report: true })`;
+
+  it.effect("a failed check moves the work along its retries, and the report shows each step", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents((_prompt, task) => json({ ok: onClaude(task) }), 100);
+      const started = yield* startWorkflow(checkedScript, {
+        first: codex("low"),
+        retries: [codex("high"), claude],
+      });
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, attempts: 3 });
+      const members = yield* expectSettled(started.workflowId);
+      expect(members.map((task) => task.providerInstanceId)).toEqual([
+        instanceId,
+        instanceId,
+        claudeInstanceId,
+      ]);
+      // Each move along the list keeps what the failed check saw.
+      expect(members.slice(1).every((task) => task.prompt.includes("did not pass its"))).toBe(true);
+      const report = yield* reportOf(started.workflowId);
+      expect(attemptTargets(report)).toEqual([
+        [
+          [instanceId, model, "low"],
+          [instanceId, model, "high"],
+          [claudeInstanceId, claudeModel, null],
+        ],
+      ]);
+      expect(
+        report.summary.map((group) => [group.agents, group.retries, group.escalations]),
+      ).toEqual([[1, 2, 2]]);
+      const text = formatWorkflowReport(report);
+      expect(text).toContain(
+        `${instanceId}/${model} > ${instanceId}/${model} > ${claudeInstanceId}/${claudeModel}`,
+      );
+      expect(text).toContain("low > high > -");
+      expect(text).toMatch(/escalations/u);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a provider fault repeats its attempt's target and moves nowhere along the list", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      let answered = 0;
+      yield* answerWorkflowAgents((): WorkerReply => {
+        answered += 1;
+        if (answered === 2) return { text: "", status: "failed", tokens: 100 };
+        return { text: json({ ok: answered === 3 }), tokens: 100 };
+      });
+      const started = yield* startWorkflow(checkedScript, {
+        first: codex("low"),
+        retries: [codex("high"), claude],
+      });
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, attempts: 3 });
+      const report = yield* reportOf(started.workflowId);
+      expect(attemptTargets(report)).toEqual([
+        [
+          [instanceId, model, "low"],
+          [instanceId, model, "high"],
+          [instanceId, model, "high"],
+        ],
+      ]);
+      expect(report.summary[0]?.escalations).toBe(1);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("an attempt past its deadline moves to the next target", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("slow work", { label: "slow", target: args.first, retries: args.retries, attemptTimeoutMs: 60000, report: true })',
+        { first: codex("low"), retries: [claude] },
+      );
+      yield* awaitMember(started.workflowId, 1);
+      yield* TestClock.adjust("2 minutes");
+      const retry = yield* awaitMember(started.workflowId, 2);
+      expect(retry.providerInstanceId).toBe(claudeInstanceId);
+      expect(retry.prompt).toContain("passed its time budget of 60000 ms");
+      yield* completeChild(retry.childThreadId!, "finished in time");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, attempts: 2 });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  const node = (fields: Record<string, unknown>) => ({
+    subject: "build",
+    description: "build the parser",
+    dependsOn: [],
+    target: codex("low"),
+    ...fields,
+  });
+  const graphOf = (fields: Record<string, unknown>) => ({
+    schemaVersion: 1,
+    nodes: { a: node(fields) },
+  });
+  const judged = (target?: unknown) => ({
+    type: "judgment",
+    rubric: ["It is right."],
+    ...(target === undefined ? {} : { target }),
+  });
+
+  it.effect("graph review resolves every retry target into the digest it approves", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const plain = yield* reviewGraph(graphOf({}));
+      const reviewed = yield* reviewGraph(graphOf({ retries: [codex("high")] }));
+      expect(reviewed.ready).toBe(true);
+      expect(reviewed.next).toContain("call graph_start now");
+      const concrete = {
+        providerInstanceId: instanceId,
+        model,
+        options: [{ id: "reasoningEffort", value: "high" }],
+        inheritOptions: false,
+      };
+      expect(reviewed.targets[0]?.retries).toEqual([concrete]);
+      expect(
+        (reviewed.expandedGraph as { nodes: Record<string, { retries?: unknown }> }).nodes.a
+          ?.retries,
+      ).toEqual([concrete]);
+      // The digest covers the list, so a graph that walks it is not the one without it.
+      expect(reviewed.digest).not.toBe(plain.digest);
+      expect((yield* reviewGraph(reviewed.expandedGraph)).digest).toBe(reviewed.digest);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a started graph walks the retry targets it was reviewed with", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents((_prompt, task) => json({ ok: onClaude(task) }), 100);
+      const reviewed = yield* reviewGraph(
+        graphOf({
+          retries: [claude],
+          schema: { type: "object", required: ["ok"] },
+          verify: { type: "structured", equals: { "/ok": true } },
+        }),
+      );
+      const started = yield* decodeWorkflow(
+        (yield* invoke("graph_start", {
+          graph: reviewed.expandedGraph,
+          acceptedDigest: reviewed.digest,
+        })).structuredContent,
+      );
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(ended.status).toBe("completed");
+      const members = yield* expectSettled(started.workflowId);
+      expect(members.map((task) => task.providerInstanceId)).toEqual([
+        instanceId,
+        claudeInstanceId,
+      ]);
+      expect(ended.nodes?.a).toMatchObject({ status: "passed", attempts: 2 });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect.each([
+    {
+      name: "a retry target that does not resolve",
+      fields: { retries: [{ providerInstanceId: instanceId, model: "unknown-model" }] },
+      blocker: `a retries[0]: Model unknown-model is not advertised by provider ${instanceId}.`,
+    },
+    {
+      name: "a retries field that is not a list",
+      fields: { retries: "escalate" },
+      blocker: "a: retries must be an array of targets.",
+    },
+    {
+      name: "retries that leave the worker's family under an inherited judgment check",
+      fields: { retries: [claude], verify: judged() },
+      blocker: `a judgment: retries runs ${claudeModel} outside the model family of the first target, so the judgment check needs a target of its own.`,
+    },
+  ])("graph review blocks $name", ({ fields, blocker }) =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const reviewed = yield* reviewGraph(graphOf(fields));
+      expect(reviewed.digest).toBeNull();
+      expect(reviewed.ready).toBe(false);
+      expect(reviewed.blockers).toContain(blocker);
+      expect(reviewed.next).toContain("Fix the blockers");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect(
+    "a check with its own target allows retries across families, and notes any in its family",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const reviewed = yield* reviewGraph(graphOf({ retries: [claude], verify: judged(claude) }));
+        expect(reviewed.blockers).toEqual([]);
+        expect(reviewed.ready).toBe(true);
+        expect(reviewed.advisory?.assignmentNotes).toEqual([
+          "a retries[0]: same model family as its judgment check (claude) while another family is enabled.",
+        ]);
+      }).pipe(Effect.provide(layerTest)),
+  );
 });
 
 /** A small seeded generator (mulberry32), so each seed replays the same outcomes. */

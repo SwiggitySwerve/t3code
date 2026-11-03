@@ -77,6 +77,7 @@ import {
 import { GRAPH_DRIVER_SCRIPT, REMOVED_PRESET_MESSAGE } from "./workflowGraph.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { WorkflowPhases } from "./workflowPhases.ts";
+import { parseRetries, type RetryTarget, retriesCheckProblem } from "./workflowRetries.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
@@ -650,10 +651,18 @@ class WorkflowSession {
     let inputs: ReadonlyArray<FileRef> = [];
     let outputs: ReadonlyArray<FileRef> = [];
     let attemptTimeoutMs: number | undefined;
+    let retries: ReadonlyArray<RetryTarget> | undefined;
     let invalid: string | undefined =
       error ?? (source === "workerTarget" ? this.workflow.workerTargetError : undefined);
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
+      if (options.retries !== undefined) retries = parseRetries(options.retries);
+      const ownCheckTarget = check?.type === "judgment" && check.target !== undefined;
+      const retriesProblem =
+        check?.type === "judgment" && !ownCheckTarget
+          ? retriesCheckProblem(stringOption(asRecord(target), "model"), retries)
+          : undefined;
+      if (retriesProblem !== undefined) throw new Error(retriesProblem);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);
       if (options.inputs !== undefined) inputs = parseFileRefs(options.inputs, "inputs");
       if (options.outputs !== undefined) outputs = parseFileRefs(options.outputs, "outputs");
@@ -702,6 +711,7 @@ class WorkflowSession {
           ...(inputs.length === 0 ? [] : [{ inputs: inputs.map(withoutProducer) }]),
           ...(outputs.length === 0 ? [] : [{ outputs }]),
           ...(attemptTimeoutMs === undefined ? [] : [{ attemptTimeoutMs }]),
+          ...(retries === undefined ? [] : [{ retries }]),
         ]),
       )
       .digest("hex")
@@ -825,16 +835,21 @@ class WorkflowSession {
             hasOutputs: outputs.length > 0,
           })
         : "";
-    const itemFor = (feedback: string) =>
+    const itemFor = (feedback: string, attemptTarget: unknown) =>
       decodeItem({
         task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${feedback}`,
         title: truncate(label, 500),
-        ...(target === undefined ? {} : { target }),
+        ...(attemptTarget === undefined ? {} : { target: attemptTarget }),
         ...(options.isolation === undefined ? {} : { isolation: options.isolation }),
         ...(options.role === undefined ? {} : { role: options.role }),
         ...(options.schema === undefined ? {} : { resultSchema: options.schema }),
       });
-    if (invalid !== undefined || Exit.isFailure(itemFor(""))) {
+    if (
+      invalid !== undefined ||
+      [target, ...(retries ?? [])].some((attemptTarget) =>
+        Exit.isFailure(itemFor("", attemptTarget)),
+      )
+    ) {
       settle("failed", `agent "${label}" has invalid options${invalid ? `: ${invalid}` : "."}`);
       return done(null);
     }
@@ -874,6 +889,7 @@ class WorkflowSession {
           label,
           phase,
           target,
+          retries,
           requestKey,
           check,
           inputs,

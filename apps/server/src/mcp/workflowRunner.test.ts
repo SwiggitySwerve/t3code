@@ -143,7 +143,11 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const taskUpdates = new Map<string, Queue.Queue<void>>();
     const stops: Array<string> = [];
     const keys = new Map<string, string>();
-    const spawns: Array<{ readonly task: string; readonly requestKey: string }> = [];
+    const spawns: Array<{
+      readonly task: string;
+      readonly requestKey: string;
+      readonly target: unknown;
+    }> = [];
     const rowsAtStop: Array<OrchestrationV2SubagentWorkflow | undefined> = [];
     // The files the runner stored for checkers, those a checker could read when it started, and
     // those removed afterwards.
@@ -285,7 +289,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
           if (options.beforeSpawn !== undefined) yield* options.beforeSpawn;
           spawned += 1;
           keys.set(item.task, requestKey);
-          spawns.push({ task: item.task, requestKey });
+          spawns.push({ task: item.task, requestKey, target: item.target });
           if (options.failSpawn)
             return yield* Effect.fail({
               code: "orchestration_error",
@@ -1547,8 +1551,174 @@ describe("workflow runner", () => {
 
   it("recovers a request key from attempt keys up to the most attempts an agent makes", () => {
     const key = `wf-${"a".repeat(24)}-0`;
-    expect([key, `${key}-r1`, `${key}-r3`].map(agentRequestKey)).toEqual([key, key, key]);
-    expect(agentRequestKey(`${key}-r4`)).toBeUndefined();
+    expect([key, `${key}-r1`, `${key}-r4`].map(agentRequestKey)).toEqual([key, key, key]);
+    expect(agentRequestKey(`${key}-r5`)).toBeUndefined();
+  });
+
+  describe("retries", () => {
+    const rung = (effort: string) => ({
+      providerInstanceId: "codex",
+      model: "m",
+      options: { effort },
+    });
+    // The target as the delegated item carries it, with its options in list form.
+    const sent = (effort: string) => ({
+      providerInstanceId: "codex",
+      model: "m",
+      options: [{ id: "effort", value: effort }],
+    });
+    const failed = () => Effect.succeed({ outcome: "failed" as const, detail: "wrong" });
+    const passedOn =
+      (childThreadId: string): WorkflowRunnerDeps["runCommandCheck"] =>
+      (_workflow, child) =>
+        child === childThreadId
+          ? Effect.succeed({ outcome: "passed" as const, detail: "right" })
+          : failed();
+    const checked = `verify: { type: "process", argv: ["check"] }`;
+    const ladder = `target: ${JSON.stringify(rung("low"))}, retries: ${JSON.stringify([rung("medium"), rung("high")])}`;
+    const run = (source: string, options: HarnessOptions = {}) =>
+      Effect.gen(function* () {
+        const h = yield* makeHarness(options);
+        yield* launch(h.runner, source);
+        return { h, report: JSON.parse(yield* Deferred.await(h.completed)) };
+      });
+
+    it.effect("keys an agent without retries as before, and one with them apart", () =>
+      Effect.gen(function* () {
+        // report is not part of the key; the pinned key is the one this call had before retries.
+        const plain = yield* run('return await agent("x", { report: true })');
+        expect(plain.h.spawns.map((spawn) => spawn.requestKey)).toEqual([
+          "wf-c585ef6a4b3b95ec597f40fb-0",
+        ]);
+        const listed = yield* run('return await agent("x", { retries: [], report: true })');
+        expect(listed.h.spawns[0]!.requestKey).not.toBe("wf-c585ef6a4b3b95ec597f40fb-0");
+      }),
+    );
+
+    it.effect.each([
+      { name: "after each failed check", finish: undefined },
+      {
+        name: "past a provider fault, which repeats its target",
+        finish: (n: number) => (n === 2 ? ("failed" as const) : ("completed" as const)),
+      },
+    ])("walks its targets in order $name", ({ finish }) =>
+      Effect.gen(function* () {
+        const faulted = finish !== undefined;
+        const { h, report } = yield* run(
+          `return await agent("x", { ${ladder}, ${checked}, report: true })`,
+          {
+            runCommandCheck: passedOn(faulted ? "thread:agent-4" : "thread:agent-3"),
+            ...(finish === undefined ? {} : { finish }),
+          },
+        );
+        expect(report).toMatchObject({ ok: true, attempts: faulted ? 4 : 3 });
+        expect(h.spawns.map((spawn) => spawn.target)).toEqual(
+          faulted
+            ? [sent("low"), sent("medium"), sent("medium"), sent("high")]
+            : [sent("low"), sent("medium"), sent("high")],
+        );
+        // Every attempt after a failed check carries what the check saw.
+        expect(h.spawns.slice(1).every((spawn) => spawn.task.includes("wrong"))).toBe(true);
+      }),
+    );
+
+    it.effect("leaves one work attempt for an empty list", () =>
+      Effect.gen(function* () {
+        const { h, report } = yield* run(
+          `return await agent("x", { retries: [], ${checked}, report: true })`,
+          { runCommandCheck: failed },
+        );
+        expect(report).toMatchObject({ ok: false, attempts: 1 });
+        expect(h.spawns).toHaveLength(1);
+      }),
+    );
+
+    it.effect.each([
+      { retries: '"high"', reason: "retries must be an array of targets." },
+      {
+        retries: JSON.stringify([rung("a"), rung("b"), rung("c")]),
+        reason: "retries takes at most 2 targets.",
+      },
+      {
+        retries: JSON.stringify([{ model: "m" }]),
+        reason: "retries[0] needs a providerInstanceId and a model",
+      },
+      {
+        retries: JSON.stringify([{ ...rung("a"), environmentId: "elsewhere" }]),
+        reason: "retries[0] takes providerInstanceId, model and options, not environmentId.",
+      },
+    ])("refuses retries of $retries before starting anything", ({ retries, reason }) =>
+      Effect.gen(function* () {
+        const { h, report } = yield* run(
+          `return await agent("x", { retries: ${retries}, report: true })`,
+        );
+        expect(report.ok).toBe(false);
+        expect(report.reason).toContain(reason);
+        expect(h.spawns).toEqual([]);
+      }),
+    );
+
+    it.effect("refuses retries that leave the family of a judgment check's worker", () =>
+      Effect.gen(function* () {
+        const judged = (checkTarget: string) =>
+          `return await agent("x", { target: { providerInstanceId: "codex", model: "gpt-5.4" }, retries: [{ providerInstanceId: "claude", model: "claude-sonnet-4-6" }], verify: { type: "judgment", rubric: ["ok"]${checkTarget} }, report: true })`;
+        const inherited = yield* run(judged(""));
+        expect(inherited.report.reason).toContain("judgment check needs a target of its own");
+        expect(inherited.h.spawns).toEqual([]);
+        // With its own target the check no longer follows the worker's first one.
+        const own = yield* run(
+          judged(', target: { providerInstanceId: "claude", model: "claude-opus-5" }'),
+          { judgment: () => true },
+        );
+        expect(own.report.ok).toBe(true);
+      }),
+    );
+
+    it.effect("resumes part-way through on the target each attempt started on", () =>
+      Effect.gen(function* () {
+        const source = `return await agent("x", { ${ladder}, ${checked}, report: true })`;
+        // The first run fails its first check, then stops while its second attempt runs.
+        const secondStarted = yield* Deferred.make<OrchestrationV2SubagentWorkflow>();
+        const first = yield* makeHarness({
+          runCommandCheck: failed,
+          finish: (n) => (n === 1 ? "completed" : "hang"),
+          onWorkflowUpdate: (workflow) =>
+            workflow.agents[0]?.attemptHistory?.length === 2
+              ? Deferred.succeed(secondStarted, workflow)
+              : Effect.void,
+        });
+        yield* launch(first.runner, source);
+        const previousWorkflow = yield* Deferred.await(secondStarted);
+        yield* first.runner.detachAll;
+        const requestKey = first.spawns[0]!.requestKey;
+        const second = yield* makeHarness({
+          previousWorkflow,
+          taskIds: first.taskIds,
+          agentStarted: (key) => first.taskIds.has(key),
+          runCommandCheck: passedOn("thread:agent-3"),
+        });
+        yield* second.runner.launch({
+          workflowId,
+          threadId,
+          source,
+          args: null,
+          afterSequence: 0,
+          previousWorkflow,
+        });
+        expect(JSON.parse(yield* Deferred.await(second.completed))).toMatchObject({
+          ok: true,
+          attempts: 3,
+        });
+        // The first two attempts are attached again by their keys, each on the target it started
+        // on; only the third is new.
+        expect(first.spawns.map((spawn) => spawn.target)).toEqual([sent("low"), sent("medium")]);
+        expect(second.spawns.map((spawn) => [spawn.requestKey, spawn.target])).toEqual([
+          [requestKey, sent("low")],
+          [`${requestKey}-r1`, sent("medium")],
+          [`${requestKey}-r2`, sent("high")],
+        ]);
+      }),
+    );
   });
 
   describe("final completion", () => {

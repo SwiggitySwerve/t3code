@@ -598,6 +598,20 @@ describe("graph capacity", () => {
     expect(reviewed.layers).toEqual([]);
     // The same count of nodes without judges is well within capacity.
     expect(reviewGraph(graph(many(fits + 1)), {}).blockers).toEqual([]);
+    // Each declared retry target is one more work attempt, and so one more judge.
+    const laddered = () =>
+      node({
+        verify: { type: "judgment", rubric: ["Correct"] },
+        retries: [
+          { providerInstanceId: "codex", model: "gpt-5.4" },
+          { providerInstanceId: "codex", model: "gpt-5.5" },
+        ],
+      });
+    const ladderFits = Math.floor(CAPACITY / (perNode + 1));
+    expect(reviewGraph(graph(many(ladderFits, laddered)), {}).blockers).toEqual([]);
+    expect(reviewGraph(graph(many(ladderFits + 1, laddered)), {}).blockers[0]).toContain(
+      String((ladderFits + 1) * (perNode + 1)),
+    );
   });
 
   it("does not count process or structured checks as extra agents", () => {

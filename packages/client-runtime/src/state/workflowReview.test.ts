@@ -85,8 +85,23 @@ describe("workflowReviewOf", () => {
     });
     expect(review.nodes[3]).toMatchObject({
       judge: { providerInstanceId: "cliproxy", model: "claude-opus-5-5" },
+      retries: [],
       check: "judgment",
     });
+    const [laddered] = reviewOf({
+      tasks: [
+        {
+          key: "a",
+          label: "A",
+          wave: 0,
+          dependsOn: [],
+          retries: [{ providerInstanceId: "cliproxy", model: "claude-opus-5-5" }],
+        },
+      ],
+    }).nodes;
+    expect(laddered?.retries).toEqual([
+      { providerInstanceId: "cliproxy", model: "claude-opus-5-5" },
+    ]);
     expect(review.advice).toMatchObject({
       nodeCount: 4,
       estimatedTokens: { low: 180_000, high: 436_800 },
@@ -464,6 +479,21 @@ describe("workflowReviewNodeLines", () => {
     });
     expect(workflowReviewNodeLines({ ...survey!, check: "structured" }, undefined).runs).toContain(
       "checked against its output",
+    );
+    // The targets its retries move to are part of what the person approves.
+    expect(
+      workflowReviewNodeLines(
+        {
+          ...verify!,
+          retries: [
+            { providerInstanceId: "cliproxy", model: "claude-sonnet-5-5" },
+            { providerInstanceId: "cliproxy", model: null },
+          ],
+        },
+        undefined,
+      ).runs,
+    ).toBe(
+      "cliproxy · claude-haiku-5-5, then cliproxy · claude-sonnet-5-5, then cliproxy · checked by cliproxy · claude-opus-5-5",
     );
   });
 });

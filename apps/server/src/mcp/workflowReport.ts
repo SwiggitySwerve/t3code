@@ -29,6 +29,30 @@ function median(values: ReadonlyArray<number>): number | null {
   return sorted.length % 2 === 1 ? sorted[middle]! : (sorted[middle - 1]! + sorted[middle]!) / 2;
 }
 
+type ReportAttempt = OrchestratorMcpWorkflowReportAttempt;
+
+const attemptTargetKey = (attempt: ReportAttempt) =>
+  JSON.stringify([
+    attempt.provider,
+    attempt.model,
+    attempt.effort,
+    Object.entries(attempt.options ?? {}).toSorted(([left], [right]) => left.localeCompare(right)),
+  ]);
+
+/** Each run of consecutive attempts on one target, in attempt order. */
+function attemptTargets(attempts: ReadonlyArray<ReportAttempt>): ReadonlyArray<ReportAttempt> {
+  return attempts
+    .toSorted((left, right) => left.attempt - right.attempt)
+    .filter(
+      (attempt, index, sorted) =>
+        index === 0 || attemptTargetKey(attempt) !== attemptTargetKey(sorted[index - 1]!),
+    );
+}
+
+/** Retries that ran on another target than the attempt before them. */
+const escalationsOf = (attempts: ReadonlyArray<ReportAttempt> | undefined) =>
+  Math.max(0, attemptTargets(attempts ?? []).length - 1);
+
 interface Cost {
   readonly costUsd: number | null;
   readonly costSource: WorkflowReportCostSource;
@@ -192,6 +216,7 @@ export function workflowReport(
         firstTryPassRate:
           passed.filter((agent) => agent.attempts === 1).length / Math.max(1, members.length),
         retries: members.reduce((sum, agent) => sum + Math.max(0, agent.attempts - 1), 0),
+        escalations: members.reduce((sum, agent) => sum + escalationsOf(agent.attemptCosts), 0),
         medianTokensPerPassed: median(
           passed.flatMap((agent) => (agent.totalTokens === null ? [] : [agent.totalTokens])),
         ),
@@ -279,28 +304,46 @@ export function formatWorkflowReport(report: OrchestratorMcpWorkflowReport): str
       "outcome",
       "check",
     ],
-    ...report.agents.map((agent) => [
-      String(agent.index),
-      agent.label,
-      agent.phase ?? "-",
-      agent.role,
-      `${agent.provider ?? "-"}/${agent.model ?? "-"}`,
-      agent.effort ?? "-",
-      agent.targetSource ?? "-",
-      `${count(agent.inputTokens)}/${count(agent.cachedInputTokens)}/${count(agent.outputTokens)}`,
-      cost(agent),
-      duration(agent.durationMs),
-      String(agent.attempts),
-      agent.outcome ?? agent.status,
-      agent.role === "checker"
-        ? `verdict:${agent.checkOutcome ?? "-"}`
-        : agent.check === "none" && agent.checkOutcome === null
-          ? "-"
-          : `${agent.check}:${agent.checkOutcome ?? "-"}`,
-    ]),
+    ...report.agents.map((agent) => {
+      // An agent whose retries moved to other targets lists each one, oldest first.
+      const targets = attemptTargets(agent.attemptCosts ?? []);
+      const escalated = targets.length > 1;
+      return [
+        String(agent.index),
+        agent.label,
+        agent.phase ?? "-",
+        agent.role,
+        escalated
+          ? targets.map((attempt) => `${attempt.provider}/${attempt.model ?? "-"}`).join(" > ")
+          : `${agent.provider ?? "-"}/${agent.model ?? "-"}`,
+        escalated
+          ? targets.map((attempt) => attempt.effort ?? "-").join(" > ")
+          : (agent.effort ?? "-"),
+        agent.targetSource ?? "-",
+        `${count(agent.inputTokens)}/${count(agent.cachedInputTokens)}/${count(agent.outputTokens)}`,
+        cost(agent),
+        duration(agent.durationMs),
+        String(agent.attempts),
+        agent.outcome ?? agent.status,
+        agent.role === "checker"
+          ? `verdict:${agent.checkOutcome ?? "-"}`
+          : agent.check === "none" && agent.checkOutcome === null
+            ? "-"
+            : `${agent.check}:${agent.checkOutcome ?? "-"}`,
+      ];
+    }),
   ]);
   const groups = table([
-    ["role", "family", "check", "agents", "first-try pass", "retries", "median tokens/passed"],
+    [
+      "role",
+      "family",
+      "check",
+      "agents",
+      "first-try pass",
+      "retries",
+      "escalations",
+      "median tokens/passed",
+    ],
     ...report.summary.map((group) => [
       group.role,
       group.family,
@@ -308,6 +351,7 @@ export function formatWorkflowReport(report: OrchestratorMcpWorkflowReport): str
       String(group.agents),
       `${Math.round(group.firstTryPassRate * 100)}%`,
       String(group.retries),
+      group.escalations === undefined ? "-" : String(group.escalations),
       count(group.medianTokensPerPassed),
     ]),
   ]);

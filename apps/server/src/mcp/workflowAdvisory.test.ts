@@ -198,6 +198,28 @@ describe("graph advisory", () => {
       low: 2 * 2 * 17_000 + 2 * 37_000 + 3 * 96_000,
       high: 2 * 3 * 26_000 + 3 * 96_000 + 4 * 106_000,
     });
+    // A declared retry target adds an attempt on its own driver and a judge for it to the high
+    // figures only; the low ones still expect the first attempt to pass.
+    const laddered = advise(
+      graph({
+        a: node({
+          verify: { type: "judgment", rubric: ["Is it correct?"] },
+          retries: [{ providerInstanceId: "claude", model: "claude-opus-5" }],
+        }),
+        b: node(),
+      }),
+      {
+        ...driversOf("codex", { a: "codex", b: "codex" }, { a: "claudeAgent" }),
+        retries: new Map([["a", ["claudeAgent"]]]),
+      },
+    ).advisory;
+    expect(laddered.estimatedModelCalls).toEqual({ low: 9, high: 13 + 3 + 3 });
+    expect(laddered.estimatedTokens).toMatchObject({
+      low: advisory.estimatedTokens.low,
+      high: advisory.estimatedTokens.high + 3 * 96_000 + 3 * 96_000,
+    });
+    expect(laddered.suggestedBudgetTokens).toBeGreaterThan(advisory.suggestedBudgetTokens);
+    expect(laddered.estimatedTokens.basis).toContain("High counts every declared retry target");
   });
   it("never changes the digest, the blockers or the layers of a review", () => {
     const value = chain(3);

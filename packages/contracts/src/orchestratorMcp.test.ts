@@ -65,6 +65,13 @@ describe("orchestrator MCP contracts", () => {
     expect(decodeGraphReviewResult({ ...base, next: "call graph_start now" }).next).toBe(
       "call graph_start now",
     );
+    // Nor retry targets; a current server lists the concrete ones review resolved.
+    const target = { providerInstanceId: "codex", model: "gpt-6-luna" };
+    const laddered = decodeGraphReviewResult({
+      ...base,
+      targets: [{ nodeId: "a", source: "target", target, retries: [target] }],
+    });
+    expect(laddered.targets[0]?.retries).toEqual([target]);
     expect(decodeGraphReviewResult({ ...base, advisory }).advisory).toEqual(advisory);
     expect(() =>
       decodeGraphReviewResult({ ...base, advisory: { ...advisory, fanOut: "stop" } }),

@@ -39,6 +39,8 @@ export interface WorkflowReviewNodeView {
   readonly worker: WorkflowReviewTargetView | null;
   /** The judge's target, when the task has a judgment check. */
   readonly judge: WorkflowReviewTargetView | null;
+  /** The targets its attempts after a failed check move to, in order; empty when none. */
+  readonly retries: ReadonlyArray<WorkflowReviewTargetView>;
   /** How the task's result is checked, when it is. */
   readonly check: "process" | "structured" | "judgment" | null;
 }
@@ -130,6 +132,7 @@ export function workflowReviewOf(item: OrchestrationV2WorkflowReviewRecord): Wor
       wave: task.wave,
       worker: targetView(task.worker),
       judge: targetView(task.judge),
+      retries: (task.retries ?? []).flatMap((rung) => targetView(rung) ?? []),
       check: task.check ?? null,
     })),
     taskCount: item.taskCount,
@@ -397,12 +400,17 @@ export function workflowReviewTargetLabel(
   return [providerName, modelName].filter((part): part is string => part !== null).join(" \u00b7 ");
 }
 
-/** The two lines under a task's name: who runs it and how it is checked, and what it waits for. */
+/**
+ * The two lines under a task's name: who runs it, then who runs each retry, and how it is checked;
+ * and what it waits for.
+ */
 export function workflowReviewNodeLines(
   node: WorkflowReviewNodeView,
   providers: Parameters<typeof workflowReviewTargetLabel>[1],
 ): { readonly runs: string; readonly after: string | null } {
-  const worker = workflowReviewTargetLabel(node.worker, providers);
+  const worker = [node.worker, ...node.retries]
+    .map((target) => workflowReviewTargetLabel(target, providers))
+    .join(", then ");
   const checkedBy =
     node.check === "judgment"
       ? `checked by ${node.judge === null ? "a judge" : workflowReviewTargetLabel(node.judge, providers)}`

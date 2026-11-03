@@ -38,7 +38,8 @@ import {
   judgedResultFits,
   taskOutputAt,
 } from "./workflowHandoff.ts";
-import { MAX_AGENT_ATTEMPTS, MAX_INFRA_RETRIES, MAX_WORK_ATTEMPTS } from "./workflowLimits.ts";
+import { MAX_AGENT_ATTEMPTS, MAX_INFRA_RETRIES, workAttempts } from "./workflowLimits.ts";
+import { attemptTarget, type RetryTarget } from "./workflowRetries.ts";
 import type { WaitingAgent } from "./workflowSweep.ts";
 import type {
   WorkflowAgentOutcome,
@@ -139,7 +140,9 @@ export interface AgentAttemptInput {
   readonly entry: MutableAgent;
   readonly label: string;
   readonly phase: string | undefined;
+  /** The first attempt's target; a judgment check without its own runs on it. */
   readonly target: unknown;
+  readonly retries: ReadonlyArray<RetryTarget> | undefined;
   readonly requestKey: string;
   readonly check: WorkflowCheck | undefined;
   readonly inputs: ReadonlyArray<FileRef>;
@@ -147,6 +150,7 @@ export interface AgentAttemptInput {
   readonly attemptTimeoutMs: number | undefined;
   readonly itemFor: (
     feedback: string,
+    target: unknown,
   ) => Exit.Exit<OrchestratorMcpDelegateTasksItem, Schema.SchemaError>;
   readonly settle: (status: "completed" | "failed", result: string | null) => void;
 }
@@ -167,6 +171,7 @@ export async function runAttempts(
     label,
     phase,
     target,
+    retries,
     requestKey,
     check,
     inputs,
@@ -175,6 +180,7 @@ export async function runAttempts(
     itemFor,
     settle,
   } = input;
+  const allowedWork = workAttempts(retries);
   const files = Object.fromEntries([
     ...inputs.map((ref) => [`input:${ref.id}`, ref.path] as const),
     ...outputs.map((ref) => [`output:${ref.id}`, ref.path] as const),
@@ -183,6 +189,13 @@ export async function runAttempts(
   // Work failures use the agent's attempts; infrastructure faults retry beside them.
   let workFailures = 0;
   let infraFaults = 0;
+  // Names the retry target the next attempt moves to, when it moves.
+  const onNextTarget = () => {
+    const next = attemptTarget(target, retries, workFailures);
+    return next === attemptTarget(target, retries, workFailures - 1)
+      ? ""
+      : ` on ${(next as RetryTarget).model}`;
+  };
   // A run from before these limits may have started the next attempt already. It is attached
   // again rather than left running with no owner.
   const nextAttemptStarted = async (attempt: number) =>
@@ -193,7 +206,7 @@ export async function runAttempts(
         .pipe(Effect.orElseSucceed(() => false)),
     ));
   for (let attempt = 0; ; attempt += 1) {
-    const item = itemFor(feedback);
+    const item = itemFor(feedback, attemptTarget(target, retries, workFailures));
     if (Exit.isFailure(item)) {
       settle("failed", `agent "${label}" has invalid options.`);
       return null;
@@ -305,9 +318,9 @@ export async function runAttempts(
     if (status !== "completed" && stopReason === "timed_out") {
       const passed = `passed its time budget of ${attemptTimeoutMs} ms and was stopped`;
       workFailures += 1;
-      if (workFailures < MAX_WORK_ATTEMPTS || (await nextAttemptStarted(attempt))) {
+      if (workFailures < allowedWork || (await nextAttemptStarted(attempt))) {
         feedback = `\n\nYour previous attempt ${passed}. Work more directly and finish within the budget.`;
-        host.setProgress(`agent "${label}" ${passed}; starting it again.`);
+        host.setProgress(`agent "${label}" ${passed}; starting it again${onNextTarget()}.`);
         continue;
       }
       entry.outcomeCategory = "timed_out";
@@ -394,10 +407,12 @@ export async function runAttempts(
     if (checked.outcome === "failed") workFailures += 1;
     if (
       checked.outcome === "failed" &&
-      (workFailures < MAX_WORK_ATTEMPTS || (await nextAttemptStarted(attempt)))
+      (workFailures < allowedWork || (await nextAttemptStarted(attempt)))
     ) {
       feedback = checkFeedback(checkType, checked);
-      host.setProgress(`agent "${label}" failed its ${checkType} check; starting it again.`);
+      host.setProgress(
+        `agent "${label}" failed its ${checkType} check; starting it again${onNextTarget()}.`,
+      );
       entry.state = "running";
       host.scheduleUpdate();
       continue;

@@ -16,8 +16,9 @@ import {
   scopesOverlap,
   type WorkflowCheck,
 } from "./workflowChecks.ts";
-import { MAX_AGENTS_PER_WORKFLOW, MAX_WORK_ATTEMPTS, maxAgentsPerCall } from "./workflowLimits.ts";
+import { MAX_AGENTS_PER_WORKFLOW, maxAgentsPerCall } from "./workflowLimits.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
+import { parseRetries } from "./workflowRetries.ts";
 
 type AttemptBudget = "short" | "standard" | "long";
 const ATTEMPT_BUDGETS = { short: 30 * 60_000, standard: 2 * 60 * 60_000, long: 6 * 60 * 60_000 };
@@ -45,6 +46,8 @@ interface GraphNode {
   readonly dependsOn: ReadonlyArray<string>;
   readonly phase?: string;
   readonly target?: unknown;
+  /** Review replaces each with the concrete target it resolves to, as it does `target`. */
+  readonly retries?: ReadonlyArray<unknown>;
   readonly model?: string;
   readonly role?: string;
   readonly schema?: unknown;
@@ -203,6 +206,7 @@ function parseNode(value: unknown): NodeParse {
     (entry) => parseFileRefs([entry], "outputs"),
   );
   const verify = optional(node.verify, parseCheck);
+  const retries = optional(node.retries, parseRetries);
   if (
     outputs !== undefined &&
     verify?.type === "structured" &&
@@ -241,6 +245,7 @@ function parseNode(value: unknown): NodeParse {
       dependsOn,
       ...(phase === undefined ? {} : { phase }),
       ...(node.target === undefined ? {} : { target: node.target }),
+      ...(retries === undefined ? {} : { retries }),
       ...(model === undefined ? {} : { model }),
       ...(role === undefined ? {} : { role }),
       ...(node.schema === undefined ? {} : { schema: node.schema }),
@@ -367,7 +372,7 @@ export function parseGraph(value: unknown): ParseResult {
   }
   // Judgment checks add judge agents, so the nodes' worst case is known once they are read.
   const agentsNeeded = Object.values(nodes).reduce(
-    (sum, node) => sum + maxAgentsPerCall(node.verify?.type),
+    (sum, node) => sum + maxAgentsPerCall(node.verify?.type, node.retries),
     0,
   );
   if (agentsNeeded > MAX_AGENTS_PER_WORKFLOW)
@@ -375,7 +380,7 @@ export function parseGraph(value: unknown): ParseResult {
       ok: false,
       problems: [
         ...problems,
-        `graph can start up to ${agentsNeeded} agents (each node, plus up to ${MAX_WORK_ATTEMPTS} judges for each judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
+        `graph can start up to ${agentsNeeded} agents (each node, plus a judge for each work attempt of a judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
       ],
     };
   const paths = new Map<string, string>();
@@ -582,7 +587,7 @@ const runNode = async (key) => {
       attemptTimeoutMs: budgets[node.attemptBudget], report: true,
     };
     if (recordsNodes) options.node = key;
-    for (const field of ["target", "role", "schema", "scopes", "verify", "stallTimeoutMs"]) {
+    for (const field of ["target", "retries", "role", "schema", "scopes", "verify", "stallTimeoutMs"]) {
       if (node[field] !== undefined) options[field] = node[field];
     }
     let report;

@@ -69,6 +69,7 @@ export function workflowReviewRecord(
     const entry = targets.get(node.key);
     const worker = targetOf(entry?.target);
     const judge = targetOf(entry?.judgmentTarget);
+    const retries = entry?.retries?.flatMap((rung) => targetOf(rung) ?? []);
     const check = graph?.nodes[node.key]?.verify?.type;
     const dependsOnMore = node.dependsOn.length - WORKFLOW_REVIEW_MAX_DEPENDENCIES;
     return {
@@ -79,6 +80,7 @@ export function workflowReviewRecord(
       ...(dependsOnMore > 0 ? { dependsOnMore } : {}),
       ...(worker === undefined ? {} : { worker }),
       ...(judge === undefined ? {} : { judge }),
+      ...(retries === undefined || retries.length === 0 ? {} : { retries }),
       ...(check === undefined ? {} : { check }),
     };
   });

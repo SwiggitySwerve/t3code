@@ -248,6 +248,7 @@ describe("workflow report", () => {
         passed: 2,
         firstTryPassRate: 1,
         retries: 0,
+        escalations: 0,
         medianTokensPerPassed: 1_350,
       },
       {
@@ -258,6 +259,8 @@ describe("workflow report", () => {
         passed: 0,
         firstTryPassRate: 0,
         retries: 2,
+        // Its retries left no attempt record, so none is known to have moved.
+        escalations: 0,
         medianTokensPerPassed: null,
       },
       {
@@ -268,6 +271,7 @@ describe("workflow report", () => {
         passed: 1,
         firstTryPassRate: 0,
         retries: 1,
+        escalations: 1,
         medianTokensPerPassed: 5_000,
       },
     ]);
@@ -402,16 +406,16 @@ describe("workflow report", () => {
     expect(formatWorkflowReport(workflowReport(row(decodeWorkflow(stored)), result, pricing))).toBe(
       [
         "Fixture (workflow:fixture): script, failed",
-        "#  label        phase     role     provider/model            effort  source  in/cached/out   cost      time  tries  outcome         check",
-        "0  draft        Write     worker   codex/gpt-5.4             high    target  4000/2000/1000  $0.0114   4.0s  2      completed       judgment:passed",
-        "1  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1000/500/200    no usage  -     1      completed       verdict:failed",
-        "2  check draft  Write     checker  claude/claude-sonnet-4-6  max     target  1200/600/300    no usage  -     1      completed       verdict:passed",
-        "3  research     Research  worker   claude/claude-sonnet-4-6  -       caller  -/-/-           no usage  -     3      provider_error  process:not_run",
+        "#  label        phase     role     provider/model                      effort      source  in/cached/out   cost      time  tries  outcome         check",
+        "0  draft        Write     worker   codex/gpt-5.4-mini > codex/gpt-5.4  low > high  target  4000/2000/1000  $0.0114   4.0s  2      completed       judgment:passed",
+        "1  check draft  Write     checker  claude/claude-sonnet-4-6            max         target  1000/500/200    no usage  -     1      completed       verdict:failed",
+        "2  check draft  Write     checker  claude/claude-sonnet-4-6            max         target  1200/600/300    no usage  -     1      completed       verdict:passed",
+        "3  research     Research  worker   claude/claude-sonnet-4-6            -           caller  -/-/-           no usage  -     3      provider_error  process:not_run",
         "",
-        "role     family  check     agents  first-try pass  retries  median tokens/passed",
-        "checker  claude  none      2       100%            0        1350",
-        "worker   claude  process   1       0%              2        -",
-        "worker   gpt     judgment  1       0%              1        5000",
+        "role     family  check     agents  first-try pass  retries  escalations  median tokens/passed",
+        "checker  claude  none      2       100%            0        0            1350",
+        "worker   claude  process   1       0%              2        0            -",
+        "worker   gpt     judgment  1       0%              1        1            5000",
         "",
         "phases 2, agents 4 (4 settled), attempts 7, tokens 7700 of 20000, ended by settled",
       ].join("\n"),

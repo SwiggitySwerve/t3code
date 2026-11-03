@@ -170,6 +170,7 @@ import {
   workflowTurnUsage,
 } from "./workflowUsage.ts";
 import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
+import { retriesCheckProblem } from "./workflowRetries.ts";
 import { concreteModelFamily, graphAssignmentNotes } from "./workflowAdvisory.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -2604,10 +2605,21 @@ const make = Effect.gen(function* () {
       for (const [nodeId, node] of Object.entries(parsed.graph.nodes)) {
         const selected = selectWorkflowTarget(node, workerTarget);
         const target = yield* resolveGraphTarget(selected.target, nodeId);
+        // Each retry target is resolved and checked as target is, so the digest covers it.
+        const retries: OrchestratorMcpTarget[] = [];
+        for (const [index, rung] of (node.retries ?? []).entries()) {
+          const resolved = yield* resolveGraphTarget(rung, `${nodeId} retries[${index}]`);
+          if (resolved !== undefined) retries.push(resolved);
+        }
         let verify = node.verify;
         let judgmentTarget: OrchestratorMcpTarget | undefined;
         if (verify?.type === "judgment") {
           judgments.set(nodeId, { ownTarget: verify.target !== undefined });
+          const problem =
+            verify.target === undefined && target !== undefined
+              ? retriesCheckProblem(target.model, retries)
+              : undefined;
+          if (problem !== undefined) targetBlockers.push(`${nodeId} judgment: ${problem}`);
           judgmentTarget = yield* resolveGraphTarget(verify.target ?? target, `${nodeId} judgment`);
           verify = { ...verify, target: judgmentTarget };
         }
@@ -2617,9 +2629,15 @@ const make = Effect.gen(function* () {
             source: selected.source,
             target,
             ...(judgmentTarget === undefined ? {} : { judgmentTarget }),
+            ...(node.retries === undefined ? {} : { retries }),
           });
         const { model: _legacyModel, ...concreteNode } = node;
-        nodes[nodeId] = { ...concreteNode, target, ...(verify === undefined ? {} : { verify }) };
+        nodes[nodeId] = {
+          ...concreteNode,
+          target,
+          ...(node.retries === undefined ? {} : { retries }),
+          ...(verify === undefined ? {} : { verify }),
+        };
       }
       concreteGraph = { ...parsed.graph, nodes };
       // A file several nodes read is read once, under the largest bound; review checks each.
@@ -2657,6 +2675,9 @@ const make = Effect.gen(function* () {
             : [[entry.nodeId, driverOfTarget(entry.judgmentTarget)] as const],
         ),
       ),
+      retries: new Map(
+        targets.map((entry) => [entry.nodeId, (entry.retries ?? []).map(driverOfTarget)] as const),
+      ),
     });
     // Only a judgment check can be on its worker's family, so only then are families listed.
     const enabledFamilies = new Set<string>();
@@ -2684,6 +2705,9 @@ const make = Effect.gen(function* () {
           nodeId: entry.nodeId,
           source: entry.source,
           model: entry.target.model ?? parent.thread.modelSelection.model,
+          retryModels: (entry.retries ?? []).map(
+            (rung) => rung.model ?? parent.thread.modelSelection.model,
+          ),
           ...(judgment === undefined || entry.judgmentTarget === undefined
             ? {}
             : {
