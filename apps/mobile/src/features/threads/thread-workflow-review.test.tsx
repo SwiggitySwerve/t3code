@@ -198,6 +198,8 @@ describe("ThreadWorkflowReview", () => {
       "After tests, change",
       "CLI Proxy \u00b7 Claude Opus 5.5",
       "checked by CLI Proxy \u00b7 Claude Opus 5.5",
+      // A task with retries lists each target its attempts move to, in order.
+      "CLI Proxy \u00b7 Claude Haiku 5.5, then CLI Proxy \u00b7 Claude Opus 5.5",
       "About 180K to 437K tokens",
     ]) {
       expect(text()).toContain(expected);

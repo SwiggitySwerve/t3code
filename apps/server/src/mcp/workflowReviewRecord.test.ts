@@ -45,7 +45,7 @@ const node = (dependsOn: ReadonlyArray<string> = [], extra: object = {}) => ({
 });
 
 describe("workflowReviewRecord", () => {
-  it("lists tasks in step order with worker, judge, check and what each waits for", () => {
+  it("lists tasks in step order with worker, retries, judge, check and what each waits for", () => {
     const graph = graphOf({
       schemaVersion: 1,
       name: "  Fix it  ",
@@ -58,7 +58,12 @@ describe("workflowReviewRecord", () => {
       result({
         layers: [["a"], ["b"]],
         targets: [
-          { nodeId: "a", source: "target", target: { providerInstanceId: P1, model: "m1" } },
+          {
+            nodeId: "a",
+            source: "target",
+            target: { providerInstanceId: P1, model: "m1" },
+            retries: [{ providerInstanceId: P2, model: "m4" }],
+          },
           {
             nodeId: "b",
             source: "target",
@@ -86,6 +91,7 @@ describe("workflowReviewRecord", () => {
           wave: 0,
           dependsOn: [],
           worker: { providerInstanceId: "p1", model: "m1" },
+          retries: [{ providerInstanceId: "p2", model: "m4" }],
           check: "process",
         },
         {
@@ -98,6 +104,8 @@ describe("workflowReviewRecord", () => {
         },
       ],
     });
+    // A task that declares no retries carries none.
+    expect(record.tasks[1]).not.toHaveProperty("retries");
     // Descriptions, prompts and inputs never reach the record.
     expect(JSON.stringify(record)).not.toContain("A long description");
   });

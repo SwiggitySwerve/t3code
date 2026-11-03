@@ -282,6 +282,8 @@ describe("workflow review card in the chat timeline", () => {
       "CLI Proxy \u00b7 Claude Opus 5.5",
       "CLI Proxy \u00b7 Claude Haiku 5.5",
       "checked by CLI Proxy \u00b7 Claude Opus 5.5",
+      // A task with retries lists each target its attempts move to, in order.
+      "CLI Proxy \u00b7 Claude Haiku 5.5, then CLI Proxy \u00b7 Claude Opus 5.5",
       "About 180K to 437K tokens",
       "Suggested budget 420K",
       "Approve & run",
@@ -289,6 +291,12 @@ describe("workflow review card in the chat timeline", () => {
     ]) {
       expect(text).toContain(expected);
     }
+    // Names stay whole, but a long list of retry targets can wrap between them.
+    const unbroken = [
+      ...card(screen.container)!.querySelectorAll<HTMLElement>(".whitespace-nowrap"),
+    ].map((part) => part.textContent ?? "");
+    expect(unbroken).toContain("then CLI Proxy · ");
+    expect(unbroken.filter((part) => part.includes(", then"))).toEqual([]);
   });
 
   it("approves with the review id and digest the server issued, once, and shows it as approved", async () => {

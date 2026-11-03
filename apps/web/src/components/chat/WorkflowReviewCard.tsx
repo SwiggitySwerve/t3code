@@ -188,15 +188,27 @@ export function WorkflowReviewCard(props: {
   );
 }
 
-/** The parts of a "who runs it" line, each keyed by where it starts in the line. */
-function runParts(runs: string): ReadonlyArray<{ text: string; offset: number; last: boolean }> {
-  const texts = runs.split(" \u00b7 ");
-  let offset = 0;
-  return texts.map((text, index) => {
-    const part = { text, offset, last: index === texts.length - 1 };
-    offset += text.length + 3;
-    return part;
-  });
+const RUN_BREAKS = / \u00b7 |, then /gu;
+
+/**
+ * The parts of a "who runs it" line, each keyed by where it starts in the line: it splits after
+ * each " \u00b7" and before each "then" that starts the next retry target.
+ */
+function runParts(runs: string): ReadonlyArray<{ text: string; offset: number }> {
+  const parts: Array<{ text: string; offset: number }> = [];
+  let start = 0;
+  let prefix = "";
+  for (const found of runs.matchAll(RUN_BREAKS)) {
+    const dot = found[0] === " \u00b7 ";
+    parts.push({
+      text: `${prefix}${runs.slice(start, found.index)}${dot ? " \u00b7" : ","}`,
+      offset: start,
+    });
+    prefix = dot ? "" : "then ";
+    start = found.index + found[0].length;
+  }
+  parts.push({ text: `${prefix}${runs.slice(start)}`, offset: start });
+  return parts;
 }
 
 function ReviewNodeRow(props: {
@@ -211,11 +223,10 @@ function ReviewNodeRow(props: {
         {node.subject}
       </span>
       <span className="min-w-0 break-words text-2xs text-muted-foreground">
-        {/* A model name never splits across lines; the line breaks only between its parts. */}
+        {/* A provider or model name never splits; the line breaks after a dot or between targets. */}
         {runParts(lines.runs).map((part) => (
           <span key={part.offset} className="whitespace-nowrap">
-            {part.text}
-            {part.last ? "" : " \u00b7"}{" "}
+            {part.text}{" "}
           </span>
         ))}
       </span>

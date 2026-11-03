@@ -23,7 +23,10 @@ const target = (model: string) => ({
   model,
 });
 
-/** The record of a ready review with four tasks in three steps, one of them judged. */
+/**
+ * The record of a ready review with four tasks in three steps: one judged, and one whose attempts
+ * after a failed check move to a stronger model.
+ */
 export function workflowReviewFixtureRecord(
   overrides: Partial<OrchestrationV2WorkflowReviewRecord> = {},
 ): OrchestrationV2WorkflowReviewRecord {
@@ -41,6 +44,7 @@ export function workflowReviewFixtureRecord(
       wave,
       dependsOn,
       worker: target(index === 0 ? "claude-opus-5-5" : "claude-haiku-5-5"),
+      ...(key === "change" ? { retries: [target("claude-opus-5-5")] } : {}),
       ...(key === "verify" ? { judge: target("claude-opus-5-5"), check: "judgment" as const } : {}),
     })),
     taskCount: TASKS.length,
