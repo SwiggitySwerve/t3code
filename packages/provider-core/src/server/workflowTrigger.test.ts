@@ -97,6 +97,13 @@ describe("applyTurnTriggers", () => {
       expect(note).toContain("run a planning agent on a stronger model first");
       expect(note).toContain("different model family than its worker");
       expect(note).toContain("{ type: 'judgment', rubric, target }");
+      expect(note).toContain(
+        "Give an agent with a decisive check retries: targets for its next attempts, cheapest first, escalating effort or model.",
+      );
+      expect(note).toContain(
+        "you redo only after they are spent or the check says the split was wrong",
+      );
+      expect(note).toContain("listPrice is list price; null is unknown, not free.");
       expect(note).not.toMatch(/preset|profile|Settings/iu);
     }
   });
@@ -254,8 +261,8 @@ describe("workflowTurnNote", () => {
   });
 
   it("is compact", () => {
-    expect(workflowTurnNote().length).toBeLessThan(1200);
-    expect(EVERY_TURN_WORKFLOW_NOTE.length).toBeLessThan(1100);
+    expect(workflowTurnNote().length).toBeLessThan(1500);
+    expect(EVERY_TURN_WORKFLOW_NOTE.length).toBeLessThan(1350);
   });
 });
 
