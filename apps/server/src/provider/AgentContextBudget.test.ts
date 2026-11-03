@@ -166,7 +166,7 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
         workflow_start: "e376030a98e44bd9ab94b3c8edb05b8a0b7c33b7b402878d29cdb95d568ed3f4",
         workflow_status: "ecc96395ab4a603896377c9b77548913813eab8874f757167f8c79ee8da99e9c",
         workflow_stop: "8370d8ffc7f9aafde23cc4f0a2d294a46c009fd3daaa7e80c20da9793d3fd1ae",
-        graph_review: "548d89cbc73bff64a7f4599b177a15b31603972c81b9a71fff5c256ed85cd1fd",
+        graph_review: "db4349f0ec45321fb5db35b2fe82e71e3f9c7b054dc24de609a378830911b8dd",
         graph_start: "72469e2348756778e8737d62b859e41058917c4b6e52b45d5173634a0fe9b3d2",
         create_threads: "1ac22ad0de594beb374692af1f768e2493d3f225a708f4cc40f3aa2c05110ee8",
         t3_worktree_remove: "e3570c6c5ba463201941d89475a278817ddb24af12169c7e42c5376da6e538bd",

@@ -98,12 +98,12 @@ describe("applyTurnTriggers", () => {
       expect(note).toContain("different model family than its worker");
       expect(note).toContain("{ type: 'judgment', rubric, target }");
       expect(note).toContain(
-        "Give an agent with a decisive check retries: targets for its next attempts, cheapest first, escalating effort or model.",
+        "Give an agent with a check that can fail it retries: later targets, cheapest first, then more effort or model.",
       );
+      expect(note).toContain("Redo it only once they run out or the split was wrong.");
       expect(note).toContain(
-        "you redo only after they are spent or the check says the split was wrong",
+        "listPrice is the provider's published price, not what this account pays; null is unknown, not free.",
       );
-      expect(note).toContain("listPrice is list price; null is unknown, not free.");
       expect(note).not.toMatch(/preset|profile|Settings/iu);
     }
   });

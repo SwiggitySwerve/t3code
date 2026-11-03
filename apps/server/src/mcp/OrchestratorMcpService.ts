@@ -2811,7 +2811,7 @@ const make = Effect.gen(function* () {
       ? "Fix the blockers, then call graph_review again."
       : decision.approvalRequired
         ? "End your turn. T3 Code sends you the approved digest once the user approves this review."
-        : "No approval is needed: call graph_start now with expandedGraph and acceptedDigest.",
+        : "No approval is needed: call graph_start now with expandedGraph as graph and digest as acceptedDigest.",
     digest: review.digest,
     ready: isReviewReady(review),
     targets: review.targets,

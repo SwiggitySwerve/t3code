@@ -5464,7 +5464,7 @@ describe("workflow approval", () => {
       expect(reviewed.approvalRequired).toBe(false);
       // The result says to start it, so a coordinator does not wait for an approval nobody asks.
       expect(reviewed.next).toBe(
-        "No approval is needed: call graph_start now with expandedGraph and acceptedDigest.",
+        "No approval is needed: call graph_start now with expandedGraph as graph and digest as acceptedDigest.",
       );
       const started = yield* decodeWorkflow(
         (yield* startGraph(oneNode, reviewed)).structuredContent,

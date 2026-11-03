@@ -22,7 +22,7 @@ const ASSIGNMENT_RULES = [
   "Give each agent the smallest model and effort you expect to succeed first time (pass its check, if it has one), and more to ambiguous, multi-file or previously failed work. Prefer lowering effort to switching to a much weaker model.",
   "Split work you cannot scope into smaller agents; for a part too large to scope, run a planning agent on a stronger model first.",
   "Check work with verify: { type: 'process', argv }, or { type: 'judgment', rubric, target } on a different model family than its worker when one is enabled.",
-  "Give an agent with a decisive check retries: targets for its next attempts, cheapest first, escalating effort or model. The runner walks them; you redo only after they are spent or the check says the split was wrong. listPrice is list price; null is unknown, not free.",
+  "Give an agent with a check that can fail it retries: later targets, cheapest first, then more effort or model. Redo it only once they run out or the split was wrong. listPrice is the provider's published price, not what this account pays; null is unknown, not free.",
 ];
 
 const WORKFLOW_TURN_NOTE = [
