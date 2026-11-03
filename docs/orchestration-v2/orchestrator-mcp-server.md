@@ -854,7 +854,8 @@ when every node passed its checks.
   agent by agent. The `basis` says which figures were used. Tasks that read more than the
   benchmark's one or two small files will exceed the member high figure; the headroom and the
   thresholds are opinion. The advisory counts one judge agent per judgment check, and its high
-  figures count every declared `retries` target as one more attempt, judged again when checked. It is not in the
+  figures count every declared `retries` target as one more attempt, judged again when checked;
+  the suggested budget's reserve of one more attempt covers only nodes that declare no `retries`. It is not in the
   digest and never changes `ready`, `blockers` or `approvalRequired`, and it never blocks a start,
   including when the user asked for a workflow. It also returns
   a `reviewId` the server made for this review, `approvalRequired`, true while a

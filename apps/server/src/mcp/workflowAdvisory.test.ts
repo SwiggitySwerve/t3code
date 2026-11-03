@@ -200,26 +200,51 @@ describe("graph advisory", () => {
     });
     // A declared retry target adds an attempt on its own driver and a judge for it to the high
     // figures only; the low ones still expect the first attempt to pass.
-    const laddered = advise(
-      graph({
-        a: node({
-          verify: { type: "judgment", rubric: ["Is it correct?"] },
-          retries: [{ providerInstanceId: "claude", model: "claude-opus-5" }],
+    const laddered = (retryDrivers: ReadonlyArray<string>) =>
+      advise(
+        graph({
+          a: node({
+            verify: { type: "judgment", rubric: ["Is it correct?"] },
+            retries: retryDrivers.map(() => ({ providerInstanceId: "p", model: "claude-opus-5" })),
+          }),
+          b: node(),
         }),
-        b: node(),
-      }),
-      {
-        ...driversOf("codex", { a: "codex", b: "codex" }, { a: "claudeAgent" }),
-        retries: new Map([["a", ["claudeAgent"]]]),
-      },
-    ).advisory;
-    expect(laddered.estimatedModelCalls).toEqual({ low: 9, high: 13 + 3 + 3 });
-    expect(laddered.estimatedTokens).toMatchObject({
-      low: advisory.estimatedTokens.low,
-      high: advisory.estimatedTokens.high + 3 * 96_000 + 3 * 96_000,
+        {
+          ...driversOf("codex", { a: "codex", b: "codex" }, { a: "claudeAgent" }),
+          retries: new Map([["a", retryDrivers]]),
+        },
+      ).advisory;
+    const high = (figures: typeof advisory) => ({
+      calls: figures.estimatedModelCalls.high,
+      tokens: figures.estimatedTokens.high,
     });
-    expect(laddered.suggestedBudgetTokens).toBeGreaterThan(advisory.suggestedBudgetTokens);
-    expect(laddered.estimatedTokens.basis).toContain("High counts every declared retry target");
+    const step = (from: typeof advisory, to: typeof advisory) => ({
+      calls: high(to).calls - high(from).calls,
+      tokens: high(to).tokens - high(from).tokens,
+    });
+    const once = laddered(["claudeAgent"]);
+    const twice = laddered(["claudeAgent", "claudeAgent"]);
+    expect(once.estimatedModelCalls.low).toBe(advisory.estimatedModelCalls.low);
+    expect(once.estimatedTokens.low).toBe(advisory.estimatedTokens.low);
+    expect(step(advisory, once).calls).toBeGreaterThan(0);
+    // Each retry target on the same driver adds the same attempt and judge again.
+    expect(step(once, twice)).toEqual(step(advisory, once));
+    // A retry on the measured Codex driver adds less than one on an unmeasured driver.
+    expect(step(advisory, laddered(["codex"])).tokens).toBeLessThan(step(advisory, once).tokens);
+    expect(once.suggestedBudgetTokens).toBeGreaterThan(advisory.suggestedBudgetTokens);
+    expect(once.estimatedTokens.basis).toContain("High counts every declared retry target");
+  });
+
+  it("budgets the retries a node declares once, and none past an empty list", () => {
+    const single = (retries?: ReadonlyArray<unknown>) =>
+      advise(graph({ a: node(retries === undefined ? {} : { retries }) }), {
+        ...driversOf("codex", { a: "codex" }),
+        retries: new Map([["a", (retries ?? []).map(() => "codex")]]),
+      }).advisory.suggestedBudgetTokens;
+    // The default retry repeats the target, so declaring that same target costs no more.
+    expect(single([{ providerInstanceId: "codex", model: "gpt-5.4" }])).toBe(single());
+    // An empty list leaves the first attempt alone, with no retry to budget for.
+    expect(single([])).toBeLessThan(single());
   });
   it("never changes the digest, the blockers or the layers of a review", () => {
     const value = chain(3);

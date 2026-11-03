@@ -586,7 +586,11 @@ describe("11. coordinator-written retries", () => {
         `${instanceId}/${model} > ${instanceId}/${model} > ${claudeInstanceId}/${claudeModel}`,
       );
       expect(text).toContain("low > high > -");
-      expect(text).toMatch(/escalations/u);
+      // The groups table prints the count under its own column.
+      const lines = text.split("\n");
+      const header = lines.findIndex((line) => line.includes("escalations"));
+      const column = lines[header]!.indexOf("escalations");
+      expect(lines[header + 1]!.slice(column).split(/\s+/u)[0]).toBe("2");
     }).pipe(Effect.provide(layerTest)),
   );
 

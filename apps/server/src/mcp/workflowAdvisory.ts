@@ -164,8 +164,13 @@ export function graphAdvisory(
     entries.map(([id, node]) => [id, agentLoad(nodeFigures(id), readsOf(node.inputs ?? []))]),
   );
   // A judgment check runs as one more agent, on its own driver, and reads nothing but the result.
-  const judgeFigures = entries.flatMap(([id, node]) =>
-    node.verify?.type === "judgment" ? [figuresFor(drivers?.judges.get(id))] : [],
+  const judgeFigures = new Map(
+    entries.flatMap(([id, node]) =>
+      node.verify?.type === "judgment" ? [[id, figuresFor(drivers?.judges.get(id))] as const] : [],
+    ),
+  );
+  const judgeLoads = new Map(
+    [...judgeFigures].map(([id, figures]) => [id, agentLoad(figures, { count: 0, bytes: 0 })]),
   );
   // A declared retry target is an attempt the high estimate counts, on its own driver with the
   // node's reads, and judged again when the node has a judgment check.
@@ -176,21 +181,20 @@ export function graphAdvisory(
       figures: figuresFor(drivers?.retries?.get(id)?.[index]),
     })),
   );
+  const judgeLoadOf = (id: string): ReadonlyArray<AgentLoad> => {
+    const load = judgeLoads.get(id);
+    return load === undefined ? [] : [load];
+  };
   const retryLoads = retryFigures.flatMap(({ id, node, figures }) => [
     agentLoad(figures, readsOf(node.inputs ?? [])),
-    ...(node.verify?.type === "judgment"
-      ? [agentLoad(figuresFor(drivers?.judges.get(id)), { count: 0, bytes: 0 })]
-      : []),
+    ...judgeLoadOf(id),
   ]);
   const memberFigures = [
     ...entries.map(([id]) => nodeFigures(id)),
-    ...judgeFigures,
+    ...judgeFigures.values(),
     ...retryFigures.map((entry) => entry.figures),
   ];
-  const loads = [
-    ...nodeLoads.values(),
-    ...judgeFigures.map((figures) => agentLoad(figures, { count: 0, bytes: 0 })),
-  ];
+  const loads = [...nodeLoads.values(), ...judgeLoads.values()];
   const retriedHigh = {
     calls: retryLoads.reduce((sum, load) => sum + load.calls.high, 0),
     tokens: retryLoads.reduce((sum, load) => sum + load.tokens.high, 0),
@@ -220,8 +224,16 @@ export function graphAdvisory(
   );
   // The budget only stops new starts, so the last node is the one a short budget drops. Cover every
   // agent, one retry of the costliest (C4/S06: a retried node costs one more attempt), and the
-  // coordinator's estimate as reserve (the budget does not count it).
-  const retryTokens = Math.max(0, ...loads.map((load) => load.tokens.high));
+  // coordinator's estimate as reserve (the budget does not count it). A node that declares its
+  // retries has them in members.high already, so only the others can take that one retry.
+  const retryTokens = Math.max(
+    0,
+    ...entries.flatMap(([id, node]) =>
+      node.retries === undefined
+        ? [nodeLoads.get(id)?.tokens.high ?? 0, ...judgeLoadOf(id).map((load) => load.tokens.high)]
+        : [],
+    ),
+  );
   const reasons = singleAgentReasons({ nodeCount, widestWave, verifierCount });
   return {
     fanOut: reasons.length > 0 ? "consider_single" : "ok",
