@@ -47,6 +47,8 @@ export function sidebarThreadTopStatus(input: {
   readonly goalActive: boolean;
 }): SidebarTopStatus | null {
   switch (input.status) {
+    case "preparing":
+      return { label: "Setting up", icon: "working", className: "text-info-foreground" };
     case "working":
       return {
         label: input.goalActive ? "Goal" : "Working",
