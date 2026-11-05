@@ -2282,9 +2282,18 @@ const main = Effect.gen(function* () {
     const { id, kind, pattern } = testCase;
     const identity = { id, kind, pattern, role: testCase.setup.role };
     const usage = { usage: emptyUsage(), shellUsage: emptyUsage() };
-    const privateValues = [config.apiKey, ...Object.values(config.proxy?.headers ?? {})]
+    // Keys, and the proxy addresses an error message could name.
+    const privateValues = [
+      config.apiKey,
+      ...Object.values(config.proxy?.headers ?? {}),
+      process.env.EVAL_ANTHROPIC_BASE_URL ?? "",
+      ANTHROPIC_PROXY ?? "",
+      config.proxy?.url ?? "",
+    ]
       .flatMap((value) => [value, value.replace(/^Bearer /i, "")])
-      .filter(Boolean);
+      .filter(Boolean)
+      // The longest first, so a trimmed address never leaves a raw one's tail behind.
+      .toSorted((left, right) => right.length - left.length);
     return runSample(testCase, config, baseFor(testCase), usage).pipe(
       inFlight.withPermits(1),
       Effect.matchCause({
