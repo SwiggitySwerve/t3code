@@ -56,6 +56,9 @@ it("keeps a field description the generator drops on a transformation or Unknown
     parameters: Schema.Struct({
       script: Trimmed.check(Schema.isMaxLength(10)).annotate({ description: "The script." }),
       graph: Schema.Unknown.annotate({ description: "The graph." }),
+      // Optional fields, annotated on the optional wrapper as the orchestrator contracts do.
+      args: Schema.optional(Schema.Unknown).annotate({ description: "The args." }),
+      note: Schema.optional(Trimmed).annotate({ description: "The note." }),
       plain: Schema.String.annotate({ description: "Kept by the generator." }),
       bare: Schema.String,
     }),
@@ -66,6 +69,8 @@ it("keeps a field description the generator drops on a transformation or Unknown
     properties: {
       script: { type: "string", description: "The script." },
       graph: { description: "The graph." },
+      args: { description: "The args." },
+      note: { type: "string", description: "The note." },
       plain: { type: "string", description: "Kept by the generator." },
       bare: { type: "string" },
     },
