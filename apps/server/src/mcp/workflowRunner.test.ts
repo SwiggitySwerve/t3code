@@ -1728,6 +1728,37 @@ describe("workflow runner", () => {
       }),
     );
 
+    // workerTarget's family is not the caller's, so each verdict tells the two paths apart.
+    it.effect("judges a check it inherits against workerTarget, not the caller's model", () =>
+      Effect.gen(function* () {
+        const runOn = (rungModel: string, options: HarnessOptions = {}) =>
+          Effect.gen(function* () {
+            const h = yield* makeHarness(options);
+            yield* h.runner.launch({
+              workflowId,
+              threadId,
+              source: inheritedJudgment(rungModel),
+              args: null,
+              afterSequence: 0,
+              workerTarget: { providerInstanceId: "p", model: "claude-haiku-4-5" },
+            });
+            return { h, report: JSON.parse(yield* Deferred.await(h.completed)) };
+          });
+        const same = yield* runOn("claude-sonnet-4-6", { judgment: () => true });
+        expect(same.report).toMatchObject({ ok: true, attempts: 1 });
+        // The worker runs on workerTarget, and so does the check it inherits.
+        expect(same.h.spawns.map((spawn) => spawn.target)).toEqual([
+          { providerInstanceId: "p", model: "claude-haiku-4-5" },
+          { providerInstanceId: "p", model: "claude-haiku-4-5" },
+        ]);
+        const other = yield* runOn(CALLER_MODEL);
+        expect(other.report.reason).toContain(
+          `retries runs ${CALLER_MODEL} outside the model family of the first target (claude-haiku-4-5)`,
+        );
+        expect(other.h.spawns).toEqual([]);
+      }),
+    );
+
     it.effect.each([
       {
         name: "a model its provider does not list",
