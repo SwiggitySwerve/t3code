@@ -859,8 +859,10 @@ when every node passed its checks.
   digest and never changes `ready`, `blockers` or `approvalRequired`, and it never blocks a start,
   including when the user asked for a workflow. It also returns
   a `reviewId` the server made for this review, `approvalRequired`, true while a
-  user's request for a workflow waits for approval (above), and `next`, one line saying
-  whether to fix blockers, end the turn for approval, or call `graph_start` now. The server keeps the review
+  user's request for a workflow waits for approval (above), blocked reviews included, and `next`,
+  one line saying whether to fix blockers and review again, end the turn for approval (a ready
+  review only), or start the work now with `graph_start`, or `workflow_start` when the task asked
+  for a script. The server keeps the review
   in memory so the user's decision can be bound to it; the client decides by `reviewId`
   and `digest`, never by what the agent echoed. The server notes which request is armed
   before the review reads anything. If the request was replaced, lifted or settled while the

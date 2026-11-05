@@ -466,7 +466,7 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   }),
   approvalRequired: Schema.Boolean.annotate({
     description:
-      "true when the user asked for a workflow and must approve this review in T3 Code before graph_start runs it: end your turn, and T3 Code sends you a message with the approved digest. false: no approval is needed, so call graph_start yourself.",
+      "true while the user's request for a workflow waits for their approval in T3 Code, blocked reviews included. Follow next: only a ready review with approvalRequired true ends your turn, and T3 Code sends you a message with the approved digest once the user approves it. false: no approval is needed, so start the work now with graph_start, or workflow_start if you were asked to run a script.",
   }),
   next: Schema.optional(Schema.String).annotate({
     description: "What to do now with this review.",

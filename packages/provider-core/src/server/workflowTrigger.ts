@@ -21,7 +21,7 @@ const ASSIGNMENT_RULES = [
   "You choose every worker's and every check's target: providerInstanceId, model and options such as effort, from orchestrator_capabilities. Never invent ids.",
   "Give each agent the smallest model and effort you expect to succeed first time (pass its check, if it has one), and more to ambiguous, multi-file or previously failed work. Prefer lowering effort to switching to a much weaker model.",
   "Split work you cannot scope into smaller agents; for a part too large to scope, run a planning agent on a stronger model first.",
-  "Check work with verify that can fail it when wrong: tests its worker can see or wrote are not enough alone. Add { type: 'judgment', rubric, target } on the task's criteria, or { type: 'process', argv } the worker cannot have tuned to. A judge needs no stronger model than the work: prefer a cheap one of a different model family than its worker when one is enabled.",
+  "When an agent's work needs a check, use one that can fail wrong work, not only tests its worker sees or wrote: { type: 'judgment', rubric, target } on the task's criteria (a judge cannot see a worktree: have its worker return the diff) or { type: 'process', argv } it cannot have tuned to. Prefer a cheap judge of a different model family than its worker when one is enabled.",
   "Give an agent with a check that can fail it retries: later targets, cheapest first, then more effort or model. Redo it only once they run out or the split was wrong. listPrice is the provider's published price, not what this account pays; null is unknown, not free.",
 ];
 
@@ -30,7 +30,7 @@ const WORKFLOW_TURN_NOTE = [
   "The user asked for a workflow, so plan it before anything runs.",
   "1. Split the work into graph nodes with dependencies, add a verify check to any node whose result needs checking, and call graph_review.",
   ...ASSIGNMENT_RULES.map((rule, index) => `${index + 2}. ${rule}`),
-  `${ASSIGNMENT_RULES.length + 2}. When graph_review returns approvalRequired: true, end your turn. The user approves it in T3 Code, which then sends you a message with the approved digest: do not call graph_start or workflow_start before that message. When it returns false, call graph_start.`,
+  `${ASSIGNMENT_RULES.length + 2}. Do what graph_review's next says: fix blockers and review again; only a ready review with approvalRequired: true ends your turn. Once the user approves it, T3 Code messages you the approved digest: do not call graph_start or workflow_start before that.`,
   "</t3-workflow>",
 ].join("\n");
 
