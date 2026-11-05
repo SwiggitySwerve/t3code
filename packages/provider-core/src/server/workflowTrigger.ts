@@ -21,7 +21,7 @@ const ASSIGNMENT_RULES = [
   "You choose every worker's and every check's target: providerInstanceId, model and options such as effort, from orchestrator_capabilities. Never invent ids.",
   "Give each agent the smallest model and effort you expect to succeed first time (pass its check, if it has one), and more to ambiguous, multi-file or previously failed work. Prefer lowering effort to switching to a much weaker model.",
   "Split work you cannot scope into smaller agents; for a part too large to scope, run a planning agent on a stronger model first.",
-  "Check work with verify: { type: 'process', argv }, or { type: 'judgment', rubric, target } on a different model family than its worker when one is enabled.",
+  "Check work with verify that can fail it when wrong: tests its worker can see or wrote are not enough alone. Add { type: 'judgment', rubric, target } on the task's criteria, or { type: 'process', argv } the worker cannot have tuned to. A judge needs no stronger model than the work: prefer a cheap one of a different model family than its worker when one is enabled.",
   "Give an agent with a check that can fail it retries: later targets, cheapest first, then more effort or model. Redo it only once they run out or the split was wrong. listPrice is the provider's published price, not what this account pays; null is unknown, not free.",
 ];
 

@@ -97,6 +97,10 @@ describe("applyTurnTriggers", () => {
       expect(note).toContain("run a planning agent on a stronger model first");
       expect(note).toContain("different model family than its worker");
       expect(note).toContain("{ type: 'judgment', rubric, target }");
+      // E4: visible-test checks passed wrong work, so the ladder never escalated.
+      expect(note).toContain("tests its worker can see or wrote are not enough alone");
+      expect(note).toContain("{ type: 'process', argv } the worker cannot have tuned to");
+      expect(note).toContain("A judge needs no stronger model than the work: prefer a cheap one");
       expect(note).toContain(
         "Give an agent with a check that can fail it retries: later targets, cheapest first, then more effort or model.",
       );
@@ -261,8 +265,8 @@ describe("workflowTurnNote", () => {
   });
 
   it("is compact", () => {
-    expect(workflowTurnNote().length).toBeLessThan(1500);
-    expect(EVERY_TURN_WORKFLOW_NOTE.length).toBeLessThan(1350);
+    expect(workflowTurnNote().length).toBeLessThan(1700);
+    expect(EVERY_TURN_WORKFLOW_NOTE.length).toBeLessThan(1550);
   });
 });
 
