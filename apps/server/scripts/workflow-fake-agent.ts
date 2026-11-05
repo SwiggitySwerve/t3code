@@ -9,6 +9,9 @@ import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import * as NodeReadline from "node:readline";
 
+// The runner's own reader of the schema it appends: the last block is the one it wrote.
+import { resultSchemaOf } from "../src/mcp/delegatedTaskResultFormat.ts";
+
 export interface FakeModel {
   /** Chance-of-pass offset: an item passes about half the time when skill equals difficulty. */
   readonly skill: number;
@@ -212,12 +215,17 @@ export function decideWork(
   };
 }
 
-/** A checker's verdict: right with its accuracy, else the opposite of the truth. */
+/**
+ * A checker's verdict: right with its accuracy, else the opposite of the truth. The draw follows
+ * the proofs judged, so one piece of work gets one verdict; a result without proofs draws on
+ * `subject`, the judged text, so its verdicts still vary from one result to the next.
+ */
 export function decideVerdict(
   tables: Tables,
   input: {
     readonly seed: number;
     readonly proofs: ReadonlyArray<string>;
+    readonly subject: string;
     readonly truth: boolean;
     readonly model: string;
     readonly effort: string;
@@ -229,17 +237,18 @@ export function decideVerdict(
   readonly passed: boolean;
 } {
   const accuracy = checkerAccuracy(tables, input.model, input.effort);
-  const draw = uniform(["check", input.seed, ...input.proofs, input.model, input.effort]);
+  const judged = input.proofs.length > 0 ? input.proofs : [input.subject];
+  const draw = uniform(["check", input.seed, ...judged, input.model, input.effort]);
   const correct = draw < accuracy;
   return { accuracy, draw, correct, passed: correct ? input.truth : !input.truth };
 }
 
 const PROOF = /fake-proof:([A-Za-z0-9._-]+):(\d+):([0-9a-f]{12})/g;
 const TASK_TAG = /\[task:([A-Za-z0-9._-]+)\]/g;
+/** How the runner's judgment prompt (`judgmentPrompt` in workflowChecks.ts) begins. */
 const CHECKER_MARK = "You are an independent checker.";
-const JUDGE_WORDS = /\b(judge|review|verify|assess|evaluate|grade|inspect)/i;
 
-/** The request inside T3's ACP wrapper, whose own instructions use judging words. */
+/** The request inside T3's ACP wrapper. */
 function userRequest(text: string): string {
   const start = text.lastIndexOf("<user_request>");
   if (start < 0) return text;
@@ -247,16 +256,32 @@ function userRequest(text: string): string {
   return text.slice(start + "<user_request>".length, end < 0 ? undefined : end);
 }
 
+type SchemaShape = { readonly properties?: Record<string, { enum?: unknown; type?: unknown }> };
+
 /**
- * A judging prompt: the runner's judgment check, or an agent the coordinator wrote to judge
- * quoted work: its own instruction, before the quoted proof, asks to judge. A work prompt can
- * quote a proof too, when it relays a planning or discovery agent's report.
+ * The runner's verdict schema (`JUDGMENT_RESULT_SCHEMA` in workflowChecks.ts): an outcome of
+ * passed or failed, with reasons.
+ */
+function isVerdictSchema(schema: unknown): boolean {
+  const properties = (schema as SchemaShape | undefined)?.properties;
+  const outcome = properties?.outcome?.enum;
+  return (
+    Array.isArray(outcome) &&
+    outcome.length === 2 &&
+    outcome.includes("passed") &&
+    outcome.includes("failed") &&
+    properties?.reasons?.type === "string"
+  );
+}
+
+/**
+ * A judging prompt, by what the runner controls: its checker marker, or the verdict schema it
+ * gives judgment agents, which a coordinator-written judge can be given too. Everything else is
+ * work, whatever words it uses and whatever reports or proofs it quotes.
  */
 export function isCheckerPrompt(text: string): boolean {
   const request = userRequest(text);
-  if (request.includes(CHECKER_MARK)) return true;
-  const proof = request.indexOf("fake-proof:");
-  return proof >= 0 && JUDGE_WORDS.test(request.slice(0, proof));
+  return request.includes(CHECKER_MARK) || isVerdictSchema(resultSchemaOf(request));
 }
 const RETRY_MARK = "Your previous attempt";
 
@@ -296,17 +321,6 @@ export function judgedResult(text: string): string {
   if (start < 0) return text;
   const end = text.indexOf("\nCriteria:", start);
   return text.slice(start, end < 0 ? undefined : end);
-}
-
-/** The JSON Schema the runner appended to a prompt, if any. */
-export function resultSchemaOf(text: string): unknown {
-  const match = /<t3-result-schema>\s*([\s\S]*?)\s*<\/t3-result-schema>/.exec(text);
-  if (match === null) return undefined;
-  try {
-    return JSON.parse(match[1]!);
-  } catch {
-    return undefined;
-  }
 }
 
 interface FillFacts {
@@ -443,11 +457,13 @@ export function answerPrompt(
   };
   const schema = resultSchemaOf(input.text);
   if (isCheckerPrompt(input.text)) {
-    const proofs = readProofs(fixture.secret, judgedResult(input.text));
+    const judged = judgedResult(input.text);
+    const proofs = readProofs(fixture.secret, judged);
     const truth = proofs.length > 0 && proofs.every((proof) => proof.pass);
     const verdict = decideVerdict(tables, {
       seed: fixture.seed,
       proofs: proofs.map((proof) => proof.proof),
+      subject: judged,
       truth,
       model: input.model,
       effort: input.effort,
