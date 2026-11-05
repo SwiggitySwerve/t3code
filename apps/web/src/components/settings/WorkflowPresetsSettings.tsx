@@ -1,9 +1,11 @@
 import { PlusIcon } from "lucide-react";
-import { useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import { randomUUID } from "../../lib/utils";
 import {
   AuthSettingsWriteScope,
   type EnvironmentId,
+  type ServerProvider,
+  type UnifiedSettings,
   type WorkflowPreset,
 } from "@t3tools/contracts";
 import { useEnvironmentSettings } from "../../hooks/useSettings";
@@ -12,7 +14,6 @@ import { useEnvironmentScope } from "../../state/session";
 import { EMPTY_SERVER_PROVIDERS, serverEnvironment } from "../../state/server";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { squashAtomCommandFailure } from "@t3tools/client-runtime/state/runtime";
-import { workflowReviewTargetLabel } from "@t3tools/client-runtime/state/workflowReview";
 import { providerInstanceEntriesFor } from "../../providerInstances";
 import {
   getCustomModelOptionsByInstance,
@@ -30,40 +31,77 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 
-export function WorkflowPresetsSettings({ environmentId }: { environmentId: EnvironmentId }) {
+type Roles = UnifiedSettings["workflowPresets"];
+
+/** A name no role uses yet, so a new role never shares a label with an old one. */
+function newRoleName(roles: Roles): string {
+  const taken = new Set(roles.presets.map((role) => role.name.trim().toLowerCase()));
+  for (let index = 1; ; index++) {
+    const name = index === 1 ? "New role" : `New role ${index}`;
+    if (!taken.has(name.toLowerCase())) return name;
+  }
+}
+
+/**
+ * The Workflow settings page: the switch that turns workflows on, when a message starts one, and
+ * the agent roles workers run as. A role is edited in place like the default model in General:
+ * its model and effort save on change, its name on Enter or blur.
+ */
+export function WorkflowPresetsSettings({
+  environmentId,
+  startSetting,
+}: {
+  environmentId: EnvironmentId;
+  /** The project-scoped "Start a workflow" row, when the page has a scope to show it for. */
+  startSetting?: ReactNode;
+}) {
   const settings = useEnvironmentSettings(environmentId);
   const providers = useEnvironmentProviders().get(environmentId) ?? EMPTY_SERVER_PROVIDERS;
   const canWrite = useEnvironmentScope(environmentId, AuthSettingsWriteScope);
   const persist = useAtomCommand(serverEnvironment.updateSettings, { reportFailure: false });
-  const [draft, setDraft] = useState<WorkflowPreset | null>(null);
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const presets = settings.workflowPresets;
-  const instanceEntries = providerInstanceEntriesFor(providers, settings, null);
-  const activeEntry = instanceEntries.find(
-    (entry) => entry.instanceId === draft?.target.providerInstanceId,
-  );
-  const modelOptions = getCustomModelOptionsByInstance(
-    settings,
-    providers,
-    draft?.target.providerInstanceId,
-    draft?.target.model,
-  );
+  const [focusRoleId, setFocusRoleId] = useState<string | null>(null);
+  const roles = settings.workflowPresets;
+  const editable = settings.workflows && canWrite && !pending;
 
-  const save = async (next: typeof presets, closeEditor = false) => {
-    if (!canWrite || pending) return;
+  /** Saves the whole list; resolves true once the server took it. */
+  const save = async (next: Roles): Promise<boolean> => {
+    if (!canWrite || pending) return false;
     setPending(true);
     setError(null);
+    let saved = false;
     try {
       const result = await persist({ environmentId, input: { patch: { workflowPresets: next } } });
       if (result._tag === "Failure") {
         const failure = squashAtomCommandFailure(result);
-        setError(failure instanceof Error ? failure.message : "Could not save worker presets.");
-      } else if (closeEditor) setDraft(null);
+        setError(failure instanceof Error ? failure.message : "Could not save agent roles.");
+      } else saved = true;
     } catch {
-      setError("Could not save worker presets. Reconnect and try again.");
+      setError("Could not save agent roles. Reconnect and try again.");
     }
     setPending(false);
+    return saved;
+  };
+
+  const replaceRole = (role: WorkflowPreset) =>
+    save({
+      ...roles,
+      presets: roles.presets.map((entry) => (entry.id === role.id ? role : entry)),
+    });
+
+  const addRole = async () => {
+    const selection = resolveAppModelSelectionState(settings, providers);
+    const role: WorkflowPreset = {
+      id: randomUUID(),
+      name: newRoleName(roles),
+      target: {
+        providerInstanceId: selection.instanceId,
+        model: selection.model,
+        options: selection.options ?? [],
+      },
+    };
+    if (await save({ ...roles, presets: [...roles.presets, role] })) setFocusRoleId(role.id);
   };
 
   const toggleWorkflows = async (workflows: boolean) => {
@@ -73,20 +111,17 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
     try {
       const result = await persist({ environmentId, input: { patch: { workflows } } });
       if (result._tag === "Failure") setError("Could not save workflows. Reconnect and try again.");
-      else setDraft(null);
     } catch {
       setError("Could not save workflows. Reconnect and try again.");
     }
     setPending(false);
   };
 
-  const editing = draft !== null && presets.presets.some((entry) => entry.id === draft.id);
-
   return (
     <SettingsPageContainer>
-      <SettingsSection id="workflows" title="Enable workflows">
+      <SettingsSection id="workflows" title="Workflows">
         <SettingsRow
-          title="Workflows"
+          title="Enable workflows"
           description="Takes effect when an agent session starts. Open chats pick it up when their agent restarts."
           control={
             <Switch
@@ -97,205 +132,189 @@ export function WorkflowPresetsSettings({ environmentId }: { environmentId: Envi
             />
           }
         />
+        {startSetting}
       </SettingsSection>
       <SettingsSection
         id="workflow-presets"
-        title="Workflow"
+        title="Agent Roles"
         headerAction={
-          <Button
-            size="xs"
-            disabled={!settings.workflows || !canWrite || pending || draft !== null}
-            onClick={() => {
-              const selection = resolveAppModelSelectionState(settings, providers);
-              setDraft({
-                id: randomUUID(),
-                name: "",
-                target: {
-                  providerInstanceId: selection.instanceId,
-                  model: selection.model,
-                  options: [],
-                },
-              });
-              setError(null);
-            }}
-          >
+          <Button size="xs" disabled={!editable} onClick={() => void addRole()}>
             <PlusIcon className="size-3" />
-            Create preset
+            Add role
           </Button>
         }
       >
-        <SettingsRow
-          title="Worker presets"
-          description={
-            settings.workflows
-              ? "Save a provider, model and options for workflow workers. The coordinator keeps its own model."
-              : "Workflows are off. Enable workflows to configure and run workers. Saved presets are kept."
-          }
-          status={canWrite ? undefined : "This connection cannot change worker presets."}
-        />
+        <p className="px-3 py-3 text-xs text-muted-foreground sm:px-4">
+          {!settings.workflows
+            ? "Workflows are off. Enable workflows to configure and run workers. Saved roles are kept."
+            : "Each role sets the provider, model and effort a worker runs with. The coordinator gives each task a role and keeps its own model; a task that names no role or model uses the default role."}
+        </p>
+        {canWrite ? null : (
+          <p className="px-3 pb-3 text-xs text-muted-foreground sm:px-4">
+            This connection cannot change agent roles.
+          </p>
+        )}
         {error ? (
           <p role="alert" className="px-3 py-3 text-sm text-destructive sm:px-4">
             {error}
           </p>
         ) : null}
-        {presets.presets.length === 0 ? (
+        {roles.presets.length === 0 ? (
           <p className="px-3 py-3 text-xs text-muted-foreground sm:px-4">
-            No worker presets yet. Create one to choose the provider and model workers run with.
+            No roles yet. Add one to choose the provider, model and effort a worker runs with.
           </p>
         ) : null}
-        {presets.presets.map((preset) => (
-          <SettingsRow
-            key={preset.id}
-            title={<span className="[overflow-wrap:anywhere]">{preset.name}</span>}
-            description={
-              <span className="[overflow-wrap:anywhere]">
-                {workflowReviewTargetLabel(preset.target, providers)}
-              </span>
+        {roles.presets.map((role) => (
+          <RoleRow
+            // A saved rename remounts the row with the stored name; a failed one keeps the draft.
+            key={`${role.id}:${role.name}`}
+            role={role}
+            isDefault={roles.defaultPresetId === role.id}
+            autoFocusName={focusRoleId === role.id}
+            onNameBlur={() => setFocusRoleId(null)}
+            editable={editable}
+            environmentId={environmentId}
+            settings={settings}
+            providers={providers}
+            onChange={(next) => void replaceRole(next)}
+            onRename={(name) => replaceRole({ ...role, name })}
+            onDefaultChange={(checked) =>
+              void save({ ...roles, defaultPresetId: checked ? role.id : null })
             }
-            control={
-              <div className="flex flex-wrap items-center gap-2">
-                <label className="flex min-h-6 items-center gap-2 text-xs text-muted-foreground">
-                  <Switch
-                    checked={presets.defaultPresetId === preset.id}
-                    disabled={!settings.workflows || !canWrite || pending}
-                    onCheckedChange={(checked) =>
-                      void save({ ...presets, defaultPresetId: checked ? preset.id : null })
-                    }
-                  />
-                  <span aria-hidden>Worker default</span>
-                  <span className="sr-only">{`Workflow worker default: ${preset.name}`}</span>
-                </label>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={!settings.workflows || !canWrite || pending}
-                  aria-label={`Edit ${preset.name}`}
-                  onClick={() => {
-                    setDraft(preset);
-                    setError(null);
-                  }}
-                >
-                  Edit
-                </Button>
-                <Button
-                  size="xs"
-                  variant="destructive-outline"
-                  disabled={!settings.workflows || !canWrite || pending}
-                  aria-label={`Delete ${preset.name}`}
-                  onClick={() =>
-                    void save(
-                      {
-                        presets: presets.presets.filter((entry) => entry.id !== preset.id),
-                        defaultPresetId:
-                          presets.defaultPresetId === preset.id ? null : presets.defaultPresetId,
-                      },
-                      draft?.id === preset.id,
-                    )
-                  }
-                >
-                  Delete
-                </Button>
-              </div>
+            onDelete={() =>
+              void save({
+                presets: roles.presets.filter((entry) => entry.id !== role.id),
+                defaultPresetId: roles.defaultPresetId === role.id ? null : roles.defaultPresetId,
+              })
             }
           />
         ))}
       </SettingsSection>
-      {draft && settings.workflows ? (
-        <SettingsSection id="workflow-preset-editor" title={editing ? "Edit preset" : "New preset"}>
-          <form
-            className="divide-y divide-border/50"
-            aria-label="Worker preset"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (!draft.name.trim() || pending || !canWrite) return;
-              const saved = { ...draft, name: draft.name.trim() };
-              void save(
-                {
-                  ...presets,
-                  presets: [...presets.presets.filter((entry) => entry.id !== saved.id), saved],
-                },
-                true,
-              );
-            }}
-          >
-            <SettingsRow
-              title="Name"
-              control={
-                <div className="w-full @min-[32rem]/settings-row:w-64">
-                  <Input
-                    aria-label="Preset name"
-                    value={draft.name}
-                    onChange={(event) => setDraft({ ...draft, name: event.target.value })}
-                    disabled={pending || !canWrite}
-                  />
-                </div>
-              }
-            />
-            <SettingsRow
-              title="Model"
-              description="The provider, model and options a worker using this preset runs with."
-              control={
-                <div className="flex flex-wrap items-center gap-2">
-                  <ProviderModelPicker
-                    environmentId={environmentId}
-                    activeInstanceId={draft.target.providerInstanceId}
-                    model={draft.target.model}
-                    lockedProvider={null}
-                    instanceEntries={instanceEntries}
-                    modelOptionsByInstance={modelOptions}
-                    triggerAriaLabel="Preset model"
-                    triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                    disabled={pending || !canWrite}
-                    onInstanceModelChange={(providerInstanceId, model) =>
-                      setDraft({ ...draft, target: { providerInstanceId, model, options: [] } })
-                    }
-                  />
-                  {activeEntry ? (
-                    <span className="inline-flex items-center gap-1.5">
-                      <span className="text-xs text-muted-foreground">
-                        {(draft.target.options ?? []).some((option) => /effort/i.test(option.id))
-                          ? "Effort"
-                          : "Options"}
-                      </span>
-                      <TraitsPicker
-                        provider={activeEntry.driverKind}
-                        models={activeEntry.models}
-                        model={draft.target.model}
-                        modelOptions={draft.target.options ?? []}
-                        allowPromptInjectedEffort={false}
-                        planModeEnabled={settings.planModeEnabled}
-                        disabled={pending || !canWrite}
-                        triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
-                        onModelOptionsChange={(options) => {
-                          if (!pending && canWrite)
-                            setDraft({
-                              ...draft,
-                              target: { ...draft.target, options: options ?? [] },
-                            });
-                        }}
-                      />
-                    </span>
-                  ) : null}
-                </div>
-              }
-            />
-            <div className="flex justify-end gap-2 px-3 py-3 sm:px-4">
-              <Button
-                type="button"
-                size="sm"
-                variant="ghost"
-                disabled={pending}
-                onClick={() => setDraft(null)}
-              >
-                Cancel
-              </Button>
-              <Button type="submit" size="sm" disabled={!draft.name.trim() || !canWrite || pending}>
-                {pending ? "Saving…" : "Save preset"}
-              </Button>
-            </div>
-          </form>
-        </SettingsSection>
-      ) : null}
     </SettingsPageContainer>
+  );
+}
+
+function RoleRow(props: {
+  readonly role: WorkflowPreset;
+  readonly isDefault: boolean;
+  readonly autoFocusName: boolean;
+  readonly onNameBlur: () => void;
+  readonly editable: boolean;
+  readonly environmentId: EnvironmentId;
+  readonly settings: UnifiedSettings;
+  readonly providers: ReadonlyArray<ServerProvider>;
+  readonly onChange: (role: WorkflowPreset) => void;
+  readonly onRename: (name: string) => Promise<boolean>;
+  readonly onDefaultChange: (checked: boolean) => void;
+  readonly onDelete: () => void;
+}) {
+  const { role, settings, providers, editable } = props;
+  const [name, setName] = useState(role.name);
+  const nameInput = useRef<HTMLInputElement>(null);
+  // Escape blurs the field before its reset renders, so the blur must know not to save.
+  const cancelRename = useRef(false);
+  // A new role's name is ready to type once the row can be edited (it is disabled while saving).
+  // oxlint-disable-next-line t3code/no-unreasoned-state-sync -- moves DOM focus to the new role's name input once it is enabled
+  useEffect(() => {
+    if (!props.autoFocusName || !editable) return;
+    nameInput.current?.focus();
+    nameInput.current?.select();
+  }, [props.autoFocusName, editable]);
+  const instanceEntries = providerInstanceEntriesFor(providers, settings, null);
+  const entry = instanceEntries.find(
+    (candidate) => candidate.instanceId === role.target.providerInstanceId,
+  );
+  const modelOptions = getCustomModelOptionsByInstance(
+    settings,
+    providers,
+    role.target.providerInstanceId,
+    role.target.model,
+  );
+
+  const commitName = () => {
+    props.onNameBlur();
+    if (cancelRename.current) {
+      cancelRename.current = false;
+      return;
+    }
+    const trimmed = name.trim();
+    if (trimmed.length === 0) setName(role.name);
+    else if (trimmed !== role.name) void props.onRename(trimmed);
+  };
+
+  return (
+    <SettingsRow
+      title={
+        <Input
+          aria-label={`Role name: ${role.name}`}
+          className="w-full max-w-56"
+          size="sm"
+          value={name}
+          ref={nameInput}
+          disabled={!editable}
+          onChange={(event) => setName(event.target.value)}
+          onBlur={commitName}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") event.currentTarget.blur();
+            if (event.key === "Escape") {
+              cancelRename.current = true;
+              setName(role.name);
+              event.currentTarget.blur();
+            }
+          }}
+        />
+      }
+      control={
+        <div className="flex flex-wrap items-center justify-end gap-1.5">
+          <ProviderModelPicker
+            environmentId={props.environmentId}
+            activeInstanceId={role.target.providerInstanceId}
+            model={role.target.model}
+            lockedProvider={null}
+            instanceEntries={instanceEntries}
+            modelOptionsByInstance={modelOptions}
+            triggerAriaLabel={`Model for ${role.name}`}
+            triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+            disabled={!editable}
+            onInstanceModelChange={(providerInstanceId, model) =>
+              props.onChange({ ...role, target: { providerInstanceId, model, options: [] } })
+            }
+          />
+          {entry ? (
+            <TraitsPicker
+              provider={entry.driverKind}
+              models={entry.models}
+              model={role.target.model}
+              modelOptions={role.target.options ?? []}
+              allowPromptInjectedEffort={false}
+              planModeEnabled={settings.planModeEnabled}
+              disabled={!editable}
+              triggerClassName={SETTINGS_PICKER_TRIGGER_CLASSNAME}
+              onModelOptionsChange={(options) =>
+                props.onChange({ ...role, target: { ...role.target, options: options ?? [] } })
+              }
+            />
+          ) : null}
+          <label className="ml-1.5 flex min-h-6 items-center gap-2 text-xs text-muted-foreground">
+            <Switch
+              checked={props.isDefault}
+              disabled={!editable}
+              onCheckedChange={props.onDefaultChange}
+            />
+            <span aria-hidden>Default</span>
+            <span className="sr-only">{`Default role: ${role.name}`}</span>
+          </label>
+          <Button
+            size="xs"
+            variant="destructive-outline"
+            disabled={!editable}
+            aria-label={`Delete ${role.name}`}
+            onClick={props.onDelete}
+          >
+            Delete
+          </Button>
+        </div>
+      }
+    />
   );
 }

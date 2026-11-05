@@ -771,20 +771,20 @@ export const layer: Layer.Layer<
         records: message.context?.records ?? [],
       });
       // The one read of the trigger settings. The handoff is budgeted against the text with the
-      // workflow or ultracode note, and run execution shapes its text from this same snapshot, so a
+      // workflow-start note, and run execution shapes its text from this same snapshot, so a
       // settings change while the session recovers cannot lengthen delivery past the budget.
       // The gate answers `workflowRequestOf`, so asking here has no side effects.
       const mcpSession = yield* mcpSessions.read(projection.thread.id);
       const turnTriggersResult = yield* serverSettings.getSettings.pipe(
         Effect.map((settings): RunExecutionService.RunExecutionTurnTriggers => {
-          const { workflowTriggers, ultracode, workflowPresets } = resolveProjectSettings(
+          const { workflowTriggers, workflowStart, workflowPresets } = resolveProjectSettings(
             settings,
             projection.thread.projectId,
           ).settings;
           return {
             workflows: mcpSession?.capabilities?.has("workflows") === true,
             workflowTriggers,
-            ultracode,
+            workflowStart,
             workflowPresets,
           };
         }),
@@ -802,6 +802,7 @@ export const layer: Layer.Layer<
       const turnTriggers = turnTriggersResult.success;
       const triggerRequest = {
         workflows: turnTriggers.workflows,
+        workflowStart: turnTriggers.workflowStart,
         workflowTriggers: turnTriggers.workflowTriggers,
         typedText: message.text,
         createdBy: message.createdBy,
@@ -814,7 +815,6 @@ export const layer: Layer.Layer<
       const preparedText = applyTurnTriggers(
         {
           ...triggerRequest,
-          ultracode: turnTriggers.ultracode,
           workflowPresets: turnTriggers.workflowPresets,
           driver: session.driver,
           text: userText,

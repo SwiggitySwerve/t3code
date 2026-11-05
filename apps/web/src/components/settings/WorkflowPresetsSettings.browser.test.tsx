@@ -85,6 +85,9 @@ vi.mock("../../state/use-atom-command", () => ({
 
 import { WorkflowPresetsSettings } from "./WorkflowPresetsSettings";
 
+const REMOTE = EnvironmentId.make("remote");
+const TARGET = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+
 function setup() {
   state.settings = {
     ...DEFAULT_UNIFIED_SETTINGS,
@@ -137,41 +140,35 @@ function setup() {
   state.requests = [];
 }
 
-describe("workflow preset settings interactions", () => {
-  it("keeps presets inactive until workflows are enabled and persists both toggle directions", async () => {
+describe("agent role settings interactions", () => {
+  it("keeps roles inactive until workflows are enabled and persists both toggle directions", async () => {
     setup();
     state.settings = { ...state.settings!, workflows: false };
-    await using screen = await render(
-      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
-    );
-    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeDisabled();
+    await using screen = await render(<WorkflowPresetsSettings environmentId={REMOTE} />);
+    await expect.element(screen.getByRole("button", { name: "Add role" })).toBeDisabled();
     await userEvent.click(screen.getByRole("switch", { name: "Enable workflows" }));
     expect(decodeSettings(JSON.parse(state.disk)).workflows).toBe(true);
-    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeEnabled();
+    await expect.element(screen.getByRole("button", { name: "Add role" })).toBeEnabled();
     await userEvent.click(screen.getByRole("switch", { name: "Enable workflows" }));
     expect(decodeSettings(JSON.parse(state.disk)).workflows).toBe(false);
-    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeDisabled();
+    await expect.element(screen.getByRole("button", { name: "Add role" })).toBeDisabled();
   });
-  it("C4 labels each default switch with its preset name and keeps a single default", async () => {
+
+  it("labels each default switch with its role name and keeps a single default", async () => {
     setup();
-    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
     state.settings = {
       ...state.settings!,
       workflowPresets: {
         presets: [
-          { id: "reviewer", name: "Reviewer", target },
-          { id: "writer", name: "Writer", target },
+          { id: "reviewer", name: "Reviewer", target: TARGET },
+          { id: "writer", name: "Writer", target: TARGET },
         ],
         defaultPresetId: null,
       },
     };
-    await using screen = await render(
-      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
-    );
-    const reviewer = screen.getByRole("switch", { name: "Workflow worker default: Reviewer" });
-    const writer = screen.getByRole("switch", { name: "Workflow worker default: Writer" });
-    await expect.element(reviewer).toHaveAccessibleName("Workflow worker default: Reviewer");
-    await expect.element(writer).toHaveAccessibleName("Workflow worker default: Writer");
+    await using screen = await render(<WorkflowPresetsSettings environmentId={REMOTE} />);
+    const reviewer = screen.getByRole("switch", { name: "Default role: Reviewer" });
+    const writer = screen.getByRole("switch", { name: "Default role: Writer" });
     await userEvent.click(reviewer);
     await expect.element(reviewer).toBeChecked();
     await expect.element(writer).not.toBeChecked();
@@ -180,17 +177,18 @@ describe("workflow preset settings interactions", () => {
     await expect.element(reviewer).not.toBeChecked();
     expect(state.settings.workflowPresets.defaultPresetId).toBe("writer");
   });
+
   it("draws Delete in the destructive red, not in the neutral grey of a plain ghost button", async () => {
     setup();
-    await using screen = await render(
-      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
-    );
-    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
+    await using screen = await render(<WorkflowPresetsSettings environmentId={REMOTE} />);
     state.settings = {
       ...state.settings!,
-      workflowPresets: { presets: [{ id: "r", name: "Reviewer", target }], defaultPresetId: null },
+      workflowPresets: {
+        presets: [{ id: "r", name: "Reviewer", target: TARGET }],
+        defaultPresetId: null,
+      },
     };
-    await screen.rerender(<WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />);
+    await screen.rerender(<WorkflowPresetsSettings environmentId={REMOTE} />);
     const color = getComputedStyle(
       screen.getByRole("button", { name: "Delete Reviewer" }).element(),
     ).color;
@@ -205,55 +203,44 @@ describe("workflow preset settings interactions", () => {
     expect(red!).toBeGreaterThan(blue! + 60);
   });
 
-  it("labels the options picker in the editor, as Effort once the preset sets one", async () => {
+  it("adds, edits model and effort, renames, toggles default and deletes in place", async () => {
     setup();
-    const target = { providerInstanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" };
-    state.settings = {
-      ...state.settings!,
-      workflowPresets: {
-        presets: [
-          { id: "plain", name: "Plain", target },
-          {
-            id: "effortful",
-            name: "Effortful",
-            target: { ...target, options: [{ id: "reasoningEffort", value: "high" }] },
-          },
-        ],
-        defaultPresetId: null,
-      },
-    };
-    await using screen = await render(
-      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Edit Effortful" }));
-    await expect.element(screen.getByText("Effort", { exact: true })).toBeVisible();
-    await userEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    await userEvent.click(screen.getByRole("button", { name: "Edit Plain" }));
-    await expect.element(screen.getByText("Options", { exact: true })).toBeVisible();
-  });
-  it("C4 creates, edits model and options, renames, toggles default and deletes through settings commands", async () => {
-    setup();
-    await using screen = await render(
-      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
-    );
-    await userEvent.click(screen.getByRole("button", { name: "Create preset" }));
-    await userEvent.fill(screen.getByRole("textbox", { name: "Preset name" }), "Reviewer");
-    await userEvent.click(screen.getByRole("button", { name: "Preset model" }));
+    await using screen = await render(<WorkflowPresetsSettings environmentId={REMOTE} />);
+    await userEvent.click(screen.getByRole("button", { name: "Add role" }));
+    // A new role starts on the app's model, and its name is ready to type.
+    const added = screen.getByRole("textbox", { name: "Role name: New role" });
+    await expect.element(added).toHaveFocus();
+    expect(state.settings!.workflowPresets.presets[0]?.target.model).toBe("gpt-5.4");
+    await userEvent.fill(added, "Reviewer");
+    await userEvent.keyboard("{Enter}");
+    const name = screen.getByRole("textbox", { name: "Role name: Reviewer" });
+    await expect.element(name).toHaveValue("Reviewer");
+    expect(screen.container.querySelector("form")).toBeNull();
+
+    await userEvent.click(screen.getByRole("button", { name: "Model for Reviewer" }));
     await userEvent.click(page.getByRole("option", { name: /GPT-5.4 mini/ }));
-    await userEvent.click(screen.getByRole("button", { name: "Save preset" }));
-    await expect.element(screen.getByRole("button", { name: "Edit Reviewer" })).toBeVisible();
-    expect(state.settings!.workflowPresets.presets[0]?.target.model).toBe("gpt-5.4-mini");
-    await userEvent.click(screen.getByRole("button", { name: "Edit Reviewer" }));
-    await userEvent.fill(screen.getByRole("textbox", { name: "Preset name" }), "Writer");
+    await vi.waitFor(() =>
+      expect(state.settings!.workflowPresets.presets[0]?.target.model).toBe("gpt-5.4-mini"),
+    );
     await userEvent.click(screen.getByRole("button", { name: /Medium/ }));
     await userEvent.click(page.getByRole("menuitemradio", { name: /High/ }).first());
-    await userEvent.click(screen.getByRole("button", { name: "Save preset" }));
-    await expect.element(screen.getByRole("button", { name: "Edit Writer" })).toBeVisible();
-    expect(state.settings!.workflowPresets.presets[0]?.target.options).toContainEqual({
-      id: "reasoningEffort",
-      value: "high",
-    });
-    await userEvent.click(screen.getByRole("switch", { name: "Workflow worker default: Writer" }));
+    await vi.waitFor(() =>
+      expect(state.settings!.workflowPresets.presets[0]?.target.options).toContainEqual({
+        id: "reasoningEffort",
+        value: "high",
+      }),
+    );
+
+    // Escape drops an unsaved rename; an empty name keeps the stored one.
+    await userEvent.fill(name, "Draft");
+    await userEvent.keyboard("{Escape}");
+    await expect.element(name).toHaveValue("Reviewer");
+    await userEvent.fill(name, "   ");
+    await userEvent.keyboard("{Enter}");
+    await expect.element(name).toHaveValue("Reviewer");
+    expect(state.settings!.workflowPresets.presets[0]?.name).toBe("Reviewer");
+
+    await userEvent.click(screen.getByRole("switch", { name: "Default role: Reviewer" }));
     await vi.waitFor(() =>
       expect(state.settings!.workflowPresets.defaultPresetId).toBe(
         state.settings!.workflowPresets.presets[0]!.id,
@@ -264,24 +251,12 @@ describe("workflow preset settings interactions", () => {
       decodeSettings(JSON.parse(state.disk)),
       DEFAULT_UNIFIED_SETTINGS,
     );
-    await using reopened = await render(
-      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
-    );
+    await using reopened = await render(<WorkflowPresetsSettings environmentId={REMOTE} />);
     await expect
-      .element(reopened.getByRole("switch", { name: "Workflow worker default: Writer" }))
+      .element(reopened.getByRole("switch", { name: "Default role: Reviewer" }))
       .toBeChecked();
-    await userEvent.click(
-      reopened.getByRole("switch", { name: "Workflow worker default: Writer" }),
-    );
-    await vi.waitFor(() => expect(state.settings!.workflowPresets.defaultPresetId).toBeNull());
-    await userEvent.click(
-      reopened.getByRole("switch", { name: "Workflow worker default: Writer" }),
-    );
-    await expect
-      .element(reopened.getByRole("switch", { name: "Workflow worker default: Writer" }))
-      .toBeChecked();
-    await userEvent.click(reopened.getByRole("button", { name: "Delete Writer" }));
-    await expect.element(reopened.getByText(/No worker presets yet./)).toBeVisible();
+    await userEvent.click(reopened.getByRole("button", { name: "Delete Reviewer" }));
+    await expect.element(reopened.getByText(/No roles yet./)).toBeVisible();
     expect(decodeSettings(JSON.parse(state.disk)).workflowPresets).toEqual({
       presets: [],
       defaultPresetId: null,
@@ -289,49 +264,48 @@ describe("workflow preset settings interactions", () => {
     expect(state.requests.every((request) => request.environmentId === "remote")).toBe(true);
   });
 
-  it("C4 disables writes without permission and retains an edit after a save failure", async () => {
+  it("disables writes without permission and keeps a rename after a save failure", async () => {
     setup();
+    state.settings = {
+      ...state.settings!,
+      workflowPresets: {
+        presets: [{ id: "w", name: "Writer", target: TARGET }],
+        defaultPresetId: null,
+      },
+    };
     state.canWrite = false;
-    await using screen = await render(
-      <WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />,
-    );
-    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeDisabled();
+    await using screen = await render(<WorkflowPresetsSettings environmentId={REMOTE} />);
+    await expect.element(screen.getByRole("button", { name: "Add role" })).toBeDisabled();
+    await expect.element(screen.getByRole("textbox", { name: "Role name: Writer" })).toBeDisabled();
+    await expect.element(screen.getByRole("button", { name: "Delete Writer" })).toBeDisabled();
     expect(state.requests).toHaveLength(0);
+
     state.canWrite = true;
-    await screen.rerender(<WorkflowPresetsSettings environmentId={EnvironmentId.make("remote")} />);
-    await userEvent.click(screen.getByRole("button", { name: "Create preset" }));
-    await userEvent.fill(screen.getByRole("textbox", { name: "Preset name" }), "Unsaved");
+    await screen.rerender(<WorkflowPresetsSettings environmentId={REMOTE} />);
+    const name = screen.getByRole("textbox", { name: "Role name: Writer" });
     state.fail = true;
-    await userEvent.click(screen.getByRole("button", { name: "Save preset" }));
+    await userEvent.fill(name, "Unsaved");
+    await userEvent.keyboard("{Enter}");
     await expect.element(screen.getByRole("alert")).toHaveTextContent("Save refused");
-    await expect
-      .element(screen.getByRole("textbox", { name: "Preset name" }))
-      .toHaveValue("Unsaved");
-    expect(state.settings!.workflowPresets.presets).toHaveLength(0);
-    await expect.element(screen.getByRole("button", { name: "Save preset" })).toBeEnabled();
-    await expect.element(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+    await expect.element(name).toHaveValue("Unsaved");
+    expect(state.settings!.workflowPresets.presets[0]?.name).toBe("Writer");
 
     state.fail = false;
     state.throwTransportError = true;
-    await userEvent.click(screen.getByRole("button", { name: "Save preset" }));
+    await userEvent.click(screen.getByRole("button", { name: "Add role" }));
     await expect
       .element(screen.getByRole("alert"))
-      .toHaveTextContent("Could not save worker presets. Reconnect and try again.");
-    await expect
-      .element(screen.getByRole("textbox", { name: "Preset name" }))
-      .toHaveValue("Unsaved");
-    expect(state.settings!.workflowPresets.presets).toHaveLength(0);
-    await expect.element(screen.getByRole("button", { name: "Save preset" })).toBeEnabled();
-    await expect.element(screen.getByRole("button", { name: "Cancel" })).toBeEnabled();
+      .toHaveTextContent("Could not save agent roles. Reconnect and try again.");
+    expect(state.settings!.workflowPresets.presets).toHaveLength(1);
+    await expect.element(name).toHaveValue("Unsaved");
 
     state.throwTransportError = false;
-    await userEvent.click(screen.getByRole("button", { name: "Save preset" }));
-    await expect.element(screen.getByRole("button", { name: "Edit Unsaved" })).toBeVisible();
+    await userEvent.click(name);
+    await userEvent.keyboard("{Enter}");
     await expect
-      .element(screen.getByRole("form", { name: "Worker preset" }))
-      .not.toBeInTheDocument();
+      .element(screen.getByRole("textbox", { name: "Role name: Unsaved" }))
+      .toHaveValue("Unsaved");
     await expect.element(screen.getByRole("alert")).not.toBeInTheDocument();
-    await expect.element(screen.getByRole("button", { name: "Create preset" })).toBeEnabled();
     expect(state.requests).toHaveLength(3);
   });
 });

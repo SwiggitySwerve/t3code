@@ -3,9 +3,11 @@ import {
   EnvironmentId,
   MessageId,
   type OrchestrationV2WorkflowApprovalError,
+  ProjectId,
   RunId,
   ThreadId,
 } from "@t3tools/contracts";
+import { workflowRequestOf } from "@t3tools/provider-core/server/workflowTrigger";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
@@ -22,9 +24,11 @@ const threadId = ThreadId.make("thread:gate");
 const otherThreadId = ThreadId.make("thread:gate-other");
 const digestA = `sha256:${"a".repeat(64)}`;
 const digestB = `sha256:${"b".repeat(64)}`;
-const triggers = { enabled: true, extras: [] };
+const projectId = ProjectId.make("project:gate");
+const triggers = { extras: [] };
 
 const person = {
+  workflowStart: "keyword",
   workflowTriggers: triggers,
   createdBy: "user",
   creationSource: "web",
@@ -89,6 +93,7 @@ const makeLayer = (
                 (stored) =>
                   ({
                     thread: {
+                      projectId,
                       lineage: { relationshipToParent: stored.relationshipToParent ?? null },
                     },
                     runs: stored.runs,
@@ -923,9 +928,83 @@ describe("after a restart", () => {
             Effect.map((error) => assert.equal(error.reason, "script-not-allowed")),
           ),
         stored,
-        { workflowTriggers: { enabled: true, extras: ["fan out"] } },
+        { workflowTriggers: { extras: ["fan out"] } },
       );
     }),
+  );
+
+  it.effect.each(["keyword", "always", "off"] as const)(
+    "re-arms after a restart as turn start reads the message under workflowStart %s",
+    (workflowStart) =>
+      Effect.gen(function* () {
+        const typedText = "Plan this as a workflow";
+        // The answer turn start gives for this message under the same setting.
+        const atTurnStart = workflowRequestOf({ ...person, workflowStart, typedText });
+        assert.equal(atTurnStart, workflowStart === "off" ? "plain" : "requested");
+        const stored = { runs: runs(1), items: [start(1, typedText)] };
+        for (const settings of [
+          { workflowStart },
+          // A project override decides for the gate as it does at turn start.
+          {
+            workflowStart: workflowStart === "off" ? "keyword" : "off",
+            projectSettingsOverrides: { [projectId]: { workflowStart } },
+          },
+        ] as const) {
+          yield* withGate(
+            (gate) =>
+              Effect.gen(function* () {
+                const reason = yield* gate.requireNoRequest(threadId).pipe(
+                  Effect.as("open"),
+                  Effect.catchTags({
+                    WorkflowApprovalRequiredError: (error) => Effect.succeed(error.reason),
+                  }),
+                );
+                assert.equal(
+                  reason,
+                  atTurnStart === "requested" ? "script-not-allowed" : "open",
+                  JSON.stringify(settings),
+                );
+              }),
+            stored,
+            settings,
+          );
+        }
+      }),
+  );
+
+  it.effect("gives a steer no note and arms nothing while workflowStart is off", () =>
+    withGate(
+      (gate) =>
+        Effect.gen(function* () {
+          const note = yield* gate.observeSteer({
+            threadId,
+            messageId: MessageId.make("message:1"),
+            typedText: "Run it as a workflow",
+            createdBy: "user",
+            creationSource: "web",
+          });
+          assert.isUndefined(note);
+          yield* gate.requireNoRequest(threadId);
+        }),
+      NOTHING_STORED,
+      { projectSettingsOverrides: { [projectId]: { workflowStart: "off" } } },
+    ),
+  );
+
+  it.effect("lets a person's message under off lift a request that waits", () =>
+    withGate((gate) =>
+      Effect.gen(function* () {
+        yield* gate.observeTurn(turn("message:1", "Plan this as a workflow"));
+        assert.equal(yield* reasonOf(gate.requireNoRequest(threadId)), "script-not-allowed");
+        assert.equal(
+          yield* gate.observeTurn(
+            turn("message:2", "Plan this as a workflow", { workflowStart: "off" }),
+          ),
+          "plain",
+        );
+        yield* gate.requireNoRequest(threadId);
+      }),
+    ),
   );
 
   it.effect("refuses, rather than guess, when the stored messages cannot be read", () =>

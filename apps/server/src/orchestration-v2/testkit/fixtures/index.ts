@@ -1325,7 +1325,7 @@ export const ORCHESTRATOR_REPLAY_FIXTURES: ReadonlyArray<OrchestratorReplayFixtu
         modelSelection: MUSE_MODEL_SELECTION,
         runContinuationWorker: true,
         // The prompt asks Muse's own workflow tool. It was recorded without T3's plan-first note.
-        serverSettings: { workflowTriggers: { enabled: false, extras: [] } },
+        serverSettings: { workflowStart: "off" },
         assertOutput: assertMuseWorkflowOutput,
       },
     ],

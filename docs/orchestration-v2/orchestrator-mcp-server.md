@@ -591,21 +591,20 @@ These follow the `omx graph` execution graph's protected verifiers
   `null` on failure, so a script can record why an agent failed. A spent budget still
   throws.
 
-#### Ultracode
+#### Starting a workflow from a message
 
-The `ultracode` server setting (also a project override; Settings, Threads) asks agents
-to orchestrate substantive work as a workflow. `keyword`, the default, opts in a turn
-whose message contains the word ultracode; `always` opts in every user or agent turn;
-`off` never does. System turns, such as completion wakes, are never opted in. An opted-in
-turn reaches the provider with a `<t3-ultracode>` note asking for `workflow_start`; the
-stored message is unchanged. Claude Code has its own ultracode, which the keyword starts,
-so a Claude turn only gets the word ultracode added when `always` opts it in.
-`@t3tools/provider-core/server/ultracode` owns this rule. Run execution applies it through
-`@t3tools/provider-core/server/workflowTrigger`, where a person's message that asks for a
-workflow (the `workflowTriggers` setting) gets a plan-first `<t3-workflow>` note naming
-`graph_review` instead of the ultracode note, on every driver. Only a person's message on a
-thread that is not a delegated task can ask; wakes, steers, restart continuations and
-server-made replies cannot. The detector reads the stored message, not the provider text.
+The `workflowStart` server setting (also a project override) is the one owner of whether a
+person's message starts a workflow. `keyword`, the default, gives a message that contains
+the word "workflow" or one of the `workflowTriggers.extras` phrases a plan-first
+`<t3-workflow>` note naming `graph_review`, on every driver. `always` does the same and
+also gives every other person-typed turn a `<t3-workflow-every-turn>` note asking for
+`workflow_start`; a Claude turn gets Claude Code's own orchestration keyword instead of
+that note. `off` never starts a workflow from a message. Only a person's message on a
+thread that is not a delegated task counts; agent text, wakes, schedules, restart
+continuations and server-made replies never do. The stored message is unchanged: notes are
+only in the provider text, and the detector reads the stored message, not the provider
+text. `@t3tools/provider-core/server/workflowTrigger` owns this rule, and run execution
+and the approval gate both apply it.
 
 A request for a workflow arms an approval gate for that thread
 (`apps/server/src/orchestration-v2/WorkflowApprovalGate.ts`, which owns its state and asks

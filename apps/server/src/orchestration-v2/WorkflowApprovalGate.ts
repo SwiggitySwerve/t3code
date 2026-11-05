@@ -25,6 +25,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderSessions";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
 
@@ -247,6 +248,8 @@ const make = Effect.gen(function* () {
     const workflows = mcpSession.capabilities?.has("workflows") === true;
     if (!workflows) return undefined;
     const delegatedThread = records.thread.lineage.relationshipToParent === "subagent";
+    // Project-scoped like at turn start, so both read one message the same way.
+    const { workflowStart } = resolveProjectSettings(settings, records.thread.projectId).settings;
     const runs = new Map(records.runs.map((run) => [run.id, run]));
     const runOf = (runId: RunId | null) => (runId === null ? undefined : runs.get(runId));
     const messages = records.turnItems
@@ -259,6 +262,7 @@ const make = Effect.gen(function* () {
     for (const item of messages) {
       const request = workflowRequestOf({
         workflows,
+        workflowStart,
         workflowTriggers: settings.workflowTriggers,
         typedText: item.text,
         createdBy: item.createdBy,
@@ -328,6 +332,8 @@ const make = Effect.gen(function* () {
     const mcpSession = yield* mcpSessions.read(input.threadId);
     const request = yield* observeTurn({
       workflows: mcpSession?.capabilities?.has("workflows") === true,
+      workflowStart: resolveProjectSettings(settings, records.thread.projectId).settings
+        .workflowStart,
       workflowTriggers: settings.workflowTriggers,
       typedText: input.typedText,
       createdBy: input.createdBy,

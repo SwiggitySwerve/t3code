@@ -66,18 +66,17 @@ describe("workflow preset patches", () => {
 });
 
 describe("workflow trigger patches", () => {
-  it("merges the switch and the extras separately and replaces the extras whole", () => {
+  it("keeps the extras apart from the workflow start mode and replaces them whole", () => {
     const withExtras = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       workflowTriggers: { extras: ["fan out", "orchestrate"] },
     });
-    expect(withExtras.workflowTriggers).toEqual({
-      enabled: true,
-      extras: ["fan out", "orchestrate"],
-    });
-    const off = applyServerSettingsPatch(withExtras, { workflowTriggers: { enabled: false } });
-    expect(off.workflowTriggers).toEqual({ enabled: false, extras: ["fan out", "orchestrate"] });
+    expect(withExtras.workflowTriggers).toEqual({ extras: ["fan out", "orchestrate"] });
+    const off = applyServerSettingsPatch(withExtras, { workflowStart: "off" });
+    expect(off.workflowStart).toBe("off");
+    expect(off.workflowTriggers).toEqual({ extras: ["fan out", "orchestrate"] });
     const fewer = applyServerSettingsPatch(off, { workflowTriggers: { extras: ["orchestrate"] } });
-    expect(fewer.workflowTriggers).toEqual({ enabled: false, extras: ["orchestrate"] });
+    expect(fewer.workflowTriggers).toEqual({ extras: ["orchestrate"] });
+    expect(fewer.workflowStart).toBe("off");
     expect(
       applyServerSettingsPatch(fewer, { threadTitleInstructions: "title" }).workflowTriggers,
     ).toEqual(fewer.workflowTriggers);
@@ -179,9 +178,9 @@ describe("workflow profile fallbacks and a writer that predates them", () => {
   });
 
   it("leaves the fallbacks alone when the patch does not touch the profiles", () => {
-    expect(
-      applyServerSettingsPatch(stored, { workflowTriggers: { enabled: false } }).workflowPresets,
-    ).toEqual(stored.workflowPresets);
+    expect(applyServerSettingsPatch(stored, { workflowStart: "off" }).workflowPresets).toEqual(
+      stored.workflowPresets,
+    );
   });
 });
 
@@ -241,18 +240,18 @@ describe("settings write rules", () => {
   it("checks trigger extras only when the write changes them", () => {
     const handEdited = {
       ...DEFAULT_SERVER_SETTINGS,
-      workflowTriggers: { enabled: true, extras: ["fan out", "Fan Out", "workflow"] },
+      workflowTriggers: { extras: ["fan out", "Fan Out", "workflow"] },
     };
     // An invalid list that is already stored does not block an unrelated write or a re-save.
-    expect(serverSettingsWriteProblems(handEdited, { ...handEdited, ultracode: "off" })).toEqual(
-      [],
-    );
+    expect(
+      serverSettingsWriteProblems(handEdited, { ...handEdited, workflowStart: "off" }),
+    ).toEqual([]);
     expect(serverSettingsWriteProblems(handEdited, handEdited)).toEqual([]);
     // Changing the list checks the whole new list.
     expect(
       serverSettingsWriteProblems(handEdited, {
         ...handEdited,
-        workflowTriggers: { enabled: true, extras: ["fan out", "Fan Out"] },
+        workflowTriggers: { extras: ["fan out", "Fan Out"] },
       }),
     ).toHaveLength(1);
     expect(serverSettingsWriteProblems(DEFAULT_SERVER_SETTINGS, handEdited)).toHaveLength(2);
@@ -262,7 +261,7 @@ describe("settings write rules", () => {
     const next = {
       ...DEFAULT_SERVER_SETTINGS,
       workflowPresets: presets(preset("a", "Same"), preset("b", "same")),
-      workflowTriggers: { enabled: true, extras: ["fan out", "Fan Out", "workflow"] },
+      workflowTriggers: { extras: ["fan out", "Fan Out", "workflow"] },
     };
     expect(serverSettingsWriteProblems(DEFAULT_SERVER_SETTINGS, next)).toHaveLength(4);
     expect(serverSettingsWriteProblems(DEFAULT_SERVER_SETTINGS, DEFAULT_SERVER_SETTINGS)).toEqual(

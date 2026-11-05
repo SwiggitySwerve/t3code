@@ -552,12 +552,12 @@ export const RunExecutionServiceV2Error = Schema.Union([
 export type RunExecutionServiceV2Error = typeof RunExecutionServiceV2Error.Type;
 
 /**
- * The settings that decide the turn's workflow or ultracode note. Turn start reads them once and
+ * The settings that decide the turn's workflow-start note. Turn start reads them once and
  * budgets its context handoff against the text they produce; the run shapes the same text from them.
  */
 export type RunExecutionTurnTriggers = Pick<
   ServerSettingsValue,
-  "workflows" | "workflowTriggers" | "ultracode" | "workflowPresets"
+  "workflows" | "workflowStart" | "workflowTriggers" | "workflowPresets"
 >;
 
 export interface RunExecutionServiceV2StartRootRunInput {
@@ -1681,6 +1681,7 @@ export const layer: Layer.Layer<
         // The gate and the note answer one question about this message, asked once.
         const workflowRequest = {
           workflows: input.turnTriggers.workflows,
+          workflowStart: input.turnTriggers.workflowStart,
           workflowTriggers: input.turnTriggers.workflowTriggers,
           typedText: input.typedText,
           createdBy: input.message.createdBy,
@@ -1719,7 +1720,6 @@ export const layer: Layer.Layer<
             text: applyTurnTriggers(
               {
                 ...workflowRequest,
-                ultracode: input.turnTriggers.ultracode,
                 workflowPresets: input.turnTriggers.workflowPresets,
                 driver: input.providerThread.driver,
                 text: input.message.text,

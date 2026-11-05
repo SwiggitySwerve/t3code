@@ -122,26 +122,40 @@ describe("workflow profile compatibility", () => {
   });
 });
 
-describe("workflow trigger settings", () => {
-  it("defaults to on with no extras, for settings written before triggers existed", () => {
-    expect(decodeServerSettings({}).workflowTriggers).toEqual({ enabled: true, extras: [] });
-    expect(DEFAULT_SERVER_SETTINGS.workflowTriggers).toEqual({ enabled: true, extras: [] });
+describe("workflow start settings", () => {
+  it("starts workflows from the keyword by default, for settings written before the setting", () => {
+    expect(decodeServerSettings({}).workflowStart).toBe("keyword");
+    expect(DEFAULT_SERVER_SETTINGS.workflowStart).toBe("keyword");
+    for (const mode of ["keyword", "always", "off"] as const) {
+      expect(decodeServerSettings({ workflowStart: mode }).workflowStart).toBe(mode);
+      expect(decodeServerSettingsPatch({ workflowStart: mode })).toEqual({ workflowStart: mode });
+    }
+    expect(() => decodeServerSettings({ workflowStart: "sometimes" })).toThrow();
+  });
+
+  it("defaults to no extras, for settings written before triggers existed", () => {
+    expect(decodeServerSettings({}).workflowTriggers).toEqual({ extras: [] });
+    expect(DEFAULT_SERVER_SETTINGS.workflowTriggers).toEqual({ extras: [] });
     expect(decodeServerSettings({ workflowTriggers: {} }).workflowTriggers).toEqual({
-      enabled: true,
       extras: [],
     });
-    expect(decodeServerSettings({ workflowTriggers: { enabled: false } }).workflowTriggers).toEqual(
-      {
-        enabled: false,
-        extras: [],
-      },
+  });
+
+  it("drops the retired trigger switch from stored settings and patches", () => {
+    // workflowStart owns on and off now; a stored switch neither fails decoding nor survives it.
+    expect(
+      decodeServerSettings({ workflowTriggers: { enabled: false, extras: ["fan out"] } })
+        .workflowTriggers,
+    ).toEqual({ extras: ["fan out"] });
+    expect(decodeServerSettings({ workflowTriggers: { enabled: false } }).workflowStart).toBe(
+      "keyword",
     );
+    expect(decodeServerSettingsPatch({ workflowTriggers: { enabled: false } })).toEqual({
+      workflowTriggers: {},
+    });
   });
 
   it("decodes partial patches and trims extras", () => {
-    expect(decodeServerSettingsPatch({ workflowTriggers: { enabled: false } })).toEqual({
-      workflowTriggers: { enabled: false },
-    });
     expect(decodeServerSettingsPatch({ workflowTriggers: { extras: ["  fan out "] } })).toEqual({
       workflowTriggers: { extras: ["fan out"] },
     });

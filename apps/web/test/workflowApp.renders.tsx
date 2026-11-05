@@ -1,6 +1,7 @@
 import { createMemoryHistory } from "@tanstack/react-router";
 import {
   NodeId,
+  ProviderInstanceId,
   ThreadId,
   TurnItemId,
   type OrchestrationV2Subagent,
@@ -20,6 +21,7 @@ import {
   assistantItem,
   installFakeEnvironment,
   threadWithHistory,
+  workflowReviewItem,
   type FakeDriver,
   type FakeThread,
   userItem,
@@ -28,6 +30,7 @@ import { act, fakeTimers, render } from "./render";
 import { commitsSoFar } from "./renderCounter";
 import { QA_PROVIDERS } from "./workflow-fixtures/providers";
 import { WORKFLOW_QA_NOW, workflowCollapseFixture } from "./workflow-fixtures/workflowFixtures";
+import { workflowReviewFixtureRecord } from "@t3tools/shared/testing/workflowReviewFixture";
 
 vi.mock("../../../packages/client-runtime/src/connection/driver.ts", async (importOriginal) => {
   const [actual, { fakeDriver }, Layer] = await Promise.all([
@@ -136,13 +139,62 @@ function workflowThread(name: string, count: 4 | 256, status: "running" | "compl
   return [parent, ...children];
 }
 
+/** A plan the coordinator reviewed, waiting for the person to approve it before any agent starts. */
+function reviewThread(): FakeThread {
+  const history = threadWithHistory("workflow-review", 1);
+  const run = history.runs[0]!;
+  return {
+    ...history,
+    title: "Fix the sync bug",
+    items: [
+      userItem(history.id, run.id, "workflow-review-user", 0, "Fix the sync bug with a workflow."),
+      assistantItem(
+        history.id,
+        run.id,
+        "workflow-review-assistant",
+        1,
+        "I planned four tasks in three steps. Approve the plan to start them.",
+      ),
+      workflowReviewItem(
+        history.id,
+        run.id,
+        "workflow-review-item",
+        2,
+        workflowReviewFixtureRecord(),
+      ),
+    ],
+  };
+}
+
+const preset = (id: string, name: string, model: string, effort?: string) => ({
+  id,
+  name,
+  target: {
+    providerInstanceId: ProviderInstanceId.make("cliproxy"),
+    model,
+    options: effort ? [{ id: "reasoningEffort", value: effort }] : [],
+  },
+});
+
 const threads = [
+  reviewThread(),
   ...workflowThread("workflow-small", 4, "running"),
   ...workflowThread("workflow-live", 256, "running"),
   ...workflowThread("workflow-finished", 256, "completed"),
   ...workflowThread("workflow-failed", 256, "failed"),
 ];
-installFakeEnvironment(threads, QA_PROVIDERS);
+installFakeEnvironment(threads, QA_PROVIDERS, {
+  workflows: true,
+  workflowPresets: {
+    presets: [
+      preset("planner", "Planner", "claude-opus-5-5"),
+      preset("worker", "Worker", "claude-haiku-5-5", "high"),
+      preset("scout", "Scout (cheaper)", "claude-haiku-5-5", "medium"),
+      preset("verifier", "Verifier", "claude-opus-5-5"),
+    ],
+    defaultPresetId: "worker",
+  },
+});
 
 const views = [
   { name: "01-small-running", thread: "workflow-small", width: 1440 },
@@ -158,6 +210,9 @@ const views = [
   { name: "12-receipt-narrow", thread: "workflow-failed", width: 800 },
   { name: "13-running-fold", thread: "workflow-live", width: 1440 },
   { name: "14-relationships-phases", thread: "workflow-live", width: 1440 },
+  { name: "15-settings-workflow", thread: "workflow-small", width: 1440 },
+  { name: "17-settings-workflow-start", thread: "workflow-small", width: 1440 },
+  { name: "18-plan-review", thread: "workflow-review", width: 1440 },
 ] as const;
 
 async function quiet() {
@@ -195,31 +250,37 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
     container.style.cssText = `height:900px;width:${width}px;`;
     // AppRoot owns the real router.
     await using screen = await render(<AppRoot router={router} />, { container, router: false });
-    await vi.waitFor(() => {
-      expect(
-        container.querySelector("[data-workflow-opening]"),
-        container.textContent ?? "",
-      ).not.toBeNull();
-    });
-    await expect
-      .element(
-        page.elementLocator(container).getByRole("heading", { name: /Audit (4|256) agents/ }),
-      )
-      .toBeVisible();
+    if (thread === "workflow-review") {
+      await expect
+        .element(page.getByRole("region", { name: "Workflow review: Fix the sync bug" }))
+        .toBeVisible();
+    } else {
+      await vi.waitFor(() => {
+        expect(
+          container.querySelector("[data-workflow-opening]"),
+          container.textContent ?? "",
+        ).not.toBeNull();
+      });
+      await expect
+        .element(
+          page.elementLocator(container).getByRole("heading", { name: /Audit (4|256) agents/ }),
+        )
+        .toBeVisible();
+    }
     await expect.element(page.getByTestId("composer-editor")).toBeVisible();
     await document.fonts.ready;
     await quiet();
-    const opening = container.querySelector<HTMLElement>("[data-workflow-opening]")!;
-    if (thread === "workflow-live") opening.scrollIntoView({ block: "start" });
+    const opening = container.querySelector<HTMLElement>("[data-workflow-opening]");
+    if (thread === "workflow-live") opening!.scrollIntoView({ block: "start" });
     if (name === "03-expanded-row") {
       await userEvent.click(screen.getByRole("button", { name: /Phases 1–8 · 128 done/ }));
       expect(container.querySelectorAll("[data-workflow-dot]")).toHaveLength(176);
-      opening.scrollIntoView({ block: "start" });
+      opening!.scrollIntoView({ block: "start" });
     }
     if (name === "13-running-fold") {
       await userEvent.click(screen.getByRole("button", { name: /^Phases 11–12 · 32 running/ }));
       expect(container.querySelectorAll("[data-workflow-dot]")).toHaveLength(80);
-      opening.scrollIntoView({ block: "start" });
+      opening!.scrollIntoView({ block: "start" });
     }
     if (name === "06-anchored-readout") {
       const cell = container.querySelector<HTMLButtonElement>('[data-workflow-dot="task-255"]')!;
@@ -287,13 +348,27 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
       await expect.element(toggle).toBeInTheDocument();
       toggle.element().scrollIntoView({ block: "center" });
     }
+    if (name === "15-settings-workflow" || name === "17-settings-workflow-start") {
+      await act(() => router.navigate({ to: "/settings/agents" }));
+      await expect.element(page.getByRole("switch", { name: "Enable workflows" })).toBeChecked();
+      await expect
+        .element(page.getByRole("switch", { name: "Default role: Worker" }))
+        .toBeChecked();
+    }
+    if (name === "17-settings-workflow-start") {
+      await userEvent.click(page.getByRole("combobox", { name: "Start a workflow" }));
+      await expect
+        .element(page.getByRole("option", { name: "When a message says workflow" }))
+        .toBeVisible();
+    }
     if (name === "10-verbose-graph") {
       await userEvent.click(page.getByRole("button", { name: "Graph details", exact: true }));
       await expect
         .element(page.elementLocator(container.querySelector("[data-workflow-waves]")!))
         .toBeVisible();
     }
-    if (name !== "06-anchored-readout") {
+    // View 17 keeps its menu open, so it keeps focus and the pointer where they are.
+    if (name !== "06-anchored-readout" && name !== "17-settings-workflow-start") {
       if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
       await commands.resetPointer();
     }

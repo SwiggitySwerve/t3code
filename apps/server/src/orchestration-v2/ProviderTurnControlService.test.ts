@@ -456,7 +456,8 @@ const steerOnce = (input: {
       const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
       if (input.armedBefore === true) {
         yield* gate.observeTurn({
-          workflowTriggers: { enabled: true, extras: [] },
+          workflowStart: "keyword",
+          workflowTriggers: { extras: [] },
           typedText: "Run it as a workflow",
           threadId,
           messageId: MessageId.make("message:armed"),

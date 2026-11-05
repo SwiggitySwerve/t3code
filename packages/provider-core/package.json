@@ -91,10 +91,6 @@
       "types": "./src/server/notification.ts",
       "import": "./src/server/notification.ts"
     },
-    "./server/ultracode": {
-      "types": "./src/server/ultracode.ts",
-      "import": "./src/server/ultracode.ts"
-    },
     "./server/workflowTrigger": {
       "types": "./src/server/workflowTrigger.ts",
       "import": "./src/server/workflowTrigger.ts"
