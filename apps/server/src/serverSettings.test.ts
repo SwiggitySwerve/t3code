@@ -11,6 +11,7 @@ import {
   UsageLimitSourceId,
 } from "@t3tools/contracts";
 import { createModelSelection } from "@t3tools/shared/model";
+import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import { assert, it } from "@effect/vitest";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -115,6 +116,36 @@ it.effect("drops a stored trigger switch, leaving workflowStart the only on and 
     const written = JSON.parse(yield* fs.readFileString(config.settingsPath));
     assert.deepEqual(written.workflowTriggers, { extras: ["fan out"] });
     assert.equal(written.workflowStart, "always");
+  }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
+);
+
+it.effect("loads a file still holding the retired ultracode key, globally and per project", () =>
+  Effect.gen(function* () {
+    const service = yield* ServerSettingsModule.ServerSettingsService;
+    const config = yield* ServerConfig.ServerConfig;
+    const fs = yield* FileSystem.FileSystem;
+    const projectId = ProjectId.make("project:legacy-settings");
+    yield* fs.writeFileString(
+      config.settingsPath,
+      JSON.stringify({
+        ultracode: "off",
+        projectSettingsOverrides: { [projectId]: { ultracode: "always" } },
+      }),
+    );
+    const loaded = yield* service.getSettings;
+    assert.equal(loaded.workflowStart, DEFAULT_SERVER_SETTINGS.workflowStart);
+    assert.equal("ultracode" in loaded, false);
+    // What turn start and the approval gate read for the project.
+    assert.equal(
+      resolveProjectSettings(loaded, projectId).settings.workflowStart,
+      DEFAULT_SERVER_SETTINGS.workflowStart,
+    );
+    // The next write keeps neither key.
+    yield* service.updateSettings({ workflowStart: "always" });
+    const written = JSON.parse(yield* fs.readFileString(config.settingsPath));
+    assert.equal(written.workflowStart, "always");
+    assert.equal("ultracode" in written, false);
+    assert.equal("ultracode" in (written.projectSettingsOverrides?.[projectId] ?? {}), false);
   }).pipe(Effect.provide(layerServerSettings().pipe(Layer.provideMerge(NodeServices.layer)))),
 );
 

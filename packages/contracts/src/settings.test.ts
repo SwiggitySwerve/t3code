@@ -70,6 +70,24 @@ describe("workflow start settings", () => {
     expect(() => decodeServerSettings({ workflowStart: "sometimes" })).toThrow();
   });
 
+  it("drops the retired ultracode key, globally and per project, leaving the default", () => {
+    // `ultracode` was workflowStart's name before it was renamed; old files still carry it.
+    const projectId = ProjectId.make("project:legacy-settings");
+    const decoded = decodeServerSettings({
+      ultracode: "off",
+      projectSettingsOverrides: { [projectId]: { ultracode: "always" } },
+    });
+    expect(decoded.workflowStart).toBe(DEFAULT_SERVER_SETTINGS.workflowStart);
+    expect(decoded).not.toHaveProperty("ultracode");
+    expect(decoded.projectSettingsOverrides[projectId]).toEqual({});
+    expect(
+      decodeServerSettingsPatch({
+        ultracode: "off",
+        projectSettingsOverrides: { [projectId]: { ultracode: "always" } },
+      }),
+    ).toEqual({ projectSettingsOverrides: { [projectId]: {} } });
+  });
+
   it("defaults to no extras, for settings written before triggers existed", () => {
     expect(decodeServerSettings({}).workflowTriggers).toEqual({ extras: [] });
     expect(DEFAULT_SERVER_SETTINGS.workflowTriggers).toEqual({ extras: [] });
