@@ -84,9 +84,14 @@ describe("workflowReviewOf", () => {
       check: null,
     });
     expect(review.nodes[3]).toMatchObject({
-      judge: { providerInstanceId: "cliproxy", model: "claude-opus-5-5" },
+      judge: { providerInstanceId: "cliproxy", model: "claude-opus-5-5", effort: null },
       retries: [],
       check: "judgment",
+    });
+    // A retry that keeps its model at a higher effort carries the effort of each attempt.
+    expect(review.nodes[1]).toMatchObject({
+      worker: { providerInstanceId: "cliproxy", model: "claude-haiku-5-5", effort: "medium" },
+      retries: [{ providerInstanceId: "cliproxy", model: "claude-haiku-5-5", effort: "high" }],
     });
     const [laddered] = reviewOf({
       tasks: [
@@ -100,7 +105,7 @@ describe("workflowReviewOf", () => {
       ],
     }).nodes;
     expect(laddered?.retries).toEqual([
-      { providerInstanceId: "cliproxy", model: "claude-opus-5-5" },
+      { providerInstanceId: "cliproxy", model: "claude-opus-5-5", effort: null },
     ]);
     expect(review.advice).toMatchObject({
       nodeCount: 4,
@@ -403,20 +408,70 @@ describe("workflowReviewTargetLabel", () => {
   it("uses the catalog's names, and falls back to the ids the review carries", () => {
     expect(
       workflowReviewTargetLabel(
-        { providerInstanceId: "cliproxy", model: "claude-haiku-5-5" },
+        { providerInstanceId: "cliproxy", model: "claude-haiku-5-5", effort: null },
         providers,
       ),
     ).toBe("CLI Proxy \u00b7 Claude Haiku 5.5");
     expect(
       workflowReviewTargetLabel(
-        { providerInstanceId: "cliproxy", model: "claude-opus-5-5" },
+        { providerInstanceId: "cliproxy", model: "claude-opus-5-5", effort: null },
         providers,
       ),
     ).toBe("CLI Proxy \u00b7 claude-opus-5-5");
-    expect(workflowReviewTargetLabel({ providerInstanceId: "other", model: "m" }, undefined)).toBe(
-      "other \u00b7 m",
-    );
+    expect(
+      workflowReviewTargetLabel(
+        { providerInstanceId: "other", model: "m", effort: null },
+        undefined,
+      ),
+    ).toBe("other \u00b7 m");
     expect(workflowReviewTargetLabel(null, providers)).toBe("Provider and model not listed");
+  });
+
+  it("names the effort with the model's own label under either driver's option id", () => {
+    const efforts = (id: string) => ({
+      optionDescriptors: [
+        {
+          id,
+          label: "Effort",
+          type: "select",
+          options: [
+            { id: "xhigh", label: "Extra High" },
+            { id: "max", label: "Max" },
+          ],
+        },
+      ],
+    });
+    const catalog = [
+      {
+        instanceId: "codex",
+        displayName: "Codex",
+        models: [{ slug: "gpt", name: "GPT", capabilities: efforts("reasoningEffort") }],
+      },
+      {
+        instanceId: "claude",
+        displayName: "Claude",
+        models: [{ slug: "opus", name: "Opus", capabilities: efforts("effort") }],
+      },
+    ] as never;
+    expect(
+      workflowReviewTargetLabel(
+        { providerInstanceId: "codex", model: "gpt", effort: "xhigh" },
+        catalog,
+      ),
+    ).toBe("Codex · GPT · Extra High effort");
+    expect(
+      workflowReviewTargetLabel(
+        { providerInstanceId: "claude", model: "opus", effort: "max" },
+        catalog,
+      ),
+    ).toBe("Claude · Opus · Max effort");
+    // Without the model's descriptor the value is shown as the review carries it.
+    expect(
+      workflowReviewTargetLabel(
+        { providerInstanceId: "other", model: "m", effort: "high" },
+        catalog,
+      ),
+    ).toBe("other · m · High effort");
   });
 });
 
@@ -486,14 +541,37 @@ describe("workflowReviewNodeLines", () => {
         {
           ...verify!,
           retries: [
-            { providerInstanceId: "cliproxy", model: "claude-sonnet-5-5" },
-            { providerInstanceId: "cliproxy", model: null },
+            { providerInstanceId: "cliproxy", model: "claude-sonnet-5-5", effort: null },
+            { providerInstanceId: "cliproxy", model: null, effort: null },
           ],
         },
         undefined,
       ).runs,
     ).toBe(
       "cliproxy · claude-haiku-5-5, then cliproxy · claude-sonnet-5-5, then cliproxy · checked by cliproxy · claude-opus-5-5",
+    );
+  });
+
+  it("names a retry that keeps its model by its effort, so an effort ladder is not a repeat", () => {
+    const [, tests, , verify] = reviewOf().nodes;
+    expect(workflowReviewNodeLines(tests!, undefined).runs).toBe(
+      "cliproxy · claude-haiku-5-5 · Medium effort, then High effort",
+    );
+    // A move to another model names it in full; a judge shows its effort too.
+    expect(
+      workflowReviewNodeLines(
+        {
+          ...verify!,
+          judge: { providerInstanceId: "cliproxy", model: "claude-opus-5-5", effort: "low" },
+          retries: [
+            { providerInstanceId: "cliproxy", model: "claude-haiku-5-5", effort: "high" },
+            { providerInstanceId: "cliproxy", model: "claude-opus-5-5", effort: "high" },
+          ],
+        },
+        undefined,
+      ).runs,
+    ).toBe(
+      "cliproxy · claude-haiku-5-5, then High effort, then cliproxy · claude-opus-5-5 · High effort · checked by cliproxy · claude-opus-5-5 · Low effort",
     );
   });
 });

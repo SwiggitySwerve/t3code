@@ -18,14 +18,15 @@ const TASKS = [
   ["verify", "Verify the build and the tests", ["tests", "change"], 2],
 ] as const;
 
-const target = (model: string) => ({
+const target = (model: string, effort?: string) => ({
   providerInstanceId: WORKFLOW_REVIEW_FIXTURE_PROVIDER,
   model,
+  ...(effort === undefined ? {} : { effort }),
 });
 
 /**
- * The record of a ready review with four tasks in three steps: one judged, and one whose attempts
- * after a failed check move to a stronger model.
+ * The record of a ready review with four tasks in three steps: one judged, one whose attempts after
+ * a failed check move to a stronger model, and one whose retry keeps its model at a higher effort.
  */
 export function workflowReviewFixtureRecord(
   overrides: Partial<OrchestrationV2WorkflowReviewRecord> = {},
@@ -43,7 +44,11 @@ export function workflowReviewFixtureRecord(
       label,
       wave,
       dependsOn,
-      worker: target(index === 0 ? "claude-opus-5-5" : "claude-haiku-5-5"),
+      worker:
+        key === "tests"
+          ? target("claude-haiku-5-5", "medium")
+          : target(index === 0 ? "claude-opus-5-5" : "claude-haiku-5-5"),
+      ...(key === "tests" ? { retries: [target("claude-haiku-5-5", "high")] } : {}),
       ...(key === "change" ? { retries: [target("claude-opus-5-5")] } : {}),
       ...(key === "verify" ? { judge: target("claude-opus-5-5"), check: "judgment" as const } : {}),
     })),

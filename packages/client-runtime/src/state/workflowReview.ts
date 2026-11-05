@@ -23,6 +23,7 @@ import {
   squashAtomCommandFailure,
   type AtomCommandResult,
 } from "./runtime.ts";
+import { REASONING_EFFORT_OPTION_IDS } from "./threadExecution.ts";
 
 type WorkflowReviewItem = Extract<OrchestrationV2TurnItem, { readonly type: "workflow_review" }>;
 
@@ -48,6 +49,8 @@ export interface WorkflowReviewNodeView {
 export interface WorkflowReviewTargetView {
   readonly providerInstanceId: string | null;
   readonly model: string | null;
+  /** The effort option's value, under whichever id the driver uses; null when not set. */
+  readonly effort: string | null;
 }
 
 /** The server's fan-out and cost advice; informational, never part of the digest. */
@@ -111,7 +114,10 @@ function targetView(
   if (target === undefined) return null;
   const providerInstanceId = target.providerInstanceId ?? null;
   const model = target.model ?? null;
-  return providerInstanceId === null && model === null ? null : { providerInstanceId, model };
+  const effort = target.effort ?? null;
+  return providerInstanceId === null && model === null && effort === null
+    ? null
+    : { providerInstanceId, model, effort };
 }
 
 /** The review a record carries, in the shape the cards draw. The record is already typed and bounded. */
@@ -382,22 +388,59 @@ export function presentWorkflowReview(input: {
   };
 }
 
+type WorkflowReviewProviders =
+  | ReadonlyArray<Pick<ServerProvider, "instanceId" | "displayName" | "models">>
+  | undefined;
+
+/** "High effort": the model's own label for the value when the catalog has one. */
+function effortLabel(
+  target: WorkflowReviewTargetView,
+  effort: string,
+  providers: WorkflowReviewProviders,
+): string {
+  const choice = providers
+    ?.find((entry) => entry.instanceId === target.providerInstanceId)
+    ?.models.find((entry) => entry.slug === target.model)
+    ?.capabilities?.optionDescriptors?.flatMap((descriptor) =>
+      descriptor.type === "select" && REASONING_EFFORT_OPTION_IDS.includes(descriptor.id)
+        ? descriptor.options
+        : [],
+    )
+    .find((option) => option.id === effort);
+  const label = choice?.label ?? `${effort.charAt(0).toUpperCase()}${effort.slice(1)}`;
+  return `${label} effort`;
+}
+
 /**
- * The provider and model a task will run on, in the person's words: the provider's display name
- * and the model's name when the catalog lists them, else the ids the review carries.
+ * The provider, model and effort a task will run on, in the person's words: the provider's display
+ * name and the model's name when the catalog lists them, else the ids the review carries.
  */
 export function workflowReviewTargetLabel(
   target: WorkflowReviewTargetView | null,
-  providers:
-    | ReadonlyArray<Pick<ServerProvider, "instanceId" | "displayName" | "models">>
-    | undefined,
+  providers: WorkflowReviewProviders,
 ): string {
   if (target === null) return "Provider and model not listed";
   const provider = providers?.find((entry) => entry.instanceId === target.providerInstanceId);
   const providerName = provider?.displayName ?? target.providerInstanceId;
   const modelName =
     provider?.models.find((entry) => entry.slug === target.model)?.name ?? target.model;
-  return [providerName, modelName].filter((part): part is string => part !== null).join(" \u00b7 ");
+  const effort = target.effort === null ? null : effortLabel(target, target.effort, providers);
+  return [providerName, modelName, effort]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
+}
+
+/** A retry on the same provider and model as the attempt before it is named by its effort alone. */
+function retryLabel(
+  previous: WorkflowReviewTargetView | null,
+  target: WorkflowReviewTargetView,
+  providers: WorkflowReviewProviders,
+): string {
+  return target.effort !== null &&
+    previous?.providerInstanceId === target.providerInstanceId &&
+    previous.model === target.model
+    ? effortLabel(target, target.effort, providers)
+    : workflowReviewTargetLabel(target, providers);
 }
 
 /**
@@ -406,11 +449,14 @@ export function workflowReviewTargetLabel(
  */
 export function workflowReviewNodeLines(
   node: WorkflowReviewNodeView,
-  providers: Parameters<typeof workflowReviewTargetLabel>[1],
+  providers: WorkflowReviewProviders,
 ): { readonly runs: string; readonly after: string | null } {
-  const worker = [node.worker, ...node.retries]
-    .map((target) => workflowReviewTargetLabel(target, providers))
-    .join(", then ");
+  const worker = [
+    workflowReviewTargetLabel(node.worker, providers),
+    ...node.retries.map((target, index) =>
+      retryLabel(index === 0 ? node.worker : (node.retries[index - 1] ?? null), target, providers),
+    ),
+  ].join(", then ");
   const checkedBy =
     node.check === "judgment"
       ? `checked by ${node.judge === null ? "a judge" : workflowReviewTargetLabel(node.judge, providers)}`

@@ -3,9 +3,11 @@ import {
   WORKFLOW_REVIEW_MAX_DEPENDENCIES,
   WORKFLOW_REVIEW_MAX_TASKS,
   WORKFLOW_REVIEW_MAX_TEXT_LENGTH,
+  OrchestrationV2WorkflowReviewRecord,
   ProviderInstanceId,
   type OrchestratorMcpGraphReviewResult,
 } from "@t3tools/contracts";
+import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
 import { parseGraph } from "./workflowGraph.ts";
@@ -14,6 +16,7 @@ import { workflowReviewRecord } from "./workflowReviewRecord.ts";
 const P1 = ProviderInstanceId.make("p1");
 const P2 = ProviderInstanceId.make("p2");
 const DIGEST = `sha256:${"ab".repeat(32)}`;
+const decodeRecord = Schema.decodeUnknownSync(OrchestrationV2WorkflowReviewRecord);
 
 const result = (
   overrides: Partial<OrchestratorMcpGraphReviewResult> = {},
@@ -108,6 +111,53 @@ describe("workflowReviewRecord", () => {
     expect(record.tasks[1]).not.toHaveProperty("retries");
     // Descriptions, prompts and inputs never reach the record.
     expect(JSON.stringify(record)).not.toContain("A long description");
+  });
+
+  it("carries each target's effort under either driver's option id, and old records still decode", () => {
+    const graph = graphOf({
+      schemaVersion: 1,
+      nodes: { a: node([], { verify: { type: "judgment", rubric: ["It works"] } }) },
+    });
+    const effort = (id: string, value: string) => [{ id, value }];
+    const record = workflowReviewRecord(
+      result({
+        layers: [["a"]],
+        targets: [
+          {
+            nodeId: "a",
+            source: "target",
+            target: { providerInstanceId: P1, model: "m1", options: effort("effort", "medium") },
+            retries: [
+              { providerInstanceId: P1, model: "m1", options: effort("reasoningEffort", "high") },
+              { providerInstanceId: P2, model: "m2" },
+            ],
+            judgmentTarget: {
+              providerInstanceId: P2,
+              model: "m3",
+              options: [...effort("effort", "low"), { id: "fastMode", value: true }],
+            },
+          },
+        ],
+      }),
+      graph,
+    );
+    expect(record.tasks[0]).toMatchObject({
+      worker: { providerInstanceId: "p1", model: "m1", effort: "medium" },
+      // An effort-only ladder keeps the model and says the effort of each attempt.
+      retries: [
+        { providerInstanceId: "p1", model: "m1", effort: "high" },
+        { providerInstanceId: "p2", model: "m2" },
+      ],
+      judge: { providerInstanceId: "p2", model: "m3", effort: "low" },
+    });
+    expect(record.tasks[0]?.retries?.[1]).not.toHaveProperty("effort");
+    expect(decodeRecord(record).tasks[0]?.worker?.effort).toBe("medium");
+    // A record written before efforts were carried decodes with none.
+    const older = {
+      ...record,
+      tasks: [{ key: "a", label: "a", wave: 0, dependsOn: [], worker: { model: "m1" } }],
+    };
+    expect(decodeRecord(older).tasks[0]?.worker).toEqual({ model: "m1" });
   });
 
   it("is bounded however large the graph is, and counts what it leaves out", () => {

@@ -1762,10 +1762,12 @@ export const OrchestrationV2WorkflowReviewDigest = Schema.String.check(
   Schema.isPattern(/^sha256:[a-f0-9]{64}$/),
 );
 
-/** The provider and model a reviewed task runs on, as the digest covers them. */
+/** The provider, model and effort a reviewed task runs on, as the digest covers them. */
 export const OrchestrationV2WorkflowReviewTarget = Schema.Struct({
   providerInstanceId: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
+  /** The effort its options set, under either driver's option id; absent on older records. */
+  effort: Schema.optional(Schema.String),
 });
 export type OrchestrationV2WorkflowReviewTarget = typeof OrchestrationV2WorkflowReviewTarget.Type;
 

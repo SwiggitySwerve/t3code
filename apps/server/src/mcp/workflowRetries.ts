@@ -73,7 +73,7 @@ const recordOf = (value: unknown): Readonly<Record<string, unknown>> | undefined
     : undefined;
 
 /** The effort a target's options set, in the list or the record form a target may use. */
-function effortOf(options: unknown): string | undefined {
+export function effortOf(options: unknown): string | undefined {
   const byId = new Map<unknown, unknown>(
     Array.isArray(options)
       ? options.map((option: unknown) => [recordOf(option)?.id, recordOf(option)?.value])

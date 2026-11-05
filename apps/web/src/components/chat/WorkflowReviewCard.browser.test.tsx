@@ -284,6 +284,8 @@ describe("workflow review card in the chat timeline", () => {
       "checked by CLI Proxy \u00b7 Claude Opus 5.5",
       // A task with retries lists each target its attempts move to, in order.
       "CLI Proxy \u00b7 Claude Haiku 5.5, then CLI Proxy \u00b7 Claude Opus 5.5",
+      // A retry that keeps its model names the effort it moves to, in the model's own words.
+      "CLI Proxy \u00b7 Claude Haiku 5.5 \u00b7 Medium effort, then High effort",
       "About 180K to 437K tokens",
       "Suggested budget 420K",
       "Approve & run",
@@ -296,6 +298,7 @@ describe("workflow review card in the chat timeline", () => {
       ...card(screen.container)!.querySelectorAll<HTMLElement>(".whitespace-nowrap"),
     ].map((part) => part.textContent ?? "");
     expect(unbroken).toContain("then CLI Proxy · ");
+    expect(unbroken).toContain("then High effort ");
     expect(unbroken.filter((part) => part.includes(", then"))).toEqual([]);
   });
 

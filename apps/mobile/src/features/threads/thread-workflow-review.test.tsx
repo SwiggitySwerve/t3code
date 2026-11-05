@@ -103,7 +103,23 @@ vi.mock("../../state/entities", () => ({
         instanceId: "cliproxy",
         displayName: "CLI Proxy",
         models: [
-          { slug: "claude-haiku-5-5", name: "Claude Haiku 5.5" },
+          {
+            slug: "claude-haiku-5-5",
+            name: "Claude Haiku 5.5",
+            capabilities: {
+              optionDescriptors: [
+                {
+                  id: "reasoningEffort",
+                  label: "Reasoning effort",
+                  type: "select",
+                  options: [
+                    { id: "medium", label: "Medium" },
+                    { id: "high", label: "High" },
+                  ],
+                },
+              ],
+            },
+          },
           { slug: "claude-opus-5-5", name: "Claude Opus 5.5" },
         ],
       },
@@ -200,6 +216,8 @@ describe("ThreadWorkflowReview", () => {
       "checked by CLI Proxy \u00b7 Claude Opus 5.5",
       // A task with retries lists each target its attempts move to, in order.
       "CLI Proxy \u00b7 Claude Haiku 5.5, then CLI Proxy \u00b7 Claude Opus 5.5",
+      // A retry that keeps its model names the effort it moves to.
+      "CLI Proxy \u00b7 Claude Haiku 5.5 \u00b7 Medium effort, then High effort",
       "About 180K to 437K tokens",
     ]) {
       expect(text()).toContain(expected);
