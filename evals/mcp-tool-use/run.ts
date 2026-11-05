@@ -152,7 +152,8 @@ const PriorToolCall = Schema.Struct({
 
 /**
  * One expected call. `args` match partially: `~text` is a case-insensitive substring,
- * `"<=N"` / `">=N"` bound a number, and keys may be dotted paths.
+ * `"<=N"` / `">=N"` bound a number, `"<absent>"` / `"<present>"` test whether a value is there,
+ * and keys may be dotted paths.
  */
 const McpToolUseCall = Schema.Struct({
   tool: Schema.String,
@@ -1496,6 +1497,8 @@ const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* 
 const BOUND = /^([<>]=)(-?\d+(?:\.\d+)?)$/;
 /** Partial match: `~text` is a case-insensitive substring, `<=N` / `>=N` bound a number. */
 const matches = (expected: unknown, actual: unknown): boolean => {
+  if (expected === "<absent>") return actual === undefined || actual === null;
+  if (expected === "<present>") return actual !== undefined && actual !== null;
   const bound = typeof expected === "string" ? BOUND.exec(expected) : null;
   if (bound !== null) {
     const limit = Number(bound[2]);

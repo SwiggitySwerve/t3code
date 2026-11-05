@@ -428,6 +428,12 @@ it("matches a list against a record's values, such as a graph's nodes by id", ()
   assert.deepEqual(failed(judged("structured"), run), [
     'calls graph_review {"graph.nodes":[{"verify.type":"structured"}]}',
   ]);
+  // "<absent>" and "<present>" ask whether a value is there at all.
+  const target = (value: string) => ({
+    calls: [{ tool: "graph_review", args: { "graph.nodes": [{ "verify.target": value }] } }],
+  });
+  assert.deepEqual(failed(target("<absent>"), run), []);
+  assert.lengthOf(failed(target("<present>"), run), 1);
 });
 
 it("lists workflow tools and their fields only while a case turns workflows on, as T3 does", () => {
@@ -462,6 +468,54 @@ it("lists workflow tools and their fields only while a case turns workflows on, 
     );
   assert.include(delegate(true), "resultSchema");
   assert.notInclude(delegate(false), "resultSchema");
+});
+
+const orchestrationCase = (id: string) =>
+  NodeFS.readFileSync(new URL("./cases/orchestration.ndjson", import.meta.url), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => decodeDeviceCase(line))
+    .find((testCase) => testCase.id === id)!;
+
+it("passes the check case only for a targeted, cheap, other-family judge of the code's task", () => {
+  const { expect: rules } = orchestrationCase("workflow-check-only-visible-tests");
+  const claude = (model: string) => ({ providerInstanceId: "claudeAgent", model });
+  const gpt = (model: string) => ({ providerInstanceId: "codex", model });
+  const implement = (verify: unknown, target: unknown = claude("claude-sonnet-5-5")) => ({
+    subject: "Implement",
+    target,
+    scopes: { write: ["src/semver.js"] },
+    verify,
+  });
+  const judged = (target?: unknown) => ({
+    type: "judgment",
+    rubric: ["Meets docs/semver.md"],
+    ...(target === undefined ? {} : { target }),
+  });
+  const run = (nodes: Record<string, unknown>): SampleRun => ({
+    calls: [{ step: 0, tool: "graph_review", input: { graph: { nodes } } }],
+    text: "",
+    stopReason: "end_turn",
+  });
+  assert.deepEqual(failed(rules, run({ implement: implement(judged(gpt("gpt-6-luna"))) })), []);
+  const wrong = {
+    // A judge on a side node, while the code's task is checked only by its own tests.
+    sideNode: {
+      tests: {
+        subject: "Tests",
+        scopes: { write: ["test/spec.test.js"] },
+        verify: judged(gpt("gpt-6-luna")),
+      },
+      implement: implement({ type: "process", argv: ["node", "--test"] }),
+    },
+    untargeted: { implement: implement(judged()) },
+    sameFamilyClaude: { implement: implement(judged(claude("claude-haiku-5-5"))) },
+    sameFamilyGpt: { implement: implement(judged(gpt("gpt-6-luna")), gpt("gpt-6.1-sol")) },
+    pricey: { implement: implement(judged(gpt("gpt-6.1-sol"))) },
+  };
+  for (const [name, nodes] of Object.entries(wrong)) {
+    assert.isNotEmpty(failed(rules, run(nodes)), name);
+  }
 });
 
 it("does not record a deferred tool called before it was loaded", () => {
