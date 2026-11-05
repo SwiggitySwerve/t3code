@@ -15,9 +15,16 @@ import {
   ComposerContextRecord,
   DeviceOperationError,
   DeviceSummary,
+  graphReviewNext,
   OrchestratorMcpTaskRole,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import { WorkflowStartMode, WorkflowTriggers } from "@t3tools/contracts/settings";
+import {
+  applyTurnTriggers,
+  workflowRequestOf,
+} from "@t3tools/provider-core/server/workflowTrigger";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -87,6 +94,10 @@ const PRICES = {
   "claude-opus-5-5": { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 },
 };
 type PricedModel = keyof typeof PRICES;
+// Claude Code exports ANTHROPIC_BASE_URL to its own shells, so a proxy for Claude models and the
+// shell simulator is opted into by this eval-only name.
+const ANTHROPIC_PROXY = process.env.EVAL_ANTHROPIC_BASE_URL?.replace(/\/+$/, "") || undefined;
+const ANTHROPIC_URL = `${ANTHROPIC_PROXY ?? "https://api.anthropic.com"}/v1`;
 const T3_PREFIX = "mcp__t3-code__";
 const RUNTIME_MARKER = "<runtime_info>";
 const TOOL_LOADED = "Tool loaded.";
@@ -227,6 +238,11 @@ export const McpToolUseCase = Schema.Struct({
     harness: Schema.optional(Schema.Literals(["claude", "codex"])),
     /** The Linked environments beta is on, so T3 lists its link tools. */
     linkedEnvironments: Schema.optional(Schema.Boolean),
+    /**
+     * T3's workflows option is on, with this `workflowStart` setting. T3's text then covers
+     * workflows, and T3's own trigger decides from `prompt` whether to append its plan-first note.
+     */
+    workflows: Schema.optional(WorkflowStartMode),
     /** delegate_task `role` for a delegated child. T3 builds the child's first message from it. */
     delegateRole: Schema.optional(OrchestratorMcpTaskRole),
     context: Schema.optional(Schema.String),
@@ -239,6 +255,11 @@ export const McpToolUseCase = Schema.Struct({
         }),
       ),
     ),
+    /**
+     * Calls the agent already made in this turn, after the prompt, with T3's fields added to their
+     * results. The sample continues from there, so a case can start at one decision.
+     */
+    turnCalls: Schema.optional(Schema.Array(PriorToolCall)),
     world: Schema.optional(McpToolUseWorld),
     /**
      * Canned tool results by bare name, T3 or native. `"default"` uses the runner's result. For a
@@ -393,7 +414,7 @@ const visibleT3Tools = (options: { readonly subagent?: boolean; readonly links?:
  * T3's Claude Code options for an eval thread: its system prompt append and its hooks. `device` says
  * whether the thread holds the `device` capability, as agent device access decides.
  */
-const claudeQueryOptions = (model: Model, device = true) => {
+const claudeQueryOptions = (model: Model, device = true, workflows = false) => {
   // Refs whose device text follows the capability read deviceToolsAvailable; older ones ignore it.
   const input: Parameters<typeof makeClaudeQueryOptions>[0] & {
     readonly deviceToolsAvailable?: boolean;
@@ -404,13 +425,14 @@ const claudeQueryOptions = (model: Model, device = true) => {
     cwd: null,
     mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1/mcp" } },
     deviceToolsAvailable: device,
+    workflowsAvailable: workflows,
   };
   return makeClaudeQueryOptions(input);
 };
 
 /** Text T3 appends to Claude Code's system prompt. Delegated children get the same text. */
-export const t3SystemAppend = (model: Model, device = true) => {
-  const { systemPrompt } = claudeQueryOptions(model, device);
+export const t3SystemAppend = (model: Model, device = true, workflows = false) => {
+  const { systemPrompt } = claudeQueryOptions(model, device, workflows);
   if (isRecord(systemPrompt) && systemPrompt.type === "preset" && systemPrompt.append) {
     return systemPrompt.append;
   }
@@ -497,6 +519,8 @@ export const buildBase = (
     readonly nativeSubagent?: boolean;
     /** false: the thread has no agent device access, so T3's text leaves devices out. */
     readonly deviceAccess?: boolean;
+    /** T3's workflows option is on, so its text covers workflows. */
+    readonly workflows?: boolean;
   },
 ) => {
   const t3 = visibleT3Tools(options);
@@ -515,7 +539,9 @@ export const buildBase = (
   const nativeDeferred = deferredList.split("\n").filter((name) => name && !isT3Name(name));
   const names = [...nativeDeferred, ...t3.map((tool) => tool.name)].toSorted().join("\n");
   const { model } = options;
-  const append = options.nativeSubagent ? "" : t3SystemAppend(model, options.deviceAccess);
+  const append = options.nativeSubagent
+    ? ""
+    : t3SystemAppend(model, options.deviceAccess, options.workflows);
   const modelLine = `You are powered by the model named ${MODELS[model]}. The exact model ID is ${model}.`;
   const joined = systemTexts.join("\n");
   // The capture's home directory names its user. Cases use `/home/user` paths instead.
@@ -579,6 +605,8 @@ const buildCodexBase = (
     readonly links?: boolean;
     /** false: the thread has no agent device access, so T3's text leaves devices out. */
     readonly deviceAccess?: boolean;
+    /** T3's workflows option is on, so its text covers workflows. */
+    readonly workflows?: boolean;
   },
 ): Base => {
   const t3 = visibleT3Tools(options);
@@ -614,7 +642,7 @@ const buildCodexBase = (
   });
   const context = buildCodexAdditionalContext(
     { model: options.model, reasoningEffort: effort },
-    { browser: true, device: options.deviceAccess ?? true },
+    { browser: true, device: options.deviceAccess ?? true, workflows: options.workflows ?? false },
   );
   input.push(
     ...Object.entries(context).map(([key, entry]) => message(`<${key}>${entry.value}</${key}>`)),
@@ -818,6 +846,31 @@ const loadTools = (tools: Array<ApiTool>, id: string, found: ReadonlyArray<ApiTo
   return { type: "tool_result", tool_use_id: id, content };
 };
 
+const CODEX_DRIVER = ProviderDriverKind.make("codex");
+/** The settings default: no trigger words beyond T3's built-in "workflow". */
+const DEFAULT_WORKFLOW_TRIGGERS = Schema.decodeSync(WorkflowTriggers)({});
+
+/**
+ * The prompt as T3 sends it when the case turns workflows on: a person typed it in the web client,
+ * so T3's trigger may append the plan-first note, as it does at turn start.
+ */
+const workflowTurn = ({ testCase, base }: Sample, prompt: string) => {
+  const workflowStart = testCase.setup.workflows;
+  if (workflowStart === undefined) return prompt;
+  const request = {
+    workflows: true,
+    workflowStart,
+    workflowTriggers: DEFAULT_WORKFLOW_TRIGGERS,
+    typedText: prompt,
+    createdBy: "user",
+    creationSource: "web",
+    delegatedThread: false,
+    resumesEarlierTurn: false,
+  } as const;
+  const driver = base.codex ? CODEX_DRIVER : CLAUDE_PROVIDER;
+  return applyTurnTriggers({ ...request, driver, text: prompt }, workflowRequestOf(request));
+};
+
 /** Messages for a case: reminders, context, prior turns with real tool blocks, then the prompt. */
 export const buildMessages = (sample: Sample) => {
   const { testCase, base, tools } = sample;
@@ -839,8 +892,9 @@ export const buildMessages = (sample: Sample) => {
   push("user", ...reminders, ...notes.flatMap((note) => (note ? [reminder(note)] : [])));
   const toolSearch = findTool(base, "ToolSearch")?.name ?? "ToolSearch";
   let nextId = 0;
-  for (const turn of priorTurns) {
-    const calls = (turn.toolCalls ?? []).map((call) => {
+  /** Replays calls with real tool blocks; `asT3` adds the fields T3 adds to its results. */
+  const replay = (toolCalls: ReadonlyArray<typeof PriorToolCall.Type>, asT3: boolean) => {
+    const calls = toolCalls.map((call) => {
       const tool = findTool(base, call.tool);
       if (tool === undefined) throw new Error(`${testCase.id}: unknown prior tool ${call.tool}.`);
       if (call.result === "default" && isDeviceTool(call.tool) && !sample.priorResults.has(call)) {
@@ -862,12 +916,17 @@ export const buildMessages = (sample: Sample) => {
     // One call per step, as most real turns run them.
     for (const { id, name, input, result, tool, prior } of calls) {
       push("assistant", { type: "tool_use", id, name, input });
+      const bare = normalizeToolName(tool.name);
       const replayed =
-        normalizeToolName(tool.name) === "orchestrator_capabilities"
+        bare === "orchestrator_capabilities"
           ? capabilities(sample, result)
-          : (sample.priorResults.get(prior) ?? result);
+          : (sample.priorResults.get(prior) ??
+            (asT3 ? withProductFields(bare, result, role === "delegated-child") : result));
       push("user", toolResult(id, replayed));
     }
+  };
+  for (const turn of priorTurns) {
+    replay(turn.toolCalls ?? [], false);
     if (turn.text) push(turn.role, text(turn.text));
   }
   const prompt =
@@ -875,11 +934,12 @@ export const buildMessages = (sample: Sample) => {
       ? testCase.prompt
       : projectComposerContextForProvider({ text: testCase.prompt, ...testCase.promptContext });
   const childPrompt = () => taskPrompt({ task: prompt, role: delegateRole });
-  push("user", text(role === "delegated-child" ? childPrompt() : prompt));
+  push("user", text(role === "delegated-child" ? childPrompt() : workflowTurn(sample, prompt)));
   // Claude Code gives a subagent its SubagentStart hooks' context as a reminder after the task.
   if (native && base.subagentContext) {
     push("user", reminder(`SubagentStart hook additional context: ${base.subagentContext}`));
   }
+  replay(testCase.setup.turnCalls ?? [], true);
   return messages;
 };
 
@@ -1071,6 +1131,14 @@ const withProductFields = (name: string, value: unknown, child: boolean): unknow
       return listed("matches");
     case "link_pull_request":
       return child ? { ...value, next: CHILD_PULL_REQUEST_REPORT_NEXT } : value;
+    case "graph_review": {
+      const { ready, approvalRequired } = value;
+      if (value.next !== undefined || typeof ready !== "boolean") return value;
+      if (typeof approvalRequired !== "boolean") return value;
+      // In T3's order: next follows reviewId and approvalRequired.
+      const next = graphReviewNext({ ready, approvalRequired });
+      return { reviewId: value.reviewId, approvalRequired, next, ...value };
+    }
     default:
       return value;
   }
@@ -1401,7 +1469,9 @@ const requestBody = ({ base, tools }: Sample, effort: string, messages: unknown)
   max_tokens: 16_000,
   thinking: { type: "adaptive", display: "summarized" },
   output_config: { effort },
-  cache_control: { type: "ephemeral" },
+  // CLIProxyAPI counts top-level caching beside its own breakpoints and refuses more than 4, so a
+  // proxied run caches the system prompt only.
+  ...(ANTHROPIC_PROXY === undefined ? { cache_control: { type: "ephemeral" } } : {}),
   // Like Claude Code, cache the shared system prompt so every sample reuses it.
   system: base.system.map((block, i) =>
     i === base.system.length - 1 ? { ...block, cache_control: { type: "ephemeral" } } : block,
@@ -1556,7 +1626,7 @@ const postModel = Effect.fn("evaluateMcpToolUse.postModel")(function* (
     }),
   );
   const response = yield* HttpClientRequest.post(
-    `${proxy?.url ?? "https://api.anthropic.com/v1"}/${responses ? "responses" : "messages"}`,
+    `${proxy?.url ?? ANTHROPIC_URL}/${responses ? "responses" : "messages"}`,
   ).pipe(
     HttpClientRequest.setHeaders({
       ...(apiKey ? { "x-api-key": apiKey } : {}),
@@ -1945,6 +2015,7 @@ const main = Effect.gen(function* () {
     role: McpToolUseCase["setup"]["role"],
     deviceAccess: boolean,
     links: boolean,
+    workflows: boolean,
   ): Effect.Effect<Base, Schema.SchemaError> =>
     codex
       ? decodeCodexCapture(template).pipe(
@@ -1956,6 +2027,7 @@ const main = Effect.gen(function* () {
               subagent: role === "delegated-child",
               links,
               deviceAccess,
+              workflows,
             }),
           ),
         )
@@ -1968,6 +2040,7 @@ const main = Effect.gen(function* () {
               nativeSubagent: role === "native-subagent",
               links,
               deviceAccess,
+              workflows,
             });
             return role === "native-subagent"
               ? Effect.promise(() => t3SubagentContext(flags.model, deviceAccess)).pipe(
@@ -1978,18 +2051,22 @@ const main = Effect.gen(function* () {
         );
   // Codex has no native subagents; its cases with that role run as top-level threads.
   const baseKey = ({ setup }: McpToolUseCase) =>
-    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.linkedEnvironments === true}`;
-  const base = yield* buildFor("top", true, false);
-  const bases = new Map<string, Base>([["top:true:false", base]]);
+    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.linkedEnvironments === true}:${setup.workflows !== undefined}`;
+  const base = yield* buildFor("top", true, false, false);
+  const bases = new Map<string, Base>([["top:true:false:false", base]]);
   for (const testCase of selected) {
     const key = baseKey(testCase);
     if (bases.has(key)) continue;
-    const [role = "top", access, links] = key.split(":") as [
+    const [role = "top", access, links, workflows] = key.split(":") as [
       McpToolUseCase["setup"]["role"],
       string,
       string,
+      string,
     ];
-    bases.set(key, yield* buildFor(role, access === "true", links === "true"));
+    bases.set(
+      key,
+      yield* buildFor(role, access === "true", links === "true", workflows === "true"),
+    );
   }
   const baseFor = (testCase: McpToolUseCase) => bases.get(baseKey(testCase)) ?? base;
   const effort = flags.effort ?? base.codex?.reasoning.effort ?? "high";
@@ -2010,7 +2087,7 @@ const main = Effect.gen(function* () {
   const out = flags.out;
   if ((!apiKey && !codex) || out === undefined) {
     const message =
-      "Set ANTHROPIC_API_KEY and pass --out <directory>. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used.";
+      "Set ANTHROPIC_API_KEY and pass --out <directory>. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used; EVAL_ANTHROPIC_BASE_URL is.";
     return yield* Effect.die(new Error(message));
   }
   const config: Config = {

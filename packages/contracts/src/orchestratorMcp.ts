@@ -515,6 +515,20 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
 });
 export type OrchestratorMcpGraphReviewResult = typeof OrchestratorMcpGraphReviewResult.Type;
 
+/**
+ * graph_review's `next`, said in the result itself: a coordinator that read approval into the
+ * schema's prose waited for one nobody asked, and one that took a dry-run review as the end of
+ * its job never started the work. The server and the evals both read it here.
+ */
+export const graphReviewNext = (
+  review: Pick<OrchestratorMcpGraphReviewResult, "ready" | "approvalRequired">,
+): string =>
+  !review.ready
+    ? "Fix the blockers, then call graph_review again."
+    : review.approvalRequired
+      ? "End your turn. T3 Code sends you the approved digest once the user approves this review."
+      : "No approval is needed, and nothing has run yet: call graph_start now with expandedGraph as graph and digest as acceptedDigest, or workflow_start if you were asked to run a script. Do not end your turn before the work starts.";
+
 export const OrchestratorMcpGraphStartInput = Schema.Struct({
   workerTarget: OrchestratorMcpGraphReviewInput.fields.workerTarget,
   graph: OrchestratorMcpGraphReviewInput.fields.graph,

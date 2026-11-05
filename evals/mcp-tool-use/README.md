@@ -14,6 +14,7 @@ pnpm mcp-tool-use --model claude-opus-5-5 --out runs/opus
 
 - `ANTHROPIC_API_KEY` in the repo root `.env` pays for Claude models and the Haiku shell simulator.
 - Codex models (`gpt-*` in `MODELS` in `run.ts`) go through a CLIProxyAPI server, set up as the `vibeproxy` model provider in `~/.codex/config.toml`. Keep the proxy under about 12 samples in flight across all runs.
+- `EVAL_ANTHROPIC_BASE_URL` sends Claude models and the shell simulator through a proxy instead, with `ANTHROPIC_API_KEY` as its key. The eval never reads `ANTHROPIC_BASE_URL`, which Claude Code sets in its own shells. A proxied run caches only the system prompt, because CLIProxyAPI refuses top-level caching beside its own breakpoints.
 - Flags: `--case <ids>`, `--cases <file.ndjson>`, `--samples <n>` (default 2, and a 3rd when the first 2 disagree), `--concurrency <n>` (samples in flight, default 8), `--max-steps <n>`, `--effort <level>`, `--dry-run` (prints request bodies, no model calls), and `--context` (prints the size of T3's text and schemas, no key needed).
 - `--baseline <results.jsonl> --stop-on-regression` stops as soon as a case that passed every baseline sample fails. Use it to test one copy change against a baseline run.
 - Cost: the existing non-device suite costs about $9 on Sonnet and $17 on Opus. The 16 device cases at 3 samples each cost about $5.70–5.90 on Opus and $2.90–3.40 on Sonnet (main's text–#25661), including the Haiku shell simulator; dry runs cost $0. Results record token costs for the agent and shell simulator. Codex proxy charges are outside that total; only its shell simulator is priced here, about $0.60–0.70 for the device cases.
@@ -25,7 +26,8 @@ Cases are JSON lines in `cases/`, one file per area. The case schema in `run.ts`
 
 - `kind`: `bad` reproduces a mistake, `guard` protects correct behavior, `control` is ordinary work.
 - `experience`: the real mistake, in a sentence. `source`: where it happened.
-- `setup`: the fake thread, its `world` (repo, branch, files, PRs, pages), `priorTurns`, and `mocks` for tool results.
+- `setup`: the fake thread, its `world` (repo, branch, files, PRs, pages), `priorTurns`, and `mocks` for tool results. `turnCalls` are calls the agent already made in this turn, after the prompt, so a case can start at one decision; T3's fields, such as graph_review's `next`, are added to their results as to mocks.
+- `setup.workflows`: T3's workflows option is on with this `workflowStart` setting (`off`, `keyword` or `always`). T3's text then covers workflows, and T3's own trigger reads the prompt, as a person's web message, to decide whether to append its plan-first note.
 - `expect`: the checks, such as `calls`, `callsMustNot`, `maxCalls`, `order`, `textMust`, and `linked`. Device cases also use `device` to check every child brief, forbid raw UI commands, bound failed device actions per user turn, and require artifact paths in completed final answers.
 
 Check that the case builds with `--dry-run --case <id>`. Then run it on the text before your fix, where it must fail, and on the text after, where it must pass.

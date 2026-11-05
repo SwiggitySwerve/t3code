@@ -4,7 +4,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { assert, expect, it } from "@effect/vitest";
-import { ComposerContextId, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ComposerContextId, EnvironmentId, graphReviewNext, ThreadId } from "@t3tools/contracts";
+import { workflowTurnNote } from "@t3tools/provider-core/server/workflowTrigger";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 
 import {
@@ -341,6 +342,34 @@ it("replays earlier capability results with the model under test as the caller",
     .flatMap((message) => message.content)
     .find((block) => block.type === "tool_result" && String(block.content).includes("inherited"));
   assert.include(String(replayed?.content), '"inheritedModel":"claude-opus-5-5"');
+});
+
+it("sends a workflow turn as T3 does and resumes after this turn's calls with T3's fields", () => {
+  const base = buildBase(template, {
+    model: "claude-opus-5-5",
+    keepUserInstructions: false,
+    workflows: true,
+  });
+  assert.include(String(base.system[1]?.text), t3SystemAppend("claude-opus-5-5", true, true));
+  const review = { reviewId: "review-1", ready: true, approvalRequired: false, blockers: [] };
+  const testCase = (workflows: "off" | "keyword"): McpToolUseCase => ({
+    ...childCase,
+    setup: {
+      role: "top",
+      workflows,
+      turnCalls: [{ tool: "graph_review", input: { graph: {} }, result: review }],
+    },
+    prompt: "Run this as a workflow.",
+  });
+  const blocks = (workflows: "off" | "keyword") =>
+    buildMessages(makeSample(testCase(workflows), base)).flatMap((message) => message.content);
+  const prompt = (workflows: "off" | "keyword") =>
+    blocks(workflows).find((block) => String(block.text).startsWith("Run this"))?.text;
+  // T3's trigger reads the prompt: "off" sends it as typed, "keyword" adds the plan-first note.
+  assert.equal(prompt("off"), "Run this as a workflow.");
+  assert.equal(prompt("keyword"), `Run this as a workflow.\n\n${workflowTurnNote()}`);
+  const replayed = blocks("off").findLast((block) => block.type === "tool_result");
+  assert.include(String(replayed?.content), JSON.stringify(graphReviewNext(review)));
 });
 
 it("does not record a deferred tool called before it was loaded", () => {

@@ -15,6 +15,7 @@ import {
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   TurnItemId,
+  graphReviewNext,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -2805,13 +2806,10 @@ const make = Effect.gen(function* () {
     decision: Pick<OrchestratorMcpGraphReviewResult, "reviewId" | "approvalRequired">,
   ): OrchestratorMcpGraphReviewResult => ({
     ...decision,
-    // Said in the result itself: a coordinator that read approval into the schema's prose waited
-    // for one that was never asked for.
-    next: !isReviewReady(review)
-      ? "Fix the blockers, then call graph_review again."
-      : decision.approvalRequired
-        ? "End your turn. T3 Code sends you the approved digest once the user approves this review."
-        : "No approval is needed, and nothing has run yet: call graph_start now with expandedGraph as graph and digest as acceptedDigest, or workflow_start if you were asked to run a script. Do not end your turn before the work starts.",
+    next: graphReviewNext({
+      ready: isReviewReady(review),
+      approvalRequired: decision.approvalRequired,
+    }),
     digest: review.digest,
     ready: isReviewReady(review),
     targets: review.targets,
