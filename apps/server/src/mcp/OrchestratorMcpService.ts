@@ -1347,6 +1347,52 @@ const make = Effect.gen(function* () {
     return { ...caller, target } as const;
   });
 
+  /**
+   * Whether a pending question or approval holds the thread's delegated work: on the thread
+   * itself, or on the child thread of unfinished app-owned work it or its descendants own.
+   */
+  const awaitedRequest = Effect.fn("OrchestratorMcpService.awaitedRequest")(function* (
+    threadId: ThreadId,
+  ) {
+    const seen = new Set<ThreadId>([threadId]);
+    let level: ReadonlyArray<ThreadId> = [threadId];
+    while (level.length > 0) {
+      const records = yield* Effect.forEach(
+        level,
+        (id) =>
+          threadManagement.getThreadRecords(id, ["runtimeRequests", "subagents"]).pipe(
+            Effect.map((record) => ({ id, ...record })),
+            Effect.mapError(threadManagementFailure),
+          ),
+        { concurrency: 4 },
+      );
+      const asking = records.find((record) =>
+        record.runtimeRequests.some((request) => request.status === "pending"),
+      );
+      if (asking !== undefined) {
+        return asking.id === threadId ? ("thread" as const) : ("descendant" as const);
+      }
+      const children: Array<ThreadId> = [];
+      for (const record of records) {
+        for (const task of record.subagents) {
+          const child = task.childThreadId;
+          if (
+            child !== null &&
+            task.origin === "app_owned" &&
+            task.threadId === record.id &&
+            isOrchestrationV2WorkActive(task.status) &&
+            !seen.has(child)
+          ) {
+            seen.add(child);
+            children.push(child);
+          }
+        }
+      }
+      level = children;
+    }
+    return undefined;
+  });
+
   /** Cross-thread writes require a live caller run; stale session credentials cannot authorize them. */
   const assertLiveCallerForOtherThread = (
     scope: McpInvocationScope,
@@ -4770,6 +4816,14 @@ const make = Effect.gen(function* () {
         : [];
       const wakesCaller =
         ownedTask && !childRequests.some((request) => request.status === "pending");
+      const awaitingAnswer =
+        input.untilDelegatedWorkSettled !== true
+          ? undefined
+          : result.timedOut
+            ? yield* awaitedRequest(input.threadId)
+            : (yield* workflowApprovalGate.awaitsDecision(input.threadId))
+              ? ("workflow_review" as const)
+              : undefined;
       return {
         threadId: input.threadId,
         runId: result.run?.id ?? null,
@@ -4781,6 +4835,7 @@ const make = Effect.gen(function* () {
           : {
               resultRun: { runId: result.resultRun.id, status: runOutcome(result.resultRun) },
             }),
+        ...(awaitingAnswer === undefined ? {} : { awaitingAnswer }),
       } satisfies OrchestratorMcpThreadWaitResult;
     }),
     interruptThread: Effect.fn("OrchestratorMcpService.interruptThread")(function* (scope, input) {

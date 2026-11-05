@@ -3,7 +3,12 @@ import { RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as TestConsole from "effect/testing/TestConsole";
 
-import { printWorkflowReport, type ThreadTools, waitForRun } from "./thread.ts";
+import {
+  printWorkflowReport,
+  ThreadNeedsInputError,
+  type ThreadTools,
+  waitForRun,
+} from "./thread.ts";
 
 const threadId = ThreadId.make("thread-1");
 const runId = RunId.make("run-1");
@@ -27,14 +32,13 @@ it.effect("--wait follows the sent run to its continuation's terminal status", (
         { threadId, runId, status: "running", timedOut: true },
         { threadId, runId: continuation, status: "failed", timedOut: false },
       ],
-      t3_thread_read: [{ thread: { pendingRequestCount: 0 } }],
     });
 
     const outcome = yield* waitForRun(tools, threadId, runId);
 
     assert.deepStrictEqual(outcome, { type: "ended", runId: continuation, status: "failed" });
     assert.deepStrictEqual(
-      calls.filter((entry) => entry.tool === "t3_thread_wait").map((entry) => entry.args),
+      calls.map((entry) => entry.args),
       [
         { threadId, runId, timeoutMs: 15_000, untilDelegatedWorkSettled: true },
         { threadId, runId, timeoutMs: 15_000, untilDelegatedWorkSettled: true },
@@ -47,13 +51,63 @@ it.effect("--wait stops when the thread waits for an answer instead of polling f
   Effect.gen(function* () {
     const { tools } = scriptedTools({
       t3_thread_wait: [
-        { threadId, runId, status: "queued", timedOut: true },
-        { threadId, runId, status: "queued", timedOut: true },
+        { threadId, runId, status: "waiting", timedOut: true, awaitingAnswer: "thread" },
+        { threadId, runId, status: "waiting", timedOut: true, awaitingAnswer: "thread" },
       ],
-      t3_thread_read: [{ thread: { pendingRequestCount: 1 } }],
     });
 
-    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), { type: "needs_input" });
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "needs_input",
+      reason: "request",
+    });
+  }),
+);
+
+// The coordinator's own run has ended and holds no request; only the server
+// knows a workflow agent's thread asks something.
+it.effect("--wait stops when an agent in the thread's workflow waits for an answer", () =>
+  Effect.gen(function* () {
+    const { tools, calls } = scriptedTools({
+      t3_thread_wait: [
+        { threadId, runId, status: "completed", timedOut: true },
+        { threadId, runId, status: "completed", timedOut: true, awaitingAnswer: "descendant" },
+        { threadId, runId, status: "completed", timedOut: true, awaitingAnswer: "descendant" },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "needs_input",
+      reason: "request",
+    });
+    assert.deepStrictEqual(
+      calls.map((entry) => (entry.args as { readonly timeoutMs: number }).timeoutMs),
+      [15_000, 15_000, 1],
+    );
+  }),
+);
+
+it.effect("--wait keeps waiting when the request was answered before the recheck", () =>
+  Effect.gen(function* () {
+    const { tools } = scriptedTools({
+      t3_thread_wait: [
+        { threadId, runId, status: "completed", timedOut: true, awaitingAnswer: "descendant" },
+        // Answered, and the workflow agent works on.
+        { threadId, runId, status: "completed", timedOut: true },
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId, status: "completed" },
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "ended",
+      runId,
+      status: "completed",
+    });
   }),
 );
 
@@ -72,7 +126,6 @@ it.effect("--wait reports the run a workflow's completion wakes, not the first t
           resultRun: { runId: wake, status: "completed" },
         },
       ],
-      t3_thread_read: [{ thread: { pendingRequestCount: 0 } }],
     });
 
     assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
@@ -87,7 +140,7 @@ it.effect("--wait reports the answered run when a request clears before the rech
   Effect.gen(function* () {
     const { tools } = scriptedTools({
       t3_thread_wait: [
-        { threadId, runId, status: "running", timedOut: true },
+        { threadId, runId, status: "waiting", timedOut: true, awaitingAnswer: "thread" },
         {
           threadId,
           runId,
@@ -96,7 +149,6 @@ it.effect("--wait reports the answered run when a request clears before the rech
           resultRun: { runId, status: "completed" },
         },
       ],
-      t3_thread_read: [{ thread: { pendingRequestCount: 1 } }],
     });
 
     assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
@@ -104,6 +156,34 @@ it.effect("--wait reports the answered run when a request clears before the rech
       runId,
       status: "completed",
     });
+  }),
+);
+
+// Ending the turn on a review settles the thread, but its workflow has not run.
+it.effect("--wait needs input when the turn ends on a workflow waiting for approval", () =>
+  Effect.gen(function* () {
+    const { tools } = scriptedTools({
+      t3_thread_wait: [
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId, status: "completed" },
+          awaitingAnswer: "workflow_review",
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "needs_input",
+      reason: "workflow_review",
+      runId,
+    });
+    assert.include(
+      new ThreadNeedsInputError({ threadId, reason: "workflow_review" }).message,
+      "approve or dismiss its workflow",
+    );
   }),
 );
 

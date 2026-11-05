@@ -1062,6 +1062,12 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   next: Schema.optional(OrchestratorMcpRunningTaskNext),
   /** With untilDelegatedWorkSettled, once settled: the run whose reply is the thread's result. */
   resultRun: Schema.optional(Schema.Struct({ runId: RunId, status: OrchestrationV2RunStatus })),
+  /**
+   * With untilDelegatedWorkSettled, what waits for a person: a question or approval on this thread
+   * or on a thread its unfinished delegated work owns, which holds the work unsettled, or, once
+   * settled, the workflow review the thread ended its turn on, which runs only once approved.
+   */
+  awaitingAnswer: Schema.optional(Schema.Literals(["thread", "descendant", "workflow_review"])),
 });
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 

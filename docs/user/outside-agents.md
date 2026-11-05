@@ -113,8 +113,11 @@ the message to read it from stdin.
 `--wait` returns once the agent and any workflows or delegated tasks it started
 have finished, including the turn their completion wakes, and prints the
 agent's last reply. It exits 1 when that run fails or stops, and 2 when the
-agent waits for an answer you give in the app. Add `--json` for a
-result that always includes the thread id.
+agent, or an agent in a workflow or task it started, waits for an answer you
+give in the app. It also exits 2 when the agent ends its turn on a workflow
+plan that waits for your approval: nothing has run yet, and the reply printed
+is the agent's presentation of that plan. Approve or dismiss it in the app.
+Add `--json` for a result that always includes the thread id.
 
 `t3 thread workflow-report <thread>` prints each workflow the thread ran: one
 row per agent with its provider, model, effort, how its target was chosen,
