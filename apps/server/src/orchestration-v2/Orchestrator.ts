@@ -7971,9 +7971,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       const parentProjection = yield* projectionStore
         .getThreadRecords(
           command.parentThreadId,
-          ["runs", "nodes", "providerThreads", "providerTurns", "attempts"],
+          ["runs", "nodes", "providerThreads", "providerTurns", "attempts", "subagents"],
           // The parent node must belong to the active run, whose nodes this keeps.
-          { omitSettledLeafNodes: true },
+          {
+            omitSettledLeafNodes: true,
+            subagentIds: command.workflowId === undefined ? [] : [command.workflowId],
+          },
         )
         .pipe(
           Effect.mapError(

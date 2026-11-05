@@ -1300,6 +1300,23 @@ const make = Effect.gen(function* () {
       { turnItemTypes: [], messageRoles: includeUserMessages ? ["user"] : [] },
     );
 
+  // Workflow rows live among the thread's subagents, so workflow tools read the whole roster.
+  const loadWorkflowProjection = (threadId: ThreadId) =>
+    loadThreadRecords(
+      threadId,
+      [
+        "runs",
+        "messages",
+        "subagents",
+        "providerThreads",
+        "providerTurns",
+        "runtimeRequests",
+        "contextTransfers",
+        "turnItems",
+      ],
+      { turnItemTypes: [], messageRoles: ["user"] },
+    );
+
   // A dispatcher thread holds thousands of tasks, each with its full prompt; read only the ones named.
   const loadTasks = (threadId: ThreadId, taskIds: ReadonlyArray<NodeId>) =>
     threadManagement.getThreadRecords(threadId, ["subagents"], { subagentIds: taskIds }).pipe(
@@ -2369,7 +2386,7 @@ const make = Effect.gen(function* () {
         if (scope === undefined) {
           return yield* failure("orchestration_error", "The workflow is not running here.");
         }
-        const parent = yield* loadProjection(workflow.threadId);
+        const parent = yield* loadWorkflowProjection(workflow.threadId);
         const row = parent.subagents.find((task) => task.id === workflow.workflowId);
         if (row?.runId == null) {
           return yield* failure("orchestration_error", "The workflow row is missing.");
@@ -2536,7 +2553,7 @@ const make = Effect.gen(function* () {
     writeCheckerResult: Effect.fn("OrchestratorMcpService.writeCheckerResult")(
       function* (_workflow, _taskId, text) {
         // Outside every checkout, in a folder of the server's own, one file for each check.
-        const id = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+        const id = yield* random.uuidV4();
         return yield* checkerResults
           .write({ id, text })
           .pipe(
@@ -3065,14 +3082,14 @@ const make = Effect.gen(function* () {
           failure("orchestration_error", `Unable to start the workflow: ${errorMessage(error)}`),
         ),
       );
-    const started = findWorkflow(yield* loadProjection(scope.thread.threadId), workflowId);
+    const started = findWorkflow(yield* loadWorkflowProjection(scope.thread.threadId), workflowId);
     if (started === undefined) {
       return yield* failure("orchestration_error", "The workflow did not start.");
     }
     if (started.status === "running" && !workflowRunner.isRunning(workflowId)) {
       yield* resumeWorkflow(started, workflowScope(scope, workflowId), afterSequence);
     }
-    return yield* workflowResult(yield* loadProjection(scope.thread.threadId), started);
+    return yield* workflowResult(yield* loadWorkflowProjection(scope.thread.threadId), started);
   });
 
   /**
@@ -3127,6 +3144,12 @@ const make = Effect.gen(function* () {
         task.origin === "app_owned" &&
         task.workflow !== undefined &&
         task.childThreadId === null,
+    );
+
+  // A dispatcher thread holds thousands of tasks; a lookup by id reads only that one.
+  const findWorkflowRow = (threadId: ThreadId, workflowId: NodeId) =>
+    loadTasks(threadId, [workflowId]).pipe(
+      Effect.map((subagents) => findWorkflow({ subagents }, workflowId)),
     );
 
   const storedBudget = (prompt: string) => {
@@ -4203,7 +4226,7 @@ const make = Effect.gen(function* () {
       const { review, graph } = yield* reviewCallerGraph(parent, input.graph, input.workerTarget);
       // The review gets its id here, where it is produced. The client decides about it by this
       // id and the digest; nothing the provider echoes back is read.
-      const reviewId = yield* crypto.randomUUIDv4().pipe(Effect.orDie);
+      const reviewId = yield* random.uuidV4();
       const { approvalRequired } = yield* workflowApprovalGate
         .completeReview(ticket, {
           environmentId: scope.environmentId,
@@ -4243,7 +4266,7 @@ const make = Effect.gen(function* () {
       function* (callerScope, input) {
         const scope = yield* requireThreadScope(callerScope, "workflow_status");
         yield* requireCapability(scope);
-        const projection = yield* loadProjection(scope.thread.threadId);
+        const projection = yield* loadWorkflowProjection(scope.thread.threadId);
         const workflow = findWorkflow(projection, input.workflowId);
         if (workflow === undefined) {
           return yield* failure(
@@ -4256,7 +4279,7 @@ const make = Effect.gen(function* () {
     ),
     workflowReport: Effect.fn("OrchestratorMcpService.workflowReport")(function* (scope, input) {
       yield* loadReadableThread(scope, input.threadId);
-      const projection = yield* loadProjection(input.threadId);
+      const projection = yield* loadWorkflowProjection(input.threadId);
       const rows = projection.subagents.filter(
         (task) =>
           task.origin === "app_owned" && task.workflow !== undefined && task.childThreadId === null,
@@ -4279,7 +4302,8 @@ const make = Effect.gen(function* () {
       const scope = yield* requireThreadScope(callerScope, "workflow_stop");
       yield* requireCapability(scope);
       if (
-        findWorkflow(yield* loadProjection(scope.thread.threadId), input.workflowId) === undefined
+        findWorkflow(yield* loadWorkflowProjection(scope.thread.threadId), input.workflowId) ===
+        undefined
       ) {
         return yield* failure(
           "task_not_found",
@@ -4287,7 +4311,7 @@ const make = Effect.gen(function* () {
         );
       }
       yield* stopWorkflowById(scope, input.workflowId);
-      const projection = yield* loadProjection(scope.thread.threadId);
+      const projection = yield* loadWorkflowProjection(scope.thread.threadId);
       return yield* workflowResult(projection, findWorkflow(projection, input.workflowId)!);
     }),
     taskWait: Effect.fn("OrchestratorMcpService.taskWait")(function* (callerScope, input) {
@@ -4401,10 +4425,9 @@ const make = Effect.gen(function* () {
     }),
     cancelTask: Effect.fn("OrchestratorMcpService.cancelTask")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "task_cancel");
-      const owner = yield* loadProjection(scope.thread.threadId);
-      if (findWorkflow(owner, input.taskId) !== undefined) {
+      if ((yield* findWorkflowRow(scope.thread.threadId, input.taskId)) !== undefined) {
         yield* stopWorkflowById(scope, input.taskId);
-        const stopped = findWorkflow(yield* loadProjection(scope.thread.threadId), input.taskId);
+        const stopped = yield* findWorkflowRow(scope.thread.threadId, input.taskId);
         return {
           taskId: input.taskId,
           status:

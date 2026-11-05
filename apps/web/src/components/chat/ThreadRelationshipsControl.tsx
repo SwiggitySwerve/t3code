@@ -818,9 +818,7 @@ export function ThreadRelationshipsPanel(props: {
         )}
         {workflowGroup && agent ? (
           <WorkflowLineageStatus workflow={agent} className={trailingVisibilityClass} />
-        ) : agent &&
-          !failed &&
-          (deriveSubagentElapsedMs(agent, 0) !== null || showWorkflowStop) ? (
+        ) : agent && !failed && (deriveSubagentElapsedMs(agent, 0) !== null || showWorkflowStop) ? (
           <span
             className={`shrink-0 text-2xs font-normal tabular-nums text-muted-foreground ${showWorkflowStop ? "min-w-6 text-end" : ""} ${trailingVisibilityClass}`}
           >

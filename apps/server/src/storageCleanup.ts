@@ -1001,9 +1001,10 @@ const make = Effect.gen(function* () {
       const latestSettlement = worktreeSettlementChain(
         latestGroup.find((shell) => shell.id === owner.id)!,
         new Map(
-          [...latestGroup, ...ancestors.filter((ancestor) => ancestor !== null)].map(
-            (ancestor) => [ancestor.id, ancestor],
-          ),
+          [...latestGroup, ...ancestors.filter((ancestor) => ancestor !== null)].map((ancestor) => [
+            ancestor.id,
+            ancestor,
+          ]),
         ),
         now,
         settings,
