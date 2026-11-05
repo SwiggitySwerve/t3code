@@ -430,6 +430,40 @@ it("matches a list against a record's values, such as a graph's nodes by id", ()
   ]);
 });
 
+it("lists workflow tools and their fields only while a case turns workflows on, as T3 does", () => {
+  const names = (workflows: boolean) =>
+    buildBase(template, {
+      model: "claude-opus-5-5",
+      keepUserInstructions: false,
+      workflows,
+    }).t3.map((tool) => tool.name.replace("mcp__t3-code__", ""));
+  const gated = [
+    "workflow_start",
+    "workflow_status",
+    "workflow_stop",
+    "graph_review",
+    "graph_start",
+    "delegate_tasks",
+    "task_wait",
+  ];
+  assert.includeMembers(names(true), gated);
+  assert.includeMembers(names(false), ["delegate_task", "create_threads"]);
+  assert.deepEqual(
+    names(false).filter((name) => gated.includes(name)),
+    [],
+  );
+  const delegate = (workflows: boolean) =>
+    JSON.stringify(
+      buildBase(template, {
+        model: "claude-opus-5-5",
+        keepUserInstructions: false,
+        workflows,
+      }).t3.find((tool) => tool.name === "mcp__t3-code__delegate_task")?.input_schema,
+    );
+  assert.include(delegate(true), "resultSchema");
+  assert.notInclude(delegate(false), "resultSchema");
+});
+
 it("does not record a deferred tool called before it was loaded", () => {
   const base = buildBase(template, { model: "claude-sonnet-5-5", keepUserInstructions: false });
   const sample = makeSample(childCase, base);

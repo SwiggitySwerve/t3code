@@ -51,7 +51,10 @@ import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "../../apps/server/src/mcp/toolkits/environment/tools.ts";
 import { HtmlToolkit } from "../../apps/server/src/mcp/toolkits/html/tools.ts";
-import { OrchestratorToolkit } from "../../apps/server/src/mcp/toolkits/orchestrator/tools.ts";
+import {
+  OrchestratorToolkit,
+  toolsWithoutWorkflows,
+} from "../../apps/server/src/mcp/toolkits/orchestrator/tools.ts";
 import { PreviewToolkit } from "../../apps/server/src/mcp/toolkits/preview/tools.ts";
 import { PreviewControlsToolkit } from "../../apps/server/src/mcp/toolkits/previewControls/tools.ts";
 import { ProjectToolkit } from "../../apps/server/src/mcp/toolkits/project/tools.ts";
@@ -405,10 +408,57 @@ const enabledWhen = (predicate: () => boolean) =>
 const hiddenFromSubagents = enabledWhen(McpInvocationContext.hiddenFromSubagents);
 // The Linked environments beta starts off, and T3 lists its tools only while it is on.
 const hiddenWhileLinksOff = enabledWhen(McpInvocationContext.hiddenWhileLinksOff);
-const visibleT3Tools = (options: { readonly subagent?: boolean; readonly links?: boolean }) =>
-  t3Tools.filter(
+/** A thread caller holding every capability, with or without the one the workflows option grants. */
+const threadScope = (workflows: boolean): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("mcp-tool-use-eval"),
+  capabilities: new Set<McpInvocationContext.McpCapability>([
+    "orchestration",
+    "preview",
+    "worktree",
+    "device",
+    "pull-requests",
+    ...(workflows ? (["workflows"] as const) : []),
+  ]),
+  issuedAt: 0,
+  requestNamespace: "mcp-tool-use-eval",
+  thread: {
+    threadId: ThreadId.make("mcp-tool-use-eval"),
+    providerSessionId: "mcp-tool-use-eval",
+    providerInstanceId: ProviderInstanceId.make(CLAUDE_PROVIDER),
+  },
+  client: undefined,
+});
+const listedFor = (tool: Tool.Any, scope: McpInvocationContext.McpInvocationScope) => {
+  const predicate = Context.getOrUndefined(tool.annotations, McpSchema.EnabledWhen);
+  return (
+    predicate === undefined ||
+    Effect.runSync(
+      Effect.sync(() => predicate({ protocolVersion: "2025-06-18", capabilities: {} })).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+      ),
+    )
+  );
+};
+// The workflows option grants a thread the workflows capability. Without it T3 lists none of the
+// tools that need it, and delegate_task and create_threads advertise no workflow fields.
+const hiddenWhileWorkflowsOff = new Set(
+  t3SourceTools
+    .filter((tool) => listedFor(tool, threadScope(true)) && !listedFor(tool, threadScope(false)))
+    .map((tool) => `${T3_PREFIX}${tool.name}`),
+);
+const t3ToolsWithoutWorkflows: ReadonlyArray<ApiTool> = t3Tools.map((tool) => {
+  const narrowed = toolsWithoutWorkflows[tool.name.slice(T3_PREFIX.length)];
+  return narrowed === undefined ? tool : { ...tool, input_schema: advertisedJsonSchema(narrowed) };
+});
+export const visibleT3Tools = (options: {
+  readonly subagent?: boolean;
+  readonly links?: boolean;
+  readonly workflows?: boolean;
+}) =>
+  (options.workflows === true ? t3Tools : t3ToolsWithoutWorkflows).filter(
     (tool) =>
       (options.links === true || !hiddenWhileLinksOff.has(tool.name)) &&
+      (options.workflows === true || !hiddenWhileWorkflowsOff.has(tool.name)) &&
       !(options.subagent === true && hiddenFromSubagents.has(tool.name)),
   );
 
