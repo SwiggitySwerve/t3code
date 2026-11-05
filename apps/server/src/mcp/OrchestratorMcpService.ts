@@ -15,8 +15,7 @@ import {
   NodeId,
   ORCHESTRATOR_MCP_RUNNING_TASK_NEXT,
   TurnItemId,
-  WorkflowPresets,
-  type WorkflowPresetTarget,
+  graphReviewNext,
   type OrchestrationV2Run,
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
@@ -42,6 +41,8 @@ import {
   type OrchestratorMcpGraphReviewResult,
   type OrchestratorMcpGraphStartInput,
   type OrchestratorMcpWorkflowInput,
+  type OrchestratorMcpWorkflowReportInput,
+  type OrchestratorMcpWorkflowReportResult,
   type OrchestratorMcpWorkflowResult,
   type OrchestratorMcpWorkflowStartInput,
   type OrchestratorMcpWorkflowStopInput,
@@ -133,6 +134,9 @@ import * as ProviderRegistry from "../provider/ProviderRegistry.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { selectionSpeed } from "../usage/selectionSpeed.ts";
+import * as UsageService from "../usage/UsageService.ts";
+import { lookupRate, type RateTable } from "../usage/usagePricing.ts";
 import {
   clientModeCeiling,
   type McpInvocationScope,
@@ -158,10 +162,7 @@ import { makeCheckerResults } from "./workflowCheckerResults.ts";
 import { agentRequestKey } from "./workflowAgentAttempts.ts";
 import {
   makeWorkflowRunner,
-  presetPreference,
-  sameWorkflowPresetTarget,
   selectWorkflowTarget,
-  type WorkflowPreference,
   workflowAgentOutcomeCategory,
 } from "./workflowRunner.ts";
 import {
@@ -170,6 +171,8 @@ import {
   workflowTurnUsage,
 } from "./workflowUsage.ts";
 import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
+import { retriesCheckProblem } from "./workflowRetries.ts";
+import { concreteModelFamily, graphAssignmentNotes } from "./workflowAdvisory.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -179,6 +182,7 @@ import {
 } from "@t3tools/shared/storedWorkflowScript";
 import * as ServerRuntimeStartup from "../serverRuntimeStartup.ts";
 import { checkWorkflowScript } from "./workflowScript.ts";
+import { workflowReport } from "./workflowReport.ts";
 import { workflowReviewRecord } from "./workflowReviewRecord.ts";
 
 const DEFAULT_WAIT_TIMEOUT_MS = 10 * 60 * 1_000;
@@ -227,6 +231,11 @@ export interface OrchestratorMcpServiceShape {
     scope: McpInvocationScope,
     input: OrchestratorMcpWorkflowInput,
   ) => Effect.Effect<OrchestratorMcpWorkflowResult, OrchestratorMcpFailure>;
+  /** Every workflow of a readable thread, one row per agent; for the CLI and outside clients. */
+  readonly workflowReport: (
+    scope: McpInvocationScope,
+    input: OrchestratorMcpWorkflowReportInput,
+  ) => Effect.Effect<OrchestratorMcpWorkflowReportResult, OrchestratorMcpFailure>;
   readonly workflowStop: (
     scope: McpInvocationScope,
     input: OrchestratorMcpWorkflowStopInput,
@@ -316,11 +325,16 @@ const WorkflowTargetSnapshot = Schema.Union([
   Schema.Struct({ error: Schema.String }),
 ]);
 const decodeWorkerTargetSnapshot = Schema.decodeUnknownOption(WorkflowTargetSnapshot);
-const decodeWorkflowPresets = Schema.decodeUnknownOption(WorkflowPresets);
-const decodePresetTargets = Schema.decodeUnknownOption(
+// Legacy: workflows started before agent presets were removed stored these; resume only reads them.
+const decodeLegacyPresetDefault = Schema.decodeUnknownOption(
+  Schema.Struct({ defaultPresetId: Schema.NullOr(Schema.String) }),
+);
+const decodeLegacyPresetTargets = Schema.decodeUnknownOption(
   Schema.Record(Schema.String, WorkflowTargetSnapshot),
 );
-const concreteWorkflowTarget = (selection: ModelSelection): OrchestratorMcpTarget => ({
+/** A target as review and dispatch resolve it, so its model is always named. */
+type ConcreteWorkflowTarget = OrchestratorMcpTarget & { readonly model: string };
+const concreteWorkflowTarget = (selection: ModelSelection): ConcreteWorkflowTarget => ({
   providerInstanceId: selection.instanceId,
   model: selection.model,
   // The complete resolved options; ordering does not change selection.
@@ -434,6 +448,19 @@ function listCapabilityModels(input: {
   );
   const listed = visible.filter((model) => input.isPinned(model) || shown.has(model));
   return { listed, omitted: visible.length - listed.length };
+}
+
+/** A model's base list price in USD per million tokens; null when the table does not know it. */
+function listPriceOf(rates: RateTable, model: string) {
+  const rate = lookupRate(rates, model);
+  const perMTok = (perToken: number) => Math.round(perToken * 1e12) / 1e6;
+  return rate === null
+    ? null
+    : {
+        inputUsdPerMTok: perMTok(rate.inputCostPerToken),
+        cachedInputUsdPerMTok: perMTok(rate.cacheReadCostPerToken),
+        outputUsdPerMTok: perMTok(rate.outputCostPerToken),
+      };
 }
 
 /** Option ids and allowed values are all a delegating agent needs; labels are UI copy. */
@@ -1143,11 +1170,9 @@ const make = Effect.gen(function* () {
   const workflowApprovalGate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
   const gitDriver = yield* GitVcsDriver.GitVcsDriver;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
+  // Required, so a composition that drops the usage layer fails to build instead of losing prices.
+  const { peekRates } = yield* UsageService.UsageService;
   const remoteDelegation = yield* RemoteDelegation.RemoteDelegation;
-  const loadWorkflowPresets = serverSettings.getSettings.pipe(
-    Effect.map((settings) => settings.workflowPresets),
-    Effect.mapError(() => failure("orchestration_error", "Unable to read workflow presets.")),
-  );
   const processRunner = yield* ProcessRunner.ProcessRunner;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
@@ -1320,6 +1345,52 @@ const make = Effect.gen(function* () {
         ? caller.parent
         : yield* loadTargetThread(threadId);
     return { ...caller, target } as const;
+  });
+
+  /**
+   * Whether a pending question or approval holds the thread's delegated work: on the thread
+   * itself, or on the child thread of unfinished app-owned work it or its descendants own.
+   */
+  const awaitedRequest = Effect.fn("OrchestratorMcpService.awaitedRequest")(function* (
+    threadId: ThreadId,
+  ) {
+    const seen = new Set<ThreadId>([threadId]);
+    let level: ReadonlyArray<ThreadId> = [threadId];
+    while (level.length > 0) {
+      const records = yield* Effect.forEach(
+        level,
+        (id) =>
+          threadManagement.getThreadRecords(id, ["runtimeRequests", "subagents"]).pipe(
+            Effect.map((record) => ({ id, ...record })),
+            Effect.mapError(threadManagementFailure),
+          ),
+        { concurrency: 4 },
+      );
+      const asking = records.find((record) =>
+        record.runtimeRequests.some((request) => request.status === "pending"),
+      );
+      if (asking !== undefined) {
+        return asking.id === threadId ? ("thread" as const) : ("descendant" as const);
+      }
+      const children: Array<ThreadId> = [];
+      for (const record of records) {
+        for (const task of record.subagents) {
+          const child = task.childThreadId;
+          if (
+            child !== null &&
+            task.origin === "app_owned" &&
+            task.threadId === record.id &&
+            isOrchestrationV2WorkActive(task.status) &&
+            !seen.has(child)
+          ) {
+            seen.add(child);
+            children.push(child);
+          }
+        }
+      }
+      level = children;
+    }
+    return undefined;
   });
 
   /** Cross-thread writes require a live caller run; stale session credentials cannot authorize them. */
@@ -1609,96 +1680,6 @@ const make = Effect.gen(function* () {
       return concreteWorkflowTarget(selection);
     },
   );
-
-  type ProfileChoice = NonNullable<OrchestratorMcpGraphReviewResult["profiles"]>[number];
-  type ProfileResolution =
-    | {
-        readonly target: OrchestratorMcpTarget;
-        readonly choice: ProfileChoice;
-        /** The profile entry that was chosen, as stored: a start pins exactly this entry. */
-        readonly entry: WorkflowPresetTarget;
-      }
-    | { readonly target: undefined; readonly blocker: string };
-
-  /**
-   * Picks a profile's model: the first entry whose provider instance is enabled for the project and
-   * serves the exact model with the entry's options; others are skipped with their reason. `frozen`
-   * is the entry a review chose, compared whole: only it may run, and if the profile no longer lists
-   * it nothing runs. `advertisedModel` asks for the stricter check graph review applies.
-   */
-  const resolveProfile = Effect.fn("OrchestratorMcpService.resolveProfile")(function* (input: {
-    readonly parent: CallerProjection;
-    readonly preference: WorkflowPreference;
-    readonly advertisedModel: boolean;
-    readonly frozen?: WorkflowPresetTarget | undefined;
-  }): Effect.fn.Return<ProfileResolution> {
-    const { parent, preference, frozen } = input;
-    const serve = Effect.fn("OrchestratorMcpService.serveProfileEntry")(function* (
-      entry: WorkflowPresetTarget,
-    ) {
-      const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
-        projectId: parent.thread.projectId,
-        instanceId: entry.providerInstanceId,
-      });
-      if (!enabled) {
-        return yield* failure(
-          "provider_unavailable",
-          `Provider instance ${entry.providerInstanceId} is disabled for this project.`,
-        );
-      }
-      if (input.advertisedModel) return yield* resolveAdvertisedTarget(parent, entry);
-      const resolved = yield* resolveTargetRechecking({
-        parent,
-        target: entry,
-        providers: yield* loadProviders,
-      });
-      return concreteWorkflowTarget(resolved.modelSelection);
-    });
-    const frozenIndex =
-      frozen === undefined
-        ? -1
-        : preference.entries.findIndex((entry) => sameWorkflowPresetTarget(entry, frozen));
-    if (frozen !== undefined && frozenIndex === -1) {
-      return {
-        target: undefined,
-        blocker: `Profile "${preference.presetName}" no longer lists the model that was reviewed, and T3 does not switch to another model. Review the graph again.`,
-      };
-    }
-    const skipped: Array<ProfileChoice["skipped"][number]> = [];
-    for (const [index, entry] of preference.entries.entries()) {
-      if (frozen !== undefined && index !== frozenIndex) continue;
-      const served = yield* serve(entry).pipe(Effect.result);
-      if (served._tag === "Success") {
-        return {
-          target: served.success,
-          entry,
-          choice: {
-            presetId: preference.presetId,
-            presetName: preference.presetName,
-            chosenIndex: index,
-            skipped,
-          },
-        };
-      }
-      skipped.push({
-        index,
-        providerInstanceId: entry.providerInstanceId,
-        model: entry.model,
-        reason: served.failure.message,
-      });
-    }
-    const tried = skipped.map(
-      (entry) =>
-        `${entry.index + 1}. ${entry.providerInstanceId} / ${entry.model}: ${entry.reason}`,
-    );
-    return {
-      target: undefined,
-      blocker:
-        frozen === undefined
-          ? `Profile "${preference.presetName}" has no available model. ${tried.join(" ")}`
-          : `Profile "${preference.presetName}": the reviewed model is no longer available, and T3 does not switch to another model in the profile. Review the graph again. ${tried.join(" ")}`,
-    };
-  });
 
   const requestKey = (clientRequestId: string | undefined): Effect.Effect<string> =>
     clientRequestId === undefined
@@ -2329,9 +2310,29 @@ const make = Effect.gen(function* () {
           taskId: started.taskId,
           childThreadId: started.childThreadId,
           model: prepared.target.modelSelection.model,
+          options: prepared.target.modelSelection.options,
+          speed: selectionSpeed(started.driver, prepared.target.modelSelection.options ?? []),
           providerInstanceId: started.providerInstanceId,
           driver: started.driver,
         };
+      },
+    ),
+    resolveTarget: Effect.fn("OrchestratorMcpService.resolveWorkflowAgentTarget")(
+      function* (workflow, value) {
+        const parent = yield* loadProjection(workflow.threadId);
+        const target =
+          value === undefined
+            ? undefined
+            : yield* decodeWorkflowTarget(value).pipe(
+                Effect.mapError(() => failure("invalid_request", "Invalid target.")),
+              );
+        // Resolved against the selection the agents inherit, as spawnAgent resolves them.
+        return yield* resolveAdvertisedTarget(
+          workflow.callerSelection === undefined
+            ? parent
+            : { ...parent, thread: { ...parent.thread, modelSelection: workflow.callerSelection } },
+          target,
+        );
       },
     ),
     agentStarted: Effect.fn("OrchestratorMcpService.workflowAgentStarted")(
@@ -2629,19 +2630,10 @@ const make = Effect.gen(function* () {
 
   type GraphReview = ReturnType<typeof reviewGraph> & {
     targets: OrchestratorMcpGraphReviewResult["targets"];
-    profiles: ReadonlyArray<ProfileChoice>;
-    availableProfiles: NonNullable<OrchestratorMcpGraphReviewResult["availableProfiles"]>;
     expandedGraph: unknown | null;
   };
-  // Recent reviews by digest: input hashes, so a refused start can name the files that changed,
-  // and the profile entry each profile node chose, which a start may not replace with another.
-  const reviewedGraphs = new Map<
-    string,
-    {
-      readonly inputs: GraphReview["inputs"];
-      readonly profileEntries: Map<string, WorkflowPresetTarget>;
-    }
-  >();
+  // Recent reviews' input hashes by digest, so a refused start can name the files that changed.
+  const reviewedGraphs = new Map<string, { readonly inputs: GraphReview["inputs"] }>();
   const REVIEWED_GRAPHS_KEPT = 256;
 
   /** Reviews a graph against the files in the caller's checkout as they are now. */
@@ -2649,18 +2641,13 @@ const make = Effect.gen(function* () {
     parent: CallerProjection,
     graph: unknown,
     workerTarget: OrchestratorMcpTarget | undefined,
-    reviewedProfileEntries?: ReadonlyMap<string, WorkflowPresetTarget>,
   ) {
     const threadId = parent.thread.id;
     const parsed = parseGraph(graph);
-    const presets = yield* loadWorkflowPresets;
     let concreteGraph = parsed.ok ? parsed.graph : undefined;
     const hashes: Record<string, GraphReview["inputs"][string]> = {};
     const targets: OrchestratorMcpGraphReviewResult["targets"][number][] = [];
-    // A profile's choice is reported once, however many nodes use it; a node names it by presetId.
-    const profiles = new Map<string, ProfileChoice>();
-    const profileEntries = new Map<string, WorkflowPresetTarget>();
-    const plannedTargets = new Map<string, unknown>();
+    const judgments = new Map<string, { readonly ownTarget: boolean }>();
     const targetBlockers: string[] = [];
     const resolveGraphTarget = Effect.fn("OrchestratorMcpService.resolveGraphTarget")(
       function* (value: unknown, _label: string) {
@@ -2680,68 +2667,28 @@ const make = Effect.gen(function* () {
           }),
         ),
     );
-    // Every node of a profile resolves alike within one review, so a profile is resolved once.
-    const profileResolutions = new Map<
-      string,
-      Array<{
-        readonly frozen: WorkflowPresetTarget | undefined;
-        readonly value: ProfileResolution;
-      }>
-    >();
-    const chooseProfile = Effect.fn("OrchestratorMcpService.chooseGraphProfile")(function* (
-      nodeId: string,
-      preference: WorkflowPreference,
-    ) {
-      const frozen = reviewedProfileEntries?.get(nodeId);
-      const seen = profileResolutions.get(preference.presetId) ?? [];
-      profileResolutions.set(preference.presetId, seen);
-      let resolution = seen.find((entry) =>
-        frozen === undefined || entry.frozen === undefined
-          ? frozen === entry.frozen
-          : sameWorkflowPresetTarget(frozen, entry.frozen),
-      )?.value;
-      if (resolution === undefined) {
-        resolution = yield* resolveProfile({
-          parent,
-          preference,
-          advertisedModel: true,
-          frozen,
-        });
-        seen.push({ frozen, value: resolution });
-      }
-      if (resolution.target === undefined) {
-        targetBlockers.push(`${nodeId}: ${resolution.blocker}`);
-        return undefined;
-      }
-      return resolution;
-    });
     if (parsed.ok) {
       const nodes: Record<string, (typeof parsed.graph.nodes)[string]> = {};
       for (const [nodeId, node] of Object.entries(parsed.graph.nodes)) {
-        const selected = selectWorkflowTarget(node, workerTarget, presets);
-        if (selected.error !== undefined) targetBlockers.push(`${nodeId}: ${selected.error}`);
-        const chosen =
-          selected.error === undefined && selected.preference !== undefined
-            ? yield* chooseProfile(nodeId, selected.preference)
-            : undefined;
-        const target =
-          selected.error !== undefined
-            ? undefined
-            : selected.preference === undefined
-              ? yield* resolveGraphTarget(selected.target, nodeId)
-              : chosen?.target;
+        const selected = selectWorkflowTarget(node, workerTarget);
+        const target = yield* resolveGraphTarget(selected.target, nodeId);
+        // Each retry target is resolved and checked as target is, so the digest covers it.
+        const retries: ConcreteWorkflowTarget[] = [];
+        for (const [index, rung] of (node.retries ?? []).entries()) {
+          const resolved = yield* resolveGraphTarget(rung, `${nodeId} retries[${index}]`);
+          if (resolved !== undefined) retries.push(resolved);
+        }
         let verify = node.verify;
-        plannedTargets.set(nodeId, selected.preference?.entries[0] ?? target);
         let judgmentTarget: OrchestratorMcpTarget | undefined;
         if (verify?.type === "judgment") {
+          judgments.set(nodeId, { ownTarget: verify.target !== undefined });
+          const problem =
+            verify.target === undefined && target !== undefined
+              ? retriesCheckProblem(target.model, retries)
+              : undefined;
+          if (problem !== undefined) targetBlockers.push(`${nodeId} judgment: ${problem}`);
           judgmentTarget = yield* resolveGraphTarget(verify.target ?? target, `${nodeId} judgment`);
           verify = { ...verify, target: judgmentTarget };
-        }
-        if (chosen !== undefined) {
-          if (!profiles.has(chosen.choice.presetId)) {
-            profiles.set(chosen.choice.presetId, chosen.choice);
-          }
-          profileEntries.set(nodeId, chosen.entry);
         }
         if (target !== undefined)
           targets.push({
@@ -2749,10 +2696,15 @@ const make = Effect.gen(function* () {
             source: selected.source,
             target,
             ...(judgmentTarget === undefined ? {} : { judgmentTarget }),
-            ...(chosen === undefined ? {} : { presetId: chosen.choice.presetId }),
+            ...(node.retries === undefined ? {} : { retries }),
           });
-        const { model: _legacyModel, preset: _preset, ...concreteNode } = node;
-        nodes[nodeId] = { ...concreteNode, target, ...(verify === undefined ? {} : { verify }) };
+        const { model: _legacyModel, ...concreteNode } = node;
+        nodes[nodeId] = {
+          ...concreteNode,
+          target,
+          ...(node.retries === undefined ? {} : { retries }),
+          ...(verify === undefined ? {} : { verify }),
+        };
       }
       concreteGraph = { ...parsed.graph, nodes };
       // A file several nodes read is read once, under the largest bound; review checks each.
@@ -2772,8 +2724,9 @@ const make = Effect.gen(function* () {
       }
     }
     // The advisory's token figures depend on the driver that runs each agent, so it is told which.
+    const providers = yield* loadProviders;
     const driverByInstance = new Map(
-      (yield* loadProviders).map((provider) => [provider.instanceId, provider.driver]),
+      providers.map((provider) => [provider.instanceId, provider.driver]),
     );
     const driverOfTarget = (target: OrchestratorMcpTarget) =>
       target.providerInstanceId === undefined
@@ -2789,15 +2742,57 @@ const make = Effect.gen(function* () {
             : [[entry.nodeId, driverOfTarget(entry.judgmentTarget)] as const],
         ),
       ),
+      retries: new Map(
+        targets.map((entry) => [entry.nodeId, (entry.retries ?? []).map(driverOfTarget)] as const),
+      ),
+    });
+    // Only a judgment check can be on its worker's family, so only then are families listed.
+    const enabledFamilies = new Set<string>();
+    if (judgments.size > 0) {
+      for (const provider of providers) {
+        if (!provider.enabled || !isProviderAvailable(provider)) continue;
+        const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
+          projectId: parent.thread.projectId,
+          instanceId: provider.instanceId,
+        });
+        if (!enabled) continue;
+        // Only a model the coordinator can target names a family; "auto" names none.
+        for (const model of provider.models) {
+          const family = concreteModelFamily(model.slug);
+          if (family !== undefined) enabledFamilies.add(family);
+        }
+      }
+    }
+    const assignmentNotes = graphAssignmentNotes({
+      coordinatorModel: parent.thread.modelSelection.model,
+      enabledFamilies,
+      nodes: targets.map((entry) => {
+        const judgment = judgments.get(entry.nodeId);
+        return {
+          nodeId: entry.nodeId,
+          source: entry.source,
+          model: entry.target.model ?? parent.thread.modelSelection.model,
+          retryModels: (entry.retries ?? []).map(
+            (rung) => rung.model ?? parent.thread.modelSelection.model,
+          ),
+          ...(judgment === undefined || entry.judgmentTarget === undefined
+            ? {}
+            : {
+                judgment: {
+                  model: entry.judgmentTarget.model ?? parent.thread.modelSelection.model,
+                  ownTarget: judgment.ownTarget,
+                },
+              }),
+        };
+      }),
     });
     const review: GraphReview = {
       ...reviewed,
+      // Advice only, added after the digest was computed.
+      ...(reviewed.advisory === undefined || assignmentNotes.length === 0
+        ? {}
+        : { advisory: { ...reviewed.advisory, assignmentNotes } }),
       targets,
-      profiles: [...profiles.values()],
-      availableProfiles: presets.presets.map((preset) => ({
-        presetId: preset.id,
-        presetName: preset.name,
-      })),
       expandedGraph:
         targetBlockers.length === 0 && reviewed.blockers.length === 0
           ? (concreteGraph ?? null)
@@ -2807,10 +2802,7 @@ const make = Effect.gen(function* () {
     };
     if (review.digest !== null) {
       reviewedGraphs.delete(review.digest);
-      reviewedGraphs.set(review.digest, {
-        inputs: review.inputs,
-        profileEntries,
-      });
+      reviewedGraphs.set(review.digest, { inputs: review.inputs });
       if (reviewedGraphs.size > REVIEWED_GRAPHS_KEPT) {
         reviewedGraphs.delete(reviewedGraphs.keys().next().value!);
       }
@@ -2820,7 +2812,23 @@ const make = Effect.gen(function* () {
         ? {
             source: GRAPH_DRIVER_SCRIPT,
             args: { graph: concreteGraph, inputs: review.inputs },
-            plan: graphPlan(concreteGraph, plannedTargets),
+            plan: graphPlan(
+              concreteGraph,
+              new Map(
+                targets.map((entry) => {
+                  const judgment = judgments.get(entry.nodeId);
+                  return [
+                    entry.nodeId,
+                    {
+                      worker: entry.source,
+                      ...(judgment === undefined
+                        ? {}
+                        : { check: judgment.ownTarget ? ("target" as const) : entry.source }),
+                    },
+                  ] as const;
+                }),
+              ),
+            ),
             title: concreteGraph.name ?? "Graph",
           }
         : undefined;
@@ -2844,13 +2852,13 @@ const make = Effect.gen(function* () {
     decision: Pick<OrchestratorMcpGraphReviewResult, "reviewId" | "approvalRequired">,
   ): OrchestratorMcpGraphReviewResult => ({
     ...decision,
+    next: graphReviewNext({
+      ready: isReviewReady(review),
+      approvalRequired: decision.approvalRequired,
+    }),
     digest: review.digest,
     ready: isReviewReady(review),
     targets: review.targets,
-    ...(review.profiles.length === 0 ? {} : { profiles: review.profiles }),
-    ...(review.availableProfiles.length === 0
-      ? {}
-      : { availableProfiles: review.availableProfiles }),
     expandedGraph: review.expandedGraph,
     layers: review.layers,
     writeConflicts: review.writeConflicts,
@@ -2925,7 +2933,6 @@ const make = Effect.gen(function* () {
     const key = yield* requestKey(input.clientRequestId);
     const commandId = stableCommandId({ scope, requestKey: key, operation: "workflow-start" });
     const workflowId = NodeId.make(String(commandId).replace(/^command:/, "workflow:"));
-    const workflowPresets = yield* loadWorkflowPresets;
     const snapshotTarget = Effect.fn("OrchestratorMcpService.snapshotWorkflowTarget")(function* (
       target: OrchestratorMcpTarget,
     ) {
@@ -2938,19 +2945,6 @@ const make = Effect.gen(function* () {
         Effect.catch((error) => Effect.succeed({ error: error.message })),
       );
     });
-    // A profile resolves once, here; the run and every resume use this choice, never the order.
-    const presetTargets: Record<string, typeof WorkflowTargetSnapshot.Type> = Object.create(null);
-    for (const preset of workflowPresets.presets) {
-      const resolution = yield* resolveProfile({
-        parent,
-        preference: presetPreference(preset),
-        advertisedModel: false,
-      });
-      presetTargets[preset.id] =
-        resolution.target === undefined
-          ? { error: resolution.blocker }
-          : { target: resolution.target };
-    }
     // Defaults must not depend on catalog order after a restart. Keep failure until
     // an agent actually selects the default: its own target can still override it.
     const workerTargetSnapshot =
@@ -2970,8 +2964,6 @@ const make = Effect.gen(function* () {
         title: input.title ?? "Workflow",
         script: storedWorkflowScript(input.script, {
           callerSelection: parent.thread.modelSelection,
-          workflowPresets,
-          presetTargets,
           ...(input.args === undefined ? {} : { args: input.args }),
           ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
           ...(input.workerTarget === undefined ? {} : { workerTarget: input.workerTarget }),
@@ -3003,12 +2995,7 @@ const make = Effect.gen(function* () {
     input: OrchestratorMcpGraphStartInput,
   ) {
     const parent = yield* loadProjection(scope.thread.threadId);
-    const { review, compiled } = yield* reviewCallerGraph(
-      parent,
-      input.graph,
-      input.workerTarget,
-      reviewedGraphs.get(input.acceptedDigest)?.profileEntries,
-    );
+    const { review, compiled } = yield* reviewCallerGraph(parent, input.graph, input.workerTarget);
     if (review.blockers.length > 0 || compiled === undefined) {
       return yield* failure(
         "invalid_request",
@@ -3061,7 +3048,8 @@ const make = Effect.gen(function* () {
     }
   };
 
-  const workflowResult = Effect.fn("OrchestratorMcpService.workflowResult")(function* (
+  /** The workflow's result, and each attempt's own usage by task id for pricing it. */
+  const workflowReadings = Effect.fn("OrchestratorMcpService.workflowResult")(function* (
     projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
     workflow: OrchestrationV2Subagent,
   ) {
@@ -3094,6 +3082,9 @@ const make = Effect.gen(function* () {
       { concurrency: 8 },
     );
     const usage = aggregateWorkflowUsage(records.flatMap((record) => record.usage));
+    const attemptUsage = new Map(
+      records.map((record) => [record.member.id as string, aggregateWorkflowUsage(record.usage)]),
+    );
     const nodes = workflow.workflow?.nodeOutcomes;
     const phaseProgress =
       workflow.workflow?.phases.filter((phase) => phase.progress !== undefined) ?? [];
@@ -3103,7 +3094,7 @@ const make = Effect.gen(function* () {
       const known = values.filter((value) => value !== null);
       return known.length === 0 ? null : latest ? Math.max(...known) : Math.min(...known);
     };
-    return {
+    const result = {
       workflowId: workflow.id,
       status:
         workflow.status === "completed" ||
@@ -3186,7 +3177,12 @@ const make = Effect.gen(function* () {
       // A graph's stored provenance: what its result may leave out when it is large.
       ...(nodes === undefined || Object.keys(nodes).length === 0 ? {} : { nodes }),
     } satisfies OrchestratorMcpWorkflowResult;
+    return { result, attemptUsage };
   });
+  const workflowResult = (
+    projection: Pick<OrchestrationV2ThreadProjection, "subagents">,
+    workflow: OrchestrationV2Subagent,
+  ) => workflowReadings(projection, workflow).pipe(Effect.map((readings) => readings.result));
 
   // Agents act with the starting thread's authority, which comes from the thread itself;
   // the session that started the workflow is gone after a restart, so only the thread,
@@ -3225,21 +3221,21 @@ const make = Effect.gen(function* () {
       stored._tag === "Some" && stored.value.workerTargetSnapshot !== undefined
         ? decodeWorkerTargetSnapshot(stored.value.workerTargetSnapshot)
         : Option.none();
-    const workflowPresets =
+    const legacyPresetDefault =
       stored._tag === "Some" && stored.value.workflowPresets !== undefined
-        ? decodeWorkflowPresets(stored.value.workflowPresets)
+        ? decodeLegacyPresetDefault(stored.value.workflowPresets)
         : Option.none();
-    const presetTargets =
+    const legacyPresetTargets =
       stored._tag === "Some" && stored.value.presetTargets !== undefined
-        ? decodePresetTargets(stored.value.presetTargets)
+        ? decodeLegacyPresetTargets(stored.value.presetTargets)
         : Option.none();
     if (
       stored._tag === "None" ||
       (stored.value.plan !== undefined && Option.isNone(plan)) ||
       (stored.value.callerSelection !== undefined && Option.isNone(callerSelection)) ||
       (stored.value.workerTargetSnapshot !== undefined && Option.isNone(workerTargetSnapshot)) ||
-      (stored.value.workflowPresets !== undefined && Option.isNone(workflowPresets)) ||
-      (stored.value.presetTargets !== undefined && Option.isNone(presetTargets))
+      (stored.value.workflowPresets !== undefined && Option.isNone(legacyPresetDefault)) ||
+      (stored.value.presetTargets !== undefined && Option.isNone(legacyPresetTargets))
     ) {
       // An earlier start may have left a rejection under the usual id; the row is still running.
       yield* sendWithFreshId(
@@ -3265,8 +3261,16 @@ const make = Effect.gen(function* () {
       threadId: row.threadId,
       source: stored.value.source,
       args: stored.value.args,
-      ...(Option.isSome(workflowPresets) ? { workflowPresets: workflowPresets.value } : {}),
-      ...(Option.isSome(presetTargets) ? { presetTargets: presetTargets.value } : {}),
+      ...(Option.isSome(legacyPresetDefault) || Option.isSome(legacyPresetTargets)
+        ? {
+            legacyPresets: {
+              defaultPresetId: Option.isSome(legacyPresetDefault)
+                ? legacyPresetDefault.value.defaultPresetId
+                : null,
+              targets: Option.isSome(legacyPresetTargets) ? legacyPresetTargets.value : {},
+            },
+          }
+        : {}),
       ...(Option.isSome(workerTargetSnapshot) && "target" in workerTargetSnapshot.value
         ? { workerTarget: workerTargetSnapshot.value.target }
         : stored.value.workerTarget === undefined
@@ -3754,14 +3758,12 @@ const make = Effect.gen(function* () {
       );
       const inherited = parent?.thread.modelSelection;
       const searchTerms = input.search?.toLowerCase().split(/\s+/) ?? [];
+      const { table: rates } = yield* peekRates;
       return {
         parentThreadId: parent?.thread.id ?? null,
         inheritedProviderInstanceId: inherited?.instanceId ?? null,
         inheritedModel: inherited?.model ?? null,
         inheritedOptions: inherited?.options ?? [],
-        ...(scope.capabilities.has("workflows")
-          ? { workflowPresets: settings.workflowPresets }
-          : {}),
         runtimeMode: limits.runtimeMode,
         interactionMode: limits.interactionMode,
         providers: providers.map((provider) => {
@@ -3793,6 +3795,7 @@ const make = Effect.gen(function* () {
                   ? {}
                   : { label: model.name }),
                 ...(options.length === 0 ? {} : { options: options.map(capabilityModelOption) }),
+                ...(rates.size === 0 ? {} : { listPrice: listPriceOf(rates, model.slug) }),
               };
             }),
             ...(omitted === 0 ? {} : { omittedModels: omitted }),
@@ -4041,6 +4044,27 @@ const make = Effect.gen(function* () {
         return yield* workflowResult(projection, workflow);
       },
     ),
+    workflowReport: Effect.fn("OrchestratorMcpService.workflowReport")(function* (scope, input) {
+      yield* loadReadableThread(scope, input.threadId);
+      const projection = yield* loadProjection(input.threadId);
+      const rows = projection.subagents.filter(
+        (task) =>
+          task.origin === "app_owned" && task.workflow !== undefined && task.childThreadId === null,
+      );
+      const { table: rates, pricing } = yield* peekRates;
+      const workflows = yield* Effect.forEach(rows, (row) =>
+        workflowReadings(projection, row).pipe(
+          Effect.map(({ result, attemptUsage }) =>
+            workflowReport(row, result, { attemptUsage, rates }),
+          ),
+        ),
+      );
+      return {
+        threadId: input.threadId,
+        workflows,
+        pricing: { status: pricing.status, source: pricing.source, fetchedAt: pricing.fetchedAt },
+      };
+    }),
     workflowStop: Effect.fn("OrchestratorMcpService.workflowStop")(function* (callerScope, input) {
       const scope = yield* requireThreadScope(callerScope, "workflow_stop");
       yield* requireCapability(scope);
@@ -4792,6 +4816,14 @@ const make = Effect.gen(function* () {
         : [];
       const wakesCaller =
         ownedTask && !childRequests.some((request) => request.status === "pending");
+      const awaitingAnswer =
+        input.untilDelegatedWorkSettled !== true
+          ? undefined
+          : result.timedOut
+            ? yield* awaitedRequest(input.threadId)
+            : (yield* workflowApprovalGate.awaitsDecision(input.threadId))
+              ? ("workflow_review" as const)
+              : undefined;
       return {
         threadId: input.threadId,
         runId: result.run?.id ?? null,
@@ -4803,6 +4835,7 @@ const make = Effect.gen(function* () {
           : {
               resultRun: { runId: result.resultRun.id, status: runOutcome(result.resultRun) },
             }),
+        ...(awaitingAnswer === undefined ? {} : { awaitingAnswer }),
       } satisfies OrchestratorMcpThreadWaitResult;
     }),
     interruptThread: Effect.fn("OrchestratorMcpService.interruptThread")(function* (scope, input) {
@@ -4908,6 +4941,7 @@ export const layer: Layer.Layer<
   | ProjectService.ProjectService
   | SecretRequests.SecretRequests
   | ServerSettings.ServerSettingsService
+  | UsageService.UsageService
   | RemoteDelegation.RemoteDelegation
   | ChildProcessSpawner.ChildProcessSpawner
   | ServerConfig.ServerConfig

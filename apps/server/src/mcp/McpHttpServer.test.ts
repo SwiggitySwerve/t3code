@@ -1409,13 +1409,18 @@ it.effect(
             "device_open",
           ]),
         );
-        // Coordinator keeps every tool.
+        // Coordinator keeps every tool but the report, which only callers outside a thread list.
         // The link tools are listed only while the linked-environments beta is on, for anyone.
         expect(coordinator).toEqual(
           expect.arrayContaining(
-            hiddenFromMember.filter((name) => !/^t3_environment_(links?|unlink)$/.test(name)),
+            hiddenFromMember.filter(
+              (name) =>
+                !/^t3_environment_(links?|unlink)$/.test(name) && name !== "t3_workflow_report",
+            ),
           ),
         );
+        expect(coordinator).not.toContain("t3_workflow_report");
+        expect(noBrowser).not.toContain("t3_workflow_report");
         // The member sees worktree, pull request (minus the watch tools a child never gets) and html tools only.
         const expectedMember = [
           ...namesOf(WorktreeToolkit as never),

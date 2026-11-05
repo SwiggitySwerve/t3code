@@ -20,50 +20,9 @@ import {
   parsePersistedServerObservabilitySettings,
   resolveSourceControlWriterModelSelection,
   serverSettingsWriteProblems,
-  WORKFLOW_PRESET_NAME_MAX_CHARS,
-  workflowPresetsWriteProblems,
 } from "./serverSettings.ts";
 
 const FOLDED_SERVER_SETTINGS = { ...DEFAULT_SERVER_SETTINGS, projectSettingsFolded: true };
-
-describe("workflow preset patches", () => {
-  it("C4 creates, renames, replaces targets, clears default and deletes without deep merging", () => {
-    const first = {
-      id: "worker",
-      name: "Worker",
-      target: {
-        providerInstanceId: ProviderInstanceId.make("codex"),
-        model: "gpt-5.4",
-        options: [{ id: "reasoningEffort", value: "high" }],
-      },
-    };
-    const created = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      workflowPresets: { presets: [first], defaultPresetId: first.id },
-    });
-    expect(created.workflowPresets).toEqual({ presets: [first], defaultPresetId: first.id });
-    const edited = {
-      ...first,
-      name: "Renamed",
-      target: {
-        providerInstanceId: ProviderInstanceId.make("claude"),
-        model: "sonnet",
-        options: [],
-      },
-    };
-    const updated = applyServerSettingsPatch(created, {
-      workflowPresets: { presets: [edited], defaultPresetId: null },
-    });
-    expect(updated.workflowPresets).toEqual({ presets: [edited], defaultPresetId: null });
-    const deleted = applyServerSettingsPatch(updated, {
-      workflowPresets: { presets: [], defaultPresetId: null },
-    });
-    expect(deleted.workflowPresets).toEqual(DEFAULT_SERVER_SETTINGS.workflowPresets);
-    expect(
-      applyServerSettingsPatch(created, { threadTitleInstructions: "title" }).workflowPresets,
-    ).toEqual(created.workflowPresets);
-    expect(created.workflowPresets.presets[0]).toEqual(first);
-  });
-});
 
 describe("workflow trigger patches", () => {
   it("keeps the extras apart from the workflow start mode and replaces them whole", () => {
@@ -83,160 +42,7 @@ describe("workflow trigger patches", () => {
   });
 });
 
-describe("workflow profile fallbacks and a writer that predates them", () => {
-  const codex = ProviderInstanceId.make("codex");
-  const primary = { providerInstanceId: codex, model: "gpt-5.4" };
-  const backup = { providerInstanceId: codex, model: "gpt-5.5" };
-  const stored = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-    workflowPresets: {
-      presets: [
-        { id: "worker", name: "Worker", target: primary, fallbacks: [backup] },
-        { id: "other", name: "Other", target: primary, fallbacks: [backup, primary] },
-      ],
-      defaultPresetId: "worker",
-    },
-  });
-  // What an older client sends: every stored preset without the key it never decoded.
-  const olderWriter = (
-    edit: (preset: { id: string; name: string; target: typeof primary }) => unknown,
-    defaultPresetId: string | null = "worker",
-  ) => ({
-    workflowPresets: {
-      presets: stored.workflowPresets.presets.flatMap((preset) => {
-        const edited = edit({ id: preset.id, name: preset.name, target: preset.target });
-        return edited === null ? [] : [edited as typeof preset];
-      }),
-      defaultPresetId,
-    },
-  });
-
-  it("keeps the stored fallbacks on rename, retarget and default change", () => {
-    const renamed = applyServerSettingsPatch(
-      stored,
-      olderWriter((preset) => (preset.id === "worker" ? { ...preset, name: "Renamed" } : preset)),
-    );
-    expect(
-      renamed.workflowPresets.presets.map((preset) => [preset.name, preset.fallbacks]),
-    ).toEqual([
-      ["Renamed", [backup]],
-      ["Other", [backup, primary]],
-    ]);
-    const retargeted = applyServerSettingsPatch(
-      stored,
-      olderWriter((preset) => ({ ...preset, target: backup })),
-    );
-    expect(retargeted.workflowPresets.presets.map((preset) => preset.fallbacks)).toEqual([
-      [backup],
-      [backup, primary],
-    ]);
-    const defaultChanged = applyServerSettingsPatch(
-      stored,
-      olderWriter((preset) => preset, "other"),
-    );
-    expect(defaultChanged.workflowPresets.defaultPresetId).toBe("other");
-    expect(defaultChanged.workflowPresets.presets).toEqual(stored.workflowPresets.presets);
-  });
-
-  it("keeps the other profile's fallbacks when one profile is deleted, and drops the deleted one", () => {
-    const deleted = applyServerSettingsPatch(
-      stored,
-      olderWriter((preset) => (preset.id === "worker" ? null : preset), null),
-    );
-    expect(deleted.workflowPresets.presets).toEqual([
-      { id: "other", name: "Other", target: primary, fallbacks: [backup, primary] },
-    ]);
-    // A preset deleted and later created again under the same id starts with no fallbacks.
-    const recreated = applyServerSettingsPatch(deleted, {
-      workflowPresets: {
-        presets: [
-          ...deleted.workflowPresets.presets,
-          { id: "worker", name: "Worker", target: primary },
-        ],
-        defaultPresetId: null,
-      },
-    });
-    expect("fallbacks" in recreated.workflowPresets.presets[1]!).toBe(false);
-  });
-
-  it("clears the list only for an explicit empty array, and a new profile inherits nothing", () => {
-    const cleared = applyServerSettingsPatch(stored, {
-      workflowPresets: {
-        presets: [
-          { id: "worker", name: "Worker", target: primary, fallbacks: [] },
-          { id: "other", name: "Other", target: primary, fallbacks: [primary] },
-          { id: "fresh", name: "Fresh", target: primary },
-        ],
-        defaultPresetId: null,
-      },
-    });
-    expect(cleared.workflowPresets.presets.map((preset) => preset.fallbacks)).toEqual([
-      [],
-      [primary],
-      undefined,
-    ]);
-    expect("fallbacks" in cleared.workflowPresets.presets[2]!).toBe(false);
-  });
-
-  it("leaves the fallbacks alone when the patch does not touch the profiles", () => {
-    expect(applyServerSettingsPatch(stored, { workflowStart: "off" }).workflowPresets).toEqual(
-      stored.workflowPresets,
-    );
-  });
-});
-
 describe("settings write rules", () => {
-  const target = {
-    providerInstanceId: ProviderInstanceId.make("codex"),
-    model: "gpt-5.4",
-  };
-  const preset = (id: string, name: string) => ({ id, name, target });
-  const presets = (...list: ReadonlyArray<ReturnType<typeof preset>>) => ({
-    presets: list,
-    defaultPresetId: null,
-  });
-
-  it("accepts distinct names up to the limit and an empty list", () => {
-    expect(workflowPresetsWriteProblems(presets())).toEqual([]);
-    expect(
-      workflowPresetsWriteProblems(
-        presets(preset("a", "x".repeat(WORKFLOW_PRESET_NAME_MAX_CHARS)), preset("b", "Other")),
-      ),
-    ).toEqual([]);
-  });
-
-  it("refuses a new name that is too long or already taken, ignoring case", () => {
-    const tooLong = workflowPresetsWriteProblems(
-      presets(preset("a", "x".repeat(WORKFLOW_PRESET_NAME_MAX_CHARS + 1))),
-    );
-    expect(tooLong).toMatchObject([{ presetId: "a", kind: "name_too_long" }]);
-    const taken = workflowPresetsWriteProblems(
-      presets(preset("a", "Worker"), preset("b", "worker")),
-    );
-    expect(taken.map((problem) => [problem.presetId, problem.kind])).toEqual([
-      ["a", "name_duplicate"],
-      ["b", "name_duplicate"],
-    ]);
-  });
-
-  it("does not hold presets saved before these rules against an unrelated edit", () => {
-    const legacy = presets(preset("a", "Same"), preset("b", "Same"), preset("c", "N".repeat(400)));
-    expect(workflowPresetsWriteProblems(legacy, legacy)).toEqual([]);
-    const renamed = presets(preset("a", "Same"), preset("b", "Same"), preset("c", "Short"));
-    expect(workflowPresetsWriteProblems(renamed, legacy)).toEqual([]);
-    const added = presets(...legacy.presets, preset("d", "same"));
-    expect(workflowPresetsWriteProblems(added, legacy)).toMatchObject([
-      { presetId: "d", kind: "name_duplicate" },
-    ]);
-    const lengthened = presets(
-      preset("a", "Same"),
-      preset("b", "x".repeat(401)),
-      preset("c", "N".repeat(400)),
-    );
-    expect(workflowPresetsWriteProblems(lengthened, legacy)).toMatchObject([
-      { presetId: "b", kind: "name_too_long" },
-    ]);
-  });
-
   it("checks trigger extras only when the write changes them", () => {
     const handEdited = {
       ...DEFAULT_SERVER_SETTINGS,
@@ -255,18 +61,6 @@ describe("settings write rules", () => {
       }),
     ).toHaveLength(1);
     expect(serverSettingsWriteProblems(DEFAULT_SERVER_SETTINGS, handEdited)).toHaveLength(2);
-  });
-
-  it("reports preset and trigger problems together for a whole settings write", () => {
-    const next = {
-      ...DEFAULT_SERVER_SETTINGS,
-      workflowPresets: presets(preset("a", "Same"), preset("b", "same")),
-      workflowTriggers: { extras: ["fan out", "Fan Out", "workflow"] },
-    };
-    expect(serverSettingsWriteProblems(DEFAULT_SERVER_SETTINGS, next)).toHaveLength(4);
-    expect(serverSettingsWriteProblems(DEFAULT_SERVER_SETTINGS, DEFAULT_SERVER_SETTINGS)).toEqual(
-      [],
-    );
   });
 });
 

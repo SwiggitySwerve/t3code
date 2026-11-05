@@ -1162,48 +1162,6 @@ export const StorageCleanupSettings = Schema.Struct({
 });
 export type StorageCleanupSettings = typeof StorageCleanupSettings.Type;
 
-export const WorkflowPresetTarget = Schema.Struct({
-  providerInstanceId: ProviderInstanceId,
-  model: TrimmedNonEmptyString,
-  options: Schema.optionalKey(ProviderOptionSelections),
-});
-export type WorkflowPresetTarget = typeof WorkflowPresetTarget.Type;
-
-/**
- * Stored scripts decode their saved presets with this schema, so it carries no rule a
- * preset written earlier could break. Name uniqueness and length are checked only when
- * settings are written (`workflowPresetsWriteProblems` in `@t3tools/shared/serverSettings`).
- */
-export const WorkflowPreset = Schema.Struct({
-  id: TrimmedNonEmptyString,
-  name: TrimmedNonEmptyString,
-  /** The first choice in the profile's model preference order. */
-  target: WorkflowPresetTarget,
-  /** Tried in order when `target` cannot be served at review or start; absent on older presets. */
-  fallbacks: Schema.optionalKey(Schema.Array(WorkflowPresetTarget)),
-});
-export type WorkflowPreset = typeof WorkflowPreset.Type;
-
-// Replace the list and its default together so deleting a default cannot leave a dangling reference.
-export const WorkflowPresets = Schema.Struct({
-  presets: Schema.Array(WorkflowPreset).check(
-    Schema.makeFilter(
-      (presets) =>
-        new Set(presets.map((preset) => preset.id)).size === presets.length ||
-        "Workflow preset ids must be unique.",
-    ),
-  ),
-  defaultPresetId: Schema.NullOr(TrimmedNonEmptyString),
-}).check(
-  Schema.makeFilter(
-    (settings) =>
-      settings.defaultPresetId === null ||
-      settings.presets.some((preset) => preset.id === settings.defaultPresetId) ||
-      "The workflow worker default must reference an existing preset.",
-  ),
-);
-export type WorkflowPresets = typeof WorkflowPresets.Type;
-
 /**
  * Extra words that put the coordinator into graph planning (see `@t3tools/shared/workflowIntent`).
  * The built-in word "workflow" is not stored here; `workflowStart` decides whether any trigger
@@ -1216,9 +1174,6 @@ export type WorkflowTriggers = typeof WorkflowTriggers.Type;
 
 export const ServerSettings = Schema.Struct({
   workflows: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
-  workflowPresets: WorkflowPresets.pipe(
-    Schema.withDecodingDefault(Effect.succeed({ presets: [], defaultPresetId: null })),
-  ),
   workflowTriggers: WorkflowTriggers.pipe(
     Schema.withDecodingDefault(Effect.succeed(Schema.decodeSync(WorkflowTriggers)({}))),
   ),
@@ -1571,7 +1526,6 @@ const ModelSelectionPatch = Schema.Struct({
 
 export const ServerSettingsPatch = Schema.Struct({
   workflows: Schema.optionalKey(Schema.Boolean),
-  workflowPresets: Schema.optionalKey(WorkflowPresets),
   workflowTriggers: Schema.optionalKey(
     Schema.Struct({
       extras: Schema.optionalKey(Schema.Array(TrimmedNonEmptyString)),

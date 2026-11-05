@@ -3,6 +3,7 @@ import * as Exit from "effect/Exit";
 import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 
+import { advertisedJsonSchema } from "../../advertisedJsonSchema.ts";
 import { OrchestratorToolkit } from "./tools.ts";
 
 // Oversized page sizes clamp on decode, so the schema has no `maximum`; Codex also drops
@@ -26,4 +27,12 @@ it("refuses a t3_thread_update whose fields do not fit its action", () => {
   expect(Exit.isSuccess(decode({ action: "rename", title: "New", environmentId: undefined }))).toBe(
     true,
   );
+});
+
+// The script field is a transformation, whose description the JSON Schema generator drops.
+it("advertises workflow_start's script description on the wire", () => {
+  const schema = advertisedJsonSchema(OrchestratorToolkit.tools.workflow_start) as {
+    readonly properties: Readonly<Record<string, { readonly description?: string }>>;
+  };
+  expect(schema.properties.script?.description).toContain("{ type: 'judgment', rubric, target? }");
 });

@@ -20,6 +20,7 @@ import {
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
+import * as DateTime from "effect/DateTime";
 import * as Duration from "effect/Duration";
 import * as Clock from "effect/Clock";
 import * as Deferred from "effect/Deferred";
@@ -2452,27 +2453,39 @@ describe("UsageService", () => {
   it.live("reports saved usage of a removed directory only for windows it reaches", () =>
     Effect.gen(function* () {
       const { transcript, settings, home } = yield* setup;
+      // Days before today, so the saved scan stays inside its 92-day retention whenever this runs.
+      const now = yield* Clock.currentTimeMillis;
+      const day = (daysAgo: number) =>
+        UsageDay.make(
+          DateTime.formatIso(DateTime.makeUnsafe(now - daysAgo * 86_400_000)).slice(0, 10),
+        );
+      const written = `${day(20)}T10:00:00Z`;
+      const window = { timeZone: "UTC", sinceDay: day(21), untilDay: day(19) };
       yield* Effect.promise(async () => {
-        await NodeFSP.writeFile(transcript, claudeLine(1, 5));
-        const lastWrite = Date.parse("2026-08-01T10:00:00Z") / 1000;
+        await NodeFSP.writeFile(
+          transcript,
+          claudeLine(1, 5).replace("2026-08-01T10:00:00Z", written),
+        );
+        const lastWrite = Date.parse(written) / 1000;
         await NodeFSP.utimes(transcript, lastWrite, lastWrite);
       });
       const service = yield* UsageService.make.pipe(
         Effect.provide(layerService({ prefix: "usage-service-saved-window-test", home, settings })),
       );
-      const first = yield* service.readSummary(WINDOW);
+      const first = yield* service.readSummary(window);
+      assert.isAbove(first.buckets.length, 0);
       yield* Effect.promise(() =>
         NodeFSP.rm(NodePath.join(home, "claude", "projects"), { recursive: true }),
       );
 
-      const reached = yield* service.readSummary(WINDOW);
+      const reached = yield* service.readSummary(window);
       assert.deepStrictEqual(reached.buckets, first.buckets);
       assert.strictEqual(reached.sources[0]?.status, "ok");
 
       const later = yield* service.readSummary({
         timeZone: "UTC",
-        sinceDay: UsageDay.make("2026-08-10"),
-        untilDay: UsageDay.make("2026-08-12"),
+        sinceDay: day(11),
+        untilDay: day(9),
       });
       assert.deepStrictEqual(later.buckets, []);
       assert.strictEqual(later.sources[0]?.status, "missing");
@@ -2598,6 +2611,48 @@ describe("UsageService", () => {
         assert.deepStrictEqual(cached.buckets, summary.buckets);
         assert.strictEqual(requests.length, 2);
       }).pipe(Effect.scoped),
+  );
+
+  it.live("peeks at the rate table from memory or its disk cache, never the network", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const requests: HttpClientRequest.HttpClientRequest[] = [];
+      const serviceLayer = layerService({
+        prefix: "usage-service-peek-test",
+        home,
+        settings,
+        onRatesFetch: (request) => requests.push(request),
+      });
+      const { service, stateDir } = yield* Effect.gen(function* () {
+        const config = yield* ServerConfig.ServerConfig;
+        return { service: yield* UsageService.make, stateDir: config.stateDir };
+      }).pipe(Effect.provide(serviceLayer));
+      const ratesFile = NodePath.join(stateDir, "usage-model-rates.json");
+      const writeRates = (inputCostPerToken: number, mtimeSeconds: number) =>
+        Effect.promise(async () => {
+          await NodeFSP.mkdir(stateDir, { recursive: true });
+          const document = {
+            "fake-model": { input_cost_per_token: inputCostPerToken, output_cost_per_token: 2e-6 },
+          };
+          await NodeFSP.writeFile(ratesFile, JSON.stringify({ fetchedAtMs: 0, document }));
+          await NodeFSP.utimes(ratesFile, mtimeSeconds, mtimeSeconds);
+        });
+
+      const none = yield* service.peekRates;
+      assert.strictEqual(none.pricing.status, "unavailable");
+      assert.strictEqual(none.table.size, 0);
+
+      yield* writeRates(1e-6, 1_000);
+      const cached = yield* service.peekRates;
+      assert.strictEqual(cached.pricing.status, "cached");
+      assert.strictEqual(cached.table.get("fake-model")?.inputCostPerToken, 1e-6);
+
+      // Another writer's newer cache file is read again.
+      yield* writeRates(3e-6, 2_000);
+      const rewritten = yield* service.peekRates;
+      assert.strictEqual(rewritten.table.get("fake-model")?.inputCostPerToken, 3e-6);
+      assert.strictEqual(requests.length, 0);
+    }).pipe(Effect.scoped),
   );
 
   it.live("does not orphan an in-flight scan when its first caller is interrupted", () =>

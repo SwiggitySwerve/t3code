@@ -4,6 +4,7 @@ import {
   OrchestratorMcpThreadReadResult,
   OrchestratorMcpThreadSendResult,
   OrchestratorMcpThreadWaitResult,
+  OrchestratorMcpWorkflowReportResult,
   ProjectId,
   RunId,
   ThreadId,
@@ -29,6 +30,7 @@ import { Argument, Command, Flag, GlobalFlag } from "effect/cli";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as ServerConfig from "../config.ts";
 import { mcpToolSession, type McpToolSession } from "../mcp/AcpMcpStdioBridge.ts";
+import { formatWorkflowReports } from "../mcp/workflowReport.ts";
 import { readPersistedServerRuntimeState } from "../serverRuntimeState.ts";
 import { projectLocationFlags, resolveCliAuthConfig } from "./config.ts";
 
@@ -93,13 +95,15 @@ export class ThreadProjectNotFoundError extends Schema.TaggedError<ThreadProject
 /** Exit code 2 lets a script tell "needs a human" apart from a failed run. */
 export class ThreadNeedsInputError extends Schema.TaggedError<ThreadNeedsInputError>()(
   "ThreadNeedsInputError",
-  { threadId: ThreadId },
+  { threadId: ThreadId, reason: Schema.Literals(["request", "workflow_review"]) },
 ) {
   override readonly [Runtime.errorReported] = false;
   override readonly [Runtime.errorExitCode] = 2;
 
   override get message(): string {
-    return `Thread ${this.threadId} is waiting for an answer. Open it in T3 Code to respond.`;
+    return this.reason === "workflow_review"
+      ? `Thread ${this.threadId} is waiting for you to approve or dismiss its workflow. Open it in T3 Code to decide.`
+      : `Thread ${this.threadId} is waiting for an answer. Open it in T3 Code to respond.`;
   }
 }
 
@@ -377,11 +381,17 @@ type WaitOutcome =
       readonly runId: RunId | null;
       readonly status: OrchestratorMcpThreadStatus;
     }
-  | { readonly type: "needs_input" };
+  | {
+      readonly type: "needs_input";
+      readonly reason: "request" | "workflow_review";
+      /** The run that ended its turn on the workflow review, whose reply describes it. */
+      readonly runId?: RunId;
+    };
 
 /**
- * Waits for this exact run, following a restart to its continuation, so a
- * message another client sends meanwhile cannot stand in for its result.
+ * Waits for this run, following a restart to its continuation, and then for
+ * the work it started: a workflow or delegated task wakes the thread for
+ * another run when it ends. The outcome is the run with the thread's answer.
  */
 export const waitForRun = Effect.fn("cli.thread.waitForRun")(function* (
   tools: ThreadTools,
@@ -389,24 +399,34 @@ export const waitForRun = Effect.fn("cli.thread.waitForRun")(function* (
   runId: RunId,
 ) {
   const waitSlice = (timeoutMs: number) =>
-    tools.call("t3_thread_wait", { threadId, runId, timeoutMs }, OrchestratorMcpThreadWaitResult);
-  const ended = (waited: OrchestratorMcpThreadWaitResult) =>
-    ({ type: "ended", runId: waited.runId, status: waited.status }) satisfies WaitOutcome;
+    tools.call(
+      "t3_thread_wait",
+      { threadId, runId, timeoutMs, untilDelegatedWorkSettled: true },
+      OrchestratorMcpThreadWaitResult,
+    );
+  // Settled, unless the workflow it ended its turn on waits for the person's approval.
+  const settled = (waited: OrchestratorMcpThreadWaitResult): WaitOutcome => {
+    const resultRunId = waited.resultRun?.runId ?? waited.runId;
+    return waited.awaitingAnswer === "workflow_review"
+      ? {
+          type: "needs_input",
+          reason: "workflow_review",
+          ...(resultRunId === null ? {} : { runId: resultRunId }),
+        }
+      : { type: "ended", runId: resultRunId, status: waited.resultRun?.status ?? waited.status };
+  };
   while (true) {
     const waited = yield* waitSlice(WAIT_SLICE_MS);
-    if (!waited.timedOut) return ended(waited);
-    // A pending request on this run, or on an earlier run this one is queued
-    // behind, blocks it until someone answers.
-    const { thread } = yield* tools.call(
-      "t3_thread_read",
-      { threadId, limit: 1, runLimit: 1 },
-      OrchestratorMcpThreadReadResult,
-    );
-    if (thread.pendingRequestCount > 0) {
-      // The count is thread-wide: if this run ended since the slice, the
-      // request belongs to a later run.
+    if (!waited.timedOut) return settled(waited);
+    // A question or approval on the thread or on a workflow agent or task it
+    // owns keeps the work from settling until someone answers.
+    if (waited.awaitingAnswer !== undefined) {
+      // The request may have been answered since the slice.
       const recheck = yield* waitSlice(1);
-      return recheck.timedOut ? ({ type: "needs_input" } satisfies WaitOutcome) : ended(recheck);
+      if (!recheck.timedOut) return settled(recheck);
+      if (recheck.awaitingAnswer !== undefined) {
+        return { type: "needs_input", reason: "request" } satisfies WaitOutcome;
+      }
     }
   }
 });
@@ -424,10 +444,11 @@ const finishRun = Effect.fn("cli.thread.finishRun")(function* (
   },
 ) {
   const outcome = yield* waitForRun(tools, input.threadId, input.runId);
-  const runId = outcome.type === "ended" ? (outcome.runId ?? input.runId) : input.runId;
+  const runId = outcome.runId ?? input.runId;
   const status = outcome.type === "ended" ? outcome.status : "waiting";
+  // A review waiting for approval keeps the reply that presents it.
   const reply =
-    status === "completed"
+    status === "completed" || (outcome.type === "needs_input" && outcome.runId !== undefined)
       ? yield* runResultText(tools, input.threadId, runId, "assistant_message")
       : null;
   const error =
@@ -440,7 +461,7 @@ const finishRun = Effect.fn("cli.thread.finishRun")(function* (
     yield* Console.log(reply);
   }
   if (outcome.type === "needs_input") {
-    return yield* new ThreadNeedsInputError({ threadId: input.threadId });
+    return yield* new ThreadNeedsInputError({ threadId: input.threadId, reason: outcome.reason });
   }
   if (status !== "completed") {
     return yield* new ThreadRunEndedError({
@@ -481,7 +502,7 @@ const jsonFlag = Flag.Boolean("json").pipe(
 );
 const waitFlag = Flag.Boolean("wait").pipe(
   Flag.withDescription(
-    "Wait for the agent to finish and print its reply. Exits 1 if the run fails and 2 if it waits for an answer.",
+    "Wait until the agent and the workflows and tasks it started have finished, then print its last reply. Exits 1 if that run fails, and 2 if it or an agent it started waits for an answer, or its workflow waits for your approval.",
   ),
   Flag.withDefault(false),
 );
@@ -700,6 +721,38 @@ const threadShowCommand = Command.make("show", {
   ),
 );
 
+/** Prints a thread's workflow reports; JSON keeps every field, for aggregating across runs. */
+export const printWorkflowReport = Effect.fn("cli.thread.printWorkflowReport")(function* (
+  tools: ThreadTools,
+  threadId: ThreadId,
+  json: boolean,
+) {
+  const report = yield* tools.call(
+    "t3_workflow_report",
+    { threadId },
+    OrchestratorMcpWorkflowReportResult,
+  );
+  if (json) return yield* printJson(report);
+  if (report.workflows.length === 0) return yield* Console.log("This thread has no workflows.");
+  yield* Console.log(formatWorkflowReports(report));
+});
+
+const threadWorkflowReportCommand = Command.make("workflow-report", {
+  ...projectLocationFlags,
+  thread: threadArgument,
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Report a thread's workflows: one row per agent, groups by model family and check, and loop totals.",
+  ),
+  Command.withHandler((flags) =>
+    Effect.gen(function* () {
+      const threadId = yield* decodeThreadId(flags.thread);
+      yield* withThreadTools(flags, (tools) => printWorkflowReport(tools, threadId, flags.json));
+    }).pipe(reportThreadErrors),
+  ),
+);
+
 export const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Start, message, and read threads on the running server."),
   Command.withSubcommands([
@@ -707,5 +760,6 @@ export const threadCommand = Command.make("thread").pipe(
     threadStartCommand,
     threadSendCommand,
     threadShowCommand,
+    threadWorkflowReportCommand,
   ]),
 );

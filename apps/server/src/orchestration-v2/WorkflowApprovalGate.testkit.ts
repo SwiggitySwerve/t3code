@@ -29,5 +29,6 @@ export const layerOpen = Layer.succeed(
     guardGraphStart: (_input, start) => start(undefined),
     approve: noPendingRequest,
     dismiss: noPendingRequest,
+    awaitsDecision: () => Effect.succeed(false),
   }),
 );

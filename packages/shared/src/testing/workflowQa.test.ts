@@ -137,7 +137,7 @@ describe("workflow QA frames", () => {
   });
 
   it("fails a frame recorded twice, an empty element and an empty run", () => {
-    const frames = fullSet("settings-agents", "empty");
+    const frames = fullSet("sidebar-status", "queued");
     expect(kinds([...frames, frames[0]!, { ...frames[1]!, box: { width: 0, height: 4 } }])).toEqual(
       ["empty-box", "duplicate", "duplicate"],
     );
@@ -232,13 +232,13 @@ describe("workflow QA coverage", () => {
 
   it("fails a deleted fixture and a state nobody listed", () => {
     const frames = everything().filter(
-      (entry) => !(entry.surface === "settings-agents" && entry.state === "empty"),
+      (entry) => !(entry.surface === "sidebar-status" && entry.state === "queued"),
     );
     expect(verifyWorkflowQaCoverage(frames).map((problem) => problem.kind)).toEqual([
       "missing-state",
     ]);
     expect(
-      verifyWorkflowQaCoverage([...everything(), ...fullSet("settings-agents", "surprise")]).map(
+      verifyWorkflowQaCoverage([...everything(), ...fullSet("sidebar-status", "surprise")]).map(
         (problem) => problem.kind,
       ),
     ).toEqual(["unexpected-state"]);

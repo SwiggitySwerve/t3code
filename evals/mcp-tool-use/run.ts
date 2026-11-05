@@ -6,6 +6,7 @@
  * README.md for how to run it and add cases.
  */
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
 import * as NodeVM from "node:vm";
 import * as NodeZlib from "node:zlib";
@@ -15,9 +16,16 @@ import {
   ComposerContextRecord,
   DeviceOperationError,
   DeviceSummary,
+  graphReviewNext,
   OrchestratorMcpTaskRole,
+  ProviderDriverKind,
   ProviderInstanceId,
 } from "@t3tools/contracts";
+import { WorkflowStartMode, WorkflowTriggers } from "@t3tools/contracts/settings";
+import {
+  applyTurnTriggers,
+  workflowRequestOf,
+} from "@t3tools/provider-core/server/workflowTrigger";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -43,7 +51,10 @@ import { AttachmentToolkit } from "../../apps/server/src/mcp/toolkits/attachment
 import { DeviceToolkit } from "../../apps/server/src/mcp/toolkits/device/tools.ts";
 import { EnvironmentToolkit } from "../../apps/server/src/mcp/toolkits/environment/tools.ts";
 import { HtmlToolkit } from "../../apps/server/src/mcp/toolkits/html/tools.ts";
-import { OrchestratorToolkit } from "../../apps/server/src/mcp/toolkits/orchestrator/tools.ts";
+import {
+  OrchestratorToolkit,
+  toolsWithoutWorkflows,
+} from "../../apps/server/src/mcp/toolkits/orchestrator/tools.ts";
 import { PreviewToolkit } from "../../apps/server/src/mcp/toolkits/preview/tools.ts";
 import { PreviewControlsToolkit } from "../../apps/server/src/mcp/toolkits/previewControls/tools.ts";
 import { ProjectToolkit } from "../../apps/server/src/mcp/toolkits/project/tools.ts";
@@ -52,6 +63,11 @@ import {
   PullRequestsToolkit,
 } from "../../apps/server/src/mcp/toolkits/pullRequests/tools.ts";
 import { ThreadToolkit } from "../../apps/server/src/mcp/toolkits/thread/tools.ts";
+import {
+  concreteModelFamily,
+  graphAssignmentNotes,
+} from "../../apps/server/src/mcp/workflowAdvisory.ts";
+import { parseGraph, reviewGraph } from "../../apps/server/src/mcp/workflowGraph.ts";
 import { WorktreeToolkit } from "../../apps/server/src/mcp/toolkits/worktree/tools.ts";
 import {
   CLAUDE_PROVIDER,
@@ -87,6 +103,10 @@ const PRICES = {
   "claude-opus-5-5": { input: 4, output: 20, cacheWrite: 5, cacheRead: 0.2 },
 };
 type PricedModel = keyof typeof PRICES;
+// Claude Code exports ANTHROPIC_BASE_URL to its own shells, so a proxy for Claude models and the
+// shell simulator is opted into by this eval-only name.
+const ANTHROPIC_PROXY = process.env.EVAL_ANTHROPIC_BASE_URL?.replace(/\/+$/, "") || undefined;
+const ANTHROPIC_URL = `${ANTHROPIC_PROXY ?? "https://api.anthropic.com"}/v1`;
 const T3_PREFIX = "mcp__t3-code__";
 const RUNTIME_MARKER = "<runtime_info>";
 const TOOL_LOADED = "Tool loaded.";
@@ -136,7 +156,8 @@ const PriorToolCall = Schema.Struct({
 
 /**
  * One expected call. `args` match partially: `~text` is a case-insensitive substring,
- * `"<=N"` / `">=N"` bound a number, and keys may be dotted paths.
+ * `"<=N"` / `">=N"` bound a number, `"<absent>"` / `"<present>"` test whether a value is there,
+ * and keys may be dotted paths.
  */
 const McpToolUseCall = Schema.Struct({
   tool: Schema.String,
@@ -227,6 +248,11 @@ export const McpToolUseCase = Schema.Struct({
     harness: Schema.optional(Schema.Literals(["claude", "codex"])),
     /** The Linked environments beta is on, so T3 lists its link tools. */
     linkedEnvironments: Schema.optional(Schema.Boolean),
+    /**
+     * T3's workflows option is on, with this `workflowStart` setting. T3's text then covers
+     * workflows, and T3's own trigger decides from `prompt` whether to append its plan-first note.
+     */
+    workflows: Schema.optional(WorkflowStartMode),
     /** delegate_task `role` for a delegated child. T3 builds the child's first message from it. */
     delegateRole: Schema.optional(OrchestratorMcpTaskRole),
     context: Schema.optional(Schema.String),
@@ -239,6 +265,11 @@ export const McpToolUseCase = Schema.Struct({
         }),
       ),
     ),
+    /**
+     * Calls the agent already made in this turn, after the prompt, with T3's fields added to their
+     * results. The sample continues from there, so a case can start at one decision.
+     */
+    turnCalls: Schema.optional(Schema.Array(PriorToolCall)),
     world: Schema.optional(McpToolUseWorld),
     /**
      * Canned tool results by bare name, T3 or native. `"default"` uses the runner's result. For a
@@ -382,10 +413,57 @@ const enabledWhen = (predicate: () => boolean) =>
 const hiddenFromSubagents = enabledWhen(McpInvocationContext.hiddenFromSubagents);
 // The Linked environments beta starts off, and T3 lists its tools only while it is on.
 const hiddenWhileLinksOff = enabledWhen(McpInvocationContext.hiddenWhileLinksOff);
-const visibleT3Tools = (options: { readonly subagent?: boolean; readonly links?: boolean }) =>
-  t3Tools.filter(
+/** A thread caller holding every capability, with or without the one the workflows option grants. */
+const threadScope = (workflows: boolean): McpInvocationContext.McpInvocationScope => ({
+  environmentId: EnvironmentId.make("mcp-tool-use-eval"),
+  capabilities: new Set<McpInvocationContext.McpCapability>([
+    "orchestration",
+    "preview",
+    "worktree",
+    "device",
+    "pull-requests",
+    ...(workflows ? (["workflows"] as const) : []),
+  ]),
+  issuedAt: 0,
+  requestNamespace: "mcp-tool-use-eval",
+  thread: {
+    threadId: ThreadId.make("mcp-tool-use-eval"),
+    providerSessionId: "mcp-tool-use-eval",
+    providerInstanceId: ProviderInstanceId.make(CLAUDE_PROVIDER),
+  },
+  client: undefined,
+});
+const listedFor = (tool: Tool.Any, scope: McpInvocationContext.McpInvocationScope) => {
+  const predicate = Context.getOrUndefined(tool.annotations, McpSchema.EnabledWhen);
+  return (
+    predicate === undefined ||
+    Effect.runSync(
+      Effect.sync(() => predicate({ protocolVersion: "2025-06-18", capabilities: {} })).pipe(
+        Effect.provideService(McpInvocationContext.McpInvocationContext, scope),
+      ),
+    )
+  );
+};
+// The workflows option grants a thread the workflows capability. Without it T3 lists none of the
+// tools that need it, and delegate_task and create_threads advertise no workflow fields.
+const hiddenWhileWorkflowsOff = new Set(
+  t3SourceTools
+    .filter((tool) => listedFor(tool, threadScope(true)) && !listedFor(tool, threadScope(false)))
+    .map((tool) => `${T3_PREFIX}${tool.name}`),
+);
+const t3ToolsWithoutWorkflows: ReadonlyArray<ApiTool> = t3Tools.map((tool) => {
+  const narrowed = toolsWithoutWorkflows[tool.name.slice(T3_PREFIX.length)];
+  return narrowed === undefined ? tool : { ...tool, input_schema: advertisedJsonSchema(narrowed) };
+});
+export const visibleT3Tools = (options: {
+  readonly subagent?: boolean;
+  readonly links?: boolean;
+  readonly workflows?: boolean;
+}) =>
+  (options.workflows === true ? t3Tools : t3ToolsWithoutWorkflows).filter(
     (tool) =>
       (options.links === true || !hiddenWhileLinksOff.has(tool.name)) &&
+      (options.workflows === true || !hiddenWhileWorkflowsOff.has(tool.name)) &&
       !(options.subagent === true && hiddenFromSubagents.has(tool.name)),
   );
 
@@ -393,7 +471,7 @@ const visibleT3Tools = (options: { readonly subagent?: boolean; readonly links?:
  * T3's Claude Code options for an eval thread: its system prompt append and its hooks. `device` says
  * whether the thread holds the `device` capability, as agent device access decides.
  */
-const claudeQueryOptions = (model: Model, device = true) => {
+const claudeQueryOptions = (model: Model, device = true, workflows = false) => {
   // Refs whose device text follows the capability read deviceToolsAvailable; older ones ignore it.
   const input: Parameters<typeof makeClaudeQueryOptions>[0] & {
     readonly deviceToolsAvailable?: boolean;
@@ -404,13 +482,14 @@ const claudeQueryOptions = (model: Model, device = true) => {
     cwd: null,
     mcpServers: { "t3-code": { type: "http", url: "http://127.0.0.1/mcp" } },
     deviceToolsAvailable: device,
+    workflowsAvailable: workflows,
   };
   return makeClaudeQueryOptions(input);
 };
 
 /** Text T3 appends to Claude Code's system prompt. Delegated children get the same text. */
-export const t3SystemAppend = (model: Model, device = true) => {
-  const { systemPrompt } = claudeQueryOptions(model, device);
+export const t3SystemAppend = (model: Model, device = true, workflows = false) => {
+  const { systemPrompt } = claudeQueryOptions(model, device, workflows);
   if (isRecord(systemPrompt) && systemPrompt.type === "preset" && systemPrompt.append) {
     return systemPrompt.append;
   }
@@ -497,6 +576,8 @@ export const buildBase = (
     readonly nativeSubagent?: boolean;
     /** false: the thread has no agent device access, so T3's text leaves devices out. */
     readonly deviceAccess?: boolean;
+    /** T3's workflows option is on, so its text covers workflows. */
+    readonly workflows?: boolean;
   },
 ) => {
   const t3 = visibleT3Tools(options);
@@ -515,7 +596,9 @@ export const buildBase = (
   const nativeDeferred = deferredList.split("\n").filter((name) => name && !isT3Name(name));
   const names = [...nativeDeferred, ...t3.map((tool) => tool.name)].toSorted().join("\n");
   const { model } = options;
-  const append = options.nativeSubagent ? "" : t3SystemAppend(model, options.deviceAccess);
+  const append = options.nativeSubagent
+    ? ""
+    : t3SystemAppend(model, options.deviceAccess, options.workflows);
   const modelLine = `You are powered by the model named ${MODELS[model]}. The exact model ID is ${model}.`;
   const joined = systemTexts.join("\n");
   // The capture's home directory names its user. Cases use `/home/user` paths instead.
@@ -579,6 +662,8 @@ const buildCodexBase = (
     readonly links?: boolean;
     /** false: the thread has no agent device access, so T3's text leaves devices out. */
     readonly deviceAccess?: boolean;
+    /** T3's workflows option is on, so its text covers workflows. */
+    readonly workflows?: boolean;
   },
 ): Base => {
   const t3 = visibleT3Tools(options);
@@ -614,7 +699,7 @@ const buildCodexBase = (
   });
   const context = buildCodexAdditionalContext(
     { model: options.model, reasoningEffort: effort },
-    { browser: true, device: options.deviceAccess ?? true },
+    { browser: true, device: options.deviceAccess ?? true, workflows: options.workflows ?? false },
   );
   input.push(
     ...Object.entries(context).map(([key, entry]) => message(`<${key}>${entry.value}</${key}>`)),
@@ -818,6 +903,37 @@ const loadTools = (tools: Array<ApiTool>, id: string, found: ReadonlyArray<ApiTo
   return { type: "tool_result", tool_use_id: id, content };
 };
 
+const CODEX_DRIVER = ProviderDriverKind.make("codex");
+/** The settings default: no trigger words beyond T3's built-in "workflow". */
+const DEFAULT_WORKFLOW_TRIGGERS = Schema.decodeSync(WorkflowTriggers)({});
+
+/**
+ * What T3's trigger reads from the case's prompt when the case turns workflows on: a person typed
+ * it in the web client. "requested" appends the plan-first note and arms the approval gate.
+ */
+const workflowTrigger = ({ setup, prompt }: McpToolUseCase) => {
+  if (setup.workflows === undefined) return undefined;
+  const input = {
+    workflows: true,
+    workflowStart: setup.workflows,
+    workflowTriggers: DEFAULT_WORKFLOW_TRIGGERS,
+    typedText: prompt,
+    createdBy: "user",
+    creationSource: "web",
+    delegatedThread: false,
+    resumesEarlierTurn: false,
+  } as const;
+  return { input, request: workflowRequestOf(input) };
+};
+
+/** The prompt as T3 sends it, with the plan-first note when its trigger appends one. */
+const workflowTurn = ({ testCase, base }: Sample, prompt: string) => {
+  const trigger = workflowTrigger(testCase);
+  if (trigger === undefined) return prompt;
+  const driver = base.codex ? CODEX_DRIVER : CLAUDE_PROVIDER;
+  return applyTurnTriggers({ ...trigger.input, driver, text: prompt }, trigger.request);
+};
+
 /** Messages for a case: reminders, context, prior turns with real tool blocks, then the prompt. */
 export const buildMessages = (sample: Sample) => {
   const { testCase, base, tools } = sample;
@@ -839,8 +955,9 @@ export const buildMessages = (sample: Sample) => {
   push("user", ...reminders, ...notes.flatMap((note) => (note ? [reminder(note)] : [])));
   const toolSearch = findTool(base, "ToolSearch")?.name ?? "ToolSearch";
   let nextId = 0;
-  for (const turn of priorTurns) {
-    const calls = (turn.toolCalls ?? []).map((call) => {
+  /** Replays calls with real tool blocks; `asT3` adds the fields T3 adds to its results. */
+  const replay = (toolCalls: ReadonlyArray<typeof PriorToolCall.Type>, asT3: boolean) => {
+    const calls = toolCalls.map((call) => {
       const tool = findTool(base, call.tool);
       if (tool === undefined) throw new Error(`${testCase.id}: unknown prior tool ${call.tool}.`);
       if (call.result === "default" && isDeviceTool(call.tool) && !sample.priorResults.has(call)) {
@@ -862,12 +979,22 @@ export const buildMessages = (sample: Sample) => {
     // One call per step, as most real turns run them.
     for (const { id, name, input, result, tool, prior } of calls) {
       push("assistant", { type: "tool_use", id, name, input });
+      const bare = normalizeToolName(tool.name);
+      // In this turn, "default" is T3's own result, as for a call the sample makes.
+      const value =
+        asT3 && result === "default" && !isDeviceTool(bare)
+          ? t3Default(sample, bare, isRecord(input) ? input : {})
+          : result;
       const replayed =
-        normalizeToolName(tool.name) === "orchestrator_capabilities"
-          ? capabilities(sample, result)
-          : (sample.priorResults.get(prior) ?? result);
+        bare === "orchestrator_capabilities"
+          ? capabilities(sample, value)
+          : (sample.priorResults.get(prior) ??
+            (asT3 ? withProductFields(bare, value, role === "delegated-child") : value));
       push("user", toolResult(id, replayed));
     }
+  };
+  for (const turn of priorTurns) {
+    replay(turn.toolCalls ?? [], false);
     if (turn.text) push(turn.role, text(turn.text));
   }
   const prompt =
@@ -875,11 +1002,12 @@ export const buildMessages = (sample: Sample) => {
       ? testCase.prompt
       : projectComposerContextForProvider({ text: testCase.prompt, ...testCase.promptContext });
   const childPrompt = () => taskPrompt({ task: prompt, role: delegateRole });
-  push("user", text(role === "delegated-child" ? childPrompt() : prompt));
+  push("user", text(role === "delegated-child" ? childPrompt() : workflowTurn(sample, prompt)));
   // Claude Code gives a subagent its SubagentStart hooks' context as a reminder after the task.
   if (native && base.subagentContext) {
     push("user", reminder(`SubagentStart hook additional context: ${base.subagentContext}`));
   }
+  replay(testCase.setup.turnCalls ?? [], true);
   return messages;
 };
 
@@ -933,6 +1061,98 @@ const pullRequest = (repo: string, input: Readonly<Record<string, unknown>>) => 
     number,
     url: url || `https://github.com/${repository}/pull/${number}`,
   };
+};
+
+/**
+ * T3's review of the agent's graph over the case's files: T3's parser, layers, write conflicts,
+ * input blockers, digest and advisory. Approval is required while the prompt is a person's
+ * workflow request, when T3's gate is armed. Targets are the eval's: T3 resolves them against the
+ * live catalog, and here a node without one runs on the caller.
+ */
+const graphReviewDefault = (sample: Sample, input: Readonly<Record<string, unknown>>) => {
+  const files = sample.testCase.setup.world?.files;
+  const hashes = Object.fromEntries(
+    Object.entries(isRecord(files) ? files : {}).map(([path, content]) => {
+      const bytes = Buffer.from(valueText(content));
+      const sha256 = NodeCrypto.createHash("sha256").update(bytes).digest("hex");
+      return [path, { sha256, sizeBytes: bytes.length }];
+    }),
+  );
+  const review = reviewGraph(input.graph, hashes);
+  const parsed = parseGraph(input.graph);
+  const ready = review.digest !== null && review.blockers.length === 0;
+  const approvalRequired = workflowTrigger(sample.testCase)?.request === "requested";
+  const caller = {
+    providerInstanceId: sample.base.codex ? "codex" : "claudeAgent",
+    model: sample.base.model,
+  };
+  const nodes = parsed.ok ? Object.entries(parsed.graph.nodes) : [];
+  const concrete = nodes.map(([key, node]) => [key, { ...node, target: node.target ?? caller }]);
+  const modelOf = (target: unknown) =>
+    isRecord(target) && typeof target.model === "string" ? target.model : caller.model;
+  // T3 appends these after the digest, from the families its enabled providers list.
+  const assignmentNotes = graphAssignmentNotes({
+    coordinatorModel: caller.model,
+    enabledFamilies: new Set(
+      advertisedModels(sample).flatMap((model) => concreteModelFamily(model) ?? []),
+    ),
+    nodes: nodes.map(([nodeId, node]) => ({
+      nodeId,
+      source: node.target === undefined ? "caller" : "target",
+      model: modelOf(node.target),
+      retryModels: (node.retries ?? []).map(modelOf),
+      ...(node.verify?.type === "judgment"
+        ? {
+            judgment: {
+              model: modelOf(node.verify.target ?? node.target),
+              ownTarget: node.verify.target !== undefined,
+            },
+          }
+        : {}),
+    })),
+  });
+  const advisory =
+    review.advisory === undefined || assignmentNotes.length === 0
+      ? review.advisory
+      : { ...review.advisory, assignmentNotes };
+  return {
+    reviewId: `review-${sample.nextTask++}`,
+    approvalRequired,
+    next: graphReviewNext({ ready, approvalRequired }),
+    digest: review.digest,
+    ready,
+    targets: nodes.map(([nodeId, node]) => ({
+      nodeId,
+      source: node.target === undefined ? "caller" : "target",
+      target: node.target ?? caller,
+    })),
+    expandedGraph: parsed.ok ? { ...parsed.graph, nodes: Object.fromEntries(concrete) } : null,
+    layers: review.layers,
+    writeConflicts: review.writeConflicts,
+    inputs: Object.entries(review.inputs).map(([path, hash]) =>
+      typeof hash === "string"
+        ? { path, status: hash, sha256: null, sizeBytes: null }
+        : { path, status: "found", sha256: hash.sha256, sizeBytes: hash.sizeBytes },
+    ),
+    blockers: review.blockers,
+    ...(advisory === undefined ? {} : { advisory }),
+  };
+};
+
+/** The model ids the agent's capabilities list: the case's own, else the eval's catalog. */
+const advertisedModels = ({ testCase }: Sample): ReadonlyArray<string> => {
+  const listed =
+    testCase.setup.mocks?.orchestrator_capabilities ??
+    testCase.setup.turnCalls?.find((call) => call.tool === "orchestrator_capabilities")?.result;
+  const providers =
+    isRecord(listed) && Array.isArray(listed.providers) ? listed.providers : PROVIDERS;
+  return providers.flatMap((provider: unknown) =>
+    isRecord(provider) && Array.isArray(provider.models)
+      ? provider.models.flatMap((model: unknown) =>
+          isRecord(model) && typeof model.id === "string" ? [model.id] : [],
+        )
+      : [],
+  );
 };
 
 /** A believable T3 result for a tool the case does not mock. */
@@ -1016,6 +1236,8 @@ const t3Default = (sample: Sample, name: string, input: Readonly<Record<string, 
         htmlRender: { attachmentId: "att-1", title: input.title ?? "Visual", height: 560 },
         message: HTML_RENDERED,
       };
+    case "graph_review":
+      return graphReviewDefault(sample, input);
     case "preview_status":
       return {
         available: false,
@@ -1071,6 +1293,14 @@ const withProductFields = (name: string, value: unknown, child: boolean): unknow
       return listed("matches");
     case "link_pull_request":
       return child ? { ...value, next: CHILD_PULL_REQUEST_REPORT_NEXT } : value;
+    case "graph_review": {
+      const { ready, approvalRequired } = value;
+      if (value.next !== undefined || typeof ready !== "boolean") return value;
+      if (typeof approvalRequired !== "boolean") return value;
+      // In T3's order: next follows reviewId and approvalRequired.
+      const next = graphReviewNext({ ready, approvalRequired });
+      return { reviewId: value.reviewId, approvalRequired, next, ...value };
+    }
     default:
       return value;
   }
@@ -1314,6 +1544,8 @@ const answerToolCall = Effect.fn("evaluateMcpToolUse.answerToolCall")(function* 
 const BOUND = /^([<>]=)(-?\d+(?:\.\d+)?)$/;
 /** Partial match: `~text` is a case-insensitive substring, `<=N` / `>=N` bound a number. */
 const matches = (expected: unknown, actual: unknown): boolean => {
+  if (expected === "<absent>") return actual === undefined || actual === null;
+  if (expected === "<present>") return actual !== undefined && actual !== null;
   const bound = typeof expected === "string" ? BOUND.exec(expected) : null;
   if (bound !== null) {
     const limit = Number(bound[2]);
@@ -1323,9 +1555,9 @@ const matches = (expected: unknown, actual: unknown): boolean => {
     return valueText(actual).toLowerCase().includes(expected.slice(1).toLowerCase());
   }
   if (Array.isArray(expected)) {
-    return (
-      Array.isArray(actual) && expected.every((item) => actual.some((at) => matches(item, at)))
-    );
+    // A list matches a list, or a record's values, such as a graph's nodes by id.
+    const items = Array.isArray(actual) ? actual : isRecord(actual) ? Object.values(actual) : null;
+    return items !== null && expected.every((item) => items.some((at) => matches(item, at)));
   }
   if (!isRecord(expected)) return expected === actual;
   const at = (path: string) =>
@@ -1401,7 +1633,9 @@ const requestBody = ({ base, tools }: Sample, effort: string, messages: unknown)
   max_tokens: 16_000,
   thinking: { type: "adaptive", display: "summarized" },
   output_config: { effort },
-  cache_control: { type: "ephemeral" },
+  // CLIProxyAPI counts top-level caching beside its own breakpoints and refuses more than 4, so a
+  // proxied run caches the system prompt only.
+  ...(ANTHROPIC_PROXY === undefined ? { cache_control: { type: "ephemeral" } } : {}),
   // Like Claude Code, cache the shared system prompt so every sample reuses it.
   system: base.system.map((block, i) =>
     i === base.system.length - 1 ? { ...block, cache_control: { type: "ephemeral" } } : block,
@@ -1556,7 +1790,7 @@ const postModel = Effect.fn("evaluateMcpToolUse.postModel")(function* (
     }),
   );
   const response = yield* HttpClientRequest.post(
-    `${proxy?.url ?? "https://api.anthropic.com/v1"}/${responses ? "responses" : "messages"}`,
+    `${proxy?.url ?? ANTHROPIC_URL}/${responses ? "responses" : "messages"}`,
   ).pipe(
     HttpClientRequest.setHeaders({
       ...(apiKey ? { "x-api-key": apiKey } : {}),
@@ -1945,6 +2179,7 @@ const main = Effect.gen(function* () {
     role: McpToolUseCase["setup"]["role"],
     deviceAccess: boolean,
     links: boolean,
+    workflows: boolean,
   ): Effect.Effect<Base, Schema.SchemaError> =>
     codex
       ? decodeCodexCapture(template).pipe(
@@ -1956,6 +2191,7 @@ const main = Effect.gen(function* () {
               subagent: role === "delegated-child",
               links,
               deviceAccess,
+              workflows,
             }),
           ),
         )
@@ -1968,6 +2204,7 @@ const main = Effect.gen(function* () {
               nativeSubagent: role === "native-subagent",
               links,
               deviceAccess,
+              workflows,
             });
             return role === "native-subagent"
               ? Effect.promise(() => t3SubagentContext(flags.model, deviceAccess)).pipe(
@@ -1978,18 +2215,22 @@ const main = Effect.gen(function* () {
         );
   // Codex has no native subagents; its cases with that role run as top-level threads.
   const baseKey = ({ setup }: McpToolUseCase) =>
-    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.linkedEnvironments === true}`;
-  const base = yield* buildFor("top", true, false);
-  const bases = new Map<string, Base>([["top:true:false", base]]);
+    `${codex && setup.role === "native-subagent" ? "top" : setup.role}:${setup.world?.deviceAgentAccess !== false}:${setup.linkedEnvironments === true}:${setup.workflows !== undefined}`;
+  const base = yield* buildFor("top", true, false, false);
+  const bases = new Map<string, Base>([["top:true:false:false", base]]);
   for (const testCase of selected) {
     const key = baseKey(testCase);
     if (bases.has(key)) continue;
-    const [role = "top", access, links] = key.split(":") as [
+    const [role = "top", access, links, workflows] = key.split(":") as [
       McpToolUseCase["setup"]["role"],
       string,
       string,
+      string,
     ];
-    bases.set(key, yield* buildFor(role, access === "true", links === "true"));
+    bases.set(
+      key,
+      yield* buildFor(role, access === "true", links === "true", workflows === "true"),
+    );
   }
   const baseFor = (testCase: McpToolUseCase) => bases.get(baseKey(testCase)) ?? base;
   const effort = flags.effort ?? base.codex?.reasoning.effort ?? "high";
@@ -2010,7 +2251,7 @@ const main = Effect.gen(function* () {
   const out = flags.out;
   if ((!apiKey && !codex) || out === undefined) {
     const message =
-      "Set ANTHROPIC_API_KEY and pass --out <directory>. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used.";
+      "Set ANTHROPIC_API_KEY and pass --out <directory>. ANTHROPIC_AUTH_TOKEN and ANTHROPIC_BASE_URL are never used; EVAL_ANTHROPIC_BASE_URL is.";
     return yield* Effect.die(new Error(message));
   }
   const config: Config = {
@@ -2041,9 +2282,18 @@ const main = Effect.gen(function* () {
     const { id, kind, pattern } = testCase;
     const identity = { id, kind, pattern, role: testCase.setup.role };
     const usage = { usage: emptyUsage(), shellUsage: emptyUsage() };
-    const privateValues = [config.apiKey, ...Object.values(config.proxy?.headers ?? {})]
+    // Keys, and the proxy addresses an error message could name.
+    const privateValues = [
+      config.apiKey,
+      ...Object.values(config.proxy?.headers ?? {}),
+      process.env.EVAL_ANTHROPIC_BASE_URL ?? "",
+      ANTHROPIC_PROXY ?? "",
+      config.proxy?.url ?? "",
+    ]
       .flatMap((value) => [value, value.replace(/^Bearer /i, "")])
-      .filter(Boolean);
+      .filter(Boolean)
+      // The longest first, so a trimmed address never leaves a raw one's tail behind.
+      .toSorted((left, right) => right.length - left.length);
     return runSample(testCase, config, baseFor(testCase), usage).pipe(
       inFlight.withPermits(1),
       Effect.matchCause({

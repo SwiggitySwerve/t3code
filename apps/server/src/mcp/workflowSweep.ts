@@ -25,11 +25,11 @@ export interface WaitingAgent {
   deadlineStopAccepted?: boolean;
 }
 
-/** The runner state the sweep reads and marks. */
+/** The runner state the sweep reads and marks; a mark settles once the row records it. */
 export interface SweptSession {
   waitingAgents(): Iterable<readonly [string, WaitingAgent]>;
-  markStalled(taskId: string): void;
-  markTimedOut(taskId: string): void;
+  markStalled(taskId: string): Promise<void>;
+  markTimedOut(taskId: string): Promise<void>;
 }
 
 export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(function* (
@@ -66,7 +66,7 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
       if (now - start >= agent.attemptTimeoutMs) {
         // Marked before the stop: the stop can end the attempt before it returns, and the deadline
         // has passed whether or not the stop is accepted.
-        session.markTimedOut(taskId);
+        yield* Effect.promise(() => session.markTimedOut(taskId));
         const accepted = yield* deps
           .stopAgent(workflow, taskId as NodeId, agent.childThreadId, "timed_out")
           .pipe(
@@ -90,7 +90,7 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
       continue;
     }
     if (now - agent.seenAt < agent.stallMs) continue;
-    session.markStalled(taskId);
+    yield* Effect.promise(() => session.markStalled(taskId));
     yield* deps
       .stopAgent(workflow, taskId as NodeId, agent.childThreadId, "stalled")
       .pipe(

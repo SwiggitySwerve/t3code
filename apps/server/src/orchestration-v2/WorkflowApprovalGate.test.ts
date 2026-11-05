@@ -389,6 +389,31 @@ describe("deciding a review", () => {
     ),
   );
 
+  it.effect(
+    "waits for the person only while a ready review of the armed request is undecided",
+    () =>
+      withGate((gate) =>
+        Effect.gen(function* () {
+          yield* gate.observeTurn(turn("message:1", "Plan this as a workflow"));
+          // Armed, but nothing the person could approve yet.
+          assert.isFalse(yield* gate.awaitsDecision(threadId));
+          yield* review(gate, "review:blocked", digestB, { ready: false });
+          assert.isFalse(yield* gate.awaitsDecision(threadId));
+          yield* review(gate, "review:1", digestA);
+          assert.isTrue(yield* gate.awaitsDecision(threadId));
+          assert.isFalse(yield* gate.awaitsDecision(otherThreadId));
+          // Approved: the agent is told to start it, so the person has nothing left to decide.
+          yield* gate.approve(decision("review:1"));
+          assert.isFalse(yield* gate.awaitsDecision(threadId));
+          yield* gate.observeTurn(turn("message:2", "Run another workflow"));
+          yield* review(gate, "review:2", digestB);
+          assert.isTrue(yield* gate.awaitsDecision(threadId));
+          yield* gate.dismiss(decision("review:2", digestB));
+          assert.isFalse(yield* gate.awaitsDecision(threadId));
+        }),
+      ),
+  );
+
   it.effect("says nothing is waiting when no request armed the gate", () =>
     withGate((gate) =>
       Effect.gen(function* () {

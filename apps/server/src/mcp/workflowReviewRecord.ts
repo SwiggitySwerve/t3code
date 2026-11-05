@@ -16,6 +16,7 @@ import {
 import * as Schema from "effect/Schema";
 
 import { graphPlan, type WorkflowGraph } from "./workflowGraph.ts";
+import { effortOf } from "./workflowRetries.ts";
 
 const isDigest = Schema.is(OrchestrationV2WorkflowReviewDigest);
 
@@ -25,17 +26,25 @@ function clip(text: string): string {
     : `${text.slice(0, WORKFLOW_REVIEW_MAX_TEXT_LENGTH - 1)}\u2026`;
 }
 
+/** Provider, model and effort: a retry that only raises effort must not read as a repeat. */
 function targetOf(
   target:
-    | { readonly providerInstanceId?: string | undefined; readonly model?: string | undefined }
+    | {
+        readonly providerInstanceId?: string | undefined;
+        readonly model?: string | undefined;
+        readonly options?: unknown;
+      }
     | undefined,
 ): OrchestrationV2WorkflowReviewTarget | undefined {
   if (target === undefined) return undefined;
   const { providerInstanceId, model } = target;
-  if (providerInstanceId === undefined && model === undefined) return undefined;
+  const effort = effortOf(target.options);
+  if (providerInstanceId === undefined && model === undefined && effort === undefined)
+    return undefined;
   return {
     ...(providerInstanceId === undefined ? {} : { providerInstanceId }),
     ...(model === undefined ? {} : { model }),
+    ...(effort === undefined ? {} : { effort: clip(effort) }),
   };
 }
 
@@ -69,6 +78,7 @@ export function workflowReviewRecord(
     const entry = targets.get(node.key);
     const worker = targetOf(entry?.target);
     const judge = targetOf(entry?.judgmentTarget);
+    const retries = entry?.retries?.flatMap((rung) => targetOf(rung) ?? []);
     const check = graph?.nodes[node.key]?.verify?.type;
     const dependsOnMore = node.dependsOn.length - WORKFLOW_REVIEW_MAX_DEPENDENCIES;
     return {
@@ -79,6 +89,7 @@ export function workflowReviewRecord(
       ...(dependsOnMore > 0 ? { dependsOnMore } : {}),
       ...(worker === undefined ? {} : { worker }),
       ...(judge === undefined ? {} : { judge }),
+      ...(retries === undefined || retries.length === 0 ? {} : { retries }),
       ...(check === undefined ? {} : { check }),
     };
   });

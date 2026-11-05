@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off -- graph review hashes pure, normalized values synchronously.
 import * as NodeCrypto from "node:crypto";
 
-import type { OrchestrationV2WorkflowPlan } from "@t3tools/contracts";
+import type { OrchestrationV2WorkflowPlan, WorkflowAgentTargetSource } from "@t3tools/contracts";
 import { stableStringify } from "@t3tools/shared/relaySigning";
 import { workflowGraphFailureSummary } from "@t3tools/shared/workflowGraphResult";
 
@@ -16,8 +16,9 @@ import {
   scopesOverlap,
   type WorkflowCheck,
 } from "./workflowChecks.ts";
-import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW, maxAgentsPerCall } from "./workflowLimits.ts";
+import { MAX_AGENTS_PER_WORKFLOW, maxAgentsPerCall } from "./workflowLimits.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
+import { parseRetries } from "./workflowRetries.ts";
 
 type AttemptBudget = "short" | "standard" | "long";
 const ATTEMPT_BUDGETS = { short: 30 * 60_000, standard: 2 * 60 * 60_000, long: 6 * 60 * 60_000 };
@@ -35,14 +36,19 @@ type GraphInput =
       readonly outputId: string;
     };
 
+/** Agent presets were a Settings feature; a graph node or script that still names one is told so. */
+export const REMOVED_PRESET_MESSAGE =
+  "Agent presets were removed; set target from orchestrator_capabilities.";
+
 interface GraphNode {
   readonly subject: string;
   readonly description: string;
   readonly dependsOn: ReadonlyArray<string>;
   readonly phase?: string;
   readonly target?: unknown;
+  /** Review replaces each with the concrete target it resolves to, as it does `target`. */
+  readonly retries?: ReadonlyArray<unknown>;
   readonly model?: string;
-  readonly preset?: string;
   readonly role?: string;
   readonly schema?: unknown;
   readonly scopes?: FileScopes;
@@ -200,6 +206,7 @@ function parseNode(value: unknown): NodeParse {
     (entry) => parseFileRefs([entry], "outputs"),
   );
   const verify = optional(node.verify, parseCheck);
+  const retries = optional(node.retries, parseRetries);
   if (
     outputs !== undefined &&
     verify?.type === "structured" &&
@@ -211,7 +218,7 @@ function parseNode(value: unknown): NodeParse {
   const description = field(problems, () => text(node.description, "description"));
   const phase = optional(node.phase, (raw) => text(raw, "phase"));
   const model = optional(node.model, (raw) => text(raw, "model"));
-  const preset = optional(node.preset, (raw) => text(raw, "preset"));
+  if (node.preset !== undefined) problems.push("preset: " + REMOVED_PRESET_MESSAGE);
   const role = optional(node.role, (raw) => text(raw, "role"));
   const scopes = optional(node.scopes, parseScopes);
   const inputs = fileList(
@@ -238,8 +245,8 @@ function parseNode(value: unknown): NodeParse {
       dependsOn,
       ...(phase === undefined ? {} : { phase }),
       ...(node.target === undefined ? {} : { target: node.target }),
+      ...(retries === undefined ? {} : { retries }),
       ...(model === undefined ? {} : { model }),
-      ...(preset === undefined ? {} : { preset }),
       ...(role === undefined ? {} : { role }),
       ...(node.schema === undefined ? {} : { schema: node.schema }),
       ...(scopes === undefined ? {} : { scopes }),
@@ -270,26 +277,52 @@ function graphLayers(graph: WorkflowGraph): string[][] {
   return layers;
 }
 
-/** The graph as the app shows it: each node's label, wave and dependencies, without prompts. */
+/** How review chose a node's worker target, and its judgment check's when it has one. */
+export interface ReviewedTargetSources {
+  readonly worker: WorkflowAgentTargetSource;
+  readonly check?: WorkflowAgentTargetSource;
+}
+
+/**
+ * The graph as the app shows it: each node's label, wave and dependencies, without prompts, plus
+ * the shape facts the graph itself fixes and the target sources review found.
+ */
 export function graphPlan(
   graph: WorkflowGraph,
-  plannedTargets?: ReadonlyMap<string, unknown>,
+  sources?: ReadonlyMap<string, ReviewedTargetSources>,
 ): OrchestrationV2WorkflowPlan {
+  const dependents = new Map<string, number>();
+  for (const node of Object.values(graph.nodes))
+    for (const dep of node.dependsOn) dependents.set(dep, (dependents.get(dep) ?? 0) + 1);
   return {
     nodes: graphLayers(graph).flatMap((layer, wave) =>
       layer.map((key) => {
         const node = graph.nodes[key]!;
         const plannedIdentity = workflowPlannedIdentity(
-          plannedTargets?.get(key) ??
-            node.target ??
-            (node.model ? { model: node.model } : undefined),
+          node.target ?? (node.model ? { model: node.model } : undefined),
         );
+        const reviewed = sources?.get(key);
+        const reads = new Set([
+          ...(node.scopes?.read ?? []),
+          ...node.inputs.map((input) =>
+            input.kind === "workspace_snapshot" ? input.path : `${input.nodeId}#${input.outputId}`,
+          ),
+        ]);
         return {
           key,
           label: node.subject,
           wave,
           dependsOn: [...node.dependsOn],
           ...(plannedIdentity === undefined ? {} : { plannedIdentity }),
+          ...(reviewed === undefined ? {} : { targetSource: reviewed.worker }),
+          ...(reviewed?.check === undefined ? {} : { checkTargetSource: reviewed.check }),
+          features: {
+            fanIn: node.dependsOn.length,
+            fanOut: dependents.get(key) ?? 0,
+            check: node.verify?.type ?? "none",
+            reads: reads.size,
+            writes: writePaths(node).length,
+          },
         };
       }),
     ),
@@ -339,7 +372,7 @@ export function parseGraph(value: unknown): ParseResult {
   }
   // Judgment checks add judge agents, so the nodes' worst case is known once they are read.
   const agentsNeeded = Object.values(nodes).reduce(
-    (sum, node) => sum + maxAgentsPerCall(node.verify?.type),
+    (sum, node) => sum + maxAgentsPerCall(node.verify?.type, node.retries),
     0,
   );
   if (agentsNeeded > MAX_AGENTS_PER_WORKFLOW)
@@ -347,7 +380,7 @@ export function parseGraph(value: unknown): ParseResult {
       ok: false,
       problems: [
         ...problems,
-        `graph can start up to ${agentsNeeded} agents (each node, plus up to ${MAX_AGENT_ATTEMPTS} judges for each judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
+        `graph can start up to ${agentsNeeded} agents (each node, plus a judge for each work attempt of a judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
       ],
     };
   const paths = new Map<string, string>();
@@ -554,7 +587,7 @@ const runNode = async (key) => {
       attemptTimeoutMs: budgets[node.attemptBudget], report: true,
     };
     if (recordsNodes) options.node = key;
-    for (const field of ["target", "role", "schema", "scopes", "verify", "stallTimeoutMs"]) {
+    for (const field of ["target", "retries", "role", "schema", "scopes", "verify", "stallTimeoutMs"]) {
       if (node[field] !== undefined) options[field] = node[field];
     }
     let report;

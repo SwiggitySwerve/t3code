@@ -1,8 +1,14 @@
-import { assert, it } from "@effect/vitest";
+import { assert, expect, it } from "@effect/vitest";
 import { RunId, ThreadId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+import * as TestConsole from "effect/testing/TestConsole";
 
-import { type ThreadTools, waitForRun } from "./thread.ts";
+import {
+  printWorkflowReport,
+  ThreadNeedsInputError,
+  type ThreadTools,
+  waitForRun,
+} from "./thread.ts";
 
 const threadId = ThreadId.make("thread-1");
 const runId = RunId.make("run-1");
@@ -26,17 +32,16 @@ it.effect("--wait follows the sent run to its continuation's terminal status", (
         { threadId, runId, status: "running", timedOut: true },
         { threadId, runId: continuation, status: "failed", timedOut: false },
       ],
-      t3_thread_read: [{ thread: { pendingRequestCount: 0 } }],
     });
 
     const outcome = yield* waitForRun(tools, threadId, runId);
 
     assert.deepStrictEqual(outcome, { type: "ended", runId: continuation, status: "failed" });
     assert.deepStrictEqual(
-      calls.filter((entry) => entry.tool === "t3_thread_wait").map((entry) => entry.args),
+      calls.map((entry) => entry.args),
       [
-        { threadId, runId, timeoutMs: 15_000 },
-        { threadId, runId, timeoutMs: 15_000 },
+        { threadId, runId, timeoutMs: 15_000, untilDelegatedWorkSettled: true },
+        { threadId, runId, timeoutMs: 15_000, untilDelegatedWorkSettled: true },
       ],
     );
   }),
@@ -46,24 +51,56 @@ it.effect("--wait stops when the thread waits for an answer instead of polling f
   Effect.gen(function* () {
     const { tools } = scriptedTools({
       t3_thread_wait: [
-        { threadId, runId, status: "queued", timedOut: true },
-        { threadId, runId, status: "queued", timedOut: true },
+        { threadId, runId, status: "waiting", timedOut: true, awaitingAnswer: "thread" },
+        { threadId, runId, status: "waiting", timedOut: true, awaitingAnswer: "thread" },
       ],
-      t3_thread_read: [{ thread: { pendingRequestCount: 1 } }],
     });
 
-    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), { type: "needs_input" });
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "needs_input",
+      reason: "request",
+    });
   }),
 );
 
-it.effect("--wait reports its run's result when a later run is the one waiting", () =>
+// The coordinator's own run has ended and holds no request; only the server
+// knows a workflow agent's thread asks something.
+it.effect("--wait stops when an agent in the thread's workflow waits for an answer", () =>
+  Effect.gen(function* () {
+    const { tools, calls } = scriptedTools({
+      t3_thread_wait: [
+        { threadId, runId, status: "completed", timedOut: true },
+        { threadId, runId, status: "completed", timedOut: true, awaitingAnswer: "descendant" },
+        { threadId, runId, status: "completed", timedOut: true, awaitingAnswer: "descendant" },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "needs_input",
+      reason: "request",
+    });
+    assert.deepStrictEqual(
+      calls.map((entry) => (entry.args as { readonly timeoutMs: number }).timeoutMs),
+      [15_000, 15_000, 1],
+    );
+  }),
+);
+
+it.effect("--wait keeps waiting when the request was answered before the recheck", () =>
   Effect.gen(function* () {
     const { tools } = scriptedTools({
       t3_thread_wait: [
-        { threadId, runId, status: "running", timedOut: true },
-        { threadId, runId, status: "completed", timedOut: false },
+        { threadId, runId, status: "completed", timedOut: true, awaitingAnswer: "descendant" },
+        // Answered, and the workflow agent works on.
+        { threadId, runId, status: "completed", timedOut: true },
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId, status: "completed" },
+        },
       ],
-      t3_thread_read: [{ thread: { pendingRequestCount: 1 } }],
     });
 
     assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
@@ -72,4 +109,164 @@ it.effect("--wait reports its run's result when a later run is the one waiting",
       status: "completed",
     });
   }),
+);
+
+it.effect("--wait reports the run a workflow's completion wakes, not the first turn", () =>
+  Effect.gen(function* () {
+    const wake = RunId.make("run-2");
+    const { tools } = scriptedTools({
+      t3_thread_wait: [
+        // The first turn ended, but its workflow is still running.
+        { threadId, runId, status: "completed", timedOut: true },
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId: wake, status: "completed" },
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "ended",
+      runId: wake,
+      status: "completed",
+    });
+  }),
+);
+
+it.effect("--wait reports the answered run when a request clears before the recheck", () =>
+  Effect.gen(function* () {
+    const { tools } = scriptedTools({
+      t3_thread_wait: [
+        { threadId, runId, status: "waiting", timedOut: true, awaitingAnswer: "thread" },
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId, status: "completed" },
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "ended",
+      runId,
+      status: "completed",
+    });
+  }),
+);
+
+// Ending the turn on a review settles the thread, but its workflow has not run.
+it.effect("--wait needs input when the turn ends on a workflow waiting for approval", () =>
+  Effect.gen(function* () {
+    const { tools } = scriptedTools({
+      t3_thread_wait: [
+        {
+          threadId,
+          runId,
+          status: "completed",
+          timedOut: false,
+          resultRun: { runId, status: "completed" },
+          awaitingAnswer: "workflow_review",
+        },
+      ],
+    });
+
+    assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
+      type: "needs_input",
+      reason: "workflow_review",
+      runId,
+    });
+    assert.include(
+      new ThreadNeedsInputError({ threadId, reason: "workflow_review" }).message,
+      "approve or dismiss its workflow",
+    );
+  }),
+);
+
+it.effect("workflow-report prints a thread's reports as text, or as JSON with --json", () =>
+  Effect.gen(function* () {
+    const report = {
+      threadId,
+      workflows: [
+        {
+          workflowId: "workflow:one",
+          name: "One",
+          kind: "script",
+          status: "completed",
+          agents: [
+            {
+              index: 0,
+              label: "work",
+              phase: null,
+              role: "worker",
+              node: null,
+              childThreadId: null,
+              provider: "codex",
+              model: "gpt-5.4",
+              effort: "high",
+              targetSource: "target",
+              usageStatus: "complete",
+              inputTokens: 10,
+              cachedInputTokens: 5,
+              outputTokens: 2,
+              totalTokens: 12,
+              costUsd: 0.0001,
+              costSource: "modelPriced",
+              attemptCosts: [],
+              durationMs: 1_000,
+              attempts: 1,
+              status: "completed",
+              outcome: "completed",
+              check: "none",
+              checkOutcome: null,
+            },
+          ],
+          summary: [
+            {
+              role: "worker",
+              family: "gpt",
+              check: "none",
+              agents: 1,
+              passed: 1,
+              firstTryPassRate: 1,
+              retries: 0,
+              medianTokensPerPassed: 12,
+            },
+          ],
+          loop: {
+            phases: 0,
+            agents: 1,
+            attempts: 1,
+            settledAgents: 1,
+            totalTokens: 12,
+            budgetTokens: null,
+            endedBy: "settled",
+          },
+        },
+      ],
+      pricing: { status: "cached", source: "rates.json", fetchedAt: null },
+    };
+    const { tools, calls } = scriptedTools({ t3_workflow_report: [report, report] });
+    yield* printWorkflowReport(tools, threadId, false);
+    yield* printWorkflowReport(tools, threadId, true);
+    const [text, json] = (yield* TestConsole.logLines).map(String);
+    expect(text?.split("\n")).toEqual([
+      "One (workflow:one): script, completed",
+      "#  label  phase  role    provider/model  effort  source  in/cached/out  cost     time  tries  outcome    check",
+      "0  work   -      worker  codex/gpt-5.4   high    target  10/5/2         $0.0001  1.0s  1      completed  -",
+      "",
+      "role    family  check  agents  first-try pass  retries  escalations  median tokens/passed",
+      "worker  gpt     none   1       100%            0        -            12",
+      "",
+      "phases 0, agents 1 (1 settled), attempts 1, tokens 12, ended by settled",
+      "",
+      "list prices: cached",
+    ]);
+    expect(JSON.parse(json!)).toEqual(report);
+    expect(calls.map((entry) => entry.args)).toEqual([{ threadId }, { threadId }]);
+  }).pipe(Effect.provide(TestConsole.layer)),
 );

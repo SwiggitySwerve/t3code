@@ -89,7 +89,7 @@ describe("T3 device instructions", () => {
   });
 });
 
-// Goldens from the supplied ablation report's variants/final/*.rendered.md.
+// Digest goldens of the rendered text; the evals in evals/mcp-tool-use cover its behaviour.
 describe("model-family orchestration instructions", () => {
   it.each([
     ["claude-opus-4-6", "anthropic"],
@@ -130,15 +130,15 @@ describe("model-family orchestration instructions", () => {
   });
 
   it.each([
-    ["", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
+    ["", "9bcf8736af1d149234b7b3ed07fd84013e8bbb2d0954506d714ec06ce510dc7e", 3891],
     [
       "anthropic/claude-opus-4-6",
-      "82ec47e2e8cbfccc7edb37998eb34969569cc4f9cc06f9e6baffdc498284e070",
-      3858,
+      "fdbde1d5c2b0cba15ff8b5afa9f2d5c8e0dfbfc3269f3086427a15bf613e46ae",
+      3975,
     ],
-    ["openai/gpt-5.4", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
-    ["unknown-model", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
-  ] as const)("matches the report for selected model %s", (model, digest, bytes) => {
+    ["openai/gpt-5.4", "9bcf8736af1d149234b7b3ed07fd84013e8bbb2d0954506d714ec06ce510dc7e", 3891],
+    ["unknown-model", "9bcf8736af1d149234b7b3ed07fd84013e8bbb2d0954506d714ec06ce510dc7e", 3891],
+  ] as const)("renders the reviewed text for selected model %s", (model, digest, bytes) => {
     const rendered = t3OrchestrationInstructions(true, model);
     expect(NodeCrypto.createHash("sha256").update(rendered).digest("hex")).toBe(digest);
     expect(Buffer.byteLength(rendered, "utf8")).toBe(bytes);

@@ -26,9 +26,9 @@ import {
   type WorkflowAgentOutcomeCategory,
   type OrchestratorMcpWorkflowUsage,
   type ModelSelection,
-  type WorkflowPresets,
-  type WorkflowPresetTarget,
   type OrchestratorMcpTarget,
+  type ProviderOptionSelection,
+  type WorkflowAgentTargetSource,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
@@ -37,6 +37,8 @@ import * as Fiber from "effect/Fiber";
 import * as Random from "effect/Random";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+
+import type { UsageSpeed } from "@t3tools/provider-core/server/usage";
 
 import type * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
 import { freshCommandId, isCommandIdSpent } from "../orchestration-v2/WorkflowCommandRetry.ts";
@@ -66,14 +68,16 @@ import {
 } from "./workflowHandoff.ts";
 import {
   type AgentAttemptHost,
+  type AttemptStopReason,
   type MutableAgent,
   agentAttemptKey,
   runAttempts,
   TERMINAL_TASK_STATUSES,
 } from "./workflowAgentAttempts.ts";
-import { GRAPH_DRIVER_SCRIPT } from "./workflowGraph.ts";
+import { GRAPH_DRIVER_SCRIPT, REMOVED_PRESET_MESSAGE } from "./workflowGraph.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { WorkflowPhases } from "./workflowPhases.ts";
+import { parseRetries, type RetryTarget, retriesCheckProblem } from "./workflowRetries.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
@@ -94,10 +98,8 @@ export interface WorkflowContext {
   readonly args: unknown;
   readonly workerTarget?: unknown;
   readonly workerTargetError?: string;
-  readonly workflowPresets?: WorkflowPresets;
-  readonly presetTargets?: Readonly<
-    Record<string, { readonly target: OrchestratorMcpTarget } | { readonly error: string }>
-  >;
+  /** Only for workflows started before agent presets were removed; see `legacyPresetSelection`. */
+  readonly legacyPresets?: LegacyPresetSnapshots;
   readonly callerSelection?: ModelSelection;
   /** New agents stop starting once recorded child usage reaches this limit. */
   readonly budgetTokens?: number;
@@ -108,100 +110,66 @@ export interface WorkflowContext {
   readonly previousWorkflow?: OrchestrationV2SubagentWorkflow;
 }
 
-export interface WorkflowPreference {
-  readonly presetId: string;
-  readonly presetName: string;
-  readonly entries: ReadonlyArray<WorkflowPresetTarget>;
-}
-
 /**
- * Whether two profile entries are the same choice: provider instance, model and options. An
- * entry without `options` inherits the caller's, so it is not the same as one with `options: []`.
+ * What a workflow started before agent presets were removed stored at its start: the default
+ * preset's id and the target each preset resolved to. A resumed script that still names a
+ * preset gets that frozen target, so its agents keep their identities.
  */
-export function sameWorkflowPresetTarget(
-  a: WorkflowPresetTarget,
-  b: WorkflowPresetTarget,
-): boolean {
-  if (a.providerInstanceId !== b.providerInstanceId || a.model !== b.model) return false;
-  const left = a.options;
-  const right = b.options;
-  if (left === undefined || right === undefined) return left === right;
-  return (
-    left.length === right.length &&
-    left.every(
-      (option, index) => option.id === right[index]!.id && option.value === right[index]!.value,
-    )
-  );
-}
-
-/** A profile's model preference order: its primary target, then its fallbacks. */
-export function presetPreference(preset: WorkflowPresets["presets"][number]): WorkflowPreference {
-  return {
-    presetId: preset.id,
-    presetName: preset.name,
-    entries: [preset.target, ...(preset.fallbacks ?? [])],
-  };
+export interface LegacyPresetSnapshots {
+  readonly defaultPresetId: string | null;
+  readonly targets: Readonly<
+    Record<string, { readonly target: OrchestratorMcpTarget } | { readonly error: string }>
+  >;
 }
 
 /**
- * Select one whole request before the provider resolver applies caller inheritance. A preset
- * without a frozen snapshot also reports its `preference` order, whose first entry is `target`;
- * a snapshot is the resolved choice and carries no order, so a resume never re-reads one.
+ * Select one whole request before the provider resolver applies caller inheritance: the agent's
+ * own target or model, then the workflow's workerTarget, then the caller's model.
  */
 export function selectWorkflowTarget(
-  own: {
-    readonly target?: unknown;
-    readonly model?: string | undefined;
-    readonly preset?: unknown;
-  },
+  own: { readonly target?: unknown; readonly model?: string | undefined },
   workerTarget?: unknown,
-  presets?: WorkflowPresets,
-  snapshots?: WorkflowContext["presetTargets"],
 ): {
   readonly target: unknown;
-  readonly plannedTarget?: unknown;
-  readonly source: "target" | "model" | "preset" | "workerTarget" | "defaultPreset" | "caller";
-  readonly error?: string;
-  readonly preference?: WorkflowPreference;
+  readonly source: "target" | "model" | "workerTarget" | "caller";
 } {
   if (own.target !== undefined) return { target: own.target, source: "target" };
   if (own.model !== undefined) return { target: { model: own.model }, source: "model" };
-  if (own.preset !== undefined && (typeof own.preset !== "string" || !own.preset.trim())) {
-    return {
-      target: undefined,
-      source: "preset",
-      error: "Workflow preset must be a non-empty id.",
-    };
-  }
-  const presetId =
-    own.preset ?? (workerTarget === undefined ? presets?.defaultPresetId : undefined);
-  if (presetId !== undefined && presetId !== null) {
-    const source = own.preset !== undefined ? "preset" : "defaultPreset";
-    const preset = presets?.presets.find((preset) => preset.id === presetId);
-    if (preset === undefined)
-      return {
-        target: undefined,
-        source,
-        error: `Workflow preset ${String(presetId)} was not found.`,
-      };
-    const snapshot = snapshots?.[preset.id];
-    if (snapshot !== undefined)
-      return {
-        target: "target" in snapshot ? snapshot.target : undefined,
-        plannedTarget: preset.target,
-        source,
-        ...("error" in snapshot ? { error: snapshot.error } : {}),
-      };
-    return { target: preset.target, source, preference: presetPreference(preset) };
-  }
   if (workerTarget !== undefined) return { target: workerTarget, source: "workerTarget" };
   return { target: undefined, source: "caller" };
+}
+
+/**
+ * A script's `preset` option, which ranked below its own target or model and above workerTarget,
+ * with the stored default preset applying only without a workerTarget. It resolves only from a
+ * legacy snapshot; without one the agent fails. Undefined when no preset applies.
+ */
+export function legacyPresetSelection(
+  preset: unknown,
+  workerTarget: unknown,
+  legacy: LegacyPresetSnapshots | undefined,
+): { readonly target: unknown; readonly error?: string } | undefined {
+  const presetId =
+    preset ?? (workerTarget === undefined ? legacy?.defaultPresetId : undefined) ?? undefined;
+  if (presetId === undefined) return undefined;
+  const snapshot =
+    typeof presetId === "string" && legacy !== undefined && Object.hasOwn(legacy.targets, presetId)
+      ? legacy.targets[presetId]
+      : undefined;
+  if (snapshot === undefined) return { target: undefined, error: REMOVED_PRESET_MESSAGE };
+  return "target" in snapshot
+    ? { target: snapshot.target }
+    : { target: undefined, error: snapshot.error };
 }
 
 export interface WorkflowAgentStart {
   readonly taskId: NodeId;
   readonly childThreadId: ThreadId;
   readonly model: string | null;
+  /** The model options the provider resolver settled on for this attempt. */
+  readonly options?: ReadonlyArray<ProviderOptionSelection> | undefined;
+  /** The service tier those options bill at, as the driver's usage reader decides. */
+  readonly speed?: UsageSpeed | undefined;
   readonly providerInstanceId: ProviderInstanceId;
   readonly driver: ProviderDriverKind;
 }
@@ -264,6 +232,14 @@ export interface WorkflowRunnerDeps {
     taskId: NodeId,
     onUpdate: (outcome: WorkflowAgentOutcome) => void,
   ) => Effect.Effect<WorkflowAgentOutcome, OrchestratorMcpFailure>;
+  /**
+   * Resolves an agent's target as its attempt would run, inheriting the caller's selection, and
+   * refuses a model the provider does not list or options it rejects, as graph review does.
+   */
+  readonly resolveTarget: (
+    workflow: WorkflowContext,
+    target: unknown,
+  ) => Effect.Effect<{ readonly model: string }, OrchestratorMcpFailure>;
   /** Whether an agent with this retry key was already started, by this run or an earlier one. */
   readonly agentStarted: (
     workflow: WorkflowContext,
@@ -360,8 +336,9 @@ class WorkflowSession {
   private readonly occurrences = new Map<string, number>();
   private readonly nodeOutcomes: Record<string, OrchestrationV2WorkflowNodeOutcome> = {};
   private readonly waiting = new Map<string, WaitingAgent>();
-  private readonly stalled = new Set<string>();
-  private readonly timedOut = new Set<string>();
+  /** Attempts this run stopped, and those an earlier run recorded as stopped. */
+  private readonly stops = new Map<string, AttemptStopReason>();
+  private readonly earlierStops: ReadonlyMap<string, AttemptStopReason>;
   private budgetExhausted = false;
   private sent: OrchestrationV2SubagentWorkflow = { phases: [], agents: [] };
   private sentProgress: string | undefined;
@@ -382,13 +359,19 @@ class WorkflowSession {
     this.deps = deps;
     this.sent = workflow.previousWorkflow ?? this.sent;
     this.budgetExhausted = workflow.previousWorkflow?.budget?.exhausted ?? false;
+    this.earlierStops = new Map(
+      (workflow.previousWorkflow?.agents ?? []).flatMap((agent) =>
+        (agent.attemptHistory ?? []).flatMap((record) =>
+          record.stoppedBy === undefined ? [] : [[record.taskId, record.stoppedBy] as const],
+        ),
+      ),
+    );
     this.attempts = {
       workflow,
       deps,
       signal: this.abort.signal,
       waiting: this.waiting,
-      stalled: this.stalled,
-      timedOut: this.timedOut,
+      stoppedBy: (taskId) => this.stops.get(taskId) ?? this.earlierStops.get(taskId),
       spentTokens: () => this.recordedUsage().spent ?? 0,
       markBudgetExhausted: () => {
         this.budgetExhausted = true;
@@ -406,12 +389,30 @@ class WorkflowSession {
     return [...this.waiting.entries()];
   }
 
-  markStalled(taskId: string): void {
-    this.stalled.add(taskId);
+  markStalled(taskId: string): Promise<void> {
+    // A passed deadline decides how the attempt is retried, whatever its silence.
+    return this.markStopped(taskId, this.stops.get(taskId) ?? "stalled");
   }
 
-  markTimedOut(taskId: string): void {
-    this.timedOut.add(taskId);
+  markTimedOut(taskId: string): Promise<void> {
+    return this.markStopped(taskId, "timed_out");
+  }
+
+  /**
+   * Records why the runner stops an attempt on its row and waits for the write, so a restart
+   * that replays the stopped attempt retries it as this run would have.
+   */
+  private async markStopped(taskId: string, reason: AttemptStopReason): Promise<void> {
+    this.stops.set(taskId, reason);
+    for (const agent of this.agents) {
+      if (!agent.attemptHistory?.some((record) => record.taskId === taskId)) continue;
+      agent.attemptHistory = agent.attemptHistory.map((record) =>
+        record.taskId === taskId ? { ...record, stoppedBy: reason } : record,
+      );
+    }
+    this.scheduleUpdate();
+    // A failed write leaves the stop to go ahead; only a restart loses the reason then.
+    while (this.updating !== undefined) await this.updating;
   }
 
   /** Finishes once the workflow is stopped or the server detaches this runner. */
@@ -602,6 +603,8 @@ class WorkflowSession {
     /** The label its retry key uses, when not the script's own; null keys it by content alone. */
     readonly keyLabel?: string | null;
     readonly judgmentFor?: OrchestrationV2WorkflowAgent["judgmentFor"];
+    /** A checker's source when it reuses its worker's target, which then reads as its own. */
+    readonly targetSource?: WorkflowAgentTargetSource | undefined;
   }): Promise<{
     readonly value: unknown;
     readonly entry: MutableAgent;
@@ -634,26 +637,34 @@ class WorkflowSession {
       throw new Error("Use bar.agent() to join a progress phase.");
     const label = stringOption(options, "label") ?? `agent ${this.agents.length + 1}`;
     const model = stringOption(options, "model");
-    const {
-      target,
-      source,
-      error,
-      plannedTarget = target,
-    } = selectWorkflowTarget(
-      { target: options.target, model, preset: options.preset },
+    const selected = selectWorkflowTarget(
+      { target: options.target, model },
       this.workflow.workerTarget,
-      this.workflow.workflowPresets,
-      this.workflow.presetTargets,
     );
+    // Accepted loss: a workflow stored before `presetTargets` snapshots resolves no preset, so on
+    // resume its preset agents fail, finished ones too: the target in their request key changed.
+    const legacy =
+      selected.source === "target" || selected.source === "model"
+        ? undefined
+        : legacyPresetSelection(
+            options.preset,
+            this.workflow.workerTarget,
+            this.workflow.legacyPresets,
+          );
+    const target = legacy === undefined ? selected.target : legacy.target;
+    const source = legacy === undefined ? selected.source : "preset";
+    const error = legacy?.error;
     let check: WorkflowCheck | undefined;
     let scopes: FileScopes | undefined;
     let inputs: ReadonlyArray<FileRef> = [];
     let outputs: ReadonlyArray<FileRef> = [];
     let attemptTimeoutMs: number | undefined;
+    let retries: ReadonlyArray<RetryTarget> | undefined;
     let invalid: string | undefined =
       error ?? (source === "workerTarget" ? this.workflow.workerTargetError : undefined);
     try {
       if (options.verify !== undefined) check = parseCheck(options.verify);
+      if (options.retries !== undefined) retries = parseRetries(options.retries);
       if (options.scopes !== undefined) scopes = parseScopes(options.scopes);
       if (options.inputs !== undefined) inputs = parseFileRefs(options.inputs, "inputs");
       if (options.outputs !== undefined) outputs = parseFileRefs(options.outputs, "outputs");
@@ -702,6 +713,7 @@ class WorkflowSession {
           ...(inputs.length === 0 ? [] : [{ inputs: inputs.map(withoutProducer) }]),
           ...(outputs.length === 0 ? [] : [{ outputs }]),
           ...(attemptTimeoutMs === undefined ? [] : [{ attemptTimeoutMs }]),
+          ...(retries === undefined ? [] : [{ retries }]),
         ]),
       )
       .digest("hex")
@@ -769,17 +781,29 @@ class WorkflowSession {
       })
     )
       throw new Error(`Cannot establish workflow agent identity for "${label}".`);
+    const planNode = (key: string | undefined) =>
+      key === undefined ? undefined : this.workflow.plan?.nodes.find((node) => node.key === key);
     const plannedIdentity =
       previous?.plannedIdentity ??
-      this.workflow.plan?.nodes.find((node) => node.key === graphNodeKey)?.plannedIdentity ??
-      workflowPlannedIdentity(plannedTarget);
+      planNode(graphNodeKey)?.plannedIdentity ??
+      workflowPlannedIdentity(target);
+    // Review writes a concrete target into every graph node, so a graph agent's own source is
+    // always "target"; the plan keeps the source review found.
+    const targetSource =
+      (request.judgmentFor === undefined
+        ? planNode(graphNodeKey)?.targetSource
+        : planNode(request.judgmentFor.graphNodeKey)?.checkTargetSource) ??
+      request.targetSource ??
+      (source === "preset" ? "legacyPreset" : source);
     const entry: MutableAgent = {
       index: previous?.index ?? this.nextAgentIndex++,
       requestKey,
       label,
       ...(graphNodeKey === undefined ? {} : { graphNodeKey }),
       ...(request.judgmentFor === undefined ? {} : { judgmentFor: request.judgmentFor }),
+      ...(check === undefined ? {} : { declaredCheck: check.type }),
       state: "queued",
+      targetSource,
       ...(plannedIdentity === undefined ? {} : { plannedIdentity }),
       ...(phaseRow === undefined ? {} : { phaseIndex: phaseRow.index, phaseTitle: phaseRow.title }),
       prompt: promptPreview,
@@ -813,17 +837,27 @@ class WorkflowSession {
             hasOutputs: outputs.length > 0,
           })
         : "";
-    const itemFor = (feedback: string) =>
+    const itemFor = (feedback: string, attemptTarget: unknown) =>
       decodeItem({
         task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${feedback}`,
         title: truncate(label, 500),
-        ...(target === undefined ? {} : { target }),
+        ...(attemptTarget === undefined ? {} : { target: attemptTarget }),
         ...(options.isolation === undefined ? {} : { isolation: options.isolation }),
         ...(options.role === undefined ? {} : { role: options.role }),
         ...(options.schema === undefined ? {} : { resultSchema: options.schema }),
       });
-    if (invalid !== undefined || Exit.isFailure(itemFor(""))) {
+    if (
+      invalid !== undefined ||
+      [target, ...(retries ?? [])].some((attemptTarget) =>
+        Exit.isFailure(itemFor("", attemptTarget)),
+      )
+    ) {
       settle("failed", `agent "${label}" has invalid options${invalid ? `: ${invalid}` : "."}`);
+      return done(null);
+    }
+    const retriesIssue = await this.retriesProblem(requestKey, target, retries, check);
+    if (retriesIssue !== undefined) {
+      settle("failed", `agent "${label}" has invalid options: ${retriesIssue}`);
       return done(null);
     }
     if (
@@ -862,6 +896,7 @@ class WorkflowSession {
           label,
           phase,
           target,
+          retries,
           requestKey,
           check,
           inputs,
@@ -874,6 +909,46 @@ class WorkflowSession {
     } finally {
       if (holdsWrites) this.releaseWrites(entry.index);
     }
+  }
+
+  /**
+   * Why an agent's retries cannot run, before its first attempt: a retry target that graph review
+   * would refuse, or one outside the family of the first target an inherited judgment runs on.
+   * Attempts still send targets as written. An agent an earlier run started may still be running,
+   * so it is never refused.
+   */
+  private async retriesProblem(
+    requestKey: string,
+    target: unknown,
+    retries: ReadonlyArray<RetryTarget> | undefined,
+    check: WorkflowCheck | undefined,
+  ): Promise<string | undefined> {
+    if (retries === undefined || retries.length === 0) return undefined;
+    const started = await Effect.runPromise(
+      this.deps
+        .agentStarted(this.workflow, agentAttemptKey(requestKey, 0))
+        .pipe(Effect.orElseSucceed(() => false)),
+    );
+    if (started) return undefined;
+    const resolve = (value: unknown) =>
+      Effect.runPromise(
+        this.deps.resolveTarget(this.workflow, value).pipe(
+          Effect.match({
+            onFailure: (failure) => ({ problem: failure.message }) as const,
+            onSuccess: (resolved) => ({ model: resolved.model }) as const,
+          }),
+        ),
+      );
+    const rungs: Array<{ readonly model: string }> = [];
+    for (const [index, rung] of retries.entries()) {
+      const resolved = await resolve(rung);
+      if ("problem" in resolved) return `retries[${index}]: ${resolved.problem}`;
+      rungs.push(resolved);
+    }
+    if (check?.type !== "judgment" || check.target !== undefined) return undefined;
+    const first = await resolve(target);
+    if ("problem" in first) return `target: ${first.problem}`;
+    return retriesCheckProblem(first.model, rungs);
   }
 
   /** Each input from a graph node with the stored result of the agent that ran it. */

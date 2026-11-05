@@ -36,6 +36,7 @@ import { hasOnlyPairedSurrogates } from "./threadMetadataMcp.ts";
 import { ThreadTitleRegeneration } from "./threadTitle.ts";
 import {
   WorkflowAgentOutcomeCategory,
+  WorkflowAgentTargetSource,
   OrchestrationV2Actor,
   OrchestrationV2CreationSource,
   OrchestrationV2RunStatus,
@@ -46,7 +47,6 @@ import {
 } from "./orchestrationV2.ts";
 import { ProviderOptionSelection, ProviderOptionSelectionValue } from "./model.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
-import { WorkflowPresets } from "./settings.ts";
 
 const OrchestratorMcpPrompt = TrimmedNonEmptyString.check(Schema.isMaxLength(120_000));
 const OrchestratorMcpTitle = TrimmedNonEmptyString.check(Schema.isMaxLength(512));
@@ -361,7 +361,7 @@ export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   }),
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), progress.phase(title, { total }, callback), log(...values), budget. agent options: label, phase, model or target, preset (a saved agent preset id), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), progress.phase(title, { total }, callback), log(...values), budget. agent options: label, phase, model or target, retries (up to 2 more targets, in order, for the attempts after a failed check or deadline; without it the one retry repeats target), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{result}} (a file holding the agent's final text), {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -403,34 +403,11 @@ export const OrchestratorMcpGraphReviewInput = Schema.Struct({
   workerTarget: OrchestratorMcpWorkflowStartInput.fields.workerTarget,
   graph: Schema.Unknown.annotate({
     description:
-      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, model?, preset?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to keep the reviewed targets after preset edits. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result). Complete valid example: " +
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, retries?: [target], model?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; retries lists up to 2 more, in order, for the attempts after a failed check or deadline; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to run exactly the reviewed targets. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result). Complete valid example: " +
       GRAPH_EXAMPLE,
   }),
 });
 export type OrchestratorMcpGraphReviewInput = typeof OrchestratorMcpGraphReviewInput.Type;
-
-/**
- * How a profile chose a worker: the first entry in its model preference order that is enabled,
- * serves the exact model and supports the options. The chosen target is part of the digest;
- * this record only explains it.
- */
-export const OrchestratorMcpProfileChoice = Schema.Struct({
-  presetId: Schema.String,
-  presetName: Schema.String,
-  chosenIndex: NonNegativeInt.annotate({
-    description:
-      "Position of the chosen entry in the model preference order; 0 is the first choice.",
-  }),
-  skipped: Schema.Array(
-    Schema.Struct({
-      index: NonNegativeInt,
-      providerInstanceId: ProviderInstanceId,
-      model: Schema.String,
-      reason: Schema.String,
-    }),
-  ).annotate({ description: "Entries tried before the chosen one, each with why it was skipped." }),
-});
-export type OrchestratorMcpProfileChoice = typeof OrchestratorMcpProfileChoice.Type;
 
 const LowHighRange = Schema.Struct({ low: NonNegativeInt, high: NonNegativeInt });
 
@@ -475,57 +452,45 @@ export const OrchestratorMcpGraphAdvisory = Schema.Struct({
     description:
       "About how far past budgetTokens one wave of running agents can go before it stops.",
   }),
+  assignmentNotes: Schema.optional(Schema.Array(Schema.String)).annotate({
+    description:
+      "Workers or judgment checks with no target, which run on your own model, and checks on the same model family as their worker. Absent when there are none.",
+  }),
 });
 export type OrchestratorMcpGraphAdvisory = typeof OrchestratorMcpGraphAdvisory.Type;
 
 export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   reviewId: Schema.String.annotate({
     description:
-      "Identifies this review. T3 Code shows the review to the user, who approves or dismisses it by this id and digest.",
+      "Identifies this review. When approvalRequired is true, the user approves or dismisses it in T3 Code by this id and digest.",
   }),
   approvalRequired: Schema.Boolean.annotate({
     description:
-      "true when the user asked for a workflow and must approve this review in T3 Code before graph_start runs it: end your turn, and T3 Code sends you a message with the approved digest. false when no approval is pending.",
+      "true while the user's request for a workflow waits for their approval in T3 Code, blocked reviews included. Follow next: only a ready review with approvalRequired true ends your turn, and T3 Code sends you a message with the approved digest once the user approves it. false and ready: no approval is needed, so start the work now with graph_start, or workflow_start if you were asked to run a script.",
+  }),
+  next: Schema.optional(Schema.String).annotate({
+    description: "What to do now with this review.",
   }),
   digest: Schema.NullOr(Schema.String).annotate({
     description:
-      "Covers the graph with concrete worker and judgment targets and its input hashes; null when parsing or target resolution fails.",
+      "Covers the graph with concrete worker, retry and judgment targets and its input hashes; null when parsing or target resolution fails.",
   }),
   ready: Schema.Boolean,
   expandedGraph: Schema.NullOr(Schema.Unknown).annotate({
     description:
-      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to keep the reviewed assignments after preset edits.",
+      "Self-contained graph with concrete targets. Pass this graph to graph_start with acceptedDigest to run exactly the reviewed assignments.",
   }),
   targets: Schema.Array(
     Schema.Struct({
       nodeId: Schema.String,
-      source: Schema.Literals([
-        "target",
-        "model",
-        "preset",
-        "workerTarget",
-        "defaultPreset",
-        "caller",
-      ]),
+      source: Schema.Literals(["target", "model", "workerTarget", "caller"]),
       target: OrchestratorMcpTarget,
       judgmentTarget: Schema.optional(OrchestratorMcpTarget),
-      presetId: Schema.optional(Schema.String).annotate({
-        description: "The profile that chose this worker; its choice is listed once in profiles.",
-      }),
+      retries: Schema.optional(Schema.Array(OrchestratorMcpTarget)),
     }),
   ).annotate({
     description:
-      "Concrete worker and judgment assignments included in the digest; source describes only how the worker was selected. presetId appears when a profile chose the worker.",
-  }),
-  profiles: Schema.optional(Schema.Array(OrchestratorMcpProfileChoice)).annotate({
-    description:
-      "One entry per profile that chose a worker in this review, with the entry chosen and why earlier ones were skipped. Look a node's profile up by its targets[].presetId.",
-  }),
-  availableProfiles: Schema.optional(
-    Schema.Array(Schema.Struct({ presetId: Schema.String, presetName: Schema.String })),
-  ).annotate({
-    description:
-      "Profiles the user saved in Settings, which nodes may use as their preset; absent when the user saved none. Read a profile's models from orchestrator_capabilities workflowPresets, for example to pick a verifier's target.",
+      "Concrete worker, retry and judgment assignments included in the digest; source describes only how the worker was selected, and caller means your own model.",
   }),
   layers: Schema.Array(Schema.Array(Schema.String)),
   writeConflicts: Schema.Array(
@@ -549,6 +514,20 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   }),
 });
 export type OrchestratorMcpGraphReviewResult = typeof OrchestratorMcpGraphReviewResult.Type;
+
+/**
+ * graph_review's `next`, said in the result itself: a coordinator that read approval into the
+ * schema's prose waited for one nobody asked, and one that took a dry-run review as the end of
+ * its job never started the work. The server and the evals both read it here.
+ */
+export const graphReviewNext = (
+  review: Pick<OrchestratorMcpGraphReviewResult, "ready" | "approvalRequired">,
+): string =>
+  !review.ready
+    ? "Fix the blockers, then call graph_review again."
+    : review.approvalRequired
+      ? "End your turn. T3 Code sends you the approved digest once the user approves this review."
+      : "No approval is needed, and nothing has run yet: call graph_start now with expandedGraph as graph and digest as acceptedDigest, or workflow_start if you were asked to run a script. Do not end your turn before the work starts.";
 
 export const OrchestratorMcpGraphStartInput = Schema.Struct({
   workerTarget: OrchestratorMcpGraphReviewInput.fields.workerTarget,
@@ -644,6 +623,144 @@ export const OrchestratorMcpWorkflowResult = Schema.Struct({
   ),
 });
 export type OrchestratorMcpWorkflowResult = typeof OrchestratorMcpWorkflowResult.Type;
+
+export const OrchestratorMcpWorkflowReportInput = Schema.Struct({
+  threadId: ThreadId,
+});
+export type OrchestratorMcpWorkflowReportInput = typeof OrchestratorMcpWorkflowReportInput.Type;
+
+const WorkflowReportCheck = Schema.Literals([
+  "none",
+  "process",
+  "structured",
+  "judgment",
+  "outputs",
+]);
+
+/**
+ * How an attempt's cost was found. modelPriced: complete usage at its model's list price for its
+ * service tier; partialUsage: a lower bound, as when some usage or its cache split is missing.
+ * The rest leave the cost null, never 0; tierUnpriced: its tier is unknown or has no list price.
+ */
+export const WorkflowReportCostSource = Schema.Literals([
+  "modelPriced",
+  "partialUsage",
+  "unpriced",
+  "tierUnpriced",
+  "noUsage",
+  "noRates",
+]);
+export type WorkflowReportCostSource = typeof WorkflowReportCostSource.Type;
+
+/** One attempt of an agent, priced at the model it ran on. */
+export const OrchestratorMcpWorkflowReportAttempt = Schema.Struct({
+  attempt: NonNegativeInt,
+  provider: Schema.String,
+  model: Schema.NullOr(Schema.String),
+  effort: Schema.NullOr(Schema.String),
+  options: Schema.NullOr(
+    Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Boolean])),
+  ),
+  /** The service tier it bills at; null when the row does not record it. */
+  speed: Schema.NullOr(Schema.Literals(["standard", "fast", "ultrafast"])),
+  state: Schema.String,
+  totalTokens: Schema.NullOr(NonNegativeInt),
+  costUsd: Schema.NullOr(Schema.Number),
+  costSource: WorkflowReportCostSource,
+});
+export type OrchestratorMcpWorkflowReportAttempt = typeof OrchestratorMcpWorkflowReportAttempt.Type;
+
+/** One agent of a workflow: who ran it, what it cost and how it ended. */
+export const OrchestratorMcpWorkflowReportAgent = Schema.Struct({
+  index: NonNegativeInt,
+  label: Schema.String,
+  phase: Schema.NullOr(Schema.String),
+  /** A checker is the agent a judgment check started to judge a worker. */
+  role: Schema.Literals(["worker", "checker"]),
+  node: Schema.NullOr(Schema.String),
+  /** The child thread of its latest attempt. */
+  childThreadId: Schema.NullOr(ThreadId),
+  provider: Schema.NullOr(Schema.String),
+  model: Schema.NullOr(Schema.String),
+  effort: Schema.NullOr(Schema.String),
+  targetSource: Schema.NullOr(WorkflowAgentTargetSource),
+  usageStatus: Schema.Literals(["complete", "partial", "unavailable"]),
+  inputTokens: Schema.NullOr(NonNegativeInt),
+  cachedInputTokens: Schema.NullOr(NonNegativeInt),
+  outputTokens: Schema.NullOr(NonNegativeInt),
+  totalTokens: Schema.NullOr(NonNegativeInt),
+  /** The sum of its attempts' costs; null when any attempt's cost is unknown. Absent from older servers. */
+  costUsd: Schema.optional(Schema.NullOr(Schema.Number)),
+  costSource: Schema.optional(WorkflowReportCostSource),
+  attemptCosts: Schema.optional(Schema.Array(OrchestratorMcpWorkflowReportAttempt)),
+  durationMs: Schema.NullOr(NonNegativeInt),
+  attempts: NonNegativeInt,
+  status: OrchestratorMcpWorkflowAgent.fields.status,
+  outcome: Schema.NullOr(WorkflowAgentOutcomeCategory),
+  /** The worker's declared or last-run check; a checker's own is none. */
+  check: WorkflowReportCheck,
+  /** not_run: the agent ended before its declared check ran, e.g. on a provider error. */
+  checkOutcome: Schema.NullOr(Schema.Literals(["passed", "failed", "error", "not_run"])),
+});
+export type OrchestratorMcpWorkflowReportAgent = typeof OrchestratorMcpWorkflowReportAgent.Type;
+
+/** Agents grouped by role, model family and check kind. */
+export const OrchestratorMcpWorkflowReportGroup = Schema.Struct({
+  role: OrchestratorMcpWorkflowReportAgent.fields.role,
+  family: Schema.String,
+  check: WorkflowReportCheck,
+  agents: NonNegativeInt,
+  passed: NonNegativeInt,
+  /** Agents that passed on their first attempt, over all agents of the group. */
+  firstTryPassRate: Schema.Number,
+  /**
+   * Runner retries: attempts past each agent's first. A coordinator's redo is a new agent, which
+   * the record does not link to the work it redoes.
+   */
+  retries: NonNegativeInt,
+  /**
+   * Retries that ran on another target than the attempt before them, as a declared `retries`
+   * list makes them. Absent from older servers.
+   */
+  escalations: Schema.optional(NonNegativeInt),
+  medianTokensPerPassed: Schema.NullOr(Schema.Number),
+});
+export type OrchestratorMcpWorkflowReportGroup = typeof OrchestratorMcpWorkflowReportGroup.Type;
+
+export const OrchestratorMcpWorkflowReport = Schema.Struct({
+  workflowId: NodeId,
+  name: Schema.NullOr(Schema.String),
+  kind: Schema.Literals(["script", "graph"]),
+  status: OrchestratorMcpWorkflowResult.fields.status,
+  agents: Schema.Array(OrchestratorMcpWorkflowReportAgent),
+  summary: Schema.Array(OrchestratorMcpWorkflowReportGroup),
+  loop: Schema.Struct({
+    /** Phases the run recorded; a script adds them as it reaches them. */
+    phases: NonNegativeInt,
+    agents: NonNegativeInt,
+    attempts: NonNegativeInt,
+    settledAgents: NonNegativeInt,
+    totalTokens: Schema.NullOr(NonNegativeInt),
+    budgetTokens: Schema.NullOr(NonNegativeInt),
+    /** budget: the token budget refused an agent; settled: it ended otherwise. */
+    endedBy: Schema.Literals(["running", "settled", "budget"]),
+  }),
+});
+export type OrchestratorMcpWorkflowReport = typeof OrchestratorMcpWorkflowReport.Type;
+
+export const OrchestratorMcpWorkflowReportResult = Schema.Struct({
+  threadId: ThreadId,
+  workflows: Schema.Array(OrchestratorMcpWorkflowReport),
+  /** The list-price table the costs came from; unavailable leaves every cost null. */
+  pricing: Schema.optional(
+    Schema.Struct({
+      status: Schema.Literals(["fresh", "cached", "unavailable"]),
+      source: Schema.String,
+      fetchedAt: Schema.NullOr(Schema.String),
+    }),
+  ),
+});
+export type OrchestratorMcpWorkflowReportResult = typeof OrchestratorMcpWorkflowReportResult.Type;
 
 export const OrchestratorMcpTaskStatusInput = Schema.Struct({
   taskId: NodeId,
@@ -945,6 +1062,12 @@ export const OrchestratorMcpThreadWaitResult = Schema.Struct({
   next: Schema.optional(OrchestratorMcpRunningTaskNext),
   /** With untilDelegatedWorkSettled, once settled: the run whose reply is the thread's result. */
   resultRun: Schema.optional(Schema.Struct({ runId: RunId, status: OrchestrationV2RunStatus })),
+  /**
+   * With untilDelegatedWorkSettled, what waits for a person: a question or approval on this thread
+   * or on a thread its unfinished delegated work owns, which holds the work unsettled, or, once
+   * settled, the workflow review the thread ended its turn on, which runs only once approved.
+   */
+  awaitingAnswer: Schema.optional(Schema.Literals(["thread", "descendant", "workflow_review"])),
 });
 export type OrchestratorMcpThreadWaitResult = typeof OrchestratorMcpThreadWaitResult.Type;
 
@@ -1001,6 +1124,16 @@ export const OrchestratorMcpProviderCapability = Schema.Struct({
       /** Omitted when it only restates the id. */
       label: Schema.optional(Schema.String),
       options: Schema.optional(Schema.Array(OrchestratorMcpModelOption)),
+      // From the usage pricing table, never price overrides: null when unknown, absent with no table.
+      listPrice: Schema.optional(
+        Schema.NullOr(
+          Schema.Struct({
+            inputUsdPerMTok: Schema.Finite,
+            cachedInputUsdPerMTok: Schema.Finite,
+            outputUsdPerMTok: Schema.Finite,
+          }),
+        ),
+      ),
     }),
   ),
   /** Models left out of `models`: unlisted visible models, or matches past the cap with `search`. */
@@ -1034,10 +1167,6 @@ export type OrchestratorMcpEnvironmentLinksResult =
   typeof OrchestratorMcpEnvironmentLinksResult.Type;
 
 export const OrchestratorMcpCapabilitiesResult = Schema.Struct({
-  workflowPresets: Schema.optional(WorkflowPresets).annotate({
-    description:
-      "Named worker presets and the configured workflow worker default in this environment. Use a preset id in workflow agent options or graph nodes. A preset lists its model preference order as target, then fallbacks; T3 picks the first entry that is available when the graph is reviewed or the script starts, and keeps it for the run. Presets do not affect delegate_task.",
-  }),
   parentThreadId: Schema.NullOr(ThreadId),
   inheritedProviderInstanceId: Schema.NullOr(ProviderInstanceId),
   inheritedModel: Schema.NullOr(Schema.String),

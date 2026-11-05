@@ -60,6 +60,18 @@ describe("orchestrator MCP contracts", () => {
       overshootBoundTokens: 288_000,
     };
     expect(decodeGraphReviewResult(base).advisory).toBeUndefined();
+    // An older server sends no next step.
+    expect(decodeGraphReviewResult(base).next).toBeUndefined();
+    expect(decodeGraphReviewResult({ ...base, next: "call graph_start now" }).next).toBe(
+      "call graph_start now",
+    );
+    // Nor retry targets; a current server lists the concrete ones review resolved.
+    const target = { providerInstanceId: "codex", model: "gpt-6-luna" };
+    const laddered = decodeGraphReviewResult({
+      ...base,
+      targets: [{ nodeId: "a", source: "target", target, retries: [target] }],
+    });
+    expect(laddered.targets[0]?.retries).toEqual([target]);
     expect(decodeGraphReviewResult({ ...base, advisory }).advisory).toEqual(advisory);
     expect(() =>
       decodeGraphReviewResult({ ...base, advisory: { ...advisory, fanOut: "stop" } }),
@@ -149,7 +161,7 @@ describe("orchestrator MCP contracts", () => {
     expect(() => decodeGraphReviewResult(undecided)).toThrow();
   });
 
-  it("decodes a review with and without the profile choices listed beside its targets", () => {
+  it("rejects a preset source and ignores the profile choices older servers listed", () => {
     const base = {
       reviewId: "review-2",
       approvalRequired: true,
@@ -162,35 +174,17 @@ describe("orchestrator MCP contracts", () => {
       blockers: [],
     };
     const target = { providerInstanceId: "codex", model: "gpt-5.4", options: [] };
-    const legacy = { ...base, targets: [{ nodeId: "a", source: "preset", target }] };
-    expect(decodeGraphReviewResult(legacy)).toEqual(legacy);
-    const profile = {
-      presetId: "worker",
-      presetName: "Worker",
-      chosenIndex: 1,
-      skipped: [
-        {
-          index: 0,
-          providerInstanceId: "claude",
-          model: "sonnet",
-          reason: "Provider is disabled.",
-        },
-      ],
-    };
-    const chosen = {
-      ...base,
-      targets: [
-        { nodeId: "a", source: "preset", target, presetId: "worker" },
-        { nodeId: "b", source: "preset", target, presetId: "worker" },
-      ],
-      profiles: [profile],
-    };
-    expect(decodeGraphReviewResult(chosen)).toEqual(chosen);
+    // Presets were removed: a review can no longer say a preset chose a target.
     expect(() =>
-      decodeGraphReviewResult({ ...chosen, profiles: [{ ...profile, chosenIndex: -1 }] }),
+      decodeGraphReviewResult({ ...base, targets: [{ nodeId: "a", source: "preset", target }] }),
     ).toThrow();
-    // A profile's skipped list is not repeated per node.
-    expect(JSON.stringify(chosen).split("Provider is disabled.").length - 1).toBe(1);
+    const current = { ...base, targets: [{ nodeId: "a", source: "workerTarget", target }] };
+    const decoded = decodeGraphReviewResult({
+      ...current,
+      profiles: [{ presetId: "worker", presetName: "Worker", chosenIndex: -1, skipped: [] }],
+    });
+    expect(decoded).toEqual(current);
+    expect("profiles" in decoded).toBe(false);
   });
   it("decodes cross-provider delegated task requests and durable results", () => {
     const request = decodeDelegateTaskInput({

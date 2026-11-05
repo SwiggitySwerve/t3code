@@ -777,7 +777,7 @@ export const layer: Layer.Layer<
       const mcpSession = yield* mcpSessions.read(projection.thread.id);
       const turnTriggersResult = yield* serverSettings.getSettings.pipe(
         Effect.map((settings): RunExecutionService.RunExecutionTurnTriggers => {
-          const { workflowTriggers, workflowStart, workflowPresets } = resolveProjectSettings(
+          const { workflowTriggers, workflowStart } = resolveProjectSettings(
             settings,
             projection.thread.projectId,
           ).settings;
@@ -785,7 +785,6 @@ export const layer: Layer.Layer<
             workflows: mcpSession?.capabilities?.has("workflows") === true,
             workflowTriggers,
             workflowStart,
-            workflowPresets,
           };
         }),
         Effect.result,
@@ -815,7 +814,6 @@ export const layer: Layer.Layer<
       const preparedText = applyTurnTriggers(
         {
           ...triggerRequest,
-          workflowPresets: turnTriggers.workflowPresets,
           driver: session.driver,
           text: userText,
         },

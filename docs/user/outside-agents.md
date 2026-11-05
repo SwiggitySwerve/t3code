@@ -110,9 +110,33 @@ runs in the project folder unless you pass `--worktree <base-branch>`. `send`
 never interrupts: a busy thread gets the message as its next turn. Pass `-` as
 the message to read it from stdin.
 
-`--wait` prints the agent's reply. It exits 1 when the run fails or stops, and
-2 when the agent waits for an answer you give in the app. Add `--json` for a
-result that always includes the thread id.
+`--wait` returns once the agent and any workflows or delegated tasks it started
+have finished, including the turn their completion wakes, and prints the
+agent's last reply. It exits 1 when that run fails or stops, and 2 when the
+agent, or an agent in a workflow or task it started, waits for an answer you
+give in the app. It also exits 2 when the agent ends its turn on a workflow
+plan that waits for your approval: nothing has run yet, and the reply printed
+is the agent's presentation of that plan. Approve or dismiss it in the app.
+Add `--json` for a result that always includes the thread id.
+
+`t3 thread workflow-report <thread>` prints each workflow the thread ran: one
+row per agent with its provider, model, effort, how its target was chosen,
+tokens, time, attempts, outcome and check, then agents grouped by model family
+and check kind, and the run's attempts and token budget. A check that was
+declared but never ran, for example after a provider error, shows as
+`not_run`. `retries` counts the runner's extra attempts, always on the same
+target; when the coordinator redoes work with another agent, that agent is a
+row of its own. `tries` includes retries after provider failures, so it can
+reach 4, while an agent gets only 2 attempts at its work. `cost` prices each
+attempt at the model and service tier it ran on, at the list prices usage
+reports use and without your price overrides. Instead of `$0` it says why a
+cost is unknown: `no rates` when no list price table could be read, `no usage`
+when an attempt reported no tokens, `unpriced` when its model has no list
+price, and `tier unpriced` when its tier is unknown or has no list price. A
+cost starting `>=` is a lower bound, because some usage or its cache split is
+missing. The last line says whether the list prices were fresh, cached or
+unavailable. `--json` prints the same report, with each agent's child thread
+id and per-attempt costs, for comparing runs.
 
 ## Remove an agent
 

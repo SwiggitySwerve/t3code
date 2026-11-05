@@ -14,6 +14,7 @@ pnpm mcp-tool-use --model claude-opus-5-5 --out runs/opus
 
 - `ANTHROPIC_API_KEY` in the repo root `.env` pays for Claude models and the Haiku shell simulator.
 - Codex models (`gpt-*` in `MODELS` in `run.ts`) go through a CLIProxyAPI server, set up as the `vibeproxy` model provider in `~/.codex/config.toml`. Keep the proxy under about 12 samples in flight across all runs.
+- `EVAL_ANTHROPIC_BASE_URL` sends Claude models and the shell simulator through a proxy instead, with `ANTHROPIC_API_KEY` as its key. The eval never reads `ANTHROPIC_BASE_URL`, which Claude Code sets in its own shells. A proxied run caches only the system prompt, because CLIProxyAPI refuses top-level caching beside its own breakpoints.
 - Flags: `--case <ids>`, `--cases <file.ndjson>`, `--samples <n>` (default 2, and a 3rd when the first 2 disagree), `--concurrency <n>` (samples in flight, default 8), `--max-steps <n>`, `--effort <level>`, `--dry-run` (prints request bodies, no model calls), and `--context` (prints the size of T3's text and schemas, no key needed).
 - `--baseline <results.jsonl> --stop-on-regression` stops as soon as a case that passed every baseline sample fails. Use it to test one copy change against a baseline run.
 - Cost: the existing non-device suite costs about $9 on Sonnet and $17 on Opus. The 16 device cases at 3 samples each cost about $5.70–5.90 on Opus and $2.90–3.40 on Sonnet (main's text–#25661), including the Haiku shell simulator; dry runs cost $0. Results record token costs for the agent and shell simulator. Codex proxy charges are outside that total; only its shell simulator is priced here, about $0.60–0.70 for the device cases.
@@ -25,8 +26,9 @@ Cases are JSON lines in `cases/`, one file per area. The case schema in `run.ts`
 
 - `kind`: `bad` reproduces a mistake, `guard` protects correct behavior, `control` is ordinary work.
 - `experience`: the real mistake, in a sentence. `source`: where it happened.
-- `setup`: the fake thread, its `world` (repo, branch, files, PRs, pages), `priorTurns`, and `mocks` for tool results.
-- `expect`: the checks, such as `calls`, `callsMustNot`, `maxCalls`, `order`, `textMust`, and `linked`. Device cases also use `device` to check every child brief, forbid raw UI commands, bound failed device actions per user turn, and require artifact paths in completed final answers.
+- `setup`: the fake thread, its `world` (repo, branch, files, PRs, pages), `priorTurns`, and `mocks` for tool results. `turnCalls` are calls the agent already made in this turn, after the prompt, so a case can start at one decision; T3's fields, such as graph_review's `next`, are added to their results as to mocks.
+- `setup.workflows`: T3's workflows option is on with this `workflowStart` setting (`off`, `keyword` or `always`). T3's text then covers workflows, and T3's own trigger reads the prompt, as a person's web message, to decide whether to append its plan-first note. As in T3, only then does the agent see the workflow tools (`workflow_start`, `graph_review`, `graph_start` and the rest gated on the workflows capability) and the workflow fields of `delegate_task` and `create_threads`. Without a mock, `graph_review` answers with T3's own review (`workflowGraph.ts`) of the agent's graph over the world's files, with approval required when the trigger read a request, and with T3's assignment notes in its advisory. Target resolution is the eval's: a node without a target runs on the caller, a target is taken as written rather than checked against the catalog, and the notes' enabled families are those of the models the case's capabilities list.
+- `expect`: the checks, such as `calls`, `callsMustNot`, `maxCalls`, `order`, `textMust`, and `linked`. In `args`, `"<absent>"` matches a value that is not there and `"<present>"` one that is. Device cases also use `device` to check every child brief, forbid raw UI commands, bound failed device actions per user turn, and require artifact paths in completed final answers.
 
 Check that the case builds with `--dry-run --case <id>`. Then run it on the text before your fix, where it must fail, and on the text after, where it must pass.
 
@@ -107,6 +109,30 @@ Raw-route checks inspect possible literal invocations; managed capture and recor
 Commands built at run time, external script files and full shell/interpreter semantics (including complex quoting, dynamic control flow and exception handling) are outside the bounded parser. Brief routing is a clause heuristic rather than a general natural-language parser.
 
 This API replay measures routing and recovery decisions. Screenshots return product text and metadata without rendered image blocks, and Codex code cells have no `image` helper, so a cell that calls it fails with `image is not defined`. The shell remains simulated, children are not executed, and `priorTurns` is synthetic context rather than native resume or compaction. It does not test launcher execution, binding, pruning, actual device state, transport failures or resource cleanup, and it models agent-device's session check rather than running it. DEL-02 checks managed recording start/stop and the final filename; it does not inspect video bytes, required flow, transforms, codec or size. Screenshots and final text do not establish delivered artifacts or honesty. Keep local real-harness results separate; their scores and costs are not API-replay results. Offline validation costs $0. Record fresh per-model baseline and candidate costs before using device-case scores as release evidence.
+
+## Workflow cases
+
+`cases/orchestration.ndjson` has four workflow cases from the meta-orchestrator E4 experiments. They turn workflows on with `setup.workflows`, start most samples after the coordinator's own `graph_review` (`turnCalls`), and get every review from T3's review code.
+
+| Case                                    | Kind    | What it checks                                                                                                                        |
+| --------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| workflow-script-dry-run-review-stops    | bad     | A workflow_start-worded job, after a ready review with approvalRequired false, starts graph_start or workflow_start in the same turn. |
+| workflow-request-review-awaits-approval | control | A requested workflow whose ready review needs approval starts nothing and is not reviewed again.                                      |
+| workflow-request-blocked-review-fixed   | guard   | A requested workflow whose review has a blocker (approvalRequired is true then too) is fixed and reviewed again, not resubmitted.     |
+| workflow-check-only-visible-tests       | bad     | The task that writes `src/semver.js` gets a judgment check with its own target, on Haiku or Luna and outside the worker's family.     |
+
+Passes before the cases were tightened, the text before the E4 fixes (`95ff692896`) → the fixed text, 10 samples per case on each side, at default effort. The old-text arm ran this eval on a checkout of the fixed text with T3's text files taken from `95ff692896`: `git checkout 95ff692896 -- apps/server/src/mcp/toolkits/orchestrator/tools.ts packages/contracts/src/orchestratorMcp.ts packages/provider-core/src/server/orchestrationInstructions.ts packages/provider-core/src/server/workflowTrigger.ts`, then a `graphReviewNext` appended to `orchestratorMcp.ts`, which the eval imports, returning the `next` lines `OrchestratorMcpService.ts` returned at `95ff692896`. Nothing else in `apps/` or `packages/` differs between the two texts. On the fixed text, five GPT check-case samples and one blocked-case sample failed at the proxy, so both cases were rerun with 10 fresh samples, shown here. A fresh run was used rather than topping up the errored slots, so each figure comes from one run under the same proxy conditions and has the same n as the old-text side; the first run's graded samples agree (check case 5/5, blocked case 9/9).
+
+| Case                                    | Opus 5.5      | GPT-6.1 Sol   |
+| --------------------------------------- | ------------- | ------------- |
+| workflow-script-dry-run-review-stops    | 10/10 → 10/10 | 10/10 → 10/10 |
+| workflow-request-review-awaits-approval | 10/10 → 10/10 | 10/10 → 10/10 |
+| workflow-request-blocked-review-fixed   | 10/10 → 10/10 | 5/10 → 10/10  |
+| workflow-check-only-visible-tests       | 1/10 → 8/10   | 5/10 → 9/10   |
+
+The tightened cases were regraded offline on these archived samples, with no model calls: Opus's check case goes from 1/10 → 8/10 to 0/10 → 6/10 (two fixed-text samples judged only a side node that wrote tests, while the code's task had a command check), and GPT's 5/10 → 9/10 becomes 0/10 → 9/10 (all five old-text passes judged only a side node). One fixed-text Opus sample of the control case now fails: it inspected the repo, found no tests, and reviewed a revised graph before ending the turn. The blocked case and the dry-run case are unchanged. Regrading checks the grader only: those samples saw the tool list and review results from before this change.
+
+The dry-run case does not fail on the old text: E4's stall was rare (7 of 113 archived GPT runs), and these samples did not show it. The evidence for that fix is the live runs named in the case's `source`. On the old text, GPT ended the turn on the blocked review in 5 of 10 samples ("the plan is blocked because I assumed a nonexistent spec path"), and Opus judged on Sonnet or Sol in 9 of 10. A round on Opus cost about $2.65 (old text) and $3.86 (fixed text) at list price; GPT ran through the proxy.
 
 ## Where T3's text lives
 

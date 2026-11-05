@@ -64,6 +64,7 @@ import * as PeerLinks from "./PeerLinks.ts";
 import { descriptorOf, layerLinkingEnvironment, linkTo, servePeer } from "./PeerLinks.testkit.ts";
 import * as RemoteDelegation from "./RemoteDelegation.ts";
 import * as PeerLinkRequests from "./PeerLinkRequests.ts";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 // The laptop's agent delegates a task to the box through a link. The box is
 // its real /mcp behind real OAuth, with one thread the test finishes; the
@@ -472,7 +473,9 @@ const boxToolkitLayer = (thread: BoxThread) => {
     Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
     Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
     Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
-    Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+    Layer.provide(
+      Layer.merge(WorkflowApprovalGateTestkit.layerOpen, UsageServiceTestkit.layerRates()),
+    ),
     Layer.provide(
       Layer.mock(ManagedProjectFolders.ManagedProjectFolders)({ namedProjectsRoot: "/p" }),
     ),
@@ -564,6 +567,7 @@ const makeLaptop = (
     const layerHere = McpHttpServer.layerOrchestratorToolkit.pipe(
       Layer.provideMerge(McpServer.McpServer.layer),
       Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+      Layer.provide(UsageServiceTestkit.layerRates()),
       Layer.provide(
         ServerConfig.layerTest(process.cwd(), { prefix: "t3-remote-delegation-here-" }).pipe(
           Layer.provide(NodeServices.layer),

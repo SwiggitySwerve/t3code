@@ -4,7 +4,8 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { assert, expect, it } from "@effect/vitest";
-import { ComposerContextId, EnvironmentId, ThreadId } from "@t3tools/contracts";
+import { ComposerContextId, EnvironmentId, graphReviewNext, ThreadId } from "@t3tools/contracts";
+import { workflowTurnNote } from "@t3tools/provider-core/server/workflowTrigger";
 import { projectComposerContextForProvider } from "@t3tools/shared/composerContextReferences";
 
 import {
@@ -341,6 +342,185 @@ it("replays earlier capability results with the model under test as the caller",
     .flatMap((message) => message.content)
     .find((block) => block.type === "tool_result" && String(block.content).includes("inherited"));
   assert.include(String(replayed?.content), '"inheritedModel":"claude-opus-5-5"');
+});
+
+it("sends a workflow turn as T3 does and resumes after this turn's calls with T3's fields", () => {
+  const base = buildBase(template, {
+    model: "claude-opus-5-5",
+    keepUserInstructions: false,
+    workflows: true,
+  });
+  assert.include(String(base.system[1]?.text), t3SystemAppend("claude-opus-5-5", true, true));
+  const review = { reviewId: "review-1", ready: true, approvalRequired: false, blockers: [] };
+  const testCase = (workflows: "off" | "keyword"): McpToolUseCase => ({
+    ...childCase,
+    setup: {
+      role: "top",
+      workflows,
+      turnCalls: [{ tool: "graph_review", input: { graph: {} }, result: review }],
+    },
+    prompt: "Run this as a workflow.",
+  });
+  const blocks = (workflows: "off" | "keyword") =>
+    buildMessages(makeSample(testCase(workflows), base)).flatMap((message) => message.content);
+  const prompt = (workflows: "off" | "keyword") =>
+    blocks(workflows).find((block) => String(block.text).startsWith("Run this"))?.text;
+  // T3's trigger reads the prompt: "off" sends it as typed, "keyword" adds the plan-first note.
+  assert.equal(prompt("off"), "Run this as a workflow.");
+  assert.equal(prompt("keyword"), `Run this as a workflow.\n\n${workflowTurnNote()}`);
+  const replayed = blocks("off").findLast((block) => block.type === "tool_result");
+  assert.include(String(replayed?.content), JSON.stringify(graphReviewNext(review)));
+
+  // "default" is T3's own review of the graph over the world's files, armed by the prompt.
+  const graph = {
+    schemaVersion: 1,
+    nodes: {
+      a: { subject: "Fix", description: "Fix it.", dependsOn: [] },
+      b: {
+        subject: "Read",
+        description: "Read the spec.",
+        dependsOn: ["a"],
+        inputs: [{ id: "spec", kind: "workspace_snapshot", path: "docs/spec.md" }],
+      },
+    },
+  };
+  const reviewed = (workflows: "off" | "keyword", files: Record<string, string>) => {
+    const sample = makeSample(
+      {
+        ...testCase(workflows),
+        setup: {
+          role: "top",
+          workflows,
+          world: { files },
+          turnCalls: [{ tool: "graph_review", input: { graph }, result: "default" }],
+        },
+      },
+      base,
+    );
+    const result = buildMessages(sample)
+      .flatMap((message) => message.content)
+      .findLast((block) => block.type === "tool_result");
+    return JSON.parse(String(result?.content)) as Record<string, unknown>;
+  };
+  const ready = reviewed("off", { "docs/spec.md": "# Spec" });
+  assert.deepInclude(ready, { approvalRequired: false, ready: true, blockers: [] });
+  assert.deepEqual(ready.layers, [["a"], ["b"]]);
+  // T3's assignment notes come with the advice: here a node on the caller's model.
+  assert.include(
+    (ready.advisory as { assignmentNotes?: Array<string> }).assignmentNotes ?? [],
+    "a: no target, so it runs on your own model (claude-opus-5-5).",
+  );
+  const blocked = reviewed("keyword", {});
+  assert.deepInclude(blocked, {
+    approvalRequired: true,
+    ready: false,
+    next: graphReviewNext({ ready: false, approvalRequired: true }),
+    blockers: ["b: input spec (docs/spec.md) is missing."],
+  });
+});
+
+it("matches a list against a record's values, such as a graph's nodes by id", () => {
+  const nodes = { a: { verify: { type: "process" } }, b: { verify: { type: "judgment" } } };
+  const run: SampleRun = {
+    calls: [{ step: 0, tool: "graph_review", input: { graph: { nodes } } }],
+    text: "",
+    stopReason: "end_turn",
+  };
+  const judged = (type: string) => ({
+    calls: [{ tool: "graph_review", args: { "graph.nodes": [{ "verify.type": type }] } }],
+  });
+  assert.deepEqual(failed(judged("judgment"), run), []);
+  assert.deepEqual(failed(judged("structured"), run), [
+    'calls graph_review {"graph.nodes":[{"verify.type":"structured"}]}',
+  ]);
+  // "<absent>" and "<present>" ask whether a value is there at all.
+  const target = (value: string) => ({
+    calls: [{ tool: "graph_review", args: { "graph.nodes": [{ "verify.target": value }] } }],
+  });
+  assert.deepEqual(failed(target("<absent>"), run), []);
+  assert.lengthOf(failed(target("<present>"), run), 1);
+});
+
+it("lists workflow tools and their fields only while a case turns workflows on, as T3 does", () => {
+  const names = (workflows: boolean) =>
+    buildBase(template, {
+      model: "claude-opus-5-5",
+      keepUserInstructions: false,
+      workflows,
+    }).t3.map((tool) => tool.name.replace("mcp__t3-code__", ""));
+  const gated = [
+    "workflow_start",
+    "workflow_status",
+    "workflow_stop",
+    "graph_review",
+    "graph_start",
+    "delegate_tasks",
+    "task_wait",
+  ];
+  assert.includeMembers(names(true), gated);
+  assert.includeMembers(names(false), ["delegate_task", "create_threads"]);
+  assert.deepEqual(
+    names(false).filter((name) => gated.includes(name)),
+    [],
+  );
+  const delegate = (workflows: boolean) =>
+    JSON.stringify(
+      buildBase(template, {
+        model: "claude-opus-5-5",
+        keepUserInstructions: false,
+        workflows,
+      }).t3.find((tool) => tool.name === "mcp__t3-code__delegate_task")?.input_schema,
+    );
+  assert.include(delegate(true), "resultSchema");
+  assert.notInclude(delegate(false), "resultSchema");
+});
+
+const orchestrationCase = (id: string) =>
+  NodeFS.readFileSync(new URL("./cases/orchestration.ndjson", import.meta.url), "utf8")
+    .trim()
+    .split("\n")
+    .map((line) => decodeDeviceCase(line))
+    .find((testCase) => testCase.id === id)!;
+
+it("passes the check case only for a targeted, cheap, other-family judge of the code's task", () => {
+  const { expect: rules } = orchestrationCase("workflow-check-only-visible-tests");
+  const claude = (model: string) => ({ providerInstanceId: "claudeAgent", model });
+  const gpt = (model: string) => ({ providerInstanceId: "codex", model });
+  const implement = (verify: unknown, target: unknown = claude("claude-sonnet-5-5")) => ({
+    subject: "Implement",
+    target,
+    scopes: { write: ["src/semver.js"] },
+    verify,
+  });
+  const judged = (target?: unknown) => ({
+    type: "judgment",
+    rubric: ["Meets docs/semver.md"],
+    ...(target === undefined ? {} : { target }),
+  });
+  const run = (nodes: Record<string, unknown>): SampleRun => ({
+    calls: [{ step: 0, tool: "graph_review", input: { graph: { nodes } } }],
+    text: "",
+    stopReason: "end_turn",
+  });
+  assert.deepEqual(failed(rules, run({ implement: implement(judged(gpt("gpt-6-luna"))) })), []);
+  const wrong = {
+    // A judge on a side node, while the code's task is checked only by its own tests.
+    sideNode: {
+      tests: {
+        subject: "Tests",
+        scopes: { write: ["test/spec.test.js"] },
+        verify: judged(gpt("gpt-6-luna")),
+      },
+      implement: implement({ type: "process", argv: ["node", "--test"] }),
+    },
+    untargeted: { implement: implement(judged()) },
+    sameFamilyClaude: { implement: implement(judged(claude("claude-haiku-5-5"))) },
+    sameFamilyGpt: { implement: implement(judged(gpt("gpt-6-luna")), gpt("gpt-6.1-sol")) },
+    pricey: { implement: implement(judged(gpt("gpt-6.1-sol"))) },
+  };
+  for (const [name, nodes] of Object.entries(wrong)) {
+    assert.isNotEmpty(failed(rules, run(nodes)), name);
+  }
 });
 
 it("does not record a deferred tool called before it was loaded", () => {

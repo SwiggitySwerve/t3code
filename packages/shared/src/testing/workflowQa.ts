@@ -277,15 +277,6 @@ export const WORKFLOW_QA_SIDEBAR_STATES = [
   "long-title",
 ] as const;
 
-export const WORKFLOW_QA_SETTINGS_STATES = [
-  "populated",
-  "empty",
-  "long-labels",
-  "missing-model",
-  "read-only",
-  "many-profiles",
-] as const;
-
 /**
  * The review card the coordinator's `graph_review` becomes: waiting for the person ("pending"),
  * with the decision on its way, then settled, or found out of date by the server. "large" is a
@@ -394,7 +385,6 @@ export const WORKFLOW_QA_EXPECTED_STATES: Readonly<Record<string, ReadonlyArray<
     "long-elapsed",
   ],
   "sidebar-status": WORKFLOW_QA_SIDEBAR_STATES,
-  "settings-agents": WORKFLOW_QA_SETTINGS_STATES,
   "workflow-review": WORKFLOW_QA_REVIEW_STATES,
 };
 

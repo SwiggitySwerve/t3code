@@ -1,4 +1,5 @@
-import { DEFAULT_UNIFIED_SETTINGS, type WorkflowStartMode } from "@t3tools/contracts/settings";
+import { DEFAULT_UNIFIED_SETTINGS, WorkflowStartMode } from "@t3tools/contracts/settings";
+import * as Schema from "effect/Schema";
 
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { SettingResetButton, SettingsRow } from "./settingsLayout";
@@ -9,7 +10,9 @@ import {
   useUpdateScopedSettings,
 } from "./useScopedSettings";
 
-const WORKFLOW_START_MODES = ["keyword", "always", "off"] as const;
+// The contract's modes: one it adds is listed here and must get a label and description below.
+const WORKFLOW_START_MODES = WorkflowStartMode.literals;
+const isWorkflowStartMode = Schema.is(WorkflowStartMode);
 
 const WORKFLOW_START_LABELS: Record<WorkflowStartMode, string> = {
   keyword: "When a message says workflow",
@@ -37,7 +40,7 @@ export function WorkflowStartSetting({ workflows }: { readonly workflows: boolea
       {...searchableSetting("workflow-start")}
       description={
         !workflows
-          ? "Workflows are off. Enable them above to start one from a message."
+          ? "Workflows are off for this environment."
           : mixed
             ? "The selected targets start workflows differently."
             : WORKFLOW_START_DESCRIPTIONS[settings.workflowStart]
@@ -57,7 +60,7 @@ export function WorkflowStartSetting({ workflows }: { readonly workflows: boolea
           disabled={!workflows}
           value={mixed ? null : settings.workflowStart}
           onValueChange={(value) => {
-            if (value === "keyword" || value === "always" || value === "off") {
+            if (isWorkflowStartMode(value)) {
               updateSettings({ workflowStart: value });
             }
           }}

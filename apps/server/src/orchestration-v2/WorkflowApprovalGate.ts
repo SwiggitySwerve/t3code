@@ -194,6 +194,11 @@ export class WorkflowApprovalGate extends Context.Service<
     readonly dismiss: (
       input: OrchestrationV2DismissWorkflowReviewInput,
     ) => Effect.Effect<WorkflowApprovalGateDecision, OrchestrationV2WorkflowApprovalError>;
+    /**
+     * Whether the thread's armed request waits for the person to approve a ready review, with
+     * none approved yet. Only this process's reviews count: after a restart every review is redone.
+     */
+    readonly awaitsDecision: (threadId: ThreadId) => Effect.Effect<boolean>;
   }
 >()("t3/orchestration-v2/WorkflowApprovalGate") {}
 
@@ -346,7 +351,7 @@ const make = Effect.gen(function* () {
       threadId: input.threadId,
       messageId: input.messageId,
     });
-    return request === "requested" ? workflowTurnNote(settings.workflowPresets) : undefined;
+    return request === "requested" ? workflowTurnNote() : undefined;
   });
 
   const beginReview: WorkflowApprovalGate["Service"]["beginReview"] = Effect.fn(
@@ -484,6 +489,16 @@ const make = Effect.gen(function* () {
       }
     });
 
+  const awaitsDecision: WorkflowApprovalGate["Service"]["awaitsDecision"] = (threadId) =>
+    Effect.sync(() => {
+      const armed = armedOf(pending.get(threadId));
+      return (
+        armed !== null &&
+        armed.approvals.size === 0 &&
+        [...armed.reviews.values()].some((review) => review.ready && review.digest !== null)
+      );
+    });
+
   return WorkflowApprovalGate.of({
     observeTurn,
     observeSteer,
@@ -493,6 +508,7 @@ const make = Effect.gen(function* () {
     guardGraphStart,
     approve,
     dismiss,
+    awaitsDecision,
   });
 });
 

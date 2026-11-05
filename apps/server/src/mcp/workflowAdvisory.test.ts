@@ -1,6 +1,12 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { type AdvisoryDrivers, graphAdvisory } from "./workflowAdvisory.ts";
+import {
+  type AdvisoryDrivers,
+  graphAdvisory,
+  graphAssignmentNotes,
+  concreteModelFamily,
+  modelFamily,
+} from "./workflowAdvisory.ts";
 import { parseGraph, reviewGraph } from "./workflowGraph.ts";
 
 const node = (overrides: Record<string, unknown> = {}) => ({
@@ -192,6 +198,53 @@ describe("graph advisory", () => {
       low: 2 * 2 * 17_000 + 2 * 37_000 + 3 * 96_000,
       high: 2 * 3 * 26_000 + 3 * 96_000 + 4 * 106_000,
     });
+    // A declared retry target adds an attempt on its own driver and a judge for it to the high
+    // figures only; the low ones still expect the first attempt to pass.
+    const laddered = (retryDrivers: ReadonlyArray<string>) =>
+      advise(
+        graph({
+          a: node({
+            verify: { type: "judgment", rubric: ["Is it correct?"] },
+            retries: retryDrivers.map(() => ({ providerInstanceId: "p", model: "claude-opus-5" })),
+          }),
+          b: node(),
+        }),
+        {
+          ...driversOf("codex", { a: "codex", b: "codex" }, { a: "claudeAgent" }),
+          retries: new Map([["a", retryDrivers]]),
+        },
+      ).advisory;
+    const high = (figures: typeof advisory) => ({
+      calls: figures.estimatedModelCalls.high,
+      tokens: figures.estimatedTokens.high,
+    });
+    const step = (from: typeof advisory, to: typeof advisory) => ({
+      calls: high(to).calls - high(from).calls,
+      tokens: high(to).tokens - high(from).tokens,
+    });
+    const once = laddered(["claudeAgent"]);
+    const twice = laddered(["claudeAgent", "claudeAgent"]);
+    expect(once.estimatedModelCalls.low).toBe(advisory.estimatedModelCalls.low);
+    expect(once.estimatedTokens.low).toBe(advisory.estimatedTokens.low);
+    expect(step(advisory, once).calls).toBeGreaterThan(0);
+    // Each retry target on the same driver adds the same attempt and judge again.
+    expect(step(once, twice)).toEqual(step(advisory, once));
+    // A retry on the measured Codex driver adds less than one on an unmeasured driver.
+    expect(step(advisory, laddered(["codex"])).tokens).toBeLessThan(step(advisory, once).tokens);
+    expect(once.suggestedBudgetTokens).toBeGreaterThan(advisory.suggestedBudgetTokens);
+    expect(once.estimatedTokens.basis).toContain("High counts every declared retry target");
+  });
+
+  it("budgets the retries a node declares once, and none past an empty list", () => {
+    const single = (retries?: ReadonlyArray<unknown>) =>
+      advise(graph({ a: node(retries === undefined ? {} : { retries }) }), {
+        ...driversOf("codex", { a: "codex" }),
+        retries: new Map([["a", (retries ?? []).map(() => "codex")]]),
+      }).advisory.suggestedBudgetTokens;
+    // The default retry repeats the target, so declaring that same target costs no more.
+    expect(single([{ providerInstanceId: "codex", model: "gpt-5.4" }])).toBe(single());
+    // An empty list leaves the first attempt alone, with no retry to budget for.
+    expect(single([])).toBeLessThan(single());
   });
   it("never changes the digest, the blockers or the layers of a review", () => {
     const value = chain(3);
@@ -292,5 +345,83 @@ describe("graph advisory budget for a read-heavy fan-in (review 7, G5)", () => {
     expect(review.advisory!.suggestedBudgetTokens).toBeGreaterThan(
       RECORDED_BEFORE_MERGE + costliestExtract,
     );
+  });
+});
+
+describe("assignment notes", () => {
+  it.each([
+    ["claude-haiku-5-5", "claude"],
+    ["anthropic/claude-opus-5-5", "claude"],
+    ["anthropic.claude-sonnet-4-5-20250929-v1:0", "claude"],
+    ["us.anthropic.claude-opus-4-1-20250805-v1:0", "claude"],
+    ["opus", "claude"],
+    ["gpt-5.4", "gpt"],
+    ["gpt-5.4-mini", "gpt"],
+    ["o3", "gpt"],
+    ["o4-mini", "gpt"],
+    ["openai/o3", "gpt"],
+    ["Gemini-2.5-pro", "gemini"],
+    ["auto", "auto"],
+  ])("reads %s as the %s family", (id, family) => {
+    expect(modelFamily(id)).toBe(family);
+  });
+
+  it("names no family for a placeholder id the coordinator cannot target", () => {
+    expect(concreteModelFamily("auto")).toBeUndefined();
+    expect(concreteModelFamily("default")).toBeUndefined();
+    expect(concreteModelFamily("openrouter/auto")).toBeUndefined();
+    expect(concreteModelFamily("o4-mini")).toBe("gpt");
+  });
+
+  it("flags fallbacks to the coordinator's model and same-family checks, and nothing else", () => {
+    const notes = graphAssignmentNotes({
+      coordinatorModel: "gpt-5.4",
+      enabledFamilies: new Set(["gpt", "claude"]),
+      nodes: [
+        { nodeId: "a", source: "caller", model: "gpt-5.4" },
+        {
+          nodeId: "b",
+          source: "caller",
+          model: "gpt-5.4",
+          judgment: { model: "gpt-5.4", ownTarget: false },
+        },
+        {
+          nodeId: "c",
+          source: "target",
+          model: "claude-haiku-5-5",
+          judgment: { model: "opus", ownTarget: true },
+        },
+        {
+          nodeId: "d",
+          source: "target",
+          model: "claude-haiku-5-5",
+          judgment: { model: "gpt-5.4", ownTarget: true },
+        },
+        { nodeId: "e", source: "workerTarget", model: "claude-haiku-5-5" },
+      ],
+    });
+    expect(notes).toEqual([
+      "a: no target, so it runs on your own model (gpt-5.4).",
+      "b: no target, so it runs on your own model (gpt-5.4).",
+      "b judgment: no target, so it runs on your own model (gpt-5.4).",
+      "c judgment: same model family as its worker (claude) while another family is enabled.",
+    ]);
+  });
+
+  it("does not ask for another family when only one is enabled", () => {
+    expect(
+      graphAssignmentNotes({
+        coordinatorModel: "claude-opus-5-5",
+        enabledFamilies: new Set(["claude"]),
+        nodes: [
+          {
+            nodeId: "a",
+            source: "target",
+            model: "claude-haiku-5-5",
+            judgment: { model: "claude-opus-5-5", ownTarget: true },
+          },
+        ],
+      }),
+    ).toEqual([]);
   });
 });

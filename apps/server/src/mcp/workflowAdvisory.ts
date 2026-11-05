@@ -48,6 +48,8 @@ export interface AdvisoryDrivers {
   readonly nodes: ReadonlyMap<string, string | undefined>;
   /** Each judgment check's judge agent, by node id. */
   readonly judges: ReadonlyMap<string, string | undefined>;
+  /** Each node's declared retry targets, in order, by node id. */
+  readonly retries?: ReadonlyMap<string, ReadonlyArray<string | undefined>>;
 }
 
 /** The parts of a parsed graph the advisory reads; workflowGraph.ts passes its own types. */
@@ -58,6 +60,7 @@ interface AdvisoryGraph {
       {
         readonly verify?: { readonly type: string };
         readonly inputs?: ReadonlyArray<{ readonly kind: string; readonly path?: string }>;
+        readonly retries?: ReadonlyArray<unknown>;
       }
     >
   >;
@@ -98,9 +101,14 @@ const rangeText = (figure: CallFigure) =>
 const rangesText = (figures: ReadonlyArray<CallFigure>) =>
   [...new Set(figures)].map(rangeText).join(" or ");
 
-const basisFor = (members: ReadonlyArray<DriverFigures>, coordinator: DriverFigures): string => {
+const basisFor = (
+  members: ReadonlyArray<DriverFigures>,
+  coordinator: DriverFigures,
+  retried: boolean,
+): string => {
   const all = [...members, coordinator];
   const notes = [
+    retried ? "High counts every declared retry target, and its judge." : "",
     all.some((figures) => figures.measured)
       ? "Measured in C4 on the Codex driver (Sonnet 5.5 via cliproxy)."
       : "",
@@ -156,22 +164,52 @@ export function graphAdvisory(
     entries.map(([id, node]) => [id, agentLoad(nodeFigures(id), readsOf(node.inputs ?? []))]),
   );
   // A judgment check runs as one more agent, on its own driver, and reads nothing but the result.
-  const judgeFigures = entries.flatMap(([id, node]) =>
-    node.verify?.type === "judgment" ? [figuresFor(drivers?.judges.get(id))] : [],
+  const judgeFigures = new Map(
+    entries.flatMap(([id, node]) =>
+      node.verify?.type === "judgment" ? [[id, figuresFor(drivers?.judges.get(id))] as const] : [],
+    ),
   );
-  const memberFigures = [...entries.map(([id]) => nodeFigures(id)), ...judgeFigures];
-  const loads = [
-    ...nodeLoads.values(),
-    ...judgeFigures.map((figures) => agentLoad(figures, { count: 0, bytes: 0 })),
+  const judgeLoads = new Map(
+    [...judgeFigures].map(([id, figures]) => [id, agentLoad(figures, { count: 0, bytes: 0 })]),
+  );
+  // A declared retry target is an attempt the high estimate counts, on its own driver with the
+  // node's reads, and judged again when the node has a judgment check.
+  const retryFigures = entries.flatMap(([id, node]) =>
+    (node.retries ?? []).map((_, index) => ({
+      id,
+      node,
+      figures: figuresFor(drivers?.retries?.get(id)?.[index]),
+    })),
+  );
+  const judgeLoadOf = (id: string): ReadonlyArray<AgentLoad> => {
+    const load = judgeLoads.get(id);
+    return load === undefined ? [] : [load];
+  };
+  const retryLoads = retryFigures.flatMap(({ id, node, figures }) => [
+    agentLoad(figures, readsOf(node.inputs ?? [])),
+    ...judgeLoadOf(id),
+  ]);
+  const memberFigures = [
+    ...entries.map(([id]) => nodeFigures(id)),
+    ...judgeFigures.values(),
+    ...retryFigures.map((entry) => entry.figures),
   ];
+  const loads = [...nodeLoads.values(), ...judgeLoads.values()];
+  const retriedHigh = {
+    calls: retryLoads.reduce((sum, load) => sum + load.calls.high, 0),
+    tokens: retryLoads.reduce((sum, load) => sum + load.tokens.high, 0),
+  };
   const coordinatorFigures = figuresFor(drivers?.coordinator);
   const calls = {
     low: loads.reduce((sum, load) => sum + load.calls.low, 0) + COORDINATOR_CALLS.low,
-    high: loads.reduce((sum, load) => sum + load.calls.high, 0) + COORDINATOR_CALLS.high,
+    high:
+      loads.reduce((sum, load) => sum + load.calls.high, 0) +
+      retriedHigh.calls +
+      COORDINATOR_CALLS.high,
   };
   const members = {
     low: loads.reduce((sum, load) => sum + load.tokens.low, 0),
-    high: loads.reduce((sum, load) => sum + load.tokens.high, 0),
+    high: loads.reduce((sum, load) => sum + load.tokens.high, 0) + retriedHigh.tokens,
   };
   const coordinator = {
     low: COORDINATOR_CALLS.low * coordinatorFigures.coordinator.low,
@@ -186,8 +224,16 @@ export function graphAdvisory(
   );
   // The budget only stops new starts, so the last node is the one a short budget drops. Cover every
   // agent, one retry of the costliest (C4/S06: a retried node costs one more attempt), and the
-  // coordinator's estimate as reserve (the budget does not count it).
-  const retryTokens = Math.max(0, ...loads.map((load) => load.tokens.high));
+  // coordinator's estimate as reserve (the budget does not count it). A node that declares its
+  // retries has them in members.high already, so only the others can take that one retry.
+  const retryTokens = Math.max(
+    0,
+    ...entries.flatMap(([id, node]) =>
+      node.retries === undefined
+        ? [nodeLoads.get(id)?.tokens.high ?? 0, ...judgeLoadOf(id).map((load) => load.tokens.high)]
+        : [],
+    ),
+  );
   const reasons = singleAgentReasons({ nodeCount, widestWave, verifierCount });
   return {
     fanOut: reasons.length > 0 ? "consider_single" : "ok",
@@ -201,10 +247,110 @@ export function graphAdvisory(
       low: members.low + coordinator.low,
       high: members.high + coordinator.high,
       coordinator,
-      basis: basisFor(memberFigures, coordinatorFigures),
+      basis: basisFor(memberFigures, coordinatorFigures, retryFigures.length > 0),
     },
     suggestedBudgetTokens:
       Math.round(BUDGET_HEADROOM * (members.high + retryTokens)) + coordinator.high,
     overshootBoundTokens,
   };
+}
+
+// Claude Code accepts its family's bare aliases as model ids.
+const CLAUDE_ALIASES: ReadonlySet<string> = new Set(["opus", "sonnet", "haiku", "fable"]);
+// Vendor, router and region segments some catalogs put before a model's own name.
+const MODEL_ID_PREFIXES: ReadonlySet<string> = new Set([
+  "anthropic",
+  "openai",
+  "google",
+  "meta",
+  "mistral",
+  "openrouter",
+  "bedrock",
+  "vertex",
+  "azure",
+  "us",
+  "eu",
+  "apac",
+  "global",
+]);
+// Ids that name a router's choice or a default rather than one model.
+const PLACEHOLDER_MODELS: ReadonlySet<string> = new Set(["auto", "default"]);
+
+/** The model's own name: the first `/` or `.` segment that is not a vendor or region. */
+function modelName(model: string): string {
+  const segments = model
+    .trim()
+    .toLowerCase()
+    .split(/[/.]/u)
+    .filter((segment) => segment.length > 0);
+  return segments.find((segment) => !MODEL_ID_PREFIXES.has(segment)) ?? segments.at(-1) ?? "";
+}
+
+/**
+ * A model id's family: the leading letters of its own name, so "gpt-5.4", "o3" and "o4-mini"
+ * are "gpt" and "us.anthropic.claude-x" and "anthropic/claude-x" "claude". Advice reads it, and
+ * so does the rule that retries leaving a family need a judgment check with its own target.
+ */
+export function modelFamily(model: string): string {
+  const name = modelName(model);
+  if (/^o\d/u.test(name)) return "gpt";
+  const family = /^[a-z]+/u.exec(name)?.[0] ?? name;
+  return CLAUDE_ALIASES.has(family) ? "claude" : family;
+}
+
+/** The family of a model a coordinator can target; undefined for a placeholder such as "auto". */
+export function concreteModelFamily(model: string): string | undefined {
+  return PLACEHOLDER_MODELS.has(modelName(model)) ? undefined : modelFamily(model) || undefined;
+}
+
+/** One reviewed node's assignment, as graph review resolved it. */
+export interface AssignmentReview {
+  readonly nodeId: string;
+  /** "caller" means the node set no target and runs on the coordinator's model. */
+  readonly source: string;
+  readonly model: string;
+  /** The models of its declared retry targets, in order. */
+  readonly retryModels?: ReadonlyArray<string>;
+  /** Present for a judgment check; `ownTarget` is false when it inherits the worker's. */
+  readonly judgment?: { readonly model: string; readonly ownTarget: boolean };
+}
+
+/**
+ * Notes on how a graph assigns models: a worker or judgment check that falls back to the
+ * coordinator's own model, and a judgment check of the family of its worker or of one of its
+ * retry targets while a model of another family is enabled. Advice only; it never feeds the
+ * digest or readiness.
+ */
+export function graphAssignmentNotes(input: {
+  readonly coordinatorModel: string;
+  readonly nodes: ReadonlyArray<AssignmentReview>;
+  readonly enabledFamilies: ReadonlySet<string>;
+}): ReadonlyArray<string> {
+  const own = `your own model (${input.coordinatorModel})`;
+  return input.nodes.flatMap((node) => {
+    const notes: string[] = [];
+    if (node.source === "caller") notes.push(`${node.nodeId}: no target, so it runs on ${own}.`);
+    const judgment = node.judgment;
+    if (judgment === undefined) return notes;
+    if (!judgment.ownTarget && node.source === "caller") {
+      notes.push(`${node.nodeId} judgment: no target, so it runs on ${own}.`);
+      return notes;
+    }
+    const family = modelFamily(node.model);
+    const otherEnabled = [...input.enabledFamilies].some((enabled) => enabled !== family);
+    const judgeFamily = modelFamily(judgment.model);
+    if (judgeFamily === family && otherEnabled) {
+      notes.push(
+        `${node.nodeId} judgment: same model family as its worker (${family}) while another family is enabled.`,
+      );
+    }
+    const otherThanJudge = [...input.enabledFamilies].some((enabled) => enabled !== judgeFamily);
+    (node.retryModels ?? []).forEach((model, index) => {
+      if (modelFamily(model) === judgeFamily && otherThanJudge)
+        notes.push(
+          `${node.nodeId} retries[${index}]: same model family as its judgment check (${judgeFamily}) while another family is enabled.`,
+        );
+    });
+    return notes;
+  });
 }

@@ -210,10 +210,10 @@ const SOURCE_CONTROL_HOST_TERMS = sourceControlClients.definitions
 
 export const SETTINGS_SEARCH_ITEMS = [
   {
-    id: "workflow-presets",
-    title: "Agent Roles",
+    id: "workflows-enable",
+    title: "Enable workflows",
     to: "/settings/agents",
-    searchTerms: ["workflow worker presets agent roles default provider model effort options"],
+    searchTerms: ["workflow multi agent orchestration turn on off enable disable"],
     environmentOnly: true,
     scope: "environment",
   },

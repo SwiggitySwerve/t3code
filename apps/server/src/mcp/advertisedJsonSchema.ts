@@ -1,4 +1,5 @@
 import * as Predicate from "effect/Predicate";
+import * as Schema from "effect/Schema";
 import { Tool } from "effect/ai";
 
 type Json = unknown;
@@ -96,6 +97,28 @@ const compact = (schema: Json, optional: boolean): Json => {
   return result;
 };
 
+// The generator drops a description on a transformation (`TrimmedString`) or on `Schema.Unknown`.
+const withFieldDescriptions = (tool: Tool.Any, schema: Json): Json => {
+  const parameters: unknown = tool.parametersSchema;
+  if (
+    !Predicate.isObject(schema) ||
+    !Predicate.isObject(schema.properties) ||
+    !Predicate.hasProperty(parameters, "fields") ||
+    !Predicate.isObject(parameters.fields)
+  ) {
+    return schema;
+  }
+  const properties: JsonObject = { ...schema.properties };
+  for (const [name, field] of Object.entries(parameters.fields)) {
+    const property = properties[name];
+    if (!Schema.isSchema(field) || !Predicate.isObject(property) || "description" in property)
+      continue;
+    const description = Schema.resolveAnnotations(field)?.description;
+    if (description !== undefined) properties[name] = { ...property, description };
+  }
+  return { ...schema, properties };
+};
+
 /**
  * The input schema T3 advertises for a tool. Drops JSON noise that every thread pays for:
  * `additionalProperties: true`, safe-integer bounds, nested `anyOf`, JSON-string fallbacks, and
@@ -103,4 +126,6 @@ const compact = (schema: Json, optional: boolean): Json => {
  * Decoding still uses the full schema, so each tag's own required fields still apply.
  */
 export const advertisedJsonSchema = (tool: Tool.Any) =>
-  compact(Tool.getJsonSchema(tool), false) as ReturnType<typeof Tool.getJsonSchema>;
+  withFieldDescriptions(tool, compact(Tool.getJsonSchema(tool), false)) as ReturnType<
+    typeof Tool.getJsonSchema
+  >;

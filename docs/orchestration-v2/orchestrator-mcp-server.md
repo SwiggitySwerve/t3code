@@ -219,7 +219,10 @@ Returns:
 
 - the inherited provider instance and model;
 - the parent runtime and interaction modes;
-- registered provider instances and advertised models;
+- registered provider instances and advertised models, each with its
+  `listPrice` (USD per million input, cached input and output tokens) from the
+  usage pricing table, never your price overrides: `null` when the table has
+  no price for the model, and absent when no table could be read;
 - whether each provider can run a child task; and
 - feature flags for polling, cancellation, and batch thread creation.
 
@@ -551,8 +554,8 @@ These follow the `omx graph` execution graph's protected verifiers
     `{ outcome: "passed" | "failed", reasons }`. A judge can be wrong; its reasons are kept.
     The judge grades the returned result and works in the caller's checkout, so it does not
     see files a worktree agent changed; check those with a process check instead.
-    A failed check starts the agent again with what the check saw appended to its task,
-    within the same three attempts. A check that cannot run (timeout, too much output, a
+    A failed check starts the agent once more with what the check saw appended to its
+    task: an agent gets two attempts at its work, or one more per target in `retries`. A check that cannot run (timeout, too much output, a
     missing executable, no verdict) fails the agent without retrying. When the agent was
     given a `schema`, a result that does not match it fails a `structured` check first,
     whatever else is checked. `workflow_status`
@@ -586,6 +589,19 @@ These follow the `omx graph` execution graph's protected verifiers
   - Outputs count as write scopes, so two agents never write the same output at once.
   - `agent()` then returns `{ result, outputs: { <id>: { path, sha256, sizeBytes } } }`,
     so a later agent can pin what an earlier one wrote.
+- `retries: [{ providerInstanceId, model, options? }]` (at most two) lists the targets of the
+  agent's next work attempts, in order, as the coordinator writes them. After a failed check
+  or a passed deadline the next attempt runs on the next entry, with the same feedback;
+  without `retries` it repeats `target`, and `[]` leaves one attempt. A provider fault retries
+  the attempt's own target and does not move along the list. The entry for an attempt follows
+  from the list and how many work attempts failed, so a resumed run attaches each attempt by
+  its key on the target it started on. Before the first attempt each entry is resolved as
+  `graph_review` resolves a target, so a model the provider does not list or an option it
+  rejects refuses the agent before anything runs. A judgment check without its own target runs
+  on `target` as resolved, the caller's model when it names none; when an entry leaves that
+  model's family the check needs a target of its own and the agent is refused otherwise.
+  Entries cannot set `environmentId`: every workflow agent runs in the caller's environment.
+  `retries` joins the agent's retry key only when present.
 - `report: true` makes `agent()` always resolve to
   `{ ok, result, outputs, attempts, verification, reason }`, failed or not, instead of
   `null` on failure, so a script can record why an agent failed. A spent budget still
@@ -659,7 +675,9 @@ One request and one graph are one run. Two identities are kept apart.
   approval is gone, and no start runs until the person approves a fresh review. A start
   refused before it reaches `workflow.start`, for example because the reviewed model is no
   longer served, leaves the approval in place; the same digest can start once the target is
-  served again, and T3 never moves to another entry.
+  served again, and T3 never moves to another entry. A node's `retries` are entries too:
+  review resolves each like `target` and the digest covers them, so walking them after an
+  approval runs only what was approved.
 - **Delivery identity: thread, request and decision.** The messages the gate sends are named
   by the thread, the request and a decision id the gate makes in this process. Repeated and
   concurrent clicks share the decision id, so they share one message. A review made and
@@ -702,9 +720,14 @@ Stop. Agents open their own threads. The row stores the script with a settings l
   `agent()` call back to its task, so finished agents return their stored
   results at once and running ones are waited on again; no agent starts twice.
   Recovery marks the runs it cancels with `cancelledByServerRestart`.
-- **Retries.** An agent runs at most three times in all. It runs again when it
-  failed, when a server restart cancelled it, or when it stalled. An agent a user
-  stopped is not retried; the script sees `null`.
+- **Retries.** An agent gets two attempts at its work: a failed check or a passed
+  attempt deadline starts it once more with what went wrong, on its next `retries` target
+  when it has one (at most two, so three work attempts). When its task failed,
+  a server restart cancelled it, or it stalled, it runs again on the same target
+  without using an attempt, up to two times, so one agent makes at most five
+  attempts. The runner records on the attempt why it stopped a stalled or late
+  one, so after a restart it is retried the same way. An agent a user stopped
+  is not retried; the script sees `null`.
 - **Stalls.** Every 30 seconds the runner checks each waited-on agent's thread.
   If its last update has not changed for `stallTimeoutMs` (default 20 minutes,
   at least 1 minute), the runner stops the agent and starts it again.
@@ -794,7 +817,7 @@ when every node passed its checks.
 ```
 
 - **Nodes.** `subject` is the agent's label and `description` its task. Optional:
-  `phase`, `target`, `role`, `schema`, `scopes`, `inputs`, `outputs`, `verify` (as
+  `phase`, `target`, `retries`, `role`, `schema`, `scopes`, `inputs`, `outputs`, `verify` (as
   for workflow agents), `stallTimeoutMs`, and `attemptBudget`: `short`, `standard`
   (default) or `long`, 30 minutes, 2 hours or 6 hours per attempt. `long` needs
   `longBudgetApproved: true`.
@@ -805,10 +828,12 @@ when every node passed its checks.
   blockers: bad or duplicate ids, unknown or cyclic dependencies, unsafe paths, a
   `task_output` naming an undeclared output or a node outside `dependsOn`, two
   nodes declaring one output path, `long` without approval, a structured `outputId`
-  the node does not declare, a missing or oversized input, and a graph over capacity.
+  the node does not declare, a missing or oversized input, a `target` or `retries` entry that
+  does not resolve, `retries` that leave the worker's model family under a judgment check
+  without its own target, and a graph over capacity.
   Review first refuses a graph with more than 1,000 nodes, or one whose worst case
-  exceeds the 1,000-agent workflow cap (see **Caps**): one agent per node, plus up to
-  three judges for each node with a `judgment` check. A capacity refusal can omit the
+  exceeds the 1,000-agent workflow cap (see **Caps**): one agent per node, plus a judge
+  for each work attempt of a node with a `judgment` check. A capacity refusal can omit the
   remaining per-node problems; reduce the graph and review again. It hashes every
   `workspace_snapshot` input and returns the run order as `layers`, `writeConflicts`
   between nodes with no path between them (the runner runs those one at a time), the
@@ -828,11 +853,16 @@ when every node passed its checks.
   driver is unknown is priced as unmeasured, so a graph with Codex and Claude members is priced
   agent by agent. The `basis` says which figures were used. Tasks that read more than the
   benchmark's one or two small files will exceed the member high figure; the headroom and the
-  thresholds are opinion. The advisory counts one judge agent per judgment check. It is not in the
+  thresholds are opinion. The advisory counts one judge agent per judgment check, and its high
+  figures count every declared `retries` target as one more attempt, judged again when checked;
+  the suggested budget's reserve of one more attempt covers only nodes that declare no `retries`. It is not in the
   digest and never changes `ready`, `blockers` or `approvalRequired`, and it never blocks a start,
   including when the user asked for a workflow. It also returns
-  a `reviewId` the server made for this review, and `approvalRequired`, true while a
-  user's request for a workflow waits for approval (above). The server keeps the review
+  a `reviewId` the server made for this review, `approvalRequired`, true while a
+  user's request for a workflow waits for approval (above), blocked reviews included, and `next`,
+  one line saying whether to fix blockers and review again, end the turn for approval (a ready
+  review only), or start the work now with `graph_start`, or `workflow_start` when the task asked
+  for a script. The server keeps the review
   in memory so the user's decision can be bound to it; the client decides by `reviewId`
   and `digest`, never by what the agent echoed. The server notes which request is armed
   before the review reads anything. If the request was replaced, lifted or settled while the
@@ -1018,6 +1048,15 @@ Interrupts a selected active run through the normal V2 `run.interrupt` command.
 Without `runId`, it selects the newest interruptible run. A terminal run is
 returned unchanged, and a thread with no active provider turn returns
 `no_active_run`.
+
+### `t3_workflow_report`
+
+Reports every workflow of a readable thread: one row per agent (provider, model,
+effort, target source, tokens, duration, attempts, outcome and check), groups by
+role, model family and check kind, and the run's phase, attempt and budget
+totals. Usage and outcomes come from the same joins as `workflow_status`. Only
+callers outside a thread list it, such as `t3 thread workflow-report`, so agents
+in T3 Code pay no catalog tokens for it.
 
 ## Delegated Task Lifecycle
 

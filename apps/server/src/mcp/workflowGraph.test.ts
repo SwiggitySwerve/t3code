@@ -8,7 +8,6 @@ import {
   parseGraph,
   reviewGraph,
 } from "./workflowGraph.ts";
-import { selectWorkflowTarget } from "./workflowRunner.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 
 const HASH = "a".repeat(64);
@@ -36,38 +35,76 @@ const problems = (value: unknown) => {
 };
 
 describe("graph parsing", () => {
-  it("projects explicit and preset plans without exposing options or inventing unknown identity", () => {
+  it("projects explicit plans without exposing options or inventing unknown identity", () => {
     const primary = {
       providerInstanceId: ProviderInstanceId.make("primary"),
       model: "gpt-6.1-sol",
     };
-    const fallback = {
-      providerInstanceId: ProviderInstanceId.make("fallback"),
-      model: "gpt-6-luna",
-    };
-    const selected = selectWorkflowTarget({ preset: "review" }, undefined, {
-      presets: [{ id: "review", name: "Review", target: primary, fallbacks: [fallback] }],
-      defaultPresetId: null,
-    });
     const plan = graphPlan(
       normalized(
         graph({
           explicit: node({ target: { ...primary, options: { reasoningEffort: "high" } } }),
-          preset: node({ target: fallback }),
           model: node({ model: "claude-haiku-5-5" }),
           none: node(),
         }),
       ),
-      new Map([["preset", selected.preference?.entries[0]]]),
     );
     expect(
       Object.fromEntries(plan.nodes.map((entry) => [entry.key, entry.plannedIdentity])),
     ).toEqual({
       explicit: primary,
-      preset: primary,
       model: { model: "claude-haiku-5-5" },
       none: undefined,
     });
+  });
+
+  it("derives each node's shape from the graph and keeps the sources review found", () => {
+    const judged = { type: "judgment", rubric: ["It is right."] };
+    const plan = graphPlan(
+      normalized(
+        graph({
+          scan: node({
+            scopes: { read: ["src", "docs"], write: [] },
+            inputs: [{ id: "spec", kind: "workspace_snapshot", path: "spec.md" }],
+            outputs: [{ id: "notes", path: "out/notes.md" }],
+          }),
+          left: node({ dependsOn: ["scan"], verify: judged }),
+          right: node({
+            dependsOn: ["scan"],
+            scopes: { read: [], write: ["out/right"] },
+            verify: { type: "process", argv: ["node", "check.js"] },
+          }),
+          join: node({ dependsOn: ["left", "right"] }),
+        }),
+      ),
+      new Map([
+        ["scan", { worker: "caller" as const }],
+        ["left", { worker: "target" as const, check: "workerTarget" as const }],
+      ]),
+    );
+    expect(
+      Object.fromEntries(
+        plan.nodes.map((entry) => [
+          entry.key,
+          [entry.features, entry.targetSource, entry.checkTargetSource],
+        ]),
+      ),
+    ).toEqual({
+      scan: [{ fanIn: 0, fanOut: 2, check: "none", reads: 3, writes: 1 }, "caller", undefined],
+      left: [
+        { fanIn: 1, fanOut: 1, check: "judgment", reads: 0, writes: 0 },
+        "target",
+        "workerTarget",
+      ],
+      right: [{ fanIn: 1, fanOut: 1, check: "process", reads: 0, writes: 1 }, undefined, undefined],
+      join: [{ fanIn: 2, fanOut: 0, check: "none", reads: 0, writes: 0 }, undefined, undefined],
+    });
+  });
+
+  it("refuses a node that still names an agent preset", () => {
+    expect(problems(graph({ a: node({ preset: "worker" }) }))).toContain(
+      "Agent presets were removed; set target from orchestrator_capabilities.",
+    );
   });
   it("normalizes shared paths, defaults, scopes and checks", () => {
     const parsed = normalized(
@@ -510,8 +547,8 @@ describe("graph review write conflicts", () => {
 describe("graph capacity", () => {
   // A workflow starts at most this many agents (workflowRunner.test.ts pins the runner's side).
   const CAPACITY = 1000;
-  // A judgment check adds a judge agent for each of the three attempts at its node.
-  const JUDGES_PER_NODE = 3;
+  // A judgment check adds a judge agent for each of the two work attempts at its node.
+  const JUDGES_PER_NODE = 2;
   const many = (count: number, make: (index: number) => unknown = () => node()) =>
     Object.fromEntries(Array.from({ length: count }, (_, index) => [`n${index}`, make(index)]));
   const judged = () => node({ verify: { type: "judgment", rubric: ["Correct"] } });
@@ -522,7 +559,15 @@ describe("graph capacity", () => {
     expect(reviewed.digest).not.toBeNull();
     expect(reviewed.layers).toHaveLength(1);
     const perNode = 1 + JUDGES_PER_NODE;
-    const full = reviewGraph(graph(many(CAPACITY / perNode, judged)), {});
+    const judgedNodes = Math.floor(CAPACITY / perNode);
+    const full = reviewGraph(
+      graph(
+        many(CAPACITY - judgedNodes * JUDGES_PER_NODE, (index) =>
+          index < judgedNodes ? judged() : node(),
+        ),
+      ),
+      {},
+    );
     expect(full.blockers).toEqual([]);
     expect(full.digest).not.toBeNull();
   });
@@ -544,7 +589,7 @@ describe("graph capacity", () => {
 
   it("counts the judge agents a judgment check can add at every attempt", () => {
     const perNode = 1 + JUDGES_PER_NODE;
-    const fits = CAPACITY / perNode;
+    const fits = Math.floor(CAPACITY / perNode);
     const over = graph(many(fits + 1, judged));
     const reviewed = reviewGraph(over, {});
     expect(reviewed.blockers).toHaveLength(1);
@@ -553,6 +598,20 @@ describe("graph capacity", () => {
     expect(reviewed.layers).toEqual([]);
     // The same count of nodes without judges is well within capacity.
     expect(reviewGraph(graph(many(fits + 1)), {}).blockers).toEqual([]);
+    // Each declared retry target is one more work attempt, and so one more judge.
+    const laddered = () =>
+      node({
+        verify: { type: "judgment", rubric: ["Correct"] },
+        retries: [
+          { providerInstanceId: "codex", model: "gpt-5.4" },
+          { providerInstanceId: "codex", model: "gpt-5.5" },
+        ],
+      });
+    const ladderFits = Math.floor(CAPACITY / (perNode + 1));
+    expect(reviewGraph(graph(many(ladderFits, laddered)), {}).blockers).toEqual([]);
+    expect(reviewGraph(graph(many(ladderFits + 1, laddered)), {}).blockers[0]).toContain(
+      String((ladderFits + 1) * (perNode + 1)),
+    );
   });
 
   it("does not count process or structured checks as extra agents", () => {

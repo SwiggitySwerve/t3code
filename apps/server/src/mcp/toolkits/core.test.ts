@@ -64,6 +64,7 @@ const layerOrchestratorToolkit = McpHttpServer.layerOrchestratorToolkit.pipe(
   Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
   Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
   Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+  Layer.provide(UsageServiceTestkit.layerRates()),
   Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-core-test-" })),
   Layer.provide(NodeServices.layer),
 );
@@ -73,6 +74,7 @@ const declaredFailure = (result: McpSchema.CallToolResult) => {
   return result.isError === true && text?.type === "text" ? JSON.parse(text.text) : undefined;
 };
 import { htmlRenderFromToolItem } from "@t3tools/shared/toolOutput";
+import * as UsageServiceTestkit from "../../usage/UsageService.testkit.ts";
 
 const decodeMcpAttachmentInput = Schema.decodeUnknownEffect(McpAttachmentInput);
 const decodeThreadReadResult = Schema.decodeUnknownEffect(OrchestratorMcpThreadReadResult);

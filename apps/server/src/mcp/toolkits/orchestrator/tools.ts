@@ -33,6 +33,8 @@ import {
   OrchestratorMcpTaskStatusInput,
   OrchestratorMcpTaskWaitInput,
   OrchestratorMcpWorkflowInput,
+  OrchestratorMcpWorkflowReportInput,
+  OrchestratorMcpWorkflowReportResult,
   OrchestratorMcpWorkflowResult,
   OrchestratorMcpWorkflowStartInput,
   OrchestratorMcpWorkflowStopInput,
@@ -154,7 +156,7 @@ const TaskWaitTool = Tool.make("task_wait", {
 
 const WorkflowStartTool = Tool.make("workflow_start", {
   description:
-    "Run a multi-agent workflow script on the T3 server, for any provider; the script drives the fan-out and you get one completion wake when it ends. Script format is Claude Code's Workflow: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return a JSON value. agent(prompt, { label, phase, schema, target: { providerInstanceId, model, options }, isolation: 'worktree', role }) runs one delegated task and resolves with its final text, or the parsed object when `schema` (a JSON Schema) is given, or null if it failed. Extra agent options are on script. await progress.phase(title, { total }, async bar => ...) counts logical agents via bar.agent(prompt, options); await its calls. Entry total stays fixed; callback resolve/throw completes/fails the phase. Example: docs/orchestration-v2/orchestrator-mcp-server.md. parallel([() => agent(...), ...]) runs functions concurrently and returns their results in order (null for failures). pipeline(items, (item, original, index) => ..., ...moreStages) runs each item through the stages. phase(title) sets the phase for later agents; log(...) reports progress. args is the JSON you pass. Scripts cannot read the clock, random numbers, files or the network, so a run can resume. Agents run under this thread's modes and the environment's running-agent limit. Returns the workflowId. Refused while the user's workflow request awaits approval: use graph_review.",
+    "Run a multi-agent workflow script on the T3 server, for any provider; the script drives the fan-out and you get one completion wake when it ends. Script format is Claude Code's Workflow: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return a JSON value. agent(prompt, { label, phase, schema, target: { providerInstanceId, model, options }, verify, isolation: 'worktree', role }) runs one delegated task and resolves with its final text, or the parsed object when `schema` (a JSON Schema) is given, or null if it failed. verify checks each attempt, and an attempt that fails it runs once more with what the check saw (2 attempts), or on each target of its retries in turn: { type: 'process', argv } passes on exit code 0; { type: 'judgment', rubric: [criteria], target } has a checker agent grade the returned result; it cannot see a worktree, so have such a worker return its diff. Choose each agent's and each judgment check's target from orchestrator_capabilities, preferring a cheap checker from a different model family than its worker; tests the worker can see or wrote cannot catch wrong work alone. script lists every agent option. await progress.phase(title, { total }, async bar => ...) counts logical agents via bar.agent(prompt, options); await its calls. Entry total stays fixed; callback resolve/throw completes/fails the phase. Example: docs/orchestration-v2/orchestrator-mcp-server.md. parallel([() => agent(...), ...]) runs functions concurrently and returns their results in order (null for failures). pipeline(items, (item, original, index) => ..., ...moreStages) runs each item through the stages. phase(title) sets the phase for later agents; log(...) reports progress. args is the JSON you pass. Scripts cannot read the clock, random numbers, files or the network, so a run can resume. Agents run under this thread's modes and the environment's running-agent limit. Returns the workflowId. Refused while the user's workflow request awaits approval: use graph_review.",
   parameters: OrchestratorMcpWorkflowStartInput,
   success: OrchestratorMcpWorkflowResult,
   failure: OrchestratorMcpFailure,
@@ -181,6 +183,23 @@ const WorkflowStatusTool = Tool.make("workflow_status", {
   .annotate(Tool.Idempotent, true)
   .annotate(McpSchema.EnabledWhen, McpInvocationContext.visibleToMembersWith("workflows"));
 
+// For the t3 CLI and outside clients only: agents inside T3 Code never list it, so it costs
+// them no catalog tokens.
+const WorkflowReportTool = Tool.make("t3_workflow_report", {
+  description:
+    "Report every workflow of a thread: one row per agent with its model, effort, target source, tokens, time, attempts and check, plus groups by model family and check.",
+  parameters: OrchestratorMcpWorkflowReportInput,
+  success: OrchestratorMcpWorkflowReportResult,
+  failure: OrchestratorMcpFailure,
+  failureMode: "return",
+  dependencies,
+})
+  .annotate(Tool.Title, "Report a thread's workflows")
+  .annotate(Tool.Readonly, true)
+  .annotate(Tool.Destructive, false)
+  .annotate(Tool.Idempotent, true)
+  .annotate(McpSchema.EnabledWhen, McpInvocationContext.hiddenFromThreads);
+
 const WorkflowRunStopTool = Tool.make("workflow_stop", {
   description:
     "Stop a workflow this thread started and every agent it started. No completion wake follows.",
@@ -196,7 +215,7 @@ const WorkflowRunStopTool = Tool.make("workflow_stop", {
 
 const GraphReviewTool = Tool.make("graph_review", {
   description:
-    "Validate a dependency graph without starting it. Returns reviewId, digest, run order as dependency layers, write conflicts, input status, blockers and approvalRequired. Assign workers with a node's preset: a profile id from availableProfiles or orchestrator_capabilities workflowPresets; there may be none, so never invent ids. Assign a verifier with a judgment check's target. When approvalRequired is true, end your turn: T3 messages you the approved digest after the user approves it in T3 Code. Otherwise call graph_start with the same graph and acceptedDigest.",
+    "Validate a dependency graph without starting it. Returns reviewId, digest, run order as dependency layers, write conflicts, input status, blockers and approvalRequired. Set every worker node's target and every judgment check's target yourself, choosing provider, model and options such as effort from orchestrator_capabilities; never invent ids. A node without one runs on workerTarget when given, else on your own model. Give a node verify when its result needs checking ({ type: 'process', argv } or { type: 'judgment', rubric, target }; see graph). Tests the worker can see or wrote cannot catch wrong work alone, and a judge cannot see a worktree; prefer a cheap judgment target from a different model family than its worker when one is enabled; advisory.assignmentNotes lists gaps. Then do what the result's next says: fix blockers and review again; only a ready review with approvalRequired true ends your turn, and T3 messages you the approved digest after the user approves it in T3 Code; a ready one without approval runs now with graph_start (expandedGraph as graph, digest as acceptedDigest), or workflow_start if you were asked to run a script.",
   parameters: OrchestratorMcpGraphReviewInput,
   success: OrchestratorMcpGraphReviewResult,
   failure: OrchestratorMcpFailure,
@@ -467,6 +486,7 @@ export const OrchestratorToolkit = Toolkit.make(
   TaskWaitTool,
   WorkflowStartTool,
   WorkflowStatusTool,
+  WorkflowReportTool,
   WorkflowRunStopTool,
   GraphReviewTool,
   GraphStartTool,

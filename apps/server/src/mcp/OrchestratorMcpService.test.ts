@@ -56,6 +56,8 @@ import { buildUnavailableProviderSnapshot } from "../provider/unavailableProvide
 import * as ProjectService from "../project/ProjectService.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as UsageService from "../usage/UsageService.ts";
+import { parseRateTable } from "../usage/usagePricing.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
 import * as RemoteDelegation from "../peer/RemoteDelegation.ts";
 import type { McpInvocationScope } from "./McpInvocationContext.ts";
@@ -63,17 +65,26 @@ import { idleThreadProjection, liveThreadShell } from "./McpToolAccess.testkit.t
 import * as ServerConfig from "../config.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import { resolveRuntimeMode } from "./delegatedTaskModes.ts";
+import * as WorkflowApprovalGate from "../orchestration-v2/WorkflowApprovalGate.ts";
 import * as WorkflowApprovalGateTestkit from "../orchestration-v2/WorkflowApprovalGate.testkit.ts";
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 
 const decodeTarget = Schema.decodeUnknownEffect(OrchestratorMcpTarget);
 
-const layerOrchestratorService = OrchestratorMcpService.layer.pipe(
-  Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
-  Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
-  Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
-  Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestrator-mcp-test-" })),
-);
+/** The service with no list prices, unless a test gives it a usage service with a table. */
+const layerOrchestratorServiceWith = (
+  usage: Layer.Layer<UsageService.UsageService> = UsageServiceTestkit.layerRates(),
+  gate: Layer.Layer<WorkflowApprovalGate.WorkflowApprovalGate> = WorkflowApprovalGateTestkit.layerOpen,
+) =>
+  OrchestratorMcpService.layer.pipe(
+    Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
+    Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+    Layer.provide(gate),
+    Layer.provide(usage),
+    Layer.provide(ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestrator-mcp-test-" })),
+  );
+const layerOrchestratorService = layerOrchestratorServiceWith();
 
 describe("OrchestratorMcpService", () => {
   it.effect("retries terminal acknowledgement with a fresh command id", () =>
@@ -419,6 +430,124 @@ describe("OrchestratorMcpService", () => {
         assert.equal(waited.status, "completed");
         assert.notProperty(waited, "next");
       }).pipe(Effect.provide(layerOrchestratorService.pipe(Layer.provide(layerDependencies))));
+    }),
+  );
+
+  it.effect("says what waits for a person while the thread's delegated work cannot settle", () =>
+    Effect.gen(function* () {
+      const coordinatorId = ThreadId.make("thread:mcp-await-coordinator");
+      const memberThreadId = ThreadId.make("thread:mcp-await-member");
+      const nestedThreadId = ThreadId.make("thread:mcp-await-nested");
+      const doneThreadId = ThreadId.make("thread:mcp-await-done");
+      const runId = RunId.make("run:mcp-await");
+      const asking = new Set<ThreadId>();
+      let settled = false;
+      let reviewWaits = false;
+      const task = (
+        id: string,
+        threadId: ThreadId,
+        childThreadId: ThreadId | null,
+        status: string,
+      ) => ({ id: NodeId.make(id), threadId, origin: "app_owned", childThreadId, status });
+      // A running workflow row, its running member, which owns a running task of its own, and a
+      // member that already finished.
+      const subagents = new Map<ThreadId, ReadonlyArray<unknown>>([
+        [
+          coordinatorId,
+          [
+            task("node:mcp-await-workflow", coordinatorId, null, "running"),
+            task("node:mcp-await-member", coordinatorId, memberThreadId, "running"),
+            task("node:mcp-await-done", coordinatorId, doneThreadId, "completed"),
+          ],
+        ],
+        [
+          memberThreadId,
+          [task("node:mcp-await-nested", memberThreadId, nestedThreadId, "running")],
+        ],
+      ]);
+      const records = (threadId: ThreadId) =>
+        ({
+          thread: { id: threadId },
+          runs: [{ id: runId, ordinal: 1, status: "completed" }],
+          contextTransfers: [],
+          messages: [],
+          subagents: subagents.get(threadId) ?? [],
+          providerThreads: [],
+          runtimeRequests: asking.has(threadId) ? [{ status: "pending" }] : [],
+          nodes: [],
+          turnItems: [],
+        }) as unknown as OrchestrationV2ThreadProjection;
+      const layerDependencies = Layer.mergeAll(
+        NodeServices.layer,
+        Layer.mock(ThreadManagementService.ThreadManagementService)({
+          getThreadRecords: (threadId) => Effect.succeed(records(threadId)),
+          getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
+          getProjectThreadRecords: (input) => Effect.succeed(records(input.threadId)),
+          waitForThread: () =>
+            Effect.succeed({
+              threadId: coordinatorId,
+              run: records(coordinatorId).runs[0]!,
+              timedOut: !settled,
+              ...(settled ? { resultRun: records(coordinatorId).runs[0]! } : {}),
+            }),
+        }),
+        ServerSettings.layerTest(),
+        Layer.mock(ProviderRegistry.ProviderRegistry)({ getProviders: Effect.succeed([]) }),
+        Layer.mock(ProviderAdapterRegistry.ProviderAdapterRegistryV2)({
+          list: () => Effect.succeed([]),
+        }),
+        Layer.mock(ProjectService.ProjectService)({}),
+        Layer.mock(SecretRequests.SecretRequests)({}),
+        Layer.mock(RemoteDelegation.RemoteDelegation)({}),
+        Layer.mock(ScheduledTaskService.ScheduledTaskService)({}),
+      );
+      const gate = Layer.mock(WorkflowApprovalGate.WorkflowApprovalGate)({
+        awaitsDecision: (threadId) => Effect.sync(() => reviewWaits && threadId === coordinatorId),
+      });
+      // `t3 thread --wait`: a caller outside any thread.
+      const scope: McpInvocationScope = {
+        environmentId: EnvironmentId.make("environment:mcp-await"),
+        requestNamespace: "cli:mcp-await",
+        thread: undefined,
+        client: undefined,
+        capabilities: new Set(["orchestration"]),
+        issuedAt: 1,
+      };
+
+      yield* Effect.gen(function* () {
+        const service = yield* OrchestratorMcpService.OrchestratorMcpService;
+        const wait = (untilDelegatedWorkSettled = true) =>
+          service.waitForThread(scope, { threadId: coordinatorId, untilDelegatedWorkSettled });
+        const awaiting = (untilDelegatedWorkSettled = true) =>
+          wait(untilDelegatedWorkSettled).pipe(Effect.map((result) => result.awaitingAnswer));
+
+        assert.isTrue((yield* wait()).timedOut);
+        assert.isUndefined(yield* awaiting());
+        // A finished member's thread is no longer the work's; its request holds nothing.
+        asking.add(doneThreadId);
+        assert.isUndefined(yield* awaiting());
+        asking.add(nestedThreadId);
+        assert.equal(yield* awaiting(), "descendant");
+        // A plain wait never says, as before.
+        assert.isUndefined(yield* awaiting(false));
+        asking.add(coordinatorId);
+        assert.equal(yield* awaiting(), "thread");
+        asking.clear();
+
+        settled = true;
+        assert.isUndefined(yield* awaiting());
+        reviewWaits = true;
+        const review = yield* wait();
+        assert.isFalse(review.timedOut);
+        assert.equal(review.awaitingAnswer, "workflow_review");
+        assert.isUndefined(yield* awaiting(false));
+      }).pipe(
+        Effect.provide(
+          layerOrchestratorServiceWith(UsageServiceTestkit.layerRates(), gate).pipe(
+            Layer.provide(layerDependencies),
+          ),
+        ),
+      );
     }),
   );
 
@@ -1235,7 +1364,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         yield* Effect.gen(function* () {
           const service = yield* OrchestratorMcpService.OrchestratorMcpService;
           const capabilities = yield* service.capabilities(scope);
-          assert.isUndefined(capabilities.workflowPresets);
+          assert.isFalse("workflowPresets" in capabilities);
           const byId = new Map(
             capabilities.providers.map((provider) => [provider.providerInstanceId, provider]),
           );
@@ -1377,13 +1506,13 @@ describe("OrchestratorMcpService provider resolution", () => {
       },
     ];
 
-    const capabilitiesWith = (search?: string) =>
+    const capabilitiesWith = (search?: string, usage?: Layer.Layer<UsageService.UsageService>) =>
       Effect.gen(function* () {
         const service = yield* OrchestratorMcpService.OrchestratorMcpService;
         return yield* service.capabilities(scope, search === undefined ? {} : { search });
       }).pipe(
         Effect.provide(
-          layerOrchestratorService.pipe(
+          layerOrchestratorServiceWith(usage).pipe(
             Layer.provide(
               Layer.mergeAll(
                 NodeServices.layer,
@@ -1490,6 +1619,36 @@ describe("OrchestratorMcpService provider resolution", () => {
           { id: "gpt-3" },
           { id: "my-alpha" },
         ]);
+      }),
+    );
+
+    it.effect("lists each model's base list price only when a rate table is at hand", () =>
+      Effect.gen(function* () {
+        const rates = parseRateTable({
+          "gpt-6": {
+            input_cost_per_token: 1.25e-6,
+            output_cost_per_token: 10e-6,
+            cache_read_input_token_cost: 0.125e-6,
+          },
+        });
+        const codex = (yield* capabilitiesWith(undefined, UsageServiceTestkit.layerRates(rates)))
+          .providers[0];
+        assert.deepEqual(
+          codex?.models.map((entry) => [entry.id, entry.listPrice]),
+          [
+            [
+              "gpt-6",
+              { inputUsdPerMTok: 1.25, cachedInputUsdPerMTok: 0.125, outputUsdPerMTok: 10 },
+            ],
+            // Unknown is null, not free.
+            ["gpt-4", null],
+            ["gpt-3", null],
+            ["my-alpha", null],
+          ],
+        );
+        // Without a table no price is advertised at all, rather than every price as unknown.
+        const unpriced = (yield* capabilitiesWith()).providers[0];
+        assert.isTrue(unpriced?.models.every((entry) => !("listPrice" in entry)));
       }),
     );
   });

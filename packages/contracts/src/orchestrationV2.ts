@@ -810,6 +810,24 @@ export const OrchestrationV2WorkflowPlannedIdentity = Schema.Struct({
 export type OrchestrationV2WorkflowPlannedIdentity =
   typeof OrchestrationV2WorkflowPlannedIdentity.Type;
 
+/**
+ * How a workflow agent's target was chosen: its own target or model, the workflow's workerTarget,
+ * the coordinator's own model, or a preset snapshot of a workflow started before presets were
+ * removed. A graph agent keeps what review found, since review writes a target into every node.
+ */
+export const WorkflowAgentTargetSource = Schema.Literals([
+  "target",
+  "model",
+  "workerTarget",
+  "caller",
+  "legacyPreset",
+]);
+export type WorkflowAgentTargetSource = typeof WorkflowAgentTargetSource.Type;
+
+/** The kind of check a graph node declares; `none` when it declares none. */
+export const WorkflowCheckKind = Schema.Literals(["none", "process", "structured", "judgment"]);
+export type WorkflowCheckKind = typeof WorkflowCheckKind.Type;
+
 /** A node of a reviewed graph, as the app shows it: no prompts or inputs, so updates stay small. */
 export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
   key: TrimmedNonEmptyString,
@@ -818,6 +836,23 @@ export const OrchestrationV2WorkflowPlanNode = Schema.Struct({
   wave: NonNegativeInt,
   dependsOn: Schema.Array(TrimmedNonEmptyString),
   plannedIdentity: Schema.optional(OrchestrationV2WorkflowPlannedIdentity),
+  /** How review chose the worker's target, and its judgment check's when it has one. */
+  targetSource: Schema.optional(WorkflowAgentTargetSource),
+  checkTargetSource: Schema.optional(WorkflowAgentTargetSource),
+  /**
+   * Shape facts the server derives from the graph, never from the coordinator: dependencies in
+   * and dependents out, the check kind, and how many paths it reads (scopes and inputs) and
+   * writes (scopes and outputs). Absent on plans stored before they were recorded.
+   */
+  features: Schema.optional(
+    Schema.Struct({
+      fanIn: NonNegativeInt,
+      fanOut: NonNegativeInt,
+      check: WorkflowCheckKind,
+      reads: NonNegativeInt,
+      writes: NonNegativeInt,
+    }),
+  ),
 });
 export type OrchestrationV2WorkflowPlanNode = typeof OrchestrationV2WorkflowPlanNode.Type;
 
@@ -874,6 +909,18 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
         state: Schema.Literals(["running", "completed", "failed", "cancelled", "interrupted"]),
         providerInstanceId: ProviderInstanceId,
         model: Schema.optional(TrimmedNonEmptyString),
+        /** The resolved effort and options this attempt started with; absent on older rows. */
+        effort: Schema.optional(TrimmedNonEmptyString),
+        options: Schema.optional(
+          Schema.Record(
+            TrimmedNonEmptyString,
+            Schema.Union([TrimmedNonEmptyString, Schema.Boolean]),
+          ),
+        ),
+        /** The service tier it bills at, from its driver's usage reader; absent on older rows. */
+        speed: Schema.optional(Schema.Literals(["standard", "fast", "ultrafast"])),
+        /** Why the runner stopped it, so a resumed run retries it as the stopping run would. */
+        stoppedBy: Schema.optional(Schema.Literals(["stalled", "timed_out"])),
         totalTokens: Schema.optional(NonNegativeInt),
         usageStatus: Schema.Literals(["complete", "partial", "unavailable"]),
         durationMs: Schema.optional(NonNegativeInt),
@@ -885,6 +932,8 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
     ),
   ),
   judgmentOutcome: Schema.optional(Schema.Literals(["passed", "failed", "error"])),
+  /** The check its call declared, so one that never ran still shows; absent when none. */
+  declaredCheck: Schema.optional(WorkflowCheckKind),
   outcomeCategory: Schema.optional(WorkflowAgentOutcomeCategory),
   runnerSettledAt: Schema.optional(NonNegativeInt),
   index: NonNegativeInt,
@@ -899,6 +948,11 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
   phaseIndex: Schema.optional(NonNegativeInt),
   phaseTitle: Schema.optional(TrimmedNonEmptyString),
   model: Schema.optional(TrimmedNonEmptyString),
+  /** The resolved model options its latest attempt started with, by option id. */
+  options: Schema.optional(
+    Schema.Record(TrimmedNonEmptyString, Schema.Union([TrimmedNonEmptyString, Schema.Boolean])),
+  ),
+  targetSource: Schema.optional(WorkflowAgentTargetSource),
   effort: Schema.optional(TrimmedNonEmptyString),
   speed: Schema.optional(TrimmedNonEmptyString),
   attempt: Schema.optional(NonNegativeInt),
@@ -1708,10 +1762,12 @@ export const OrchestrationV2WorkflowReviewDigest = Schema.String.check(
   Schema.isPattern(/^sha256:[a-f0-9]{64}$/),
 );
 
-/** The provider and model a reviewed task runs on, as the digest covers them. */
+/** The provider, model and effort a reviewed task runs on, as the digest covers them. */
 export const OrchestrationV2WorkflowReviewTarget = Schema.Struct({
   providerInstanceId: Schema.optional(Schema.String),
   model: Schema.optional(Schema.String),
+  /** The effort its options set, under either driver's option id; absent on older records. */
+  effort: Schema.optional(Schema.String),
 });
 export type OrchestrationV2WorkflowReviewTarget = typeof OrchestrationV2WorkflowReviewTarget.Type;
 
@@ -1727,6 +1783,8 @@ export const OrchestrationV2WorkflowReviewTask = Schema.Struct({
   worker: Schema.optional(OrchestrationV2WorkflowReviewTarget),
   /** The judge, when the task has a judgment check. */
   judge: Schema.optional(OrchestrationV2WorkflowReviewTarget),
+  /** The targets of its attempts after a failed check or deadline, in order, when declared. */
+  retries: Schema.optional(Schema.Array(OrchestrationV2WorkflowReviewTarget)),
   check: Schema.optional(Schema.Literals(["process", "structured", "judgment"])),
 });
 export type OrchestrationV2WorkflowReviewTask = typeof OrchestrationV2WorkflowReviewTask.Type;

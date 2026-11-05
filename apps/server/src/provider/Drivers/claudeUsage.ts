@@ -97,6 +97,11 @@ export const claudeUsageReader: ProviderUsageReader<ClaudeSettings, Path.Path> =
   kind: "transcripts",
   provider: "claude",
   format: claudeUsageFormat,
+  // Fast mode is the only speed Claude Code records on a turn.
+  selectionSpeed: (options) =>
+    options.some((option) => option.id === "fastMode" && option.value === true)
+      ? "fast"
+      : "standard",
   directories: Effect.fn("claudeUsageReader.directories")(function* ({ config, environment }) {
     if (config === undefined) return [];
     const path = yield* Path.Path;

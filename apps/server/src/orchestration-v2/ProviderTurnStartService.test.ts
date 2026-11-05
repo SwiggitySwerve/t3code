@@ -758,7 +758,6 @@ function makeLocalCommandHarness(input: {
             workflows: root.turnTriggers.workflows,
             workflowStart: root.turnTriggers.workflowStart,
             workflowTriggers: root.turnTriggers.workflowTriggers,
-            workflowPresets: root.turnTriggers.workflowPresets,
             typedText: root.typedText,
             driver: root.providerThread.driver,
             text: root.message.text,
