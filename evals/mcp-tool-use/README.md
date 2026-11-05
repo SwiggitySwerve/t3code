@@ -110,6 +110,28 @@ Commands built at run time, external script files and full shell/interpreter sem
 
 This API replay measures routing and recovery decisions. Screenshots return product text and metadata without rendered image blocks, and Codex code cells have no `image` helper, so a cell that calls it fails with `image is not defined`. The shell remains simulated, children are not executed, and `priorTurns` is synthetic context rather than native resume or compaction. It does not test launcher execution, binding, pruning, actual device state, transport failures or resource cleanup, and it models agent-device's session check rather than running it. DEL-02 checks managed recording start/stop and the final filename; it does not inspect video bytes, required flow, transforms, codec or size. Screenshots and final text do not establish delivered artifacts or honesty. Keep local real-harness results separate; their scores and costs are not API-replay results. Offline validation costs $0. Record fresh per-model baseline and candidate costs before using device-case scores as release evidence.
 
+## Workflow cases
+
+`cases/orchestration.ndjson` has four workflow cases from the meta-orchestrator E4 experiments. They turn workflows on with `setup.workflows`, start most samples after the coordinator's own `graph_review` (`turnCalls`), and get every review from T3's review code.
+
+| Case                                    | Kind    | What it checks                                                                                                                        |
+| --------------------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| workflow-script-dry-run-review-stops    | bad     | A workflow_start-worded job, after a ready review with approvalRequired false, starts graph_start or workflow_start in the same turn. |
+| workflow-request-review-awaits-approval | control | A requested workflow whose ready review needs approval starts nothing.                                                                |
+| workflow-request-blocked-review-fixed   | guard   | A requested workflow whose review has a blocker (approvalRequired is true then too) is fixed and reviewed again.                      |
+| workflow-check-only-visible-tests       | bad     | A specification task gets a judgment check, and no judge on a model pricier than Haiku or Luna.                                       |
+
+Passes, the text before the E4 fixes (`95ff692896`) → the fixed text, 10 samples per case on each side, at default effort. Five GPT check-case samples and one blocked-case sample on the fixed text failed at the proxy; those two cases were rerun with 10 fresh samples, shown here.
+
+| Case                                    | Opus 5.5      | GPT-6.1 Sol   |
+| --------------------------------------- | ------------- | ------------- |
+| workflow-script-dry-run-review-stops    | 10/10 → 10/10 | 10/10 → 10/10 |
+| workflow-request-review-awaits-approval | 10/10 → 10/10 | 10/10 → 10/10 |
+| workflow-request-blocked-review-fixed   | 10/10 → 10/10 | 5/10 → 10/10  |
+| workflow-check-only-visible-tests       | 1/10 → 8/10   | 5/10 → 9/10   |
+
+The dry-run case does not fail on the old text: E4's stall was rare (7 of 113 archived GPT runs), and these samples did not show it. The evidence for that fix is the live runs named in the case's `source`. On the old text, GPT ended the turn on the blocked review in 5 of 10 samples ("the plan is blocked because I assumed a nonexistent spec path"), and Opus judged on Sonnet or Sol in 9 of 10. A round on Opus cost about $2.65 (old text) and $3.86 (fixed text) at list price; GPT ran through the proxy.
+
 ## Where T3's text lives
 
 - `packages/provider-core/src/server/runtimeInstructions.ts`
