@@ -5463,8 +5463,9 @@ describe("workflow approval", () => {
       const reviewed = yield* reviewGraph(oneNode);
       expect(reviewed.approvalRequired).toBe(false);
       // The result says to start it, so a coordinator does not wait for an approval nobody asks.
+      // E4: GPT used a review as a dry run before a requested workflow_start and stopped there.
       expect(reviewed.next).toBe(
-        "No approval is needed: call graph_start now with expandedGraph as graph and digest as acceptedDigest.",
+        "No approval is needed, and nothing has run yet: call graph_start now with expandedGraph as graph and digest as acceptedDigest, or workflow_start if you were asked to run a script. Do not end your turn before the work starts.",
       );
       const started = yield* decodeWorkflow(
         (yield* startGraph(oneNode, reviewed)).structuredContent,

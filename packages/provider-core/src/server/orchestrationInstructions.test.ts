@@ -89,7 +89,7 @@ describe("T3 device instructions", () => {
   });
 });
 
-// Goldens from the supplied ablation report's variants/final/*.rendered.md.
+// Goldens from the ablation report's variants/final/*.rendered.md, plus E4's review `next` line.
 describe("model-family orchestration instructions", () => {
   it.each([
     ["claude-opus-4-6", "anthropic"],
@@ -130,14 +130,14 @@ describe("model-family orchestration instructions", () => {
   });
 
   it.each([
-    ["", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
+    ["", "42f8dc3bccdf588959dd0915eee4522c561dbb106a10b1467af7dfbd3d81ca57", 3847],
     [
       "anthropic/claude-opus-4-6",
-      "82ec47e2e8cbfccc7edb37998eb34969569cc4f9cc06f9e6baffdc498284e070",
-      3858,
+      "41746f5db8bacf386734c25ffbdc0450eb102879349d040dc04414eab00a9286",
+      3931,
     ],
-    ["openai/gpt-5.4", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
-    ["unknown-model", "991accda32b3dae4c9ad80166436bce300bff0ea35532517b7a4b3054fc755b3", 3774],
+    ["openai/gpt-5.4", "42f8dc3bccdf588959dd0915eee4522c561dbb106a10b1467af7dfbd3d81ca57", 3847],
+    ["unknown-model", "42f8dc3bccdf588959dd0915eee4522c561dbb106a10b1467af7dfbd3d81ca57", 3847],
   ] as const)("matches the report for selected model %s", (model, digest, bytes) => {
     const rendered = t3OrchestrationInstructions(true, model);
     expect(NodeCrypto.createHash("sha256").update(rendered).digest("hex")).toBe(digest);
@@ -163,5 +163,14 @@ describe("workflow instruction gate", () => {
       expect(T3_CODE_ORCHESTRATION_INSTRUCTIONS).not.toContain(addition);
       expect(enabled).toContain(addition);
     }
+  });
+
+  it("ends the turn after a review only when the review needs approval", () => {
+    // E4: GPT ended its turn after an approval-free dry-run review, citing this line.
+    const enabled = t3OrchestrationInstructions(true);
+    expect(enabled).toContain(
+      "do what its `next` says: end your turn only when `approvalRequired` is true",
+    );
+    expect(enabled).not.toContain("in one sentence, and end your turn");
   });
 });
