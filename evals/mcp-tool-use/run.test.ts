@@ -370,6 +370,64 @@ it("sends a workflow turn as T3 does and resumes after this turn's calls with T3
   assert.equal(prompt("keyword"), `Run this as a workflow.\n\n${workflowTurnNote()}`);
   const replayed = blocks("off").findLast((block) => block.type === "tool_result");
   assert.include(String(replayed?.content), JSON.stringify(graphReviewNext(review)));
+
+  // "default" is T3's own review of the graph over the world's files, armed by the prompt.
+  const graph = {
+    schemaVersion: 1,
+    nodes: {
+      a: { subject: "Fix", description: "Fix it.", dependsOn: [] },
+      b: {
+        subject: "Read",
+        description: "Read the spec.",
+        dependsOn: ["a"],
+        inputs: [{ id: "spec", kind: "workspace_snapshot", path: "docs/spec.md" }],
+      },
+    },
+  };
+  const reviewed = (workflows: "off" | "keyword", files: Record<string, string>) => {
+    const sample = makeSample(
+      {
+        ...testCase(workflows),
+        setup: {
+          role: "top",
+          workflows,
+          world: { files },
+          turnCalls: [{ tool: "graph_review", input: { graph }, result: "default" }],
+        },
+      },
+      base,
+    );
+    const result = buildMessages(sample)
+      .flatMap((message) => message.content)
+      .findLast((block) => block.type === "tool_result");
+    return JSON.parse(String(result?.content)) as Record<string, unknown>;
+  };
+  const ready = reviewed("off", { "docs/spec.md": "# Spec" });
+  assert.deepInclude(ready, { approvalRequired: false, ready: true, blockers: [] });
+  assert.deepEqual(ready.layers, [["a"], ["b"]]);
+  const blocked = reviewed("keyword", {});
+  assert.deepInclude(blocked, {
+    approvalRequired: true,
+    ready: false,
+    next: graphReviewNext({ ready: false, approvalRequired: true }),
+    blockers: ["b: input spec (docs/spec.md) is missing."],
+  });
+});
+
+it("matches a list against a record's values, such as a graph's nodes by id", () => {
+  const nodes = { a: { verify: { type: "process" } }, b: { verify: { type: "judgment" } } };
+  const run: SampleRun = {
+    calls: [{ step: 0, tool: "graph_review", input: { graph: { nodes } } }],
+    text: "",
+    stopReason: "end_turn",
+  };
+  const judged = (type: string) => ({
+    calls: [{ tool: "graph_review", args: { "graph.nodes": [{ "verify.type": type }] } }],
+  });
+  assert.deepEqual(failed(judged("judgment"), run), []);
+  assert.deepEqual(failed(judged("structured"), run), [
+    'calls graph_review {"graph.nodes":[{"verify.type":"structured"}]}',
+  ]);
 });
 
 it("does not record a deferred tool called before it was loaded", () => {

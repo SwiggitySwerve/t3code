@@ -6,6 +6,7 @@
  * README.md for how to run it and add cases.
  */
 import * as NodeChildProcess from "node:child_process";
+import * as NodeCrypto from "node:crypto";
 import * as NodeUtil from "node:util";
 import * as NodeVM from "node:vm";
 import * as NodeZlib from "node:zlib";
@@ -59,6 +60,7 @@ import {
   PullRequestsToolkit,
 } from "../../apps/server/src/mcp/toolkits/pullRequests/tools.ts";
 import { ThreadToolkit } from "../../apps/server/src/mcp/toolkits/thread/tools.ts";
+import { parseGraph, reviewGraph } from "../../apps/server/src/mcp/workflowGraph.ts";
 import { WorktreeToolkit } from "../../apps/server/src/mcp/toolkits/worktree/tools.ts";
 import {
   CLAUDE_PROVIDER,
@@ -851,15 +853,14 @@ const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const DEFAULT_WORKFLOW_TRIGGERS = Schema.decodeSync(WorkflowTriggers)({});
 
 /**
- * The prompt as T3 sends it when the case turns workflows on: a person typed it in the web client,
- * so T3's trigger may append the plan-first note, as it does at turn start.
+ * What T3's trigger reads from the case's prompt when the case turns workflows on: a person typed
+ * it in the web client. "requested" appends the plan-first note and arms the approval gate.
  */
-const workflowTurn = ({ testCase, base }: Sample, prompt: string) => {
-  const workflowStart = testCase.setup.workflows;
-  if (workflowStart === undefined) return prompt;
-  const request = {
+const workflowTrigger = ({ setup, prompt }: McpToolUseCase) => {
+  if (setup.workflows === undefined) return undefined;
+  const input = {
     workflows: true,
-    workflowStart,
+    workflowStart: setup.workflows,
     workflowTriggers: DEFAULT_WORKFLOW_TRIGGERS,
     typedText: prompt,
     createdBy: "user",
@@ -867,8 +868,15 @@ const workflowTurn = ({ testCase, base }: Sample, prompt: string) => {
     delegatedThread: false,
     resumesEarlierTurn: false,
   } as const;
+  return { input, request: workflowRequestOf(input) };
+};
+
+/** The prompt as T3 sends it, with the plan-first note when its trigger appends one. */
+const workflowTurn = ({ testCase, base }: Sample, prompt: string) => {
+  const trigger = workflowTrigger(testCase);
+  if (trigger === undefined) return prompt;
   const driver = base.codex ? CODEX_DRIVER : CLAUDE_PROVIDER;
-  return applyTurnTriggers({ ...request, driver, text: prompt }, workflowRequestOf(request));
+  return applyTurnTriggers({ ...trigger.input, driver, text: prompt }, trigger.request);
 };
 
 /** Messages for a case: reminders, context, prior turns with real tool blocks, then the prompt. */
@@ -917,11 +925,16 @@ export const buildMessages = (sample: Sample) => {
     for (const { id, name, input, result, tool, prior } of calls) {
       push("assistant", { type: "tool_use", id, name, input });
       const bare = normalizeToolName(tool.name);
+      // In this turn, "default" is T3's own result, as for a call the sample makes.
+      const value =
+        asT3 && result === "default" && !isDeviceTool(bare)
+          ? t3Default(sample, bare, isRecord(input) ? input : {})
+          : result;
       const replayed =
         bare === "orchestrator_capabilities"
-          ? capabilities(sample, result)
+          ? capabilities(sample, value)
           : (sample.priorResults.get(prior) ??
-            (asT3 ? withProductFields(bare, result, role === "delegated-child") : result));
+            (asT3 ? withProductFields(bare, value, role === "delegated-child") : value));
       push("user", toolResult(id, replayed));
     }
   };
@@ -992,6 +1005,55 @@ const pullRequest = (repo: string, input: Readonly<Record<string, unknown>>) => 
     repository,
     number,
     url: url || `https://github.com/${repository}/pull/${number}`,
+  };
+};
+
+/**
+ * T3's review of the agent's graph over the case's files: T3's parser, layers, write conflicts,
+ * input blockers, digest and advisory. Approval is required while the prompt is a person's
+ * workflow request, when T3's gate is armed. Targets are the eval's: T3 resolves them against the
+ * live catalog, and here a node without one runs on the caller.
+ */
+const graphReviewDefault = (sample: Sample, input: Readonly<Record<string, unknown>>) => {
+  const files = sample.testCase.setup.world?.files;
+  const hashes = Object.fromEntries(
+    Object.entries(isRecord(files) ? files : {}).map(([path, content]) => {
+      const bytes = Buffer.from(valueText(content));
+      const sha256 = NodeCrypto.createHash("sha256").update(bytes).digest("hex");
+      return [path, { sha256, sizeBytes: bytes.length }];
+    }),
+  );
+  const review = reviewGraph(input.graph, hashes);
+  const parsed = parseGraph(input.graph);
+  const ready = review.digest !== null && review.blockers.length === 0;
+  const approvalRequired = workflowTrigger(sample.testCase)?.request === "requested";
+  const caller = {
+    providerInstanceId: sample.base.codex ? "codex" : "claudeAgent",
+    model: sample.base.model,
+  };
+  const nodes = parsed.ok ? Object.entries(parsed.graph.nodes) : [];
+  const concrete = nodes.map(([key, node]) => [key, { ...node, target: node.target ?? caller }]);
+  return {
+    reviewId: `review-${sample.nextTask++}`,
+    approvalRequired,
+    next: graphReviewNext({ ready, approvalRequired }),
+    digest: review.digest,
+    ready,
+    targets: nodes.map(([nodeId, node]) => ({
+      nodeId,
+      source: node.target === undefined ? "caller" : "target",
+      target: node.target ?? caller,
+    })),
+    expandedGraph: parsed.ok ? { ...parsed.graph, nodes: Object.fromEntries(concrete) } : null,
+    layers: review.layers,
+    writeConflicts: review.writeConflicts,
+    inputs: Object.entries(review.inputs).map(([path, hash]) =>
+      typeof hash === "string"
+        ? { path, status: hash, sha256: null, sizeBytes: null }
+        : { path, status: "found", sha256: hash.sha256, sizeBytes: hash.sizeBytes },
+    ),
+    blockers: review.blockers,
+    ...(review.advisory === undefined ? {} : { advisory: review.advisory }),
   };
 };
 
@@ -1076,6 +1138,8 @@ const t3Default = (sample: Sample, name: string, input: Readonly<Record<string, 
         htmlRender: { attachmentId: "att-1", title: input.title ?? "Visual", height: 560 },
         message: HTML_RENDERED,
       };
+    case "graph_review":
+      return graphReviewDefault(sample, input);
     case "preview_status":
       return {
         available: false,
@@ -1391,9 +1455,9 @@ const matches = (expected: unknown, actual: unknown): boolean => {
     return valueText(actual).toLowerCase().includes(expected.slice(1).toLowerCase());
   }
   if (Array.isArray(expected)) {
-    return (
-      Array.isArray(actual) && expected.every((item) => actual.some((at) => matches(item, at)))
-    );
+    // A list matches a list, or a record's values, such as a graph's nodes by id.
+    const items = Array.isArray(actual) ? actual : isRecord(actual) ? Object.values(actual) : null;
+    return items !== null && expected.every((item) => items.some((at) => matches(item, at)));
   }
   if (!isRecord(expected)) return expected === actual;
   const at = (path: string) =>
