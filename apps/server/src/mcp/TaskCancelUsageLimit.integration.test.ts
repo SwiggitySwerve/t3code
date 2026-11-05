@@ -32,7 +32,9 @@ import * as ThreadLaunchService from "../orchestration-v2/ThreadLaunchService.ts
 import * as UsageLimitRecoveryWorker from "../orchestration-v2/UsageLimitRecoveryWorker.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as ThreadManagementService from "../orchestration-v2/ThreadManagementService.ts";
+import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
 import * as ProviderReplayHarness from "../orchestration-v2/testkit/ProviderReplayHarness.ts";
 import { checkpointWorkspace } from "@t3tools/provider-testing/replayWorkspace";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
@@ -176,6 +178,10 @@ it.effect.each([
           OrchestratorMcpService.layer.pipe(
             Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
             Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)({})),
+            Layer.provide(UsageServiceTestkit.layerRates()),
+            Layer.provide(
+              ServerConfig.layerTest(process.cwd(), { prefix: "t3-task-cancel-usage-" }),
+            ),
           ),
           layerRecovery,
         ).pipe(

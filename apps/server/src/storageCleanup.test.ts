@@ -48,8 +48,6 @@ import {
   ThreadId,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2ThreadShell,
-  type TerminalMetadataStreamEvent,
-  type TerminalSummary,
 } from "@t3tools/contracts";
 import * as DateTime from "effect/DateTime";
 import {
@@ -356,7 +354,6 @@ const cleanupFixture = (
     let openSessionCwd: string | null = null;
     let sessionLive = true;
     let onLiveCheck: Effect.Effect<void> = Effect.void;
-    let outboxStatus: string | null = null;
     let fullStatusCalls = 0;
     let snapshotReads = 0;
     let events: Stream.Stream<OrchestrationV2DomainEvent> = Stream.empty;
@@ -477,19 +474,17 @@ const cleanupFixture = (
                   }),
                 },
               ]
-            : outboxStatus !== null && strings.join("").includes("orchestration_v2_effect_outbox")
-              ? [{ status: outboxStatus }]
-              : strings.join("").includes("deleted_at IS NOT NULL")
-                ? deletedThreads.map((thread) => ({
-                    payload_json: JSON.stringify(thread),
-                    workspaceRoot: repo,
-                  }))
-                : strings.join("").includes('AS "worktreePath"')
-                  ? [
-                      ...threads.flatMap((thread) => thread.worktreePath ?? []),
-                      ...storedWorktreePaths,
-                    ].map((worktreePath) => ({ worktreePath }))
-                  : [],
+            : strings.join("").includes("deleted_at IS NOT NULL")
+              ? deletedThreads.map((thread) => ({
+                  payload_json: JSON.stringify(thread),
+                  workspaceRoot: repo,
+                }))
+              : strings.join("").includes('AS "worktreePath"')
+                ? [
+                    ...threads.flatMap((thread) => thread.worktreePath ?? []),
+                    ...storedWorktreePaths,
+                  ].map((worktreePath) => ({ worktreePath }))
+                : [],
         )) as unknown as SqlClient.SqlClient),
       Effect.provideService(EffectOutbox.EffectOutboxV2, {
         hasThreadEffects: (
@@ -568,9 +563,6 @@ const cleanupFixture = (
       },
       setOnLiveCheck: (hook: Effect.Effect<void>) => {
         onLiveCheck = hook;
-      },
-      setOutboxStatus: (status: string | null) => {
-        outboxStatus = status;
       },
       setDeletedThreads: (next: OrchestrationV2ThreadShell[]) => {
         deletedThreads = next;
@@ -1535,7 +1527,7 @@ describe("deleted thread worktrees", () => {
         const owner = parent(fixture.worktree);
         fixture.setDeletedThreads([owner]);
         fixture.setThreads([]);
-        fixture.setOutboxStatus("failed");
+        fixture.setOutboxEffects([{ threadId: owner.id, status: "failed" }]);
         const reads = yield* stopSessionAfterStartupSweep(
           fixture,
           ThreadId.make("thread-elsewhere"),

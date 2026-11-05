@@ -12,7 +12,6 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
-import * as TestClock from "effect/testing/TestClock";
 
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import { formatWorkflowReport } from "./workflowReport.ts";
@@ -38,6 +37,7 @@ import {
   startParent,
   startWorkflow,
   withServerProcess,
+  adjustBySweeps,
   type WorkerReply,
 } from "./WorkflowHarness.testkit.ts";
 
@@ -372,7 +372,7 @@ return { kept: reports.filter((entry) => entry.ok).map((entry) => entry.result),
         'return await agent("slow work", { label: "slow", attemptTimeoutMs: 60000, report: true })',
       );
       yield* awaitMember(started.workflowId, 1);
-      yield* TestClock.adjust("2 minutes");
+      yield* adjustBySweeps(4);
       const retry = yield* awaitMember(started.workflowId, 2);
       yield* completeChild(retry.childThreadId!, "finished in time");
       const ended = yield* awaitWorkflowEnd(started.workflowId);
@@ -407,7 +407,7 @@ return done;`;
       expect(third.prompt).toBe("step 3");
       yield* invoke("workflow_stop", { workflowId: started.workflowId });
       // Time for a runner that ignored the stop to start the next agent.
-      yield* TestClock.adjust("5 minutes");
+      yield* adjustBySweeps(10);
       yield* Effect.yieldNow;
       const ended = yield* decodeWorkflow(
         (yield* invoke("workflow_status", { workflowId: started.workflowId })).structuredContent,
@@ -629,7 +629,7 @@ describe("11. coordinator-written retries", () => {
         { first: codex("low"), retries: [claude] },
       );
       yield* awaitMember(started.workflowId, 1);
-      yield* TestClock.adjust("2 minutes");
+      yield* adjustBySweeps(4);
       const retry = yield* awaitMember(started.workflowId, 2);
       expect(retry.providerInstanceId).toBe(claudeInstanceId);
       expect(retry.prompt).toContain("passed its time budget of 60000 ms");

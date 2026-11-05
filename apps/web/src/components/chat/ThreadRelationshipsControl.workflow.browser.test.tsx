@@ -37,9 +37,16 @@ vi.mock(import("../../state/use-atom-command"), () => ({
 vi.mock(import("../../state/entities"), async (original) => ({
   ...(await original()),
   useProjects: (() => []) as never,
+  useQuietThreadShell: (() => null) as never,
+  useHiddenThreadKeys: (() => new Set()) as never,
+  useAnyEnvironmentHiding: (() => false) as never,
   useThreadProjection: ((ref: unknown) =>
     ref === null ? null : { projection: state.fixture.projection }) as never,
   useThreadRelationshipShells: (() => state.fixture.shells) as never,
+}));
+vi.mock(import("../../state/query"), async (original) => ({
+  ...(await original()),
+  useEnvironmentQuery: (() => ({ data: {}, isSuccess: true, isPending: false })) as never,
 }));
 vi.mock(import("../../state/environments"), async (original) => ({
   ...(await original()),
@@ -58,11 +65,11 @@ async function showLineage(fixture = lineagePanelFixture()) {
   stop.mockResolvedValue({ _tag: "Success" });
   const screen = await render(
     <ThreadRelationshipsPanel
-        environmentId={QA_ENVIRONMENT}
-        threadId={LINEAGE_PARENT}
-        showLineage
-        showSideChats
-      />,
+      environmentId={QA_ENVIRONMENT}
+      threadId={LINEAGE_PARENT}
+      showLineage
+      showSideChats
+    />,
     { router: "/" },
   );
   return { screen, title: fixture.workflowTitle };
@@ -127,11 +134,11 @@ describe("a workflow's row in the Lineage panel", () => {
               data-qa-relationships
             >
               <ThreadRelationshipsPanel
-        environmentId={QA_ENVIRONMENT}
-        threadId={LINEAGE_PARENT}
-        showLineage
-        showSideChats
-      />
+                environmentId={QA_ENVIRONMENT}
+                threadId={LINEAGE_PARENT}
+                showLineage
+                showSideChats
+              />
             </div>
             <WorkflowProgressOverview
               progress={deriveWorkflowProgress(fixture.group)}

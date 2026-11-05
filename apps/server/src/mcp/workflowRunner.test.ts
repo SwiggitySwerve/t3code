@@ -2621,8 +2621,10 @@ return errors`,
         yield* Deferred.await(harness.completed);
         const commands = harness.workflowCommands;
         const sizes = commands.map((command) => Buffer.byteLength(JSON.stringify(command), "utf8"));
+        // @effect-diagnostics-next-line processEnvInEffect:off
         if (process.env.C7_PAYLOAD_ARTIFACT) {
           NodeFS.writeFileSync(
+            // @effect-diagnostics-next-line processEnvInEffect:off
             process.env.C7_PAYLOAD_ARTIFACT,
             JSON.stringify(
               {

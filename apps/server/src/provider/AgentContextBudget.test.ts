@@ -1,6 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- Pins the supplied ablation report tool catalog.
-import * as NodeHash from "node:crypto";
-import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeCrypto from "node:crypto";
+import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
 import { EnvironmentId, ThreadId, ProviderInstanceId } from "@t3tools/contracts";
@@ -89,7 +89,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(ThreadSearch)({}),
   Layer.mock(VcsStatusBroadcaster)({}),
   Layer.mock(WorkflowApprovalGate)({}),
-).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)));
+).pipe(Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCryptoLayer.layer)));
 
 const client = McpSchema.McpServerClient.of({
   clientId: 1,
@@ -134,6 +134,7 @@ const codexAdditionalContext = (workflows = false) =>
 const layerAdvertisedTools = McpHttpServer.layerTools.pipe(
   Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
   Layer.provide(toolHandlerServices),
+  Layer.provide(ServerSettingsService.layerTest()),
 );
 
 // Claude Code loads these tools up front instead of behind ToolSearch, outside this budget.
@@ -181,7 +182,7 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
     if (workflows) {
       // Digests of the advertised workflow tools; evals/mcp-tool-use covers how agents use them.
       const expected = {
-        delegate_task: "6f83830505b869c81dac98847c7ec9b88f244a33505aba3c26e1cee2d92227a1",
+        delegate_task: "165916ac6439532ee75f3c49609aefa9880176d1afbf54f11023d5ca9607a3ae",
         delegate_tasks: "e7251b8547635577fc2914a9fd0cb058c36bb3618308ccb0eb6c8ff289e71146",
         task_wait: "4b88f18d8ec39ca2e4b104e0578a9e13282316a6603b6da0b99d5419340c97a3",
         workflow_start: "8739dab5566954a2f213936cb05c8bdc78106cf0ba7fe715e8a1a38b339ef9b8",
@@ -200,7 +201,7 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
           inputSchema: tool.inputSchema,
         };
         expect(
-          NodeHash.createHash("sha256").update(JSON.stringify(advertised)).digest("hex"),
+          NodeCrypto.createHash("sha256").update(JSON.stringify(advertised)).digest("hex"),
           tool.name,
         ).toBe(digest);
       }
@@ -208,8 +209,8 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
     expect(measured).toEqual(
       workflows
         ? {
-            claudeSystemAppendBytes: 5549,
-            codexAdditionalContextBytes: 7195,
+            claudeSystemAppendBytes: 5558,
+            codexAdditionalContextBytes: 7204,
             mcpToolListJsonBytes: budget.workflowMcpToolListJsonBytes,
           }
         : {

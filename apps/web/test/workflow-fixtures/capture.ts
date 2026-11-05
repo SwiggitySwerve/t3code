@@ -3,6 +3,7 @@
  * theme and width of the QA matrix and throws when the selector matches nothing. With
  * `VITE_T3_WORKFLOW_QA=1` it also saves each frame as a PNG with a JSON sidecar.
  */
+import * as Schema from "effect/Schema";
 import type { ReactNode } from "react";
 import {
   WORKFLOW_QA_THEMES,
@@ -20,9 +21,10 @@ import { WORKFLOW_QA_NOW } from "./workflowFixtures";
 import { workflowClientSettings } from "./settings";
 
 const CAPTURE = import.meta.env.VITE_T3_WORKFLOW_QA === "1";
-export class WorkflowQaSelectorError extends Error {
-  override readonly name = "WorkflowQaSelectorError";
-}
+export class WorkflowQaSelectorError extends Schema.TaggedError<WorkflowQaSelectorError>()(
+  "WorkflowQaSelectorError",
+  { message: Schema.String },
+) {}
 
 export interface SurfaceSpec {
   readonly verboseGraph?: boolean;
@@ -107,9 +109,9 @@ async function recordFrame(
   const one = (selector: string) => {
     const matches = scope.querySelectorAll<HTMLElement>(selector);
     if (matches.length !== 1) {
-      throw new WorkflowQaSelectorError(
-        `${name}: selector "${selector}" matched ${matches.length} elements, expected exactly one.`,
-      );
+      throw new WorkflowQaSelectorError({
+        message: `${name}: selector "${selector}" matched ${matches.length} elements, expected exactly one.`,
+      });
     }
     return matches[0]!;
   };
@@ -149,7 +151,9 @@ async function recordFrame(
   };
   const problems = workflowQaFrameProblems(frame);
   if (problems.length > 0) {
-    throw new WorkflowQaSelectorError(problems.map((entry) => entry.message).join("\n"));
+    throw new WorkflowQaSelectorError({
+      message: problems.map((entry) => entry.message).join("\n"),
+    });
   }
   if (CAPTURE) {
     const directory = framesDirectory();

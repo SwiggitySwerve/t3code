@@ -1749,14 +1749,25 @@ describe("CodexAdapterV2 post-settle continuation", () => {
             config: {
               ...CodexAdapterV2.CODEX_THREAD_CONFIG,
               ...(member ? { "skills.include_instructions": false } : {}),
-              "mcp_servers.t3-code": codexT3Server,
+              "shell_environment_policy.set.T3CODE_THREAD_ID": `thread-${scenario}`,
+              "mcp_servers.t3-code": { ...codexT3Server, disabled_tools: ["t3_thread_wait"] },
+              "mcp_servers.t3-code-direct": {
+                ...codexT3Server,
+                enabled_tools: ["t3_thread_wait"],
+                omit_tools_from: ["code_mode", "deferred"],
+              },
             },
           },
         ]);
       }).pipe(
         Effect.scoped,
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
         ),
       ),
   );
@@ -1815,7 +1826,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
           assert.equal(resumed.nativeThreadRef?.nativeId, nativeThreadId);
         }).pipe(
           Effect.provide(
-            Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+            Layer.mergeAll(
+              IdAllocator.layer,
+              McpProviderSessions.layer,
+              NodeServices.layer,
+              NodeCrypto.layer,
+            ),
           ),
         ),
       ),
@@ -2538,7 +2554,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.equal(harness.terminalEvents()[0]?.status, "completed");
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
         ),
       ),
     ),
@@ -6809,7 +6830,12 @@ describe("CodexAdapterV2 post-settle continuation", () => {
         assert.deepEqual(completed[0]?.output, graphReviewResult);
       }).pipe(
         Effect.provide(
-          Layer.mergeAll(IdAllocator.layer, McpProviderSessions.layer, NodeServices.layer),
+          Layer.mergeAll(
+            IdAllocator.layer,
+            McpProviderSessions.layer,
+            NodeServices.layer,
+            NodeCrypto.layer,
+          ),
         ),
       ),
     ),

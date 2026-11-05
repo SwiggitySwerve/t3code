@@ -83,7 +83,7 @@ describe("workflow start settings", () => {
     expect(() => decodeServerSettings({ workflowStart: "sometimes" })).toThrow();
   });
 
-  it("drops the retired ultracode key, globally and per project, leaving the default", () => {
+  it("drops the retired ultracode key globally and from patches, and keeps it inert per project", () => {
     // `ultracode` was workflowStart's name before it was renamed; old files still carry it.
     const projectId = ProjectId.make("project:legacy-settings");
     const decoded = decodeServerSettings({
@@ -92,13 +92,14 @@ describe("workflow start settings", () => {
     });
     expect(decoded.workflowStart).toBe(DEFAULT_SERVER_SETTINGS.workflowStart);
     expect(decoded).not.toHaveProperty("ultracode");
-    expect(decoded.projectSettingsOverrides[projectId]).toEqual({});
+    // Stored project overrides round-trip unknown keys, so the retired key stays and does nothing.
+    expect(decoded.projectSettingsOverrides[projectId]).toEqual({ ultracode: "always" });
     expect(
       decodeServerSettingsPatch({
         ultracode: "off",
         projectSettingsOverrides: { [projectId]: { ultracode: "always" } },
       }),
-    ).toEqual({ projectSettingsOverrides: { [projectId]: {} } });
+    ).toEqual({ projectSettingsOverrides: { [projectId]: { ultracode: "always" } } });
   });
 
   it("defaults to no extras, for settings written before triggers existed", () => {
@@ -131,7 +132,8 @@ describe("workflow start settings", () => {
   });
 });
 
-// The operations a client built before profiles decodes; a new literal would break it.
+// The operations a client built before profiles decodes; a new literal would break it. The last
+// three are the managed-policy operations that shipped before profiles.
 const legacyOperations = [
   "normalize",
   "check-exists",
@@ -145,6 +147,9 @@ const legacyOperations = [
   "write-secret",
   "write-file",
   "prepare-directory",
+  "write-secret-provider",
+  "write-managed-setting",
+  "use-disallowed-provider",
 ] as const;
 class LegacyServerSettingsError extends Schema.TaggedError<LegacyServerSettingsError>()(
   "ServerSettingsError",

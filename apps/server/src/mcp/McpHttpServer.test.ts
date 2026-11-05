@@ -1568,12 +1568,10 @@ it.effect(
             threadScope("noBrowserToken", ["orchestration", "worktree", "pull-requests"], false),
           ],
         ]);
-        const serverLayer = Layer.mergeAll(...(registrations as [Layer.Layer<never>])).pipe(
-          Layer.provideMerge(
-            McpHttpServer.layerMcpTransport.pipe(
-              Layer.provide(ServerSettings.layerTest({ workflows: true })),
-            ),
-          ),
+        const serverLayer = McpHttpServer.layerMcpTransport(
+          Layer.mergeAll(...(registrations as [Layer.Layer<never>])),
+        ).pipe(
+          Layer.provide(ServerSettings.layerTest({ workflows: true })),
           Layer.provide(
             Layer.mock(McpSessionRegistry.McpSessionRegistry)({
               resolve: (token) => Effect.succeed(scopes.get(token)),
@@ -1625,7 +1623,6 @@ it.effect(
         ].toSorted();
         expect(member.toSorted()).toEqual(expectedMember);
         expect(member).not.toContain("t3_worktree_remove");
-        expect(member).toHaveLength(9);
         // A thread that merely lacks browser access (it still has orchestration) is unchanged.
         expect(noBrowser).toEqual(expect.arrayContaining(namesOf(PreviewStandardToolkit as never)));
         // Hidden tools are not callable: the server reports them as unknown.
@@ -1653,12 +1650,8 @@ it.effect("registers the worktree removal tool for coordinators and hides it fro
         ],
         ["memberToken", threadScope("memberToken", ["worktree"], true)],
       ]);
-      const serverLayer = McpHttpServer.layerWorktreeToolkit.pipe(
-        Layer.provideMerge(
-          McpHttpServer.layerMcpTransport.pipe(
-            Layer.provide(ServerSettings.layerTest({ workflows: true })),
-          ),
-        ),
+      const serverLayer = McpHttpServer.layerMcpTransport(McpHttpServer.layerWorktreeToolkit).pipe(
+        Layer.provide(ServerSettings.layerTest({ workflows: true })),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
             resolve: (token) => Effect.succeed(scopes.get(token)),
@@ -1672,7 +1665,7 @@ it.effect("registers the worktree removal tool for coordinators and hides it fro
             Layer.mock(ProjectService.ProjectService)({}),
           ),
         ),
-        Layer.provide(NodeServices.layer),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
       yield* HttpRouter.serve(serverLayer, {
         disableListenLog: true,
@@ -1702,12 +1695,8 @@ it.effect("hides the image-returning preview tools from a member credential", ()
           threadScope("noBrowserToken", ["orchestration", "worktree", "workflows"], false),
         ],
       ]);
-      const serverLayer = McpHttpServer.layerPreviewToolkit.pipe(
-        Layer.provideMerge(
-          McpHttpServer.layerMcpTransport.pipe(
-            Layer.provide(ServerSettings.layerTest({ workflows: true })),
-          ),
-        ),
+      const serverLayer = McpHttpServer.layerMcpTransport(McpHttpServer.layerPreviewToolkit).pipe(
+        Layer.provide(ServerSettings.layerTest({ workflows: true })),
         Layer.provide(
           Layer.mock(McpSessionRegistry.McpSessionRegistry)({
             resolve: (token) => Effect.succeed(scopes.get(token)),
@@ -1720,7 +1709,7 @@ it.effect("hides the image-returning preview tools from a member credential", ()
             ServerConfig.layerTest(process.cwd(), { prefix: "t3-mcp-member-preview-" }),
           ),
         ),
-        Layer.provide(NodeServices.layer),
+        Layer.provide(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
       );
       yield* HttpRouter.serve(serverLayer, {
         disableListenLog: true,
@@ -1754,7 +1743,7 @@ it.effect.each([false, true])(
             sessionId: "external-workflow",
             label: "External",
             access: "auto",
-            webOrigin: "https://mcp.example",
+            hostedAppUrl: "https://mcp.example",
           },
           capabilities: new Set(["orchestration", "workflows"]),
         };
@@ -1766,26 +1755,27 @@ it.effect.each([false, true])(
           }),
         );
         const Workflow = Toolkit.make(Tool.make("workflow_probe", { success: Schema.Boolean }));
-        const server = Layer.mergeAll(
-          McpHttpServer.toolkitRegistration(
-            Existing,
-            McpToolAccess.toLayer(Existing, {
-              delegate_task: McpToolAccess.reads(() =>
-                Effect.map(McpInvocationContext.McpInvocationContext, (scope) =>
-                  McpInvocationContext.threadLinkFor(scope, threadId),
+        const server = McpHttpServer.layerMcpTransport(
+          Layer.mergeAll(
+            McpHttpServer.toolkitRegistration(
+              Existing,
+              McpToolAccess.toLayer(Existing, {
+                delegate_task: McpToolAccess.reads(() =>
+                  Effect.map(McpInvocationContext.McpInvocationContext, (scope) =>
+                    McpInvocationContext.threadLinkFor(scope, threadId),
+                  ),
                 ),
-              ),
-            }),
-          ),
-          McpHttpServer.toolkitRegistration(
-            Workflow,
-            McpToolAccess.toLayer(Workflow, {
-              workflow_probe: McpToolAccess.reads(() => Effect.succeed(true)),
-            }),
-            "workflows",
+              }),
+            ),
+            McpHttpServer.toolkitRegistration(
+              Workflow,
+              McpToolAccess.toLayer(Workflow, {
+                workflow_probe: McpToolAccess.reads(() => Effect.succeed(true)),
+              }),
+              "workflows",
+            ),
           ),
         ).pipe(
-          Layer.provideMerge(McpHttpServer.layerMcpTransport),
           Layer.provide(
             Layer.mock(McpSessionRegistry.McpSessionRegistry)({
               resolve: (token) =>
@@ -1850,7 +1840,11 @@ it.effect.each([false, true])(
           yield* settings.updateSettings({ workflows: current });
           for (const [call, enabled, link] of [
             [providerCall, issued, "<t3-thread://v2/environment-mcp-test/thread-mcp-test>"],
-            [externalCall, current, "https://mcp.example/environment-mcp-test/thread-mcp-test"],
+            [
+              externalCall,
+              current,
+              "https://mcp.example/threads/environment-mcp-test/thread-mcp-test",
+            ],
           ] as const) {
             const body = (yield* call("tools/list")) as {
               result: {

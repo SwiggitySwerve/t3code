@@ -785,45 +785,47 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodePlatformCrypto.layer))(
       ),
     );
 
-    it.effect("keeps an agent's credentials off the socket where workflow reviews are decided", () =>
-      Effect.gen(function* () {
-        const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
-        // A client session for an MCP client holds the operate grant that deciding a review needs.
-        const mcpClient = yield* serverAuth.issueMcpClientSession({
-          label: "Agent",
-          access: "full-access",
-          peerLink: false,
-          client: requestMetadata,
-        });
-        const upgrade = (token: string) =>
-          serverAuth
-            .authenticateWebSocketUpgrade(
+    it.effect(
+      "keeps an agent's credentials off the socket where workflow reviews are decided",
+      () =>
+        Effect.gen(function* () {
+          const serverAuth = yield* EnvironmentAuth.EnvironmentAuth;
+          // A client session for an MCP client holds the operate grant that deciding a review needs.
+          const mcpClient = yield* serverAuth.issueMcpClientSession({
+            label: "Agent",
+            access: "full-access",
+            peerLink: false,
+            client: requestMetadata,
+          });
+          const upgrade = (token: string) =>
+            serverAuth
+              .authenticateWebSocketUpgrade(
+                {
+                  url: "/ws",
+                  cookies: {},
+                  headers: { host: "192.168.1.50:3773", authorization: `Bearer ${token}` },
+                } as never,
+                "rpc",
+              )
+              .pipe(Effect.flip);
+          expect((yield* upgrade(mcpClient.token))._tag).toBe("ServerAuthInvalidCredentialError");
+          // A thread's own MCP credential is a bare secret from the MCP session registry, not a session.
+          expect((yield* upgrade("bare-thread-secret-from-the-mcp-registry"))._tag).toBe(
+            "ServerAuthInvalidCredentialError",
+          );
+          // A user's own session on the same connection is let in.
+          const user = yield* serverAuth.issueSession();
+          expect(
+            (yield* serverAuth.authenticateWebSocketUpgrade(
               {
                 url: "/ws",
                 cookies: {},
-                headers: { host: "192.168.1.50:3773", authorization: `Bearer ${token}` },
+                headers: { host: "192.168.1.50:3773", authorization: `Bearer ${user.token}` },
               } as never,
               "rpc",
-            )
-            .pipe(Effect.flip);
-        expect((yield* upgrade(mcpClient.token))._tag).toBe("ServerAuthInvalidCredentialError");
-        // A thread's own MCP credential is a bare secret from the MCP session registry, not a session.
-        expect((yield* upgrade("bare-thread-secret-from-the-mcp-registry"))._tag).toBe(
-          "ServerAuthInvalidCredentialError",
-        );
-        // A user's own session on the same connection is let in.
-        const user = yield* serverAuth.issueSession();
-        expect(
-          (yield* serverAuth.authenticateWebSocketUpgrade(
-            {
-              url: "/ws",
-              cookies: {},
-              headers: { host: "192.168.1.50:3773", authorization: `Bearer ${user.token}` },
-            } as never,
-            "rpc",
-          )).sessionId,
-        ).toBe(user.sessionId);
-      }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
+            )).sessionId,
+          ).toBe(user.sessionId);
+        }).pipe(Effect.provide(layerEnvironmentAuth({ mode: "web", host: "192.168.1.50" }))),
     );
 
     it.effect("rejects a replayed proof on a bound RPC socket ticket", () =>

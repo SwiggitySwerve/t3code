@@ -162,9 +162,13 @@ const layerTools = Layer.mergeAll(
   ),
   Layer.provide(Layer.mock(ProjectCloneTracker.ProjectCloneTracker)({})),
   Layer.provide(Layer.mock(SecretRequests.SecretRequests)({})),
-  Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-  Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-  Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+  Layer.provide(
+    Layer.mergeAll(
+      Layer.mock(PeerForwarding.PeerForwarding)({}),
+      Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+      Layer.mock(PeerLinks.PeerLinks)({}),
+    ),
+  ),
   Layer.provide(Layer.mock(ThreadSearch.ThreadSearch)({})),
   Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
   Layer.provide(

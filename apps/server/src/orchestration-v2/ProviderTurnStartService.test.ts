@@ -7,7 +7,6 @@ import {
   ContextHandoffId,
   ContextTransferId,
   GitCommandError,
-  ContextHandoffId,
   MessageId,
   NodeId,
   ProviderSessionId,
@@ -139,7 +138,6 @@ function startWithMissingWorktree(
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
       branch: "feature/restore",
       worktreePath,
-      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
     },
     runs: [
       {
@@ -433,7 +431,6 @@ function makeLocalCommandHarness(input: {
       lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
       branch: input.worktreePath === undefined ? null : "feature/restore",
       worktreePath: input.worktreePath ?? null,
-      lineage: { parentThreadId: null, relationshipToParent: null, rootThreadId: threadId },
     } as OrchestrationV2ThreadProjection["thread"],
     runs: [
       ...(input.previousNativeSession
@@ -996,7 +993,9 @@ function makeLocalCommandHarness(input: {
         ? root.session.startTurn(root as never).pipe(Effect.orDie)
         : input.failReadsAfterRunning === true || input.previousTurn !== undefined
           ? Effect.suspend(() =>
-              providerBusy ? Effect.die("The previous provider turn is still running.") : Effect.void,
+              providerBusy
+                ? Effect.die("The previous provider turn is still running.")
+                : Effect.void,
             )
           : Effect.die("A local command must not start a native turn."),
   );

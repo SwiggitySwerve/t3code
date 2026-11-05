@@ -163,7 +163,6 @@ describe("OrchestratorMcpService", () => {
         subagents: [],
         providerThreads: [],
         runtimeRequests: [],
-        turnItems: [],
       } as unknown as OrchestrationV2ThreadProjection;
       let hasNestedWork = true;
       let settleAfterTaskRead = false;
@@ -522,6 +521,7 @@ describe("OrchestratorMcpService", () => {
         }) as unknown as OrchestrationV2ThreadProjection;
       const layerDependencies = Layer.mergeAll(
         NodeServices.layer,
+        NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
           getThreadRecords: (threadId) => Effect.succeed(records(threadId)),
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
@@ -1425,6 +1425,7 @@ describe("OrchestratorMcpService provider resolution", () => {
         providerInstanceId: codexInstanceId,
         driver: "codex",
         childThreadId,
+        prompt: "Wait for the child.",
         model: "gpt-5.4",
         status: ready && terminal ? "completed" : "running",
         result: ready && wake === "parent completion" ? "done" : null,
@@ -2971,6 +2972,11 @@ describe("OrchestratorMcpService provider resolution", () => {
       OrchestratorMcpService.layer.pipe(
         Layer.provide(Layer.mock(ThreadLaunchService.ThreadLaunchService)({})),
         Layer.provide(Layer.mock(GitVcsDriver.GitVcsDriver)(git)),
+        Layer.provide(WorkflowApprovalGateTestkit.layerOpen),
+        Layer.provide(UsageServiceTestkit.layerRates()),
+        Layer.provide(
+          ServerConfig.layerTest(process.cwd(), { prefix: "t3-orchestrator-mcp-test-" }),
+        ),
         Layer.provide(
           Layer.mergeAll(
             NodeServices.layer,

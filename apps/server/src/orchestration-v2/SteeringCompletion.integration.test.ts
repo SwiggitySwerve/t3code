@@ -999,6 +999,7 @@ it.effect("restarts the turn for an image when native steering takes text only",
       const { started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
         "steering-text-only-attachment",
         true,
+        false,
         true,
         Effect.void,
         false,
@@ -1345,6 +1346,7 @@ it.effect("marks the model switch on a promoted message that restarts the turn",
         "promote-restart-switch",
         true,
         false,
+        false,
       );
       const otherSelection = { ...runSelection, model: "other-model" };
       yield* Effect.gen(function* () {
@@ -1450,6 +1452,7 @@ it.effect("queues a plain send behind the stopped queue and releases its hold", 
       const releaseInterrupt = yield* Deferred.make<void>();
       const { started, steered, layer, startFirstTurn } = yield* nextTurnSelectionHarness(
         "plain-send-after-stop",
+        false,
         false,
         true,
         Deferred.succeed(interruptReached, undefined).pipe(

@@ -7,6 +7,7 @@ import { Atom } from "effect/reactivity";
 import { vi } from "vite-plus/test";
 
 import { orchestrationEnvironment } from "../../src/state/orchestration";
+import { environmentPresentations } from "../../src/state/presentation";
 import { providersIgnoringCheckedAtAtom, serverEnvironment } from "../../src/state/server";
 import { QA_ENVIRONMENT, QA_PROVIDERS } from "./providers";
 
@@ -15,6 +16,9 @@ const workflowStopPermission = Atom.make(true).pipe(Atom.withLabel("workflow Sto
 const STUBS = new Map<unknown, unknown>([
   [serverEnvironment.providersValueAtom(QA_ENVIRONMENT), QA_PROVIDERS],
   [providersIgnoringCheckedAtAtom(QA_ENVIRONMENT), QA_PROVIDERS],
+  // No saved settings and no administrator lock: the panel keeps the providers as derived.
+  [serverEnvironment.settingsValueAtom(QA_ENVIRONMENT), null],
+  [environmentPresentations.serverConfigsAtom, new Map()],
   [workflowStopPermission, true],
 ]);
 

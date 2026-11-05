@@ -472,9 +472,13 @@ const boxToolkitLayer = (thread: BoxThread) => {
     Layer.provide(layerBoxThreads),
     Layer.provide(layerBoxLaunches),
     Layer.provide(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-    Layer.provide(Layer.mock(PeerForwarding.PeerForwarding)({})),
-    Layer.provide(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
-    Layer.provide(Layer.mock(PeerLinks.PeerLinks)({})),
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.mock(PeerForwarding.PeerForwarding)({}),
+        Layer.mock(PeerLinkRequests.PeerLinkRequests)({}),
+        Layer.mock(PeerLinks.PeerLinks)({}),
+      ),
+    ),
     Layer.provide(
       Layer.merge(WorkflowApprovalGateTestkit.layerOpen, UsageServiceTestkit.layerRates()),
     ),

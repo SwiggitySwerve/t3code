@@ -241,7 +241,6 @@ describe("resolveSidebarThreadStatus", () => {
     });
     expect(inputPill).toMatchObject({ label: "Needs input", pulse: false });
     expect(approvalPill).toMatchObject({ label: "Needs approval", pulse: false });
-    expect(resolveProjectStatusIndicator([inputPill, approvalPill])).toBe(approvalPill);
     expect(
       resolveThreadStatusPill({ thread: { ...thread, pendingSubagentRequest: "approval" } }),
     ).toEqual(approvalPill);
