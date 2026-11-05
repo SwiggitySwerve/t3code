@@ -405,6 +405,11 @@ it("sends a workflow turn as T3 does and resumes after this turn's calls with T3
   const ready = reviewed("off", { "docs/spec.md": "# Spec" });
   assert.deepInclude(ready, { approvalRequired: false, ready: true, blockers: [] });
   assert.deepEqual(ready.layers, [["a"], ["b"]]);
+  // T3's assignment notes come with the advice: here a node on the caller's model.
+  assert.include(
+    (ready.advisory as { assignmentNotes?: Array<string> }).assignmentNotes ?? [],
+    "a: no target, so it runs on your own model (claude-opus-5-5).",
+  );
   const blocked = reviewed("keyword", {});
   assert.deepInclude(blocked, {
     approvalRequired: true,

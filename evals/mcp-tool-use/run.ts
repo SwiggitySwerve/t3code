@@ -63,6 +63,10 @@ import {
   PullRequestsToolkit,
 } from "../../apps/server/src/mcp/toolkits/pullRequests/tools.ts";
 import { ThreadToolkit } from "../../apps/server/src/mcp/toolkits/thread/tools.ts";
+import {
+  concreteModelFamily,
+  graphAssignmentNotes,
+} from "../../apps/server/src/mcp/workflowAdvisory.ts";
 import { parseGraph, reviewGraph } from "../../apps/server/src/mcp/workflowGraph.ts";
 import { WorktreeToolkit } from "../../apps/server/src/mcp/toolkits/worktree/tools.ts";
 import {
@@ -1084,6 +1088,33 @@ const graphReviewDefault = (sample: Sample, input: Readonly<Record<string, unkno
   };
   const nodes = parsed.ok ? Object.entries(parsed.graph.nodes) : [];
   const concrete = nodes.map(([key, node]) => [key, { ...node, target: node.target ?? caller }]);
+  const modelOf = (target: unknown) =>
+    isRecord(target) && typeof target.model === "string" ? target.model : caller.model;
+  // T3 appends these after the digest, from the families its enabled providers list.
+  const assignmentNotes = graphAssignmentNotes({
+    coordinatorModel: caller.model,
+    enabledFamilies: new Set(
+      advertisedModels(sample).flatMap((model) => concreteModelFamily(model) ?? []),
+    ),
+    nodes: nodes.map(([nodeId, node]) => ({
+      nodeId,
+      source: node.target === undefined ? "caller" : "target",
+      model: modelOf(node.target),
+      retryModels: (node.retries ?? []).map(modelOf),
+      ...(node.verify?.type === "judgment"
+        ? {
+            judgment: {
+              model: modelOf(node.verify.target ?? node.target),
+              ownTarget: node.verify.target !== undefined,
+            },
+          }
+        : {}),
+    })),
+  });
+  const advisory =
+    review.advisory === undefined || assignmentNotes.length === 0
+      ? review.advisory
+      : { ...review.advisory, assignmentNotes };
   return {
     reviewId: `review-${sample.nextTask++}`,
     approvalRequired,
@@ -1104,8 +1135,24 @@ const graphReviewDefault = (sample: Sample, input: Readonly<Record<string, unkno
         : { path, status: "found", sha256: hash.sha256, sizeBytes: hash.sizeBytes },
     ),
     blockers: review.blockers,
-    ...(review.advisory === undefined ? {} : { advisory: review.advisory }),
+    ...(advisory === undefined ? {} : { advisory }),
   };
+};
+
+/** The model ids the agent's capabilities list: the case's own, else the eval's catalog. */
+const advertisedModels = ({ testCase }: Sample): ReadonlyArray<string> => {
+  const listed =
+    testCase.setup.mocks?.orchestrator_capabilities ??
+    testCase.setup.turnCalls?.find((call) => call.tool === "orchestrator_capabilities")?.result;
+  const providers =
+    isRecord(listed) && Array.isArray(listed.providers) ? listed.providers : PROVIDERS;
+  return providers.flatMap((provider: unknown) =>
+    isRecord(provider) && Array.isArray(provider.models)
+      ? provider.models.flatMap((model: unknown) =>
+          isRecord(model) && typeof model.id === "string" ? [model.id] : [],
+        )
+      : [],
+  );
 };
 
 /** A believable T3 result for a tool the case does not mock. */
