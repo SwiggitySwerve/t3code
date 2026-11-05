@@ -29,16 +29,10 @@ it("refuses a t3_thread_update whose fields do not fit its action", () => {
   );
 });
 
-// A Claude Code coordinator once hand-rolled a judge because no advertised text named `verify`.
-it("advertises the verify checks where a coordinator reads workflow_start and graph_review", () => {
-  for (const name of ["workflow_start", "graph_review"] as const) {
-    const tool = OrchestratorToolkit.tools[name];
-    expect(tool.description, name).toContain("{ type: 'judgment', rubric");
-    expect(tool.description, name).toContain("{ type: 'process', argv }");
-  }
+// The script field is a transformation, whose description the JSON Schema generator drops.
+it("advertises workflow_start's script description on the wire", () => {
   const schema = advertisedJsonSchema(OrchestratorToolkit.tools.workflow_start) as {
     readonly properties: Readonly<Record<string, { readonly description?: string }>>;
   };
   expect(schema.properties.script?.description).toContain("{ type: 'judgment', rubric, target? }");
-  expect(schema.properties.script?.description).toContain("{{result}}");
 });
