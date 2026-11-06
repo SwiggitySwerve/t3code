@@ -861,27 +861,36 @@ describe("after a restart", () => {
           ),
         });
       const asked = start(1, "Plan this as a workflow");
-      const cases: ReadonlyArray<readonly [string, ReadonlyArray<Record<string, unknown>>, boolean]> =
+      const cases: ReadonlyArray<
+        readonly [string, ReadonlyArray<Record<string, unknown>>, boolean]
+      > = [
+        ["a ready review", [asked, reviewItem(2, 1)], true],
+        ["a review that is not ready", [asked, reviewItem(2, 1, { ready: false })], false],
         [
-          ["a ready review", [asked, reviewItem(2, 1)], true],
-          ["a review that is not ready", [asked, reviewItem(2, 1, { ready: false })], false],
-          ["a review nobody has to decide", [asked, reviewItem(2, 1, { approvalRequired: false })], false],
-          ["no review yet", [asked], false],
-          ["an approved review", [asked, reviewItem(2, 1), told(3, "approved")], false],
-          ["a dismissed review", [asked, reviewItem(2, 1), told(3, "dismissed")], false],
-        ];
+          "a review nobody has to decide",
+          [asked, reviewItem(2, 1, { approvalRequired: false })],
+          false,
+        ],
+        ["no review yet", [asked], false],
+        ["an approved review", [asked, reviewItem(2, 1), told(3, "approved")], false],
+        ["a dismissed review", [asked, reviewItem(2, 1), told(3, "dismissed")], false],
+      ];
       for (const [label, items, expected] of cases) {
         // A new gate: nothing of this process's, as after a restart.
-        const awaits = yield* withGate(
-          (gate) => gate.awaitsDecision(threadId),
-          { runs: runs(1), items },
-        );
+        const awaits = yield* withGate((gate) => gate.awaitsDecision(threadId), {
+          runs: runs(1),
+          items,
+        });
         assert.equal(awaits, expected, label);
       }
       // A review of an earlier request is not the current request's.
       const earlier = yield* withGate((gate) => gate.awaitsDecision(threadId), {
         runs: runs(1, 2),
-        items: [start(1, "Plan this as a workflow"), reviewItem(5, 1), start(2, "Plan another workflow")],
+        items: [
+          start(1, "Plan this as a workflow"),
+          reviewItem(5, 1),
+          start(2, "Plan another workflow"),
+        ],
       });
       assert.isFalse(earlier);
     }),

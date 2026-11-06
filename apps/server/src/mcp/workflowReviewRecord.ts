@@ -18,7 +18,6 @@ import * as Schema from "effect/Schema";
 
 import { graphPlan, type WorkflowGraph } from "./workflowGraph.ts";
 
-
 const isDigest = Schema.is(OrchestrationV2WorkflowReviewDigest);
 
 function clip(text: string): string {

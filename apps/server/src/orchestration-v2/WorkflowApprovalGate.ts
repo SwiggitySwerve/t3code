@@ -510,9 +510,11 @@ const make = Effect.gen(function* () {
         turnItemTypes: ["user_message", "workflow_review"],
       });
       const runs = new Map(records.runs.map((run) => [run.id, run]));
-      const ordinalOf = (runId: RunId | null) => (runId === null ? 0 : (runs.get(runId)?.ordinal ?? 0));
+      const ordinalOf = (runId: RunId | null) =>
+        runId === null ? 0 : (runs.get(runId)?.ordinal ?? 0);
       const items = records.turnItems.toSorted(
-        (left, right) => ordinalOf(left.runId) - ordinalOf(right.runId) || left.ordinal - right.ordinal,
+        (left, right) =>
+          ordinalOf(left.runId) - ordinalOf(right.runId) || left.ordinal - right.ordinal,
       );
       const asked = items.findIndex(
         (item) => item.type === "user_message" && item.messageId === request,
@@ -539,8 +541,10 @@ const make = Effect.gen(function* () {
     },
   );
 
-  const awaitsDecision: WorkflowApprovalGate["Service"]["awaitsDecision"] = (threadId) =>
-    Effect.gen(function* () {
+  const awaitsDecision: WorkflowApprovalGate["Service"]["awaitsDecision"] = Effect.fn(
+    "WorkflowApprovalGate.awaitsDecision",
+  )(function* (threadId) {
+    return yield* Effect.gen(function* () {
       yield* load(threadId);
       const armed = yield* Effect.sync(() => armedOf(pending.get(threadId)));
       // Approved in this process, or dismissed (which leaves nothing armed): nothing to decide.
@@ -551,6 +555,7 @@ const make = Effect.gen(function* () {
       }
       return yield* storedReviewAwaitsDecision(threadId, armed.request);
     }).pipe(Effect.orElseSucceed(() => false));
+  });
 
   return WorkflowApprovalGate.of({
     observeTurn,

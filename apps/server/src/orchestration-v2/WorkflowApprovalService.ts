@@ -57,19 +57,21 @@ const make = Effect.gen(function* () {
       decided.request,
     );
     return sendWithNextId(
-      CommandId.make(`server:workflow-${decision}:${input.threadId}:${decided.request}:${decided.decisionId}`),
+      CommandId.make(
+        `server:workflow-${decision}:${input.threadId}:${decided.request}:${decided.decisionId}`,
+      ),
       (commandId) =>
-      threads.dispatch({
-        type: "message.dispatch",
-        commandId,
-        threadId: input.threadId,
-        messageId: MessageId.make(`${prefix}${decided.decisionId}`),
-        text,
-        attachments: [],
-        dispatchMode: { type: "queue_after_active" },
-        createdBy: "user",
-        creationSource: "server",
-      }),
+        threads.dispatch({
+          type: "message.dispatch",
+          commandId,
+          threadId: input.threadId,
+          messageId: MessageId.make(`${prefix}${decided.decisionId}`),
+          text,
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "user",
+          creationSource: "server",
+        }),
     ).pipe(
       Effect.asVoid,
       Effect.mapError(

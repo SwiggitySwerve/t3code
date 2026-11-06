@@ -131,6 +131,8 @@ interface BoxThread {
   readonly sent: Ref.Ref<ReadonlyArray<string>>;
   /** Runs as the launch there is answered, before the laptop hears back. */
   readonly afterLaunch: Ref.Ref<Effect.Effect<void>>;
+  /** The thread there has a question or approval that waits for a person. */
+  readonly pendingRequest: Ref.Ref<boolean>;
 }
 
 const makeBoxThread = Effect.gen(function* () {
@@ -165,6 +167,7 @@ const makeBoxThread = Effect.gen(function* () {
     releaseStop: yield* Deferred.make<void>(),
     sent: yield* Ref.make<ReadonlyArray<string>>([]),
     afterLaunch: yield* Ref.make<Effect.Effect<void>>(Effect.void),
+    pendingRequest: yield* Ref.make(false),
   } satisfies BoxThread;
 });
 
@@ -237,9 +240,14 @@ const boxToolkitLayer = (thread: BoxThread) => {
       const shell = yield* shellOf(threadId);
       const status = yield* Ref.get(thread.status);
       const runless = yield* Ref.get(thread.runless);
+      const asking = yield* Ref.get(thread.pendingRequest);
       return shell === null
         ? (null as never)
-        : { ...idleThreadProjection(shell), runs: runless ? [] : [runOf(status)] };
+        : {
+            ...idleThreadProjection(shell),
+            runs: runless ? [] : [runOf(status)],
+            runtimeRequests: (asking ? [{ id: "request:box", status: "pending" }] : []) as never,
+          };
     });
   // One record per command id, as its receipt replays a repeat.
   const recordStop = (commandId: string, kind: "interrupt" | "thread.stop" | "delegated-tasks") =>
@@ -1325,6 +1333,39 @@ it.effect("a task whose thread there waits on its own task ends with the answer 
         status: "completed",
         result: "The review found two issues; both are fixed.",
       });
+    }),
+  ).pipe(Effect.provide(NodeHttpServer.layerTest)),
+);
+
+it.live("a wait here says when the task's thread there waits for a person's answer", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const thread = yield* makeBoxThread;
+      const b = yield* serveBox(thread);
+      const offers = yield* SubscriptionRef.make<
+        ReadonlyArray<ProviderContinuationRequests.ProviderContinuationRequest>
+      >([]);
+      const database = yield* SqlitePersistence.layerMemory.pipe(Layer.build);
+      const a = yield* makeLaptop(database, offers);
+      yield* linkTo(a.links, b, "full-access");
+      yield* seedParent(a);
+      const delegated = yield* delegateToBox(a);
+      const wait = () =>
+        a
+          .call("t3_thread_wait", {
+            threadId: parentThreadId,
+            timeoutMs: 50,
+            untilDelegatedWorkSettled: true,
+          })
+          .pipe(Effect.map((result) => result.structuredContent as { awaitingAnswer?: string }));
+
+      // The task has no child thread here, but its thread there is running and asks nothing.
+      expect(delegated.childThreadId).toBeNull();
+      expect((yield* wait()).awaitingAnswer).toBeUndefined();
+      yield* Ref.set(thread.pendingRequest, true);
+      expect((yield* wait()).awaitingAnswer).toBe("descendant");
+      yield* Ref.set(thread.pendingRequest, false);
+      expect((yield* wait()).awaitingAnswer).toBeUndefined();
     }),
   ).pipe(Effect.provide(NodeHttpServer.layerTest)),
 );

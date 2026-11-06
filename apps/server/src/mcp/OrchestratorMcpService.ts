@@ -1441,7 +1441,8 @@ const make = Effect.gen(function* () {
 
   /**
    * Whether a pending question or approval holds the thread's delegated work: on the thread
-   * itself, or on the child thread of unfinished app-owned work it or its descendants own.
+   * itself, or on the child thread of unfinished app-owned work it or its descendants own,
+   * including a child in a linked environment, which that environment answers for.
    */
   const awaitedRequest = Effect.fn("OrchestratorMcpService.awaitedRequest")(function* (
     threadId: ThreadId,
@@ -1467,6 +1468,18 @@ const make = Effect.gen(function* () {
       const children: Array<ThreadId> = [];
       for (const record of records) {
         for (const task of record.subagents) {
+          // A child in a linked environment has no thread here; that environment says whether it
+          // or its own work waits on a person. If it cannot be read it is unknown, not settled.
+          if (
+            task.remoteChild !== undefined &&
+            task.origin === "app_owned" &&
+            task.threadId === record.id &&
+            isOrchestrationV2WorkActive(task.status)
+          ) {
+            const remote = yield* remoteDelegation.awaitingAnswer(record.id, task.id);
+            if (remote !== undefined) return "descendant" as const;
+            continue;
+          }
           const child = task.childThreadId;
           if (
             child !== null &&
