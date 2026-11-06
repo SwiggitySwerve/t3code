@@ -3660,6 +3660,33 @@ describe("graphs", () => {
       );
     }).pipe(Effect.provide(layerTest)),
   );
+  it.effect("refuses environmentId and projectId on a workflow agent's first target", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const node = { subject: "worker", description: "work", dependsOn: [] };
+      for (const [field, value] of [
+        ["environmentId", "environment:elsewhere"],
+        ["projectId", "project:elsewhere"],
+      ] as const) {
+        const own = yield* reviewGraph({
+          schemaVersion: 1,
+          nodes: { a: { ...node, target: { [field]: value } } },
+        });
+        expect(own.ready).toBe(false);
+        expect(own.blockers).toEqual([
+          `a: A workflow target cannot set ${field}: workflow agents run in this thread's environment and project.`,
+        ]);
+      }
+      const inherited = yield* decodeReview(
+        (yield* invoke("graph_review", {
+          graph: { schemaVersion: 1, nodes: { a: node } },
+          workerTarget: { environmentId: "environment:elsewhere" },
+        })).structuredContent,
+      );
+      expect(inherited.ready).toBe(false);
+      expect(inherited.blockers.join(" ")).toContain("cannot set environmentId");
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("C3 refuses an inherited model absent from an empty provider catalog", () =>
     Effect.gen(function* () {
       yield* startParent;

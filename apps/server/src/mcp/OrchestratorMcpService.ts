@@ -1743,12 +1743,34 @@ const make = Effect.gen(function* () {
   });
 
   /**
+   * Workflow agents are children of the workflow's own thread, so a target cannot send one to
+   * another environment or project. The concrete target would drop the field and run it here.
+   */
+  const requireLocalWorkflowTarget = (target: OrchestratorMcpTarget | undefined) => {
+    const field =
+      target?.environmentId !== undefined
+        ? "environmentId"
+        : target?.projectId !== undefined
+          ? "projectId"
+          : undefined;
+    return field === undefined
+      ? Effect.void
+      : Effect.fail(
+          failure(
+            "invalid_request",
+            `A workflow target cannot set ${field}: workflow agents run in this thread's environment and project.`,
+          ),
+        );
+  };
+
+  /**
    * Graph review needs a known concrete assignment: the usual target rules, then the model
    * must be listed by the provider and the resolved options, inherited ones included, valid
    * for it. Start runs this again, so a reviewed target is re-checked, not trusted.
    */
   const resolveAdvertisedTarget = Effect.fn("OrchestratorMcpService.resolveAdvertisedTarget")(
     function* (parent: CallerProjection, target: OrchestratorMcpTarget | undefined) {
+      yield* requireLocalWorkflowTarget(target);
       const resolved = yield* resolveTargetRechecking({
         parent,
         target,
@@ -3055,11 +3077,14 @@ const make = Effect.gen(function* () {
     const snapshotTarget = Effect.fn("OrchestratorMcpService.snapshotWorkflowTarget")(function* (
       target: OrchestratorMcpTarget,
     ) {
-      return yield* resolveTargetRechecking({
-        parent,
-        target,
-        providers: yield* loadProviders,
-      }).pipe(
+      return yield* requireLocalWorkflowTarget(target).pipe(
+        Effect.andThen(
+          resolveTargetRechecking({
+            parent,
+            target,
+            providers: yield* loadProviders,
+          }),
+        ),
         Effect.map((resolved) => ({ target: concreteWorkflowTarget(resolved.modelSelection) })),
         Effect.catch((error) => Effect.succeed({ error: error.message })),
       );

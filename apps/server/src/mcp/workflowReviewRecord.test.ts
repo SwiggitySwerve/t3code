@@ -113,7 +113,7 @@ describe("workflowReviewRecord", () => {
     expect(JSON.stringify(record)).not.toContain("A long description");
   });
 
-  it("carries each target's effort under either driver's option id, and old records still decode", () => {
+  it("carries each target's effort under any driver's option id, and old records still decode", () => {
     const graph = graphOf({
       schemaVersion: 1,
       nodes: { a: node([], { verify: { type: "judgment", rubric: ["It works"] } }) },
@@ -129,7 +129,7 @@ describe("workflowReviewRecord", () => {
             target: { providerInstanceId: P1, model: "m1", options: effort("effort", "medium") },
             retries: [
               { providerInstanceId: P1, model: "m1", options: effort("reasoningEffort", "high") },
-              { providerInstanceId: P2, model: "m2" },
+              { providerInstanceId: P2, model: "m2", options: effort("variant", "xhigh") },
             ],
             judgmentTarget: {
               providerInstanceId: P2,
@@ -146,11 +146,10 @@ describe("workflowReviewRecord", () => {
       // An effort-only ladder keeps the model and says the effort of each attempt.
       retries: [
         { providerInstanceId: "p1", model: "m1", effort: "high" },
-        { providerInstanceId: "p2", model: "m2" },
+        { providerInstanceId: "p2", model: "m2", effort: "xhigh" },
       ],
       judge: { providerInstanceId: "p2", model: "m3", effort: "low" },
     });
-    expect(record.tasks[0]?.retries?.[1]).not.toHaveProperty("effort");
     expect(decodeRecord(record).tasks[0]?.worker?.effort).toBe("medium");
     // A record written before efforts were carried decodes with none.
     const older = {
