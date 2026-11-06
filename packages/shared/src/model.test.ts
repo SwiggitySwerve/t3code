@@ -9,6 +9,8 @@ import {
   createModelSelection,
   getProviderOptionCurrentLabel,
   getProviderOptionDescriptors,
+  isReasoningControl,
+  isReasoningSelect,
   readCustomModelEntries,
   reasoningEffortOf,
   modelSelectionsEqual,
@@ -276,11 +278,41 @@ describe("reasoningEffortOf", () => {
     expect(reasoningEffortOf([{ id: "thinking_level", value: "low" }])).toBe("low");
     expect(reasoningEffortOf({ reasoning_effort: "medium" })).toBe("medium");
     expect(reasoningEffortOf([{ id: "effort", value: "max" }])).toBe("max");
+    expect(reasoningEffortOf([{ id: "thinking", value: "high" }])).toBe("high");
   });
 
   it("ignores options that are not an effort", () => {
     expect(reasoningEffortOf([{ id: "fastMode", value: true }])).toBeUndefined();
     expect(reasoningEffortOf([{ id: "effort", value: true }])).toBeUndefined();
     expect(reasoningEffortOf(undefined)).toBeUndefined();
+  });
+});
+
+describe("reasoning control recognition", () => {
+  const select = (id: string, role?: "reasoning") =>
+    ({
+      id,
+      label: id,
+      type: "select",
+      options: [{ id: "low", label: "Low" }],
+      ...(role === undefined ? {} : { role }),
+    }) as const;
+
+  it.each(["effort", "reasoningEffort", "variant", "thinking"])(
+    "recognises a %s select, as OpenCode and Pi state their effort",
+    (id) => {
+      expect(isReasoningSelect(select(id))).toBe(true);
+    },
+  );
+
+  it("recognises a select its agent marked as reasoning, whatever its id", () => {
+    expect(isReasoningSelect(select("mode", "reasoning"))).toBe(true);
+    expect(isReasoningSelect(select("mode"))).toBe(false);
+  });
+
+  it("keeps Claude's boolean thinking toggle a control but never a select of efforts", () => {
+    const toggle = { id: "thinking", label: "Thinking", type: "boolean" } as const;
+    expect(isReasoningControl(toggle)).toBe(true);
+    expect(isReasoningSelect(toggle)).toBe(false);
   });
 });

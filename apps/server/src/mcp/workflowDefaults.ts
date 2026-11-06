@@ -4,12 +4,13 @@
  * next pricier model of its family, and a judge of another family. Unpriced models never qualify.
  */
 import type { ProviderOptionDescriptor } from "@t3tools/contracts";
+import { isReasoningSelect } from "@t3tools/shared/model";
+import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { concreteModelFamily } from "./workflowAdvisory.ts";
 import { MAX_RETRY_TARGETS } from "./workflowLimits.ts";
 
-const EFFORT_OPTION_IDS: ReadonlySet<string> = new Set(["reasoningEffort", "effort"]);
 /** Effort words from least to most. Defaults stay within low..high, the range ladders measured. */
 const EFFORT_ORDER = ["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 const LOWEST_DEFAULT_EFFORT = EFFORT_ORDER.indexOf("low");
@@ -38,7 +39,7 @@ export interface DefaultTarget {
 export interface DefaultRouting {
   readonly target: DefaultTarget;
   readonly retries: ReadonlyArray<DefaultTarget>;
-  /** The cheapest model of each family, cheapest first, as a judge at its middle effort. */
+  /** The cheapest model of each family, cheapest first, as a judge at medium effort (the nearest offered). */
   readonly judges: ReadonlyArray<{ readonly family: string; readonly target: DefaultTarget }>;
 }
 
@@ -55,18 +56,28 @@ interface PricedCandidate {
 
 /** The effort option and its offered values within low..high, least first. */
 function effortRange(descriptors: ReadonlyArray<ProviderOptionDescriptor> | undefined) {
-  const descriptor = descriptors?.find(
-    (candidate) =>
-      candidate.type === "select" &&
-      (EFFORT_OPTION_IDS.has(candidate.id) || candidate.role === "reasoning"),
-  );
-  if (descriptor?.type !== "select") return undefined;
+  const descriptor = descriptors?.find(isReasoningSelect);
+  if (descriptor === undefined) return undefined;
   const rank = (id: string) => EFFORT_ORDER.indexOf(id as (typeof EFFORT_ORDER)[number]);
   const values = descriptor.options
     .map((choice) => choice.id)
     .filter((id) => rank(id) >= LOWEST_DEFAULT_EFFORT && rank(id) <= HIGHEST_DEFAULT_EFFORT)
     .toSorted((a, b) => rank(a) - rank(b));
   return values.length === 0 ? undefined : { id: descriptor.id, values };
+}
+
+/**
+ * A judge's effort: `medium` when offered, else the offered value nearest it (the lower one on a
+ * tie), so a judge neither skimps nor overspends. `values` is sorted least first.
+ */
+function judgeEffort(values: ReadonlyArray<string>): string | undefined {
+  const medium = EFFORT_ORDER.indexOf("medium");
+  const distance = (id: string) =>
+    Math.abs(EFFORT_ORDER.indexOf(id as (typeof EFFORT_ORDER)[number]) - medium);
+  return values.reduce<string | undefined>(
+    (best, id) => (best === undefined || distance(id) < distance(best) ? id : best),
+    undefined,
+  );
 }
 
 /** Locale-independent, so the same catalog picks the same defaults on every host. */
@@ -143,10 +154,9 @@ export function defaultRouting(input: {
   const judges: Array<DefaultRouting["judges"][number]> = [];
   for (const entry of priced) {
     if (judges.some((judge) => judge.family === entry.family)) continue;
-    const values = entry.effort?.values ?? [];
     judges.push({
       family: entry.family,
-      target: targetAt(entry, values[Math.floor((values.length - 1) / 2)]),
+      target: targetAt(entry, judgeEffort(entry.effort?.values ?? [])),
     });
   }
   return { routing: { target: targetAt(cheapest, efforts[0]), retries, judges } };
@@ -172,11 +182,30 @@ const DefaultTargetSchema = Schema.Struct({
   inheritOptions: Schema.Literal(false),
 });
 
-/** How a script workflow stores the defaults frozen at its start, so a resume runs the same ones. */
-export const decodeDefaultRouting = Schema.decodeUnknownOption(
-  Schema.Struct({
-    target: DefaultTargetSchema,
-    retries: Schema.Array(DefaultTargetSchema),
-    judges: Schema.Array(Schema.Struct({ family: Schema.String, target: DefaultTargetSchema })),
-  }),
+const StoredRouting = Schema.Struct({
+  target: DefaultTargetSchema,
+  retries: Schema.Array(DefaultTargetSchema),
+  judges: Schema.Array(Schema.Struct({ family: Schema.String, target: DefaultTargetSchema })),
+});
+const StoredUnavailable = Schema.Struct({ unavailable: Schema.String });
+const decodeStoredDefaults = Schema.decodeUnknownOption(
+  Schema.Union([StoredRouting, StoredUnavailable]),
 );
+
+/**
+ * What a script workflow stores of the defaults frozen at its start, so a resume runs the same
+ * ones and still says why there were none. The routing is stored bare; its absence as the reason.
+ */
+export function storedDefaults(
+  result: DefaultRoutingResult,
+): DefaultRouting | { unavailable: string } {
+  return "routing" in result ? result.routing : { unavailable: result.unavailable };
+}
+
+export function decodeDefaultRouting(value: unknown): Option.Option<DefaultRoutingResult> {
+  return Option.map(decodeStoredDefaults(value), (stored) =>
+    "unavailable" in stored
+      ? { unavailable: stored.unavailable }
+      : { routing: stored as DefaultRouting },
+  );
+}

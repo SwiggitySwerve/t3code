@@ -33,6 +33,7 @@ import {
   type WorkflowAgentOutcome,
   type WorkflowAgentStart,
 } from "./workflowRunner.ts";
+import { NO_DEFAULT_JUDGE_NOTE } from "./workflowDefaults.ts";
 import { aggregateWorkflowUsage } from "./workflowUsage.ts";
 import { agentRequestKey } from "./workflowAgentAttempts.ts";
 
@@ -1696,6 +1697,59 @@ describe("workflow runner", () => {
             ["agent 1", "default"],
             ["check agent 1", "default"],
           ]);
+        }),
+      );
+
+      it.effect("say when no other family can judge, keeping the worker's own target", () =>
+        Effect.gen(function* () {
+          const h = yield* makeHarness({ judgment: () => true });
+          yield* h.runner.launch({
+            workflowId,
+            threadId,
+            source:
+              'return await agent("x", { verify: { type: "judgment", rubric: ["ok"] }, report: true })',
+            args: null,
+            afterSequence: 0,
+            defaultRouting: { ...defaultRouting, judges: [defaultRouting.judges[0]!] },
+          });
+          yield* Deferred.await(h.completed);
+          expect(h.spawns.map((spawn) => spawn.target)).toEqual([
+            defaultRouting.target,
+            defaultRouting.target,
+          ]);
+          expect(
+            h.workflowCommands.map(
+              (command) => (command as { readonly progress?: string }).progress,
+            ),
+          ).toContain(`agent 1 judgment: ${NO_DEFAULT_JUDGE_NOTE}`);
+        }),
+      );
+
+      it.effect("say why there are no defaults when an agent would have taken them", () =>
+        Effect.gen(function* () {
+          const reasons = (source: string) =>
+            Effect.gen(function* () {
+              const h = yield* makeHarness();
+              yield* h.runner.launch({
+                workflowId,
+                threadId,
+                source,
+                args: null,
+                afterSequence: 0,
+                defaultsUnavailable: "No list prices are at hand, so T3 sets no defaults.",
+              });
+              yield* Deferred.await(h.completed);
+              return h.workflowCommands
+                .map((command) => (command as { readonly progress?: string }).progress)
+                .filter((progress) => progress?.startsWith("No list prices"));
+            });
+          expect(
+            new Set(yield* reasons('await agent("a"); await agent("b"); return null')),
+          ).toEqual(new Set(["No list prices are at hand, so T3 sets no defaults."]));
+          const own = { providerInstanceId: "codex", model: "m" };
+          expect(
+            yield* reasons(`return await agent("x", { target: ${JSON.stringify(own)} })`),
+          ).toEqual([]);
         }),
       );
 

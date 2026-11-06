@@ -360,6 +360,13 @@ describe("assignment notes", () => {
     ["o3", "gpt"],
     ["o4-mini", "gpt"],
     ["openai/o3", "gpt"],
+    ["openai/gpt-5.4", "gpt"],
+    ["xai/grok-4.7", "grok"],
+    ["x-ai/grok-4.7", "grok"],
+    ["xai.grok-4", "grok"],
+    ["grok-4.7", "grok"],
+    ["openrouter/anthropic/claude-opus-5-5", "claude"],
+    ["accounts/fireworks/models/llama-v3p1-8b", "llama"],
     ["Gemini-2.5-pro", "gemini"],
     ["auto", "auto"],
   ])("reads %s as the %s family", (id, family) => {

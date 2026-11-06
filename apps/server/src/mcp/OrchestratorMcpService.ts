@@ -195,6 +195,7 @@ import {
   defaultJudge,
   defaultRouting,
   NO_DEFAULT_JUDGE_NOTE,
+  storedDefaults,
 } from "./workflowDefaults.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -3242,9 +3243,7 @@ const make = Effect.gen(function* () {
           ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
           ...(input.workerTarget === undefined ? {} : { workerTarget: input.workerTarget }),
           ...(workerTargetSnapshot === undefined ? {} : { workerTargetSnapshot }),
-          ...(routing !== undefined && "routing" in routing
-            ? { defaultRouting: routing.routing }
-            : {}),
+          ...(routing === undefined ? {} : { defaultRouting: storedDefaults(routing) }),
           ...(plan === undefined ? {} : { plan }),
         }),
       })
@@ -3573,7 +3572,12 @@ const make = Effect.gen(function* () {
         ? { workerTargetError: workerTargetSnapshot.value.error }
         : {}),
       ...(Option.isSome(callerSelection) ? { callerSelection: callerSelection.value } : {}),
-      ...(Option.isSome(defaultRouting) ? { defaultRouting: defaultRouting.value } : {}),
+      ...(Option.isSome(defaultRouting) && "routing" in defaultRouting.value
+        ? { defaultRouting: defaultRouting.value.routing }
+        : {}),
+      ...(Option.isSome(defaultRouting) && "unavailable" in defaultRouting.value
+        ? { defaultsUnavailable: defaultRouting.value.unavailable }
+        : {}),
       ...(stored.value.budgetTokens === undefined
         ? {}
         : { budgetTokens: stored.value.budgetTokens }),

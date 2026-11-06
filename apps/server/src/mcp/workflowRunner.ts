@@ -78,7 +78,7 @@ import { GRAPH_DRIVER_SCRIPT, REMOVED_PRESET_MESSAGE } from "./workflowGraph.ts"
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { WorkflowPhases } from "./workflowPhases.ts";
 import { parseRetries, type RetryTarget, retriesCheckProblem } from "./workflowRetries.ts";
-import { type DefaultRouting, defaultJudge } from "./workflowDefaults.ts";
+import { type DefaultRouting, defaultJudge, NO_DEFAULT_JUDGE_NOTE } from "./workflowDefaults.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
@@ -104,6 +104,8 @@ export interface WorkflowContext {
   readonly callerSelection?: ModelSelection;
   /** T3's cheap-first defaults for agents without any target, frozen when the script started. */
   readonly defaultRouting?: DefaultRouting;
+  /** Why T3 had no defaults to freeze at start; said when an agent would have taken them. */
+  readonly defaultsUnavailable?: string;
   /** New agents stop starting once recorded child usage reaches this limit. */
   readonly budgetTokens?: number;
   /** Stored event sequence before the workflow row was created. */
@@ -741,6 +743,17 @@ class WorkflowSession {
             ...(runRetries ?? []).map((rung) => rung.model),
           ])
         : undefined;
+    if (source === "caller" && request.judgmentFor === undefined) {
+      if (this.workflow.defaultsUnavailable !== undefined)
+        this.advise(this.workflow.defaultsUnavailable);
+      else if (
+        defaults !== undefined &&
+        check?.type === "judgment" &&
+        check.target === undefined &&
+        judge === undefined
+      )
+        this.advise(`${label} judgment: ${NO_DEFAULT_JUDGE_NOTE}`);
+    }
     const runCheck =
       judge === undefined || check === undefined ? check : { ...check, target: judge };
     const promptPreview = truncate(request.prompt, PREVIEW_LIMIT);
@@ -985,6 +998,19 @@ class WorkflowSession {
               (agent) => agent.graphNodeKey === ref.from && agent.judgmentFor === undefined,
             )?.result,
     }));
+  }
+
+  private readonly advised = new Set<string>();
+
+  /**
+   * Says once, as the latest progress line, what T3 could not default; a script's own log may
+   * replace it, so the reason is not the only record of the choice (the agent's target is).
+   */
+  private advise(message: string) {
+    if (this.advised.has(message)) return;
+    this.advised.add(message);
+    this.progress = truncate(message, PREVIEW_LIMIT);
+    this.scheduleUpdate();
   }
 
   private async acquireWrites(index: number, paths: ReadonlyArray<string>, label: string) {

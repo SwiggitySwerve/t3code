@@ -79,7 +79,24 @@ export const REASONING_EFFORT_OPTION_IDS: ReadonlyArray<string> = [
   "variant",
   "reasoning_effort",
   "thinking_level",
+  // Pi states its effort as `thinking`; Claude's boolean `thinking` toggle is never read as one.
+  "thinking",
 ];
+
+/** The model's reasoning control: a known effort id, or a select its agent marked as reasoning. */
+export function isReasoningControl(descriptor: ProviderOptionDescriptor): boolean {
+  return (
+    (descriptor.type === "select" && descriptor.role === "reasoning") ||
+    REASONING_EFFORT_OPTION_IDS.includes(descriptor.id)
+  );
+}
+
+/** The reasoning control when it offers a choice of efforts. */
+export function isReasoningSelect(
+  descriptor: ProviderOptionDescriptor,
+): descriptor is Extract<ProviderOptionDescriptor, { type: "select" }> {
+  return descriptor.type === "select" && isReasoningControl(descriptor);
+}
 
 /** The effort a selection's options set, in the list form or the legacy record form. */
 export function reasoningEffortOf(options: unknown): string | undefined {
