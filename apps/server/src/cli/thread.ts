@@ -95,15 +95,23 @@ export class ThreadProjectNotFoundError extends Schema.TaggedError<ThreadProject
 /** Exit code 2 lets a script tell "needs a human" apart from a failed run. */
 export class ThreadNeedsInputError extends Schema.TaggedError<ThreadNeedsInputError>()(
   "ThreadNeedsInputError",
-  { threadId: ThreadId, reason: Schema.Literals(["request", "workflow_review"]) },
+  {
+    threadId: ThreadId,
+    reason: Schema.Literals(["request", "member_request", "workflow_review"]),
+  },
 ) {
   override readonly [Runtime.errorReported] = false;
   override readonly [Runtime.errorExitCode] = 2;
 
   override get message(): string {
-    return this.reason === "workflow_review"
-      ? `Thread ${this.threadId} is waiting for you to approve or dismiss its workflow. Open it in T3 Code to decide.`
-      : `Thread ${this.threadId} is waiting for an answer. Open it in T3 Code to respond.`;
+    switch (this.reason) {
+      case "workflow_review":
+        return `Thread ${this.threadId} is waiting for you to approve or dismiss its workflow. Open it in T3 Code to decide.`;
+      case "member_request":
+        return `A workflow agent or task of thread ${this.threadId} is waiting for an answer, so the thread cannot settle. Open it in T3 Code to approve or answer.`;
+      case "request":
+        return `Thread ${this.threadId} is waiting for an answer. Open it in T3 Code to respond.`;
+    }
   }
 }
 
@@ -440,7 +448,7 @@ type WaitOutcome =
     }
   | {
       readonly type: "needs_input";
-      readonly reason: "request" | "workflow_review";
+      readonly reason: "request" | "member_request" | "workflow_review";
       /** The run that ended its turn on the workflow review, whose reply describes it. */
       readonly runId?: RunId;
     };
@@ -482,7 +490,11 @@ export const waitForRun = Effect.fn("cli.thread.waitForRun")(function* (
       const recheck = yield* waitSlice(1);
       if (!recheck.timedOut) return settled(recheck);
       if (recheck.awaitingAnswer !== undefined) {
-        return { type: "needs_input", reason: "request" } satisfies WaitOutcome;
+        return {
+          type: "needs_input",
+          // A member's request is not the thread's own: the thread cannot settle until it is answered.
+          reason: recheck.awaitingAnswer === "descendant" ? "member_request" : "request",
+        } satisfies WaitOutcome;
       }
     }
   }
@@ -513,7 +525,14 @@ const finishRun = Effect.fn("cli.thread.finishRun")(function* (
       ? null
       : yield* runResultText(tools, input.threadId, runId, "error");
   if (input.json) {
-    yield* printJson({ threadId: input.threadId, runId, status, reply, error });
+    yield* printJson({
+      threadId: input.threadId,
+      runId,
+      status,
+      reply,
+      error,
+      ...(outcome.type === "needs_input" ? { awaiting: outcome.reason } : {}),
+    });
   } else if (reply !== null) {
     yield* Console.log(reply);
   }

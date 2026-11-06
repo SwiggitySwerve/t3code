@@ -1,6 +1,7 @@
 /**
  * The workflow runner's periodic sweep: it stops an attempt past its deadline, or one whose
- * thread records nothing for too long, so the runner can start it again.
+ * thread records nothing for too long, so the runner can start it again. A thread that waits for a
+ * person's answer to a pending request is not silent in this sense.
  */
 import type { NodeId, ThreadId } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -81,6 +82,12 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
         if (accepted) agent.deadlineStopAccepted = true;
         continue;
       }
+    }
+    // A request waits for a person, so the thread records nothing until they answer. That silence
+    // is not a stall; the clock starts again from the answer. The attempt's own deadline still holds.
+    if (shell.pendingRuntimeRequest != null) {
+      delete agent.seenAt;
+      continue;
     }
     // Measured only on this runner's clock: the thread's stamp just has to stop moving.
     const updatedAt = DateTime.toEpochMillis(shell.updatedAt);
