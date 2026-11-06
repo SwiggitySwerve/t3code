@@ -1441,7 +1441,8 @@ const make = Effect.gen(function* () {
 
   /**
    * Whether a pending question or approval holds the thread's delegated work: on the thread
-   * itself, or on the child thread of unfinished app-owned work it or its descendants own.
+   * itself, or on the child thread of unfinished app-owned work it or its descendants own,
+   * including a child in a linked environment, which that environment answers for.
    */
   const awaitedRequest = Effect.fn("OrchestratorMcpService.awaitedRequest")(function* (
     threadId: ThreadId,
@@ -1467,6 +1468,18 @@ const make = Effect.gen(function* () {
       const children: Array<ThreadId> = [];
       for (const record of records) {
         for (const task of record.subagents) {
+          // A child in a linked environment has no thread here; that environment says whether it
+          // or its own work waits on a person. If it cannot be read it is unknown, not settled.
+          if (
+            task.remoteChild !== undefined &&
+            task.origin === "app_owned" &&
+            task.threadId === record.id &&
+            isOrchestrationV2WorkActive(task.status)
+          ) {
+            const remote = yield* remoteDelegation.awaitingAnswer(record.id, task.id);
+            if (remote !== undefined) return "descendant" as const;
+            continue;
+          }
           const child = task.childThreadId;
           if (
             child !== null &&
@@ -1743,12 +1756,34 @@ const make = Effect.gen(function* () {
   });
 
   /**
+   * Workflow agents are children of the workflow's own thread, so a target cannot send one to
+   * another environment or project. The concrete target would drop the field and run it here.
+   */
+  const requireLocalWorkflowTarget = (target: OrchestratorMcpTarget | undefined) => {
+    const field =
+      target?.environmentId !== undefined
+        ? "environmentId"
+        : target?.projectId !== undefined
+          ? "projectId"
+          : undefined;
+    return field === undefined
+      ? Effect.void
+      : Effect.fail(
+          failure(
+            "invalid_request",
+            `A workflow target cannot set ${field}: workflow agents run in this thread's environment and project.`,
+          ),
+        );
+  };
+
+  /**
    * Graph review needs a known concrete assignment: the usual target rules, then the model
    * must be listed by the provider and the resolved options, inherited ones included, valid
    * for it. Start runs this again, so a reviewed target is re-checked, not trusted.
    */
   const resolveAdvertisedTarget = Effect.fn("OrchestratorMcpService.resolveAdvertisedTarget")(
     function* (parent: CallerProjection, target: OrchestratorMcpTarget | undefined) {
+      yield* requireLocalWorkflowTarget(target);
       const resolved = yield* resolveTargetRechecking({
         parent,
         target,
@@ -2401,6 +2436,8 @@ const make = Effect.gen(function* () {
         if (row?.runId == null) {
           return yield* failure("orchestration_error", "The workflow row is missing.");
         }
+        // Every spawn is local, whichever target it came from: script, retry or judgment.
+        yield* requireLocalWorkflowTarget(item.target);
         const prepared = yield* prepareDelegation({
           scope,
           parent:
@@ -3055,11 +3092,14 @@ const make = Effect.gen(function* () {
     const snapshotTarget = Effect.fn("OrchestratorMcpService.snapshotWorkflowTarget")(function* (
       target: OrchestratorMcpTarget,
     ) {
-      return yield* resolveTargetRechecking({
-        parent,
-        target,
-        providers: yield* loadProviders,
-      }).pipe(
+      return yield* requireLocalWorkflowTarget(target).pipe(
+        Effect.andThen(
+          resolveTargetRechecking({
+            parent,
+            target,
+            providers: yield* loadProviders,
+          }),
+        ),
         Effect.map((resolved) => ({ target: concreteWorkflowTarget(resolved.modelSelection) })),
         Effect.catch((error) => Effect.succeed({ error: error.message })),
       );

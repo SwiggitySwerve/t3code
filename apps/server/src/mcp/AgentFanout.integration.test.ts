@@ -884,6 +884,32 @@ describe("workflow_start", () => {
         ).toEqual({ ...modelSelection, options: [{ id: "serviceTier", value: "priority" }] });
       }).pipe(Effect.provide(layerTest)),
   );
+  it.effect.each([
+    {
+      name: "a first-attempt script agent target",
+      script:
+        'return await agent("x", { target: { environmentId: "environment:elsewhere" }, report: true })',
+      spawned: 0,
+    },
+    {
+      name: "a judgment check target",
+      script:
+        'return await agent("x", { report: true, verify: { type: "judgment", rubric: ["ok"], target: { projectId: "project:elsewhere" } } })',
+      spawned: 1,
+    },
+  ])("refuses environmentId and projectId on $name at spawn", ({ script, spawned }) =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents(() => "done");
+      const started = yield* startWorkflow(script);
+      yield* awaitWorkflowEnd(started.workflowId);
+      // Only the worker that names no other environment starts; nothing runs elsewhere.
+      const members = (yield* childTasks).filter(
+        (task) => task.parentNodeId === started.workflowId,
+      );
+      expect(members).toHaveLength(spawned);
+    }).pipe(Effect.provide(layerTest)),
+  );
   it.effect("C3 preserves resolver option inheritance overrides and clearing", () =>
     Effect.gen(function* () {
       const inherited = [
@@ -3658,6 +3684,33 @@ describe("graphs", () => {
       expect(preset.blockers).toContain(
         "a: preset: Agent presets were removed; set target from orchestrator_capabilities.",
       );
+    }).pipe(Effect.provide(layerTest)),
+  );
+  it.effect("refuses environmentId and projectId on a workflow agent's first target", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const node = { subject: "worker", description: "work", dependsOn: [] };
+      for (const [field, value] of [
+        ["environmentId", "environment:elsewhere"],
+        ["projectId", "project:elsewhere"],
+      ] as const) {
+        const own = yield* reviewGraph({
+          schemaVersion: 1,
+          nodes: { a: { ...node, target: { [field]: value } } },
+        });
+        expect(own.ready).toBe(false);
+        expect(own.blockers).toEqual([
+          `a: A workflow target cannot set ${field}: workflow agents run in this thread's environment and project.`,
+        ]);
+      }
+      const inherited = yield* decodeReview(
+        (yield* invoke("graph_review", {
+          graph: { schemaVersion: 1, nodes: { a: node } },
+          workerTarget: { environmentId: "environment:elsewhere" },
+        })).structuredContent,
+      );
+      expect(inherited.ready).toBe(false);
+      expect(inherited.blockers.join(" ")).toContain("cannot set environmentId");
     }).pipe(Effect.provide(layerTest)),
   );
   it.effect("C3 refuses an inherited model absent from an empty provider catalog", () =>

@@ -5,6 +5,7 @@ import {
   OrchestratorMcpFailure,
   type OrchestratorMcpDelegateTaskInput,
   type OrchestratorMcpTaskCancelResult,
+  type OrchestratorMcpThreadWaitResult,
   type OrchestratorMcpThreadTimelineItem,
   type OrchestrationV2RemoteTaskChild,
   type OrchestrationV2Subagent,
@@ -90,6 +91,15 @@ export class RemoteDelegation extends Context.Service<
         readonly clientRequestId?: string | undefined;
       },
     ) => Effect.Effect<OrchestratorMcpTaskCancelResult, OrchestratorMcpFailure>;
+    /**
+     * What the task's thread there waits on a person for, as that environment's own wait reports
+     * it: the thread, or work it owns. Undefined when nothing waits, and also when it cannot be
+     * read (the link is down or the task is not open): that is unknown, never settled.
+     */
+    readonly awaitingAnswer: (
+      parentThreadId: ThreadId,
+      taskId: NodeId,
+    ) => Effect.Effect<OrchestratorMcpThreadWaitResult["awaitingAnswer"]>;
     /**
      * Follows every open remote task until it ends, including after a
      * restart, and a finished one again when a Stop here owes it a stop there.
@@ -785,7 +795,33 @@ const make = Effect.gen(function* () {
       }).pipe(Effect.ignoreCause({ log: true })),
     );
 
-  return RemoteDelegation.of({ delegate, cancel, start });
+  const awaitingAnswer: RemoteDelegation["Service"]["awaitingAnswer"] = Effect.fn(
+    "RemoteDelegation.awaitingAnswer",
+  )(
+    function* (parentThreadId, taskId) {
+      const { thread, task } = yield* readTask(parentThreadId, taskId);
+      if (task?.remoteChild === undefined || task.result !== null) return undefined;
+      const remote = task.remoteChild;
+      const waited = yield* forwarding.waitForThread(
+        followScope(
+          { threadId: parentThreadId, providerInstanceId: thread.providerInstanceId },
+          remote,
+        ),
+        remote.environmentId,
+        {
+          threadId: remote.threadId,
+          ...(remote.runId === undefined ? {} : { runId: remote.runId }),
+          // A look, not a wait: the follower owns the long wait.
+          timeoutMs: 1,
+          untilDelegatedWorkSettled: true,
+        },
+      );
+      return waited.awaitingAnswer;
+    },
+    (effect) => effect.pipe(Effect.orElseSucceed(() => undefined)),
+  );
+
+  return RemoteDelegation.of({ delegate, cancel, awaitingAnswer, start });
 });
 
 const isTerminal = (status: string) =>

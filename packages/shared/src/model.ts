@@ -68,6 +68,39 @@ function getProviderOptionBooleanSelectionValue(
   return typeof value === "boolean" ? value : undefined;
 }
 
+/**
+ * Option ids drivers use for the reasoning effort. Descriptors seldom mark the control (only ACP
+ * agents set `role: "reasoning"`), so every reader of a selection's effort goes through this list.
+ */
+export const REASONING_EFFORT_OPTION_IDS: ReadonlyArray<string> = [
+  "reasoningEffort",
+  "effort",
+  "reasoning",
+  "variant",
+  "reasoning_effort",
+  "thinking_level",
+];
+
+/** The effort a selection's options set, in the list form or the legacy record form. */
+export function reasoningEffortOf(options: unknown): string | undefined {
+  const byId = new Map<unknown, unknown>();
+  if (Array.isArray(options)) {
+    for (const option of options as ReadonlyArray<unknown>) {
+      if (typeof option === "object" && option !== null) {
+        const { id, value } = option as { readonly id?: unknown; readonly value?: unknown };
+        byId.set(id, value);
+      }
+    }
+  } else if (typeof options === "object" && options !== null) {
+    for (const [id, value] of Object.entries(options)) byId.set(id, value);
+  }
+  for (const id of REASONING_EFFORT_OPTION_IDS) {
+    const value = byId.get(id);
+    if (typeof value === "string") return value;
+  }
+  return undefined;
+}
+
 export function getModelSelectionStringOptionValue(
   modelSelection: ModelSelection | null | undefined,
   id: string,

@@ -79,11 +79,15 @@ it.effect("--wait stops when an agent in the thread's workflow waits for an answ
 
     assert.deepStrictEqual(yield* waitForRun(tools, threadId, runId), {
       type: "needs_input",
-      reason: "request",
+      reason: "member_request",
     });
     assert.deepStrictEqual(
       calls.map((entry) => (entry.args as { readonly timeoutMs: number }).timeoutMs),
       [15_000, 15_000, 1],
+    );
+    assert.include(
+      new ThreadNeedsInputError({ threadId, reason: "member_request" }).message,
+      "workflow agent or task",
     );
   }),
 );

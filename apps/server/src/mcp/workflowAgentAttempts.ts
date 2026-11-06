@@ -11,6 +11,7 @@ import type {
   ThreadId,
   WorkflowAgentTargetSource,
 } from "@t3tools/contracts";
+import { reasoningEffortOf } from "@t3tools/shared/model";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import type * as Schema from "effect/Schema";
@@ -80,12 +81,11 @@ function numberOption(options: Readonly<Record<string, unknown>>, key: string) {
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
 
-/** The resolved options by id, and the effort among them under either provider's name. */
+/** The resolved options by id, and the effort among them under whichever id its driver uses. */
 function resolvedOptions(options: WorkflowAgentStart["options"]) {
   if (options === undefined || options.length === 0) return undefined;
   const byId = Object.fromEntries(options.map((option) => [option.id, option.value]));
-  const effort = byId.reasoningEffort ?? byId.effort;
-  return { byId, effort: typeof effort === "string" ? effort : undefined };
+  return { byId, effort: reasoningEffortOf(options) };
 }
 
 function failureMessage<A>(

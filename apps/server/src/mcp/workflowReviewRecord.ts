@@ -13,10 +13,10 @@ import {
   type OrchestrationV2WorkflowReviewTarget,
   type OrchestratorMcpGraphReviewResult,
 } from "@t3tools/contracts";
+import { reasoningEffortOf } from "@t3tools/shared/model";
 import * as Schema from "effect/Schema";
 
 import { graphPlan, type WorkflowGraph } from "./workflowGraph.ts";
-import { effortOf } from "./workflowRetries.ts";
 
 const isDigest = Schema.is(OrchestrationV2WorkflowReviewDigest);
 
@@ -38,7 +38,7 @@ function targetOf(
 ): OrchestrationV2WorkflowReviewTarget | undefined {
   if (target === undefined) return undefined;
   const { providerInstanceId, model } = target;
-  const effort = effortOf(target.options);
+  const effort = reasoningEffortOf(target.options);
   if (providerInstanceId === undefined && model === undefined && effort === undefined)
     return undefined;
   return {

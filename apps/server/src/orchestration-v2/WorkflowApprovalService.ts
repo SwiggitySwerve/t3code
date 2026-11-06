@@ -48,21 +48,30 @@ const make = Effect.gen(function* () {
   const tellAgent = (
     input: OrchestrationV2ApproveWorkflowReviewInput | OrchestrationV2DismissWorkflowReviewInput,
     decision: "approved" | "dismissed",
-    key: string,
+    decided: WorkflowApprovalGate.WorkflowApprovalGateDecision,
     text: string,
   ) => {
-    return sendWithNextId(CommandId.make(`server:workflow-${decision}:${key}`), (commandId) =>
-      threads.dispatch({
-        type: "message.dispatch",
-        commandId,
-        threadId: input.threadId,
-        messageId: MessageId.make(`message:workflow-${decision}:${key}`),
-        text,
-        attachments: [],
-        dispatchMode: { type: "queue_after_active" },
-        createdBy: "user",
-        creationSource: "server",
-      }),
+    const prefix = WorkflowApprovalGate.decisionMessageIdPrefix(
+      decision,
+      input.threadId,
+      decided.request,
+    );
+    return sendWithNextId(
+      CommandId.make(
+        `server:workflow-${decision}:${input.threadId}:${decided.request}:${decided.decisionId}`,
+      ),
+      (commandId) =>
+        threads.dispatch({
+          type: "message.dispatch",
+          commandId,
+          threadId: input.threadId,
+          messageId: MessageId.make(`${prefix}${decided.decisionId}`),
+          text,
+          attachments: [],
+          dispatchMode: { type: "queue_after_active" },
+          createdBy: "user",
+          creationSource: "server",
+        }),
     ).pipe(
       Effect.asVoid,
       Effect.mapError(
@@ -79,23 +88,11 @@ const make = Effect.gen(function* () {
 
   return WorkflowApprovalService.of({
     approve: Effect.fn("WorkflowApprovalService.approve")(function* (input) {
-      const { request, decisionId } = yield* gate.approve(input);
-      yield* tellAgent(
-        input,
-        "approved",
-        `${input.threadId}:${request}:${decisionId}`,
-        approvedText(input.digest),
-      );
+      yield* tellAgent(input, "approved", yield* gate.approve(input), approvedText(input.digest));
     }),
     dismiss: Effect.fn("WorkflowApprovalService.dismiss")(function* (input) {
-      const { request, decisionId } = yield* gate.dismiss(input);
       // One word to the agent per dismissal, however many of the request's reviews are dismissed.
-      yield* tellAgent(
-        input,
-        "dismissed",
-        `${input.threadId}:${request}:${decisionId}`,
-        dismissedText,
-      );
+      yield* tellAgent(input, "dismissed", yield* gate.dismiss(input), dismissedText);
     }),
   });
 });
