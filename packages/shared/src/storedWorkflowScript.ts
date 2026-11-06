@@ -14,6 +14,8 @@ export interface StoredWorkflowSettings {
   readonly callerSelection?: unknown;
   /** The reviewed graph's plan, for workflows started from one; the reader decodes it. */
   readonly plan?: unknown;
+  /** T3's cheap-first defaults for agents without a target, frozen at start; the reader decodes it. */
+  readonly defaultRouting?: unknown;
 }
 
 /** Always writes the settings line, so a script that itself starts with it is not misread. */
@@ -40,6 +42,7 @@ export function parseStoredWorkflowScript(stored: string): {
   readonly workflowPresets: unknown;
   readonly presetTargets: unknown;
   readonly callerSelection: unknown;
+  readonly defaultRouting: unknown;
 } {
   const source = storedWorkflowScriptSource(stored);
   if (!stored.startsWith(SETTINGS_HEADER)) {
@@ -53,6 +56,7 @@ export function parseStoredWorkflowScript(stored: string): {
       workflowPresets: undefined,
       presetTargets: undefined,
       callerSelection: undefined,
+      defaultRouting: undefined,
     };
   }
   const newline = stored.indexOf("\n");
@@ -71,5 +75,6 @@ export function parseStoredWorkflowScript(stored: string): {
     workflowPresets: settings.workflowPresets,
     presetTargets: settings.presetTargets,
     callerSelection: settings.callerSelection,
+    defaultRouting: settings.defaultRouting,
   };
 }

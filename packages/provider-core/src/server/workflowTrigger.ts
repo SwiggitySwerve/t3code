@@ -18,11 +18,11 @@ import { isPersonTypedMessage } from "./personMessage.ts";
  * every workflow turn, so they stay short.
  */
 const ASSIGNMENT_RULES = [
-  "You choose every worker's and every check's target: providerInstanceId, model and options such as effort, from orchestrator_capabilities. Never invent ids.",
-  "Give each agent the smallest model and effort you expect to succeed first time (pass its check, if it has one), and more to ambiguous, multi-file or previously failed work. Prefer lowering effort to switching to a much weaker model.",
+  "Omit a target and T3 sets cheap-first defaults: target, retries and a judge of another family. Set targets from orchestrator_capabilities only for a reason; never invent ids.",
+  "A target you set gets the smallest model and effort you expect to succeed first time (pass its check, if it has one), and more to ambiguous, multi-file or previously failed work. Prefer lowering effort to switching to a much weaker model.",
   "Split work you cannot scope into smaller agents; for a part too large to scope, run a planning agent on a stronger model first.",
-  "When an agent's work needs a check, use one that can fail wrong work, not only tests its worker sees or wrote: { type: 'judgment', rubric, target } on the task's criteria (a judge cannot see a worktree: have its worker return the diff) or { type: 'process', argv } it cannot have tuned to. Prefer a cheap judge of a different model family than its worker when one is enabled.",
-  "Give an agent with a check that can fail it retries: later targets, cheapest first, then more effort or model. Redo it only once they run out or the split was wrong. listPrice is the provider's published price, not what this account pays; null is unknown, not free.",
+  "When an agent's work needs a check, use one that can fail wrong work, not only tests its worker sees or wrote: { type: 'judgment', rubric, target } on the task's criteria (a judge cannot see a worktree: have its worker return the diff) or { type: 'process', argv } it cannot have tuned to. Prefer a cheap judge of another model family when one is enabled.",
+  "Give an agent you target with a check that can fail it retries: later targets, cheapest first, then more effort or model. Redo it only once they run out or the split was wrong. listPrice is the provider's published price, not what this account pays; null is unknown, not free.",
 ];
 
 const WORKFLOW_TURN_NOTE = [

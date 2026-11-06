@@ -1606,6 +1606,103 @@ describe("workflow runner", () => {
       }),
     );
 
+    describe("T3's cheap-first defaults", () => {
+      const at = (providerInstanceId: string, model: string, effort?: string) => ({
+        providerInstanceId,
+        model,
+        options: effort === undefined ? [] : [{ id: "reasoningEffort", value: effort }],
+        inheritOptions: false as const,
+      });
+      const defaultRouting = {
+        target: at("codex", "gpt-5.4-mini", "low"),
+        retries: [at("codex", "gpt-5.4-mini", "high"), at("codex", "gpt-5.4", "high")],
+        judges: [
+          { family: "gpt", target: at("codex", "gpt-5.4-mini", "medium") },
+          { family: "claude", target: at("claude", "claude-haiku-4-5") },
+        ],
+      };
+      const runWithDefaults = (
+        source: string,
+        options: HarnessOptions = {},
+        workerTarget?: unknown,
+      ) =>
+        Effect.gen(function* () {
+          const h = yield* makeHarness(options);
+          yield* h.runner.launch({
+            workflowId,
+            threadId,
+            source,
+            args: null,
+            afterSequence: 0,
+            defaultRouting,
+            ...(workerTarget === undefined ? {} : { workerTarget }),
+          });
+          return { h, report: JSON.parse(yield* Deferred.await(h.completed)) };
+        });
+
+      it.effect("climb an agent without a target, keyed by what the script asked", () =>
+        Effect.gen(function* () {
+          // The key is the one the same call had before defaults, so a resumed run finds its task.
+          const plain = yield* runWithDefaults('return await agent("x", { report: true })');
+          expect(plain.h.spawns.map((spawn) => [spawn.requestKey, spawn.target])).toEqual([
+            ["wf-c585ef6a4b3b95ec597f40fb-0", defaultRouting.target],
+          ]);
+          expect(plain.h.workflowUpdates.at(-1)?.agents[0]?.targetSource).toBe("default");
+          const { h, report } = yield* runWithDefaults(
+            `return await agent("x", { ${checked}, report: true })`,
+            { runCommandCheck: passedOn("thread:agent-3") },
+          );
+          expect(report).toMatchObject({ ok: true, attempts: 3 });
+          expect(h.spawns.map((spawn) => spawn.target)).toEqual([
+            defaultRouting.target,
+            ...defaultRouting.retries,
+          ]);
+        }),
+      );
+
+      it.effect("judge with the cheapest model of another family", () =>
+        Effect.gen(function* () {
+          const { h, report } = yield* runWithDefaults(
+            'return await agent("x", { verify: { type: "judgment", rubric: ["ok"] }, report: true })',
+            { judgment: () => true },
+          );
+          expect(report).toMatchObject({ ok: true, attempts: 1 });
+          expect(h.spawns.map((spawn) => spawn.target)).toEqual([
+            defaultRouting.target,
+            at("claude", "claude-haiku-4-5"),
+          ]);
+          expect(
+            h.workflowUpdates.at(-1)?.agents.map((agent) => [agent.label, agent.targetSource]),
+          ).toEqual([
+            ["agent 1", "default"],
+            ["check agent 1", "default"],
+          ]);
+        }),
+      );
+
+      it.effect("leave every target the script or workerTarget chose", () =>
+        Effect.gen(function* () {
+          const own = { providerInstanceId: "codex", model: "m" };
+          const judged = `verify: { type: "judgment", rubric: ["ok"] }`;
+          const targeted = yield* runWithDefaults(
+            `return await agent("x", { target: ${JSON.stringify(own)}, ${judged}, report: true })`,
+            { judgment: () => true },
+          );
+          // Its check inherits its target as before: no default judge, no default retries.
+          expect(targeted.h.spawns.map((spawn) => spawn.target)).toEqual([own, own]);
+          const worker = yield* runWithDefaults(
+            `return await agent("x", { ${judged}, report: true })`,
+            { judgment: () => true },
+            own,
+          );
+          expect(worker.h.spawns.map((spawn) => spawn.target)).toEqual([own, own]);
+          expect(
+            worker.h.workflowUpdates.at(-1)?.agents.map((agent) => agent.targetSource),
+          ).toEqual(["workerTarget", "workerTarget"]);
+        }),
+      );
+    });
+
     it.effect.each([
       { name: "after each failed check", finish: undefined },
       {

@@ -145,6 +145,8 @@ export interface AgentAttemptInput {
   readonly retries: ReadonlyArray<RetryTarget> | undefined;
   readonly requestKey: string;
   readonly check: WorkflowCheck | undefined;
+  /** How a judgment check's own target was chosen, when T3 rather than the script chose it. */
+  readonly judgeSource?: WorkflowAgentTargetSource | undefined;
   readonly inputs: ReadonlyArray<FileRef>;
   readonly outputs: ReadonlyArray<FileRef>;
   readonly attemptTimeoutMs: number | undefined;
@@ -375,6 +377,7 @@ export async function runAttempts(
         taskId: started.value.taskId,
         childThreadId: started.value.childThreadId,
         workerSource: entry.targetSource,
+        judgeSource: input.judgeSource,
         summary,
         structuredResult,
         structuredResultError,
@@ -467,6 +470,7 @@ async function runCheck(
     readonly taskId: NodeId;
     readonly childThreadId: ThreadId;
     readonly workerSource: WorkflowAgentTargetSource | undefined;
+    readonly judgeSource: WorkflowAgentTargetSource | undefined;
     readonly summary: string | null;
     readonly structuredResult: unknown;
     readonly structuredResultError: string | undefined;
@@ -522,7 +526,8 @@ async function runCheck(
       // Its prompt already pins the work it judges; a generated worker label would not.
       keyLabel: null,
       judgmentFor: input.judgmentFor,
-      targetSource: check.target === undefined ? input.workerSource : "target",
+      targetSource:
+        input.judgeSource ?? (check.target === undefined ? input.workerSource : "target"),
       options: {
         label: `check ${input.label}`,
         ...(input.phase === undefined ? {} : { phase: input.phase }),

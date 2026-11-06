@@ -78,6 +78,7 @@ import { GRAPH_DRIVER_SCRIPT, REMOVED_PRESET_MESSAGE } from "./workflowGraph.ts"
 import { MAX_AGENT_ATTEMPTS, MAX_AGENTS_PER_WORKFLOW } from "./workflowLimits.ts";
 import { WorkflowPhases } from "./workflowPhases.ts";
 import { parseRetries, type RetryTarget, retriesCheckProblem } from "./workflowRetries.ts";
+import { type DefaultRouting, defaultJudge } from "./workflowDefaults.ts";
 import { workflowPlannedIdentity } from "./workflowPlannedIdentity.ts";
 import { runWorkflowScript, type WorkflowScriptHost } from "./workflowScript.ts";
 import { stopStalledAgents, type WaitingAgent } from "./workflowSweep.ts";
@@ -101,6 +102,8 @@ export interface WorkflowContext {
   /** Only for workflows started before agent presets were removed; see `legacyPresetSelection`. */
   readonly legacyPresets?: LegacyPresetSnapshots;
   readonly callerSelection?: ModelSelection;
+  /** T3's cheap-first defaults for agents without any target, frozen when the script started. */
+  readonly defaultRouting?: DefaultRouting;
   /** New agents stop starting once recorded child usage reaches this limit. */
   readonly budgetTokens?: number;
   /** Stored event sequence before the workflow row was created. */
@@ -721,6 +724,25 @@ class WorkflowSession {
     const occurrence = this.occurrences.get(digest) ?? 0;
     this.occurrences.set(digest, occurrence + 1);
     const requestKey = `wf-${digest}-${occurrence}`;
+    // T3's cheap-first defaults fill only what an agent without any target left out. They stay out
+    // of the key, which hashes the script's own request; the workflow froze them at its start.
+    const defaults =
+      source === "caller" && request.judgmentFor === undefined
+        ? this.workflow.defaultRouting
+        : undefined;
+    const runTarget = defaults?.target ?? target;
+    const runRetries =
+      retries ??
+      (defaults === undefined || defaults.retries.length === 0 ? undefined : defaults.retries);
+    const judge =
+      defaults !== undefined && check?.type === "judgment" && check.target === undefined
+        ? defaultJudge(defaults, [
+            defaults.target.model,
+            ...(runRetries ?? []).map((rung) => rung.model),
+          ])
+        : undefined;
+    const runCheck =
+      judge === undefined || check === undefined ? check : { ...check, target: judge };
     const promptPreview = truncate(request.prompt, PREVIEW_LIMIT);
     const previousAgents = this.workflow.previousWorkflow?.agents ?? [];
     const legacyTasks = previousAgents.filter(
@@ -786,7 +808,7 @@ class WorkflowSession {
     const plannedIdentity =
       previous?.plannedIdentity ??
       planNode(graphNodeKey)?.plannedIdentity ??
-      workflowPlannedIdentity(target);
+      workflowPlannedIdentity(runTarget);
     // Review writes a concrete target into every graph node, so a graph agent's own source is
     // always "target"; the plan keeps the source review found.
     const targetSource =
@@ -794,7 +816,7 @@ class WorkflowSession {
         ? planNode(graphNodeKey)?.targetSource
         : planNode(request.judgmentFor.graphNodeKey)?.checkTargetSource) ??
       request.targetSource ??
-      (source === "preset" ? "legacyPreset" : source);
+      (defaults !== undefined ? "default" : source === "preset" ? "legacyPreset" : source);
     const entry: MutableAgent = {
       index: previous?.index ?? this.nextAgentIndex++,
       requestKey,
@@ -848,14 +870,14 @@ class WorkflowSession {
       });
     if (
       invalid !== undefined ||
-      [target, ...(retries ?? [])].some((attemptTarget) =>
+      [runTarget, ...(runRetries ?? [])].some((attemptTarget) =>
         Exit.isFailure(itemFor("", attemptTarget)),
       )
     ) {
       settle("failed", `agent "${label}" has invalid options${invalid ? `: ${invalid}` : "."}`);
       return done(null);
     }
-    const retriesIssue = await this.retriesProblem(requestKey, target, retries, check);
+    const retriesIssue = await this.retriesProblem(requestKey, runTarget, runRetries, runCheck);
     if (retriesIssue !== undefined) {
       settle("failed", `agent "${label}" has invalid options: ${retriesIssue}`);
       return done(null);
@@ -895,10 +917,11 @@ class WorkflowSession {
           entry,
           label,
           phase,
-          target,
-          retries,
+          target: runTarget,
+          retries: runRetries,
           requestKey,
-          check,
+          check: runCheck,
+          ...(judge === undefined ? {} : { judgeSource: "default" as const }),
           inputs,
           outputs,
           attemptTimeoutMs,

@@ -3985,6 +3985,8 @@ describe("graphs", () => {
         const reviewed = yield* reviewGraph(graph);
         expect(reviewed).toMatchObject({ ready: true, blockers: [] });
         expect(reviewed.advisory?.assignmentNotes).toEqual([
+          // No rate table here, so T3 has no cheap-first defaults to fill in.
+          "No list prices are at hand, so T3 sets no default targets: an agent without one runs on your own model.",
           `a: no target, so it runs on your own model (${model}).`,
           `a judgment: no target, so it runs on your own model (${model}).`,
           "b judgment: same model family as its worker (claude) while another family is enabled.",
