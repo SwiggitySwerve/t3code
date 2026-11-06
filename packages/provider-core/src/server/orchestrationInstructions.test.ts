@@ -130,14 +130,14 @@ describe("model-family orchestration instructions", () => {
   });
 
   it.each([
-    ["", "9bcf8736af1d149234b7b3ed07fd84013e8bbb2d0954506d714ec06ce510dc7e", 3891],
+    ["", "cf1af62c0623d1e72324de218d53c7e33a90ab135057b48d01f4d870e61f0a54", 3876],
     [
       "anthropic/claude-opus-4-6",
-      "fdbde1d5c2b0cba15ff8b5afa9f2d5c8e0dfbfc3269f3086427a15bf613e46ae",
-      3975,
+      "8d96ee8d50d8ec858cd1d3e2ce234bcea001f73bfce7d841ccf8cf7aa1ba15ec",
+      3960,
     ],
-    ["openai/gpt-5.4", "9bcf8736af1d149234b7b3ed07fd84013e8bbb2d0954506d714ec06ce510dc7e", 3891],
-    ["unknown-model", "9bcf8736af1d149234b7b3ed07fd84013e8bbb2d0954506d714ec06ce510dc7e", 3891],
+    ["openai/gpt-5.4", "cf1af62c0623d1e72324de218d53c7e33a90ab135057b48d01f4d870e61f0a54", 3876],
+    ["unknown-model", "cf1af62c0623d1e72324de218d53c7e33a90ab135057b48d01f4d870e61f0a54", 3876],
   ] as const)("renders the reviewed text for selected model %s", (model, digest, bytes) => {
     const rendered = t3OrchestrationInstructions(true, model);
     expect(NodeCrypto.createHash("sha256").update(rendered).digest("hex")).toBe(digest);
@@ -153,7 +153,7 @@ describe("workflow instruction gate", () => {
   it("uses upstream's exact instructions by default and restores workflow guidance on opt-in", () => {
     expect(
       NodeCrypto.createHash("sha256").update(T3_CODE_ORCHESTRATION_INSTRUCTIONS).digest("hex"),
-    ).toBe("1e7107a2fe573c8dfed40776217ae38eef55e8193815783c252aaf138594be01");
+    ).toBe("4935b0aa0005a6e9e36f0113cbc4cdd0959ab040cdc6b76de33d87e84a8940e0");
     expect(t3OrchestrationSystemPrompt(true, false)).toBe(T3_CODE_ORCHESTRATION_INSTRUCTIONS);
     expect(t3OrchestrationSystemPrompt(true, false, false)).toBe(
       T3_CODE_ORCHESTRATION_INSTRUCTIONS,

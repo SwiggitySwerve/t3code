@@ -56,7 +56,6 @@ import * as Option from "effect/Option";
 import * as Queue from "effect/Queue";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
-import * as TestClock from "effect/testing/TestClock";
 import { McpSchema, McpServer } from "effect/ai";
 import { CodexProviderCapabilitiesV2 } from "../orchestration-v2/Adapters/CodexAdapterV2.ts";
 import * as EventSink from "../orchestration-v2/EventSink.ts";
@@ -114,6 +113,7 @@ import {
   stopChild,
   withScratchDir,
   withServerProcess,
+  adjustBySweeps,
 } from "./WorkflowHarness.testkit.ts";
 
 describe("delegate_tasks", () => {
@@ -727,8 +727,10 @@ it.effect(
         65536,
       );
       expect(bytes(encodedSnapshot)).toBeGreaterThan(65536);
+      // @effect-diagnostics-next-line processEnvInEffect:off
       if (process.env.C7_BOUNDARY_ARTIFACT)
         NodeFS.writeFileSync(
+          // @effect-diagnostics-next-line processEnvInEffect:off
           process.env.C7_BOUNDARY_ARTIFACT,
           JSON.stringify(
             {
@@ -2452,7 +2454,7 @@ describe("workflow resume", () => {
         );
         for (const attempt of [1, 2]) {
           yield* awaitMember(started.workflowId, attempt);
-          yield* TestClock.adjust("2 minutes");
+          yield* adjustBySweeps(4);
         }
         const ended = yield* awaitWorkflowEnd(started.workflowId);
         expect(ended.agents[0]?.outcomeCategory).toBe("timed_out");
@@ -2471,7 +2473,7 @@ describe("workflow resume", () => {
         'return await agent("quiet", { stallTimeoutMs: 60000 })',
       );
       const first = yield* awaitMember(started.workflowId, 1);
-      yield* TestClock.adjust("2 minutes");
+      yield* adjustBySweeps(4);
       const second = yield* awaitMember(started.workflowId, 2);
       expect(second.prompt).toBe("quiet");
       yield* completeChild(second.childThreadId!, "spoke");
@@ -2738,6 +2740,73 @@ describe("workflow checks", () => {
           expect(ended.agents[0]?.verification?.detail).toContain("approval-required");
         }).pipe(Effect.provide(layerTest)),
       ),
+  );
+
+  it.effect(
+    "does not run a process check once the administrator's runtime ceiling falls below full access",
+    () => {
+      // The thread stays stored in full access; only the policy tightens, as after a restart
+      // with a stricter ceiling that replays a finished worker's receipt.
+      let tightened = false;
+      const managedPolicy = {
+        organization: "Acme",
+        lockedSettings: [],
+        get limits() {
+          return tightened ? { maxRuntimeMode: "auto" as const } : {};
+        },
+      };
+      return withScratchDir((dir) =>
+        Effect.gen(function* () {
+          yield* startParent;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const marker = NodePath.join(dir, "check-ran.txt");
+          const finished = new Set<string>();
+          yield* orchestrator
+            .streamStoredEventsFrom({
+              threadId: parentThreadId,
+              afterSequence: 0,
+              eventType: "subagent.updated",
+            })
+            .pipe(
+              Stream.runForEach((stored) =>
+                Effect.gen(function* () {
+                  if (stored.event.type !== "subagent.updated") return;
+                  const task = stored.event.payload;
+                  if (
+                    task.childThreadId === null ||
+                    task.status !== "running" ||
+                    finished.has(task.id) ||
+                    !String(task.parentNodeId).startsWith("workflow:")
+                  )
+                    return;
+                  finished.add(task.id);
+                  tightened = true;
+                  yield* completeChild(task.childThreadId, "ok", { status: "completed" });
+                }),
+              ),
+              Effect.forkChild,
+            );
+          const check = JSON.stringify({
+            type: "process",
+            argv: [
+              process.execPath,
+              "-e",
+              "require('fs').writeFileSync(process.argv[1], 'ran')",
+              marker,
+            ],
+          });
+          const started = yield* startWorkflow(`return await agent("work", { verify: ${check} })`);
+          const ended = yield* awaitWorkflowEnd(started.workflowId);
+          expect(NodeFS.existsSync(marker)).toBe(false);
+          expect(JSON.parse(ended.result!)).toBeNull();
+          expect(ended.agents[0]).toMatchObject({
+            status: "failed",
+            verification: { type: "process", outcome: "error", attempts: 1 },
+          });
+          expect(ended.agents[0]?.verification?.detail).toContain("Acme limits threads to Auto.");
+        }).pipe(Effect.provide(makeLayerTest(undefined, undefined, undefined, managedPolicy))),
+      );
+    },
   );
 
   it.effect("has a separate agent judge the result against a rubric", () =>
@@ -3327,7 +3396,7 @@ describe("workflow checks", () => {
                   handoffIds: [],
                   forkedFrom: null,
                   pendingBackgroundTasks: pending
-                    ? [{ taskId: "background", kind: "command" }]
+                    ? [{ taskId: "background", kind: "command", awaited: true }]
                     : [],
                   createdAt: now,
                   updatedAt: now,
@@ -3426,7 +3495,7 @@ describe("workflow checks", () => {
         'return await agent("slow", { attemptTimeoutMs: 60000, stallTimeoutMs: 3600000 })',
       );
       const first = yield* awaitMember(started.workflowId, 1);
-      yield* TestClock.adjust("2 minutes");
+      yield* adjustBySweeps(4);
       const second = yield* awaitMember(started.workflowId, 2);
       expect(second.prompt).toContain("passed its time budget of 60000 ms");
       yield* completeChild(second.childThreadId!, "in time");
@@ -3448,7 +3517,7 @@ describe("workflow checks", () => {
       const first = yield* awaitMember(started.workflowId, 1);
       // A failed decide under this id stored a rejection, which would answer every later stop.
       yield* spendCommandId(`command:workflow-stall:${first.id}`);
-      yield* TestClock.adjust("2 minutes");
+      yield* adjustBySweeps(4);
       const second = yield* awaitMember(started.workflowId, 2);
       expect(second.prompt).toContain("passed its time budget of 60000 ms");
       yield* completeChild(second.childThreadId!, "in time");
@@ -4840,7 +4909,7 @@ describe("workflow approval", () => {
               spent ||
               threadId !== parentThreadId ||
               !fields.includes("contextTransfers") ||
-              !matches(records as never)
+              !matches(("subagents" in (records as object) ? records : { subagents: [] }) as never)
             ) {
               return Effect.succeed(records);
             }

@@ -13,6 +13,7 @@ import {
   type ProjectId,
   ThreadId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
@@ -373,7 +374,10 @@ const layerBase: Layer.Layer<
               // Patches carry whole member entries and outcomes, so rebasing keeps the later value.
               const revision = previous?.workflow?.revision ?? 0;
               const payload = { ...change, previousRevision: revision, revision: revision + 1 };
-              const task = yield* Effect.try(() => applyWorkflowUpdate(previous, payload));
+              const task = yield* Effect.try({
+                try: () => applyWorkflowUpdate(previous, payload),
+                catch: (cause) => new Cause.UnknownError(cause),
+              });
               workflows.set(task.id, task);
               return { ...event, type: "workflow.updated" as const, payload };
             });

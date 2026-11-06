@@ -8,6 +8,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as NodeCrypto from "node:crypto";
 import * as NodeFS from "node:fs";
 import { expect } from "@effect/vitest";
+import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   CommandId,
@@ -18,6 +19,7 @@ import {
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
+  type ManagedPolicySummary,
   type OrchestrationV2Run,
   type ModelSelection,
   type OrchestrationV2Subagent,
@@ -32,6 +34,7 @@ import {
 import type * as ProviderAdapter from "@t3tools/provider-core/server/ProviderAdapter";
 import * as DateTime from "effect/DateTime";
 import * as Effect from "effect/Effect";
+import * as TestClock from "effect/testing/TestClock";
 import * as Context from "effect/Context";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
@@ -126,6 +129,9 @@ export const makeLayerTest = (
     readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
     readonly cwd: string;
   },
+  // Reaches the settings the MCP service reads, not the orchestrator's: threads are created
+  // before the policy applies, as threads stored before a stricter policy was set are.
+  managedPolicy?: ManagedPolicySummary,
 ) => {
   const layerAdapters = ProviderAdapterRegistry.layerFromAdapters([
     runtime?.adapter ?? adapter,
@@ -145,19 +151,22 @@ export const makeLayerTest = (
   const layerOrchestration = ThreadManagementService.layer.pipe(
     Layer.provideMerge(layerOrchestrator),
     Layer.provideMerge(
-      ServerSettings.layerTest({
-        workflows: true,
-        providerInstances: Object.fromEntries(
-          providers.map((provider) => [
-            provider.instanceId,
-            {
-              driver: provider.driver,
-              enabled: provider.enabled,
-              config: {},
-            },
-          ]),
-        ),
-      }),
+      ServerSettings.layerTest(
+        {
+          workflows: true,
+          providerInstances: Object.fromEntries(
+            providers.map((provider) => [
+              provider.instanceId,
+              {
+                driver: provider.driver,
+                enabled: provider.enabled,
+                config: {},
+              },
+            ]),
+          ),
+        },
+        managedPolicy,
+      ),
     ),
     Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
   );
@@ -180,7 +189,7 @@ export const makeLayerTest = (
         resolveCommit: () => Effect.succeed({ commitSha: "0123456789abcdef" } as never),
       }),
     ),
-    Layer.provideMerge(McpServer.McpServer.layer),
+    Layer.provideMerge(McpHttpServer.layerInProcessMcpServer),
     Layer.provideMerge(WorkflowApprovalService.layer),
     Layer.provideMerge(layerOrchestration),
     Layer.provideMerge(layerAdapters),
@@ -207,7 +216,7 @@ export const makeLayerTest = (
     Layer.provideMerge(Layer.mock(PeerLinkRequests.PeerLinkRequests)({})),
     Layer.provideMerge(Layer.mock(PeerLinks.PeerLinks)({})),
     Layer.provideMerge(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCryptoLayer.layer)),
     Layer.provideMerge(McpProviderSessions.layer),
     Layer.provideMerge(UsageServiceTestkit.layerRates()),
   );
@@ -259,6 +268,15 @@ export const invokeAs = (
 
 export const invoke = (name: string, args: Record<string, unknown>) =>
   invokeAs(invocation, name, args);
+
+/** Moves the clock one stall sweep at a time, letting each sweep run before the next. */
+export const adjustBySweeps = (sweeps: number) =>
+  Effect.gen(function* () {
+    for (let sweep = 0; sweep < sweeps; sweep++) {
+      yield* TestClock.adjust("30 seconds");
+      yield* Effect.yieldNow;
+    }
+  });
 
 export const errorText = (result: McpSchema.CallToolResult) =>
   result.content.map((part) => ("text" in part ? part.text : "")).join("");

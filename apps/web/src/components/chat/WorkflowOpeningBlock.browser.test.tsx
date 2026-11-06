@@ -912,9 +912,9 @@ it("shows recorded attempt totals without a per-card ticker", async () => {
       onOpenThread={onOpenThread}
     />,
   );
-  await expect.element(screen.getByText("≥100 tokens · ≥5.0s", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("≥100 tokens · ≥5s", { exact: true })).toBeVisible();
   await act(() => vi.advanceTimersByTime(1000));
-  await expect.element(screen.getByText("≥100 tokens · ≥5.0s", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("≥100 tokens · ≥5s", { exact: true })).toBeVisible();
   // The card's name carries its state, which changes with the run.
   const card = screen.getByRole("button", { name: /^Open Audit, / });
   card.element().focus();
@@ -927,7 +927,7 @@ it("shows recorded attempt totals without a per-card ticker", async () => {
   );
   await expect.element(card).toHaveFocus();
   await act(() => vi.advanceTimersByTime(10000));
-  await expect.element(screen.getByText("100 tokens · 5.0s", { exact: true })).toBeVisible();
+  await expect.element(screen.getByText("100 tokens · 5s", { exact: true })).toBeVisible();
 });
 
 it("shows summed usage and both attempts in the tooltip and opens earlier children by pointer", async () => {
@@ -943,7 +943,7 @@ it("shows summed usage and both attempts in the tooltip and opens earlier childr
   const latest = screen.getByRole("button", { name: "Open Audit, interrupted", exact: true });
   await expect
     .element(latest)
-    .toHaveAccessibleDescription(expect.stringContaining("100 tokens · 5.0s"));
+    .toHaveAccessibleDescription(expect.stringContaining("100 tokens · 5s"));
   await userEvent.hover(latest);
   await expect.element(page.getByText("Attempt 1: failed", { exact: true })).toBeVisible();
   await expect.element(page.getByText("provider-a / model-a", { exact: true })).toBeVisible();

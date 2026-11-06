@@ -78,7 +78,6 @@ function WorkflowMemberRow({
   plannedIdentity,
   plannedProvider,
   onOpen,
-  isThreadAvailable,
 }: {
   member: RuntimeSubagent;
   state: WorkflowTaskProgress["state"];
@@ -87,10 +86,9 @@ function WorkflowMemberRow({
   plannedIdentity: WorkflowTaskProgress["plannedIdentity"];
   plannedProvider: ServerProvider | undefined;
   onOpen: (threadId: string) => void;
-  isThreadAvailable: (threadId: string) => boolean;
 }) {
   const threadId = member.childThreadId;
-  const canOpen = threadId !== null && isThreadAvailable(threadId);
+  const canOpen = threadId !== null;
   const identity = resolveWorkflowIdentity(
     member,
     provider,
@@ -177,7 +175,6 @@ export function ThreadLineageWorkflowRow({
   provider,
   providers,
   onOpenThread,
-  isThreadAvailable,
   onStop,
   stopping,
   stopDisabled,
@@ -187,7 +184,6 @@ export function ThreadLineageWorkflowRow({
   readonly provider: ServerProvider | undefined;
   readonly providers: ReadonlyArray<ServerProvider> | undefined;
   readonly onOpenThread: (threadId: string) => void;
-  readonly isThreadAvailable: (threadId: string) => boolean;
   readonly onStop?: (() => void) | undefined;
   readonly stopping: boolean;
   readonly stopDisabled: boolean;
@@ -357,7 +353,6 @@ export function ThreadLineageWorkflowRow({
                               entry.instanceId === task.plannedIdentity?.providerInstanceId,
                           )}
                           onOpen={onOpenThread}
-                          isThreadAvailable={isThreadAvailable}
                         />
                       ),
                     )}
@@ -379,7 +374,6 @@ export function ThreadLineageWorkflowRow({
                   (entry) => entry.instanceId === task.plannedIdentity?.providerInstanceId,
                 )}
                 onOpen={onOpenThread}
-                isThreadAvailable={isThreadAvailable}
               />
             ) : null,
           )}

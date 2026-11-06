@@ -422,7 +422,6 @@ describe("workflow fixture rows", () => {
         provider={QA_PROVIDERS[0]}
         providers={QA_PROVIDERS}
         onOpenThread={() => {}}
-        isThreadAvailable={() => true}
         stopping={false}
         stopDisabled={false}
       />

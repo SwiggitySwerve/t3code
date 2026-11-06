@@ -228,7 +228,6 @@ export function LineageRowSurface(props: {
           provider={QA_PROVIDERS.find((entry) => entry.instanceId === QA_PROVIDER_INSTANCE)}
           providers={QA_PROVIDERS}
           onOpenThread={noop}
-          isThreadAvailable={() => true}
           onStop={running ? noop : undefined}
           stopping={false}
           stopDisabled={false}
