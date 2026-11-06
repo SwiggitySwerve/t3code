@@ -82,19 +82,20 @@ describe("applyTurnTriggers", () => {
     expect(note).toContain("do not call graph_start or workflow_start before that");
   });
 
-  it("leaves every assignment to the coordinator and asks for a cross-family check", () => {
+  it("leaves untargeted agents to T3's defaults and asks for a cross-family check", () => {
     for (const note of [workflowTurnNote(), EVERY_TURN_WORKFLOW_NOTE]) {
-      expect(note).toContain("every worker's and every check's target");
-      expect(note).toContain("from orchestrator_capabilities. Never invent ids.");
+      expect(note).toContain("Omit a target and T3 sets cheap-first defaults");
+      expect(note).toContain("Set targets from orchestrator_capabilities only for a reason");
+      expect(note).toContain("never invent ids.");
       expect(note).toContain(
-        "Give each agent the smallest model and effort you expect to succeed first time (pass its check, if it has one)",
+        "A target you set gets the smallest model and effort you expect to succeed first time (pass its check, if it has one)",
       );
       expect(note).toContain("Prefer lowering effort to switching to a much weaker model");
       expect(note).toContain("run a planning agent on a stronger model first");
-      expect(note).toContain("different model family than its worker");
+      expect(note).toContain("cheap judge of another model family");
       expect(note).toContain("{ type: 'judgment', rubric, target }");
       expect(note).toContain(
-        "Give an agent with a check that can fail it retries: later targets, cheapest first, then more effort or model.",
+        "Give an agent you target with a check that can fail it retries: later targets, cheapest first, then more effort or model.",
       );
       expect(note).toContain("Redo it only once they run out or the split was wrong.");
       expect(note).toContain(

@@ -261,6 +261,9 @@ const CLAUDE_ALIASES: ReadonlySet<string> = new Set(["opus", "sonnet", "haiku", 
 const MODEL_ID_PREFIXES: ReadonlySet<string> = new Set([
   "anthropic",
   "openai",
+  "xai",
+  "amazon",
+  "cohere",
   "google",
   "meta",
   "mistral",
@@ -276,13 +279,18 @@ const MODEL_ID_PREFIXES: ReadonlySet<string> = new Set([
 // Ids that name a router's choice or a default rather than one model.
 const PLACEHOLDER_MODELS: ReadonlySet<string> = new Set(["auto", "default"]);
 
-/** The model's own name: the first `/` or `.` segment that is not a vendor or region. */
+/**
+ * The model's own name. A `/` path ("xai/grok-4.7", "openrouter/anthropic/claude-x") puts it last,
+ * whatever vendor or router precedes it; within that, the first `.` segment that is not a vendor
+ * or region ("us.anthropic.claude-x") is it.
+ */
 function modelName(model: string): string {
-  const segments = model
+  const path = model
     .trim()
     .toLowerCase()
-    .split(/[/.]/u)
-    .filter((segment) => segment.length > 0);
+    .split("/")
+    .filter((part) => part.length > 0);
+  const segments = (path.at(-1) ?? "").split(".").filter((segment) => segment.length > 0);
   return segments.find((segment) => !MODEL_ID_PREFIXES.has(segment)) ?? segments.at(-1) ?? "";
 }
 

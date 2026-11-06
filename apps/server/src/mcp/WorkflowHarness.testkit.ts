@@ -71,6 +71,7 @@ import * as McpHttpServer from "./McpHttpServer.ts";
 import * as McpInvocationContext from "./McpInvocationContext.ts";
 import * as OrchestratorMcpService from "./OrchestratorMcpService.ts";
 import * as UsageServiceTestkit from "../usage/UsageService.testkit.ts";
+import type { RateTable } from "../usage/usagePricing.ts";
 
 export const instanceId = ProviderInstanceId.make("codex");
 
@@ -132,6 +133,8 @@ export const makeLayerTest = (
   // Reaches the settings the MCP service reads, not the orchestrator's: threads are created
   // before the policy applies, as threads stored before a stricter policy was set are.
   managedPolicy?: ManagedPolicySummary,
+  /** The base list price table; empty, as when none is fetched, unless a test prices models. */
+  rates?: RateTable,
 ) => {
   const layerAdapters = ProviderAdapterRegistry.layerFromAdapters([
     runtime?.adapter ?? adapter,
@@ -218,7 +221,7 @@ export const makeLayerTest = (
     Layer.provideMerge(Layer.mock(RemoteDelegation.RemoteDelegation)({})),
     Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCryptoLayer.layer)),
     Layer.provideMerge(McpProviderSessions.layer),
-    Layer.provideMerge(UsageServiceTestkit.layerRates()),
+    Layer.provideMerge(UsageServiceTestkit.layerRates(rates)),
   );
 };
 

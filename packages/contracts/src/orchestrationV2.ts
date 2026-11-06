@@ -842,14 +842,16 @@ export type OrchestrationV2WorkflowPlannedIdentity =
 
 /**
  * How a workflow agent's target was chosen: its own target or model, the workflow's workerTarget,
- * the coordinator's own model, or a preset snapshot of a workflow started before presets were
- * removed. A graph agent keeps what review found, since review writes a target into every node.
+ * the coordinator's own model, T3's cheap-first default for an agent without any target, or a
+ * preset snapshot of a workflow started before presets were removed. A graph agent keeps what
+ * review found, since review writes a target into every node.
  */
 export const WorkflowAgentTargetSource = Schema.Literals([
   "target",
   "model",
   "workerTarget",
   "caller",
+  "default",
   "legacyPreset",
 ]);
 export type WorkflowAgentTargetSource = typeof WorkflowAgentTargetSource.Type;

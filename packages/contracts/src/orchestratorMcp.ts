@@ -357,11 +357,11 @@ export type OrchestratorMcpTaskWaitResult = typeof OrchestratorMcpTaskWaitResult
 
 export const OrchestratorMcpWorkflowStartInput = Schema.Struct({
   workerTarget: Schema.optional(OrchestratorMcpTarget).annotate({
-    description: "Default target for agents that set none.",
+    description: "Target for agents that set none, in place of T3's cheap-first defaults.",
   }),
   script: TrimmedNonEmptyString.check(Schema.isMaxLength(200_000)).annotate({
     description:
-      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), progress.phase(title, { total }, callback), log(...values), budget. agent options: label, phase, model or target, retries (up to 2 more targets, in order, for the attempts after a failed check or deadline; without it the one retry repeats target), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{result}} (a file holding the agent's final text), {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
+      "Workflow script in Claude Code Workflow format: optional `export const meta = { name, description, phases: [{ title }] }`, then a top-level body that may await and return. Available: args, agent(prompt, options), parallel(arrayOfFunctions), pipeline(items, ...stages), phase(title), progress.phase(title, { total }, callback), log(...values), budget. agent options: label, phase, model or target (without both, T3 sets cheap-first target, retries and judge), retries (up to 2 more targets, in order, for the attempts after a failed check or deadline; without it the one retry repeats target), isolation, role, schema, stallTimeoutMs, verify ({ type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', requiredPointers?, equals? } | { type: 'judgment', rubric, target? }) scopes ({ read?, write? } workspace-relative paths), and inputs/outputs ([{ id, path, maxBytes?, sha256? }] files in the shared checkout; a pinned input must match its sha256 before each attempt, each output must exist within maxBytes after it, process checks may use {{result}} (a file holding the agent's final text), {{input:<id>}} and {{output:<id>}}, and agent() then returns { result, outputs: { <id>: { path, sha256, sizeBytes } } }). verify { type: 'structured', outputId, requiredPointers?, equals? } reads that declared output file's JSON and needs no schema. attemptTimeoutMs (60000 to 21600000) stops an attempt that runs longer and counts it as failed, so the retry rules apply; stallTimeoutMs separately measures inactivity. With report: true, agent() always resolves to { ok, result, outputs, attempts, verification, reason } instead of null on failure.",
   }),
   args: Schema.optional(Schema.Unknown).annotate({
     description: "JSON value the script reads as `args`.",
@@ -454,7 +454,7 @@ export const OrchestratorMcpGraphAdvisory = Schema.Struct({
   }),
   assignmentNotes: Schema.optional(Schema.Array(Schema.String)).annotate({
     description:
-      "Workers or judgment checks with no target, which run on your own model, and checks on the same model family as their worker. Absent when there are none.",
+      "Workers or judgment checks with no target, which run on your own model, why T3 set no default, and checks on the same model family as their worker. Absent when there are none.",
   }),
 });
 export type OrchestratorMcpGraphAdvisory = typeof OrchestratorMcpGraphAdvisory.Type;
@@ -483,14 +483,14 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   targets: Schema.Array(
     Schema.Struct({
       nodeId: Schema.String,
-      source: Schema.Literals(["target", "model", "workerTarget", "caller"]),
+      source: Schema.Literals(["target", "model", "workerTarget", "caller", "default"]),
       target: OrchestratorMcpTarget,
       judgmentTarget: Schema.optional(OrchestratorMcpTarget),
       retries: Schema.optional(Schema.Array(OrchestratorMcpTarget)),
     }),
   ).annotate({
     description:
-      "Concrete worker, retry and judgment assignments included in the digest; source describes only how the worker was selected, and caller means your own model.",
+      "Concrete worker, retry and judgment assignments included in the digest; source describes only how the worker was selected: caller means your own model, default T3's cheap-first ladder.",
   }),
   layers: Schema.Array(Schema.Array(Schema.String)),
   writeConflicts: Schema.Array(

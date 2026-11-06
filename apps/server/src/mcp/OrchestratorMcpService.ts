@@ -20,6 +20,7 @@ import {
   type OrchestrationV2Subagent,
   type OrchestrationV2ThreadProjection,
   type OrchestrationV2ThreadShell,
+  type WorkflowAgentTargetSource,
   type OrchestrationV2ThreadLaunchWorkspaceStrategy,
   type OrchestrationV2TurnItem,
   OrchestrationV2WorkflowPlan,
@@ -178,9 +179,24 @@ import {
   workflowExecutionTiming,
   workflowTurnUsage,
 } from "./workflowUsage.ts";
-import { GRAPH_DRIVER_SCRIPT, graphPlan, parseGraph, reviewGraph } from "./workflowGraph.ts";
+import {
+  GRAPH_DRIVER_SCRIPT,
+  graphPlan,
+  parseGraph,
+  type ReviewedTargetSources,
+  reviewGraph,
+} from "./workflowGraph.ts";
 import { retriesCheckProblem } from "./workflowRetries.ts";
 import { concreteModelFamily, graphAssignmentNotes } from "./workflowAdvisory.ts";
+import {
+  type DefaultCandidate,
+  type DefaultRoutingResult,
+  decodeDefaultRouting,
+  defaultJudge,
+  defaultRouting,
+  NO_DEFAULT_JUDGE_NOTE,
+  storedDefaults,
+} from "./workflowDefaults.ts";
 import type { CheckOutcome } from "./workflowChecks.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
@@ -1814,6 +1830,47 @@ const make = Effect.gen(function* () {
     },
   );
 
+  /**
+   * T3's cheap-first defaults for the caller's project: base list prices (never the account's
+   * price overrides), model families and effort options of the healthy instances it enables.
+   */
+  const loadDefaultRouting = Effect.fn("OrchestratorMcpService.loadDefaultRouting")(function* (
+    parent: Pick<OrchestrationV2ThreadProjection, "thread">,
+  ) {
+    const { table: rates } = yield* peekRates;
+    const candidates: DefaultCandidate[] = [];
+    if (rates.size > 0) {
+      const providers = yield* loadProviders;
+      const capable = yield* loadOrchestrationCapableInstanceIds();
+      const settings = yield* serverSettings.getSettings.pipe(Effect.option);
+      for (const provider of providers) {
+        if (providerConstraints(provider, capable.has(provider.instanceId)).length > 0) continue;
+        const enabled = yield* threadManagement.isProviderInstanceEnabledForProject({
+          projectId: parent.thread.projectId,
+          instanceId: provider.instanceId,
+        });
+        if (!enabled) continue;
+        const hidden = Option.isSome(settings)
+          ? (settings.value.providerModelPreferences?.[provider.instanceId]?.hiddenModels ?? [])
+          : [];
+        for (const model of provider.models) {
+          if (model.isLegacy === true || (!model.isCustom && hidden.includes(model.slug))) continue;
+          candidates.push({
+            providerInstanceId: provider.instanceId,
+            model: model.slug,
+            listPrice: listPriceOf(rates, model.slug),
+            optionDescriptors: model.capabilities?.optionDescriptors,
+          });
+        }
+      }
+    }
+    return defaultRouting({
+      candidates,
+      pricingAvailable: rates.size > 0,
+      callerInstanceId: parent.thread.modelSelection.instanceId,
+    });
+  });
+
   const requestKey = (clientRequestId: string | undefined): Effect.Effect<string> =>
     clientRequestId === undefined ? random.uuidV4() : Effect.succeed(clientRequestId);
 
@@ -2788,8 +2845,15 @@ const make = Effect.gen(function* () {
     targets: OrchestratorMcpGraphReviewResult["targets"];
     expandedGraph: unknown | null;
   };
-  // Recent reviews' input hashes by digest, so a refused start can name the files that changed.
-  const reviewedGraphs = new Map<string, { readonly inputs: GraphReview["inputs"] }>();
+  // Recent reviews' input hashes by digest, so a refused start can name the files that changed,
+  // and the target sources they found.
+  const reviewedGraphs = new Map<
+    string,
+    {
+      readonly inputs: GraphReview["inputs"];
+      readonly sources: ReadonlyMap<string, ReviewedTargetSources>;
+    }
+  >();
   const REVIEWED_GRAPHS_KEPT = 256;
 
   /** Reviews a graph against the files in the caller's checkout as they are now. */
@@ -2797,14 +2861,20 @@ const make = Effect.gen(function* () {
     parent: CallerProjection,
     graph: unknown,
     workerTarget: OrchestratorMcpTarget | undefined,
+    forStart = false,
   ) {
     const threadId = parent.thread.id;
     const parsed = parseGraph(graph);
     let concreteGraph = parsed.ok ? parsed.graph : undefined;
     const hashes: Record<string, GraphReview["inputs"][string]> = {};
     const targets: OrchestratorMcpGraphReviewResult["targets"][number][] = [];
-    const judgments = new Map<string, { readonly ownTarget: boolean }>();
+    const judgments = new Map<
+      string,
+      { readonly ownTarget: boolean; readonly defaulted: boolean }
+    >();
     const targetBlockers: string[] = [];
+    let routing: DefaultRoutingResult | undefined;
+    const defaultNotes: string[] = [];
     const resolveGraphTarget = Effect.fn("OrchestratorMcpService.resolveGraphTarget")(
       function* (value: unknown, _label: string) {
         const target =
@@ -2827,38 +2897,61 @@ const make = Effect.gen(function* () {
       const nodes: Record<string, (typeof parsed.graph.nodes)[string]> = {};
       for (const [nodeId, node] of Object.entries(parsed.graph.nodes)) {
         const selected = selectWorkflowTarget(node, workerTarget);
-        const target = yield* resolveGraphTarget(selected.target, nodeId);
+        // A node without any target gets T3's cheap-first defaults; nothing the coordinator set
+        // is replaced.
+        if (selected.source === "caller") routing ??= yield* loadDefaultRouting(parent);
+        const defaults =
+          selected.source === "caller" && routing !== undefined && "routing" in routing
+            ? routing.routing
+            : undefined;
+        const source = defaults === undefined ? selected.source : "default";
+        const target = yield* resolveGraphTarget(defaults?.target ?? selected.target, nodeId);
+        const declaredRetries =
+          node.retries ??
+          (defaults === undefined || defaults.retries.length === 0 ? undefined : defaults.retries);
         // Each retry target is resolved and checked as target is, so the digest covers it.
         const retries: ConcreteWorkflowTarget[] = [];
-        for (const [index, rung] of (node.retries ?? []).entries()) {
+        for (const [index, rung] of (declaredRetries ?? []).entries()) {
           const resolved = yield* resolveGraphTarget(rung, `${nodeId} retries[${index}]`);
           if (resolved !== undefined) retries.push(resolved);
         }
         let verify = node.verify;
         let judgmentTarget: OrchestratorMcpTarget | undefined;
         if (verify?.type === "judgment") {
-          judgments.set(nodeId, { ownTarget: verify.target !== undefined });
+          const judge =
+            verify.target === undefined && defaults !== undefined && target !== undefined
+              ? defaultJudge(defaults, [target.model, ...retries.map((rung) => rung.model)])
+              : undefined;
+          if (verify.target === undefined && defaults !== undefined && judge === undefined)
+            defaultNotes.push(`${nodeId} judgment: ${NO_DEFAULT_JUDGE_NOTE}`);
+          judgments.set(nodeId, {
+            ownTarget: verify.target !== undefined,
+            defaulted: judge !== undefined,
+          });
           const problem =
-            verify.target === undefined && target !== undefined
+            verify.target === undefined && judge === undefined && target !== undefined
               ? retriesCheckProblem(target.model, retries)
               : undefined;
           if (problem !== undefined) targetBlockers.push(`${nodeId} judgment: ${problem}`);
-          judgmentTarget = yield* resolveGraphTarget(verify.target ?? target, `${nodeId} judgment`);
+          judgmentTarget = yield* resolveGraphTarget(
+            verify.target ?? judge ?? target,
+            `${nodeId} judgment`,
+          );
           verify = { ...verify, target: judgmentTarget };
         }
         if (target !== undefined)
           targets.push({
             nodeId,
-            source: selected.source,
+            source,
             target,
             ...(judgmentTarget === undefined ? {} : { judgmentTarget }),
-            ...(node.retries === undefined ? {} : { retries }),
+            ...(declaredRetries === undefined ? {} : { retries }),
           });
         const { model: _legacyModel, ...concreteNode } = node;
         nodes[nodeId] = {
           ...concreteNode,
           target,
-          ...(node.retries === undefined ? {} : { retries }),
+          ...(declaredRetries === undefined ? {} : { retries }),
           ...(verify === undefined ? {} : { verify }),
         };
       }
@@ -2936,18 +3029,23 @@ const make = Effect.gen(function* () {
             : {
                 judgment: {
                   model: entry.judgmentTarget.model ?? parent.thread.modelSelection.model,
-                  ownTarget: judgment.ownTarget,
+                  ownTarget: judgment.ownTarget || judgment.defaulted,
                 },
               }),
         };
       }),
     });
+    const notes = [
+      ...(routing !== undefined && "unavailable" in routing ? [routing.unavailable] : []),
+      ...defaultNotes,
+      ...assignmentNotes,
+    ];
     const review: GraphReview = {
       ...reviewed,
       // Advice only, added after the digest was computed.
-      ...(reviewed.advisory === undefined || assignmentNotes.length === 0
+      ...(reviewed.advisory === undefined || notes.length === 0
         ? {}
-        : { advisory: { ...reviewed.advisory, assignmentNotes } }),
+        : { advisory: { ...reviewed.advisory, assignmentNotes: notes } }),
       targets,
       expandedGraph:
         targetBlockers.length === 0 && reviewed.blockers.length === 0
@@ -2956,9 +3054,37 @@ const make = Effect.gen(function* () {
       blockers: [...reviewed.blockers, ...targetBlockers],
       digest: targetBlockers.length > 0 ? null : reviewed.digest,
     };
+    const sources: ReadonlyMap<string, ReviewedTargetSources> = new Map(
+      targets.map((entry) => {
+        const judgment = judgments.get(entry.nodeId);
+        const check: WorkflowAgentTargetSource | undefined =
+          judgment === undefined
+            ? undefined
+            : judgment.ownTarget
+              ? "target"
+              : judgment.defaulted
+                ? "default"
+                : entry.source;
+        return [entry.nodeId, { worker: entry.source, ...(check === undefined ? {} : { check }) }];
+      }),
+    );
+    // A start usually passes the expanded graph, where every target reads as the node's own; the
+    // same digest means the same assignments, so such a node keeps the source its review found.
+    const remembered = review.digest === null ? undefined : reviewedGraphs.get(review.digest);
+    const planSources: ReadonlyMap<string, ReviewedTargetSources> =
+      !forStart || remembered === undefined
+        ? sources
+        : new Map(
+            [...sources].map(([nodeId, own]) => {
+              const found = remembered.sources.get(nodeId);
+              const worker = own.worker === "target" ? (found?.worker ?? own.worker) : own.worker;
+              const check = own.check === "target" ? (found?.check ?? own.check) : own.check;
+              return [nodeId, { worker, ...(check === undefined ? {} : { check }) }];
+            }),
+          );
     if (review.digest !== null) {
       reviewedGraphs.delete(review.digest);
-      reviewedGraphs.set(review.digest, { inputs: review.inputs });
+      reviewedGraphs.set(review.digest, { inputs: review.inputs, sources: planSources });
       if (reviewedGraphs.size > REVIEWED_GRAPHS_KEPT) {
         reviewedGraphs.delete(reviewedGraphs.keys().next().value!);
       }
@@ -2968,23 +3094,7 @@ const make = Effect.gen(function* () {
         ? {
             source: GRAPH_DRIVER_SCRIPT,
             args: { graph: concreteGraph, inputs: review.inputs },
-            plan: graphPlan(
-              concreteGraph,
-              new Map(
-                targets.map((entry) => {
-                  const judgment = judgments.get(entry.nodeId);
-                  return [
-                    entry.nodeId,
-                    {
-                      worker: entry.source,
-                      ...(judgment === undefined
-                        ? {}
-                        : { check: judgment.ownTarget ? ("target" as const) : entry.source }),
-                    },
-                  ] as const;
-                }),
-              ),
-            ),
+            plan: graphPlan(concreteGraph, planSources),
             title: concreteGraph.name ?? "Graph",
           }
         : undefined;
@@ -3108,6 +3218,12 @@ const make = Effect.gen(function* () {
     // an agent actually selects the default: its own target can still override it.
     const workerTargetSnapshot =
       input.workerTarget === undefined ? undefined : yield* snapshotTarget(input.workerTarget);
+    // Frozen at start, so a resume gives each agent the defaults it had. A reviewed graph names
+    // every target already, and workerTarget leaves no agent without one.
+    const routing =
+      plan === undefined && input.workerTarget === undefined
+        ? yield* loadDefaultRouting(parent)
+        : undefined;
     const afterSequence = yield* threadManagement
       .getThreadEventSequence(scope.thread.threadId)
       .pipe(Effect.mapError(threadManagementFailure));
@@ -3127,6 +3243,7 @@ const make = Effect.gen(function* () {
           ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
           ...(input.workerTarget === undefined ? {} : { workerTarget: input.workerTarget }),
           ...(workerTargetSnapshot === undefined ? {} : { workerTargetSnapshot }),
+          ...(routing === undefined ? {} : { defaultRouting: storedDefaults(routing) }),
           ...(plan === undefined ? {} : { plan }),
         }),
       })
@@ -3154,7 +3271,12 @@ const make = Effect.gen(function* () {
     input: OrchestratorMcpGraphStartInput,
   ) {
     const parent = yield* loadProjection(scope.thread.threadId);
-    const { review, compiled } = yield* reviewCallerGraph(parent, input.graph, input.workerTarget);
+    const { review, compiled } = yield* reviewCallerGraph(
+      parent,
+      input.graph,
+      input.workerTarget,
+      true,
+    );
     if (review.blockers.length > 0 || compiled === undefined) {
       return yield* failure(
         "invalid_request",
@@ -3386,6 +3508,10 @@ const make = Effect.gen(function* () {
       stored._tag === "Some" && stored.value.workerTargetSnapshot !== undefined
         ? decodeWorkerTargetSnapshot(stored.value.workerTargetSnapshot)
         : Option.none();
+    const defaultRouting =
+      stored._tag === "Some" && stored.value.defaultRouting !== undefined
+        ? decodeDefaultRouting(stored.value.defaultRouting)
+        : Option.none();
     const legacyPresetDefault =
       stored._tag === "Some" && stored.value.workflowPresets !== undefined
         ? decodeLegacyPresetDefault(stored.value.workflowPresets)
@@ -3399,6 +3525,7 @@ const make = Effect.gen(function* () {
       (stored.value.plan !== undefined && Option.isNone(plan)) ||
       (stored.value.callerSelection !== undefined && Option.isNone(callerSelection)) ||
       (stored.value.workerTargetSnapshot !== undefined && Option.isNone(workerTargetSnapshot)) ||
+      (stored.value.defaultRouting !== undefined && Option.isNone(defaultRouting)) ||
       (stored.value.workflowPresets !== undefined && Option.isNone(legacyPresetDefault)) ||
       (stored.value.presetTargets !== undefined && Option.isNone(legacyPresetTargets))
     ) {
@@ -3445,6 +3572,12 @@ const make = Effect.gen(function* () {
         ? { workerTargetError: workerTargetSnapshot.value.error }
         : {}),
       ...(Option.isSome(callerSelection) ? { callerSelection: callerSelection.value } : {}),
+      ...(Option.isSome(defaultRouting) && "routing" in defaultRouting.value
+        ? { defaultRouting: defaultRouting.value.routing }
+        : {}),
+      ...(Option.isSome(defaultRouting) && "unavailable" in defaultRouting.value
+        ? { defaultsUnavailable: defaultRouting.value.unavailable }
+        : {}),
       ...(stored.value.budgetTokens === undefined
         ? {}
         : { budgetTokens: stored.value.budgetTokens }),
