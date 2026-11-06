@@ -2436,6 +2436,8 @@ const make = Effect.gen(function* () {
         if (row?.runId == null) {
           return yield* failure("orchestration_error", "The workflow row is missing.");
         }
+        // Every spawn is local, whichever target it came from: script, retry or judgment.
+        yield* requireLocalWorkflowTarget(item.target);
         const prepared = yield* prepareDelegation({
           scope,
           parent:
