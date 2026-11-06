@@ -2742,6 +2742,73 @@ describe("workflow checks", () => {
       ),
   );
 
+  it.effect(
+    "does not run a process check once the administrator's runtime ceiling falls below full access",
+    () => {
+      // The thread stays stored in full access; only the policy tightens, as after a restart
+      // with a stricter ceiling that replays a finished worker's receipt.
+      let tightened = false;
+      const managedPolicy = {
+        organization: "Acme",
+        lockedSettings: [],
+        get limits() {
+          return tightened ? { maxRuntimeMode: "auto" as const } : {};
+        },
+      };
+      return withScratchDir((dir) =>
+        Effect.gen(function* () {
+          yield* startParent;
+          const orchestrator = yield* Orchestrator.OrchestratorV2;
+          const marker = NodePath.join(dir, "check-ran.txt");
+          const finished = new Set<string>();
+          yield* orchestrator
+            .streamStoredEventsFrom({
+              threadId: parentThreadId,
+              afterSequence: 0,
+              eventType: "subagent.updated",
+            })
+            .pipe(
+              Stream.runForEach((stored) =>
+                Effect.gen(function* () {
+                  if (stored.event.type !== "subagent.updated") return;
+                  const task = stored.event.payload;
+                  if (
+                    task.childThreadId === null ||
+                    task.status !== "running" ||
+                    finished.has(task.id) ||
+                    !String(task.parentNodeId).startsWith("workflow:")
+                  )
+                    return;
+                  finished.add(task.id);
+                  tightened = true;
+                  yield* completeChild(task.childThreadId, "ok", { status: "completed" });
+                }),
+              ),
+              Effect.forkChild,
+            );
+          const check = JSON.stringify({
+            type: "process",
+            argv: [
+              process.execPath,
+              "-e",
+              "require('fs').writeFileSync(process.argv[1], 'ran')",
+              marker,
+            ],
+          });
+          const started = yield* startWorkflow(`return await agent("work", { verify: ${check} })`);
+          const ended = yield* awaitWorkflowEnd(started.workflowId);
+          expect(NodeFS.existsSync(marker)).toBe(false);
+          expect(JSON.parse(ended.result!)).toBeNull();
+          expect(ended.agents[0]).toMatchObject({
+            status: "failed",
+            verification: { type: "process", outcome: "error", attempts: 1 },
+          });
+          expect(ended.agents[0]?.verification?.detail).toContain("Acme limits threads to Auto.");
+        }).pipe(Effect.provide(makeLayerTest(undefined, undefined, undefined, managedPolicy))),
+      );
+    },
+  );
+
   it.effect("has a separate agent judge the result against a rubric", () =>
     Effect.gen(function* () {
       yield* startParent;

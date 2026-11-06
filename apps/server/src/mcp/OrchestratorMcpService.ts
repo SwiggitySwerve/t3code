@@ -89,6 +89,7 @@ import {
   type ServerProviderModel,
   ThreadId,
   isOrchestrationV2WorkActive,
+  managedRuntimeModeDenial,
   resolveProjectProviderInstanceEnabled,
   SECRET_REQUEST_UNSAVED_NOTE,
 } from "@t3tools/contracts";
@@ -2355,15 +2356,24 @@ const make = Effect.gen(function* () {
     } as const;
   });
 
-  // A process check runs a command on the host, so the calling thread must be in full access.
-  // Every ask reads the thread's current mode: its user can lower it while an agent works.
+  // A process check runs a command on the host, so the calling thread must be in full access and
+  // the administrator's ceiling must allow it. Every ask reads the thread's current mode: its user
+  // can lower it while an agent works. A replayed delegation never passes dispatch's ceiling check.
   const callerCommandAuthority = (threadId: ThreadId) =>
     threadManagement.getThreadShell(threadId).pipe(
       Effect.mapError(threadManagementFailure),
-      Effect.map((shell) => ({
-        allowed: shell?.runtimeMode === "full-access",
-        runtimeMode: shell?.runtimeMode ?? null,
-      })),
+      Effect.map((shell) => {
+        const runtimeMode = shell?.runtimeMode ?? null;
+        const ceilingMessage = managedRuntimeModeDenial(
+          serverSettings.managedPolicy,
+          "full-access",
+        );
+        return {
+          allowed: runtimeMode === "full-access" && ceilingMessage === undefined,
+          runtimeMode,
+          ceilingMessage: ceilingMessage ?? null,
+        };
+      }),
     );
 
   const workflowRunner = makeWorkflowRunner({
@@ -2495,7 +2505,10 @@ const make = Effect.gen(function* () {
             if (!authority.allowed) {
               return {
                 outcome: "error",
-                detail: `A process check runs a command, which needs the calling thread in full-access mode; it now runs in ${authority.runtimeMode ?? "an unknown mode"}.`,
+                detail:
+                  authority.ceilingMessage === null
+                    ? `A process check runs a command, which needs the calling thread in full-access mode; it now runs in ${authority.runtimeMode ?? "an unknown mode"}.`
+                    : `A process check runs a command, which needs full-access mode. ${authority.ceilingMessage}`,
               } satisfies CheckOutcome;
             }
             const ran = yield* processRunner

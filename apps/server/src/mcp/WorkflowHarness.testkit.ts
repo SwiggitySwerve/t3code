@@ -19,6 +19,7 @@ import {
   OrchestratorMcpGraphReviewResult,
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
+  type ManagedPolicySummary,
   type OrchestrationV2Run,
   type ModelSelection,
   type OrchestrationV2Subagent,
@@ -128,6 +129,9 @@ export const makeLayerTest = (
     readonly adapter: ProviderAdapter.ProviderAdapterV2["Service"];
     readonly cwd: string;
   },
+  // Reaches the settings the MCP service reads, not the orchestrator's: threads are created
+  // before the policy applies, as threads stored before a stricter policy was set are.
+  managedPolicy?: ManagedPolicySummary,
 ) => {
   const layerAdapters = ProviderAdapterRegistry.layerFromAdapters([
     runtime?.adapter ?? adapter,
@@ -147,19 +151,22 @@ export const makeLayerTest = (
   const layerOrchestration = ThreadManagementService.layer.pipe(
     Layer.provideMerge(layerOrchestrator),
     Layer.provideMerge(
-      ServerSettings.layerTest({
-        workflows: true,
-        providerInstances: Object.fromEntries(
-          providers.map((provider) => [
-            provider.instanceId,
-            {
-              driver: provider.driver,
-              enabled: provider.enabled,
-              config: {},
-            },
-          ]),
-        ),
-      }),
+      ServerSettings.layerTest(
+        {
+          workflows: true,
+          providerInstances: Object.fromEntries(
+            providers.map((provider) => [
+              provider.instanceId,
+              {
+                driver: provider.driver,
+                enabled: provider.enabled,
+                config: {},
+              },
+            ]),
+          ),
+        },
+        managedPolicy,
+      ),
     ),
     Layer.provideMerge(CommandReceiptStore.layer.pipe(Layer.provide(layerDatabase))),
   );
