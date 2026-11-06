@@ -101,6 +101,8 @@ interface HarnessOptions {
    * starting, with no start stamp yet and a request stamp from the epoch.
    */
   readonly releasedAt?: number;
+  /** Until when (test clock ms) every agent's thread has a pending request that waits for a person. */
+  readonly pendingRequestUntil?: number;
   /** Whether the nth stop request (1-based, counting every request) is refused. */
   readonly failStop?: (attempt: number) => boolean;
   /** Whether an accepted stop leaves the agent running, as a provider that finalizes later does. */
@@ -281,11 +283,14 @@ const makeHarness = (options: HarnessOptions = {}) =>
               latestRunRequestedAt: DateTime.makeUnsafe(0),
               activityRunStatus: now < options.releasedAt! ? "preparing" : "starting",
             }))
-          : Effect.succeed({
+          : Effect.map(Clock.currentTimeMillis, (now) => ({
               updatedAt: DateTime.makeUnsafe(0),
               latestRunStartedAt: options.started === false ? null : DateTime.makeUnsafe(0),
               ...(options.started === false ? { activityRunStatus: "preparing" } : {}),
-            }),
+              ...(options.pendingRequestUntil !== undefined && now < options.pendingRequestUntil
+                ? { pendingRuntimeRequest: { requestId: "request:1", kind: "command" } }
+                : {}),
+            })),
     } as unknown as ThreadManagementService.ThreadManagementService["Service"];
     const deps: WorkflowRunnerDeps = {
       threads,
@@ -1450,6 +1455,20 @@ describe("workflow runner", () => {
         yield* first.runner.detachAll;
         return first;
       });
+
+    it.effect("does not stall an attempt while its thread waits for a person's answer", () =>
+      Effect.gen(function* () {
+        const harness = yield* makeHarness({ finish: () => "hang", pendingRequestUntil: 600_000 });
+        yield* launch(harness.runner, script("stallTimeoutMs: 60000"));
+        // Far past the stall timeout, the thread has recorded nothing but a person owes an answer.
+        for (let step = 0; step < 19; step += 1) yield* TestClock.adjust("30 seconds");
+        expect(harness.stopRequests).toEqual([]);
+        // Answered at ten minutes: the silence is then measured from there.
+        yield* sweepUntil(() => harness.stopRequests.length > 0);
+        expect(harness.stopRequests).toHaveLength(1);
+        expect(yield* Clock.currentTimeMillis).toBeGreaterThanOrEqual(600_000 + 60_000);
+      }),
+    );
 
     it.effect("retries a stalled attempt as a provider fault, without its feedback", () =>
       Effect.gen(function* () {

@@ -2,6 +2,8 @@
  * An agent's `retries`: the targets of its work attempts after the first, in order, as the
  * coordinator wrote them. Each names its provider and model, so T3 never chooses one.
  */
+import { reasoningEffortOf } from "@t3tools/shared/model";
+
 import { modelFamily } from "./workflowAdvisory.ts";
 import { MAX_RETRY_TARGETS } from "./workflowLimits.ts";
 
@@ -72,23 +74,12 @@ const recordOf = (value: unknown): Readonly<Record<string, unknown>> | undefined
     ? (value as Readonly<Record<string, unknown>>)
     : undefined;
 
-/** The effort a target's options set, in the list or the record form a target may use. */
-export function effortOf(options: unknown): string | undefined {
-  const byId = new Map<unknown, unknown>(
-    Array.isArray(options)
-      ? options.map((option: unknown) => [recordOf(option)?.id, recordOf(option)?.value])
-      : Object.entries(recordOf(options) ?? {}),
-  );
-  const effort = byId.get("reasoningEffort") ?? byId.get("effort");
-  return typeof effort === "string" ? effort : undefined;
-}
-
 /**
  * How progress names the move to a retry target: by its model, or by its effort alone when it
  * keeps the model of the attempt before it.
  */
 export function retryMoveText(previous: unknown, next: RetryTarget): string {
-  const effort = effortOf(next.options);
+  const effort = reasoningEffortOf(next.options);
   return recordOf(previous)?.model === next.model && effort !== undefined
     ? `at ${effort} effort`
     : `on ${next.model}`;

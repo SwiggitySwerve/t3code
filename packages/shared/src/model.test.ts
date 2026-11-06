@@ -10,6 +10,7 @@ import {
   getProviderOptionCurrentLabel,
   getProviderOptionDescriptors,
   readCustomModelEntries,
+  reasoningEffortOf,
   modelSelectionsEqual,
   resolveModelGlyph,
 } from "./model.ts";
@@ -266,5 +267,20 @@ describe("provider-reported option display", () => {
     { ...selection, options: [{ id: "variant", value: "none" }] },
   ])("ignores reports after changing the model, instance, or option: %j", (selected) => {
     expect(getProviderOptionCurrentLabel(descriptor, selected, reported)).toBe("Unknown");
+  });
+});
+
+describe("reasoningEffortOf", () => {
+  it("finds the effort under any driver's option id, in list or record form", () => {
+    expect(reasoningEffortOf([{ id: "variant", value: "high" }])).toBe("high");
+    expect(reasoningEffortOf([{ id: "thinking_level", value: "low" }])).toBe("low");
+    expect(reasoningEffortOf({ reasoning_effort: "medium" })).toBe("medium");
+    expect(reasoningEffortOf([{ id: "effort", value: "max" }])).toBe("max");
+  });
+
+  it("ignores options that are not an effort", () => {
+    expect(reasoningEffortOf([{ id: "fastMode", value: true }])).toBeUndefined();
+    expect(reasoningEffortOf([{ id: "effort", value: true }])).toBeUndefined();
+    expect(reasoningEffortOf(undefined)).toBeUndefined();
   });
 });

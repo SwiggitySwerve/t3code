@@ -196,7 +196,8 @@ export class WorkflowApprovalGate extends Context.Service<
     ) => Effect.Effect<WorkflowApprovalGateDecision, OrchestrationV2WorkflowApprovalError>;
     /**
      * Whether the thread's armed request waits for the person to approve a ready review, with
-     * none approved yet. Only this process's reviews count: after a restart every review is redone.
+     * none decided yet. A restart does not change the answer: it is read from the thread's stored
+     * reviews and decisions as well as from this process's.
      */
     readonly awaitsDecision: (threadId: ThreadId) => Effect.Effect<boolean>;
   }
@@ -208,6 +209,16 @@ export class WorkflowApprovalGate extends Context.Service<
  */
 const startKeyOf = (threadId: ThreadId, request: PendingRequest, digest: string) =>
   `approval:${threadId}:${request.request}:${digest}`;
+
+/**
+ * The stored message that tells the agent about a decision on `request`. Both ends use this, so
+ * the gate can tell from the thread's items that the person has already decided.
+ */
+export const decisionMessageIdPrefix = (
+  decision: "approved" | "dismissed",
+  threadId: ThreadId,
+  request: MessageId,
+) => `message:workflow-${decision}:${threadId}:${request}:`;
 
 const armedOf = (request: PendingRequest | null | undefined): PendingRequest | null =>
   request?.status._tag === "armed" ? request : null;
@@ -489,15 +500,62 @@ const make = Effect.gen(function* () {
       }
     });
 
-  const awaitsDecision: WorkflowApprovalGate["Service"]["awaitsDecision"] = (threadId) =>
-    Effect.sync(() => {
-      const armed = armedOf(pending.get(threadId));
-      return (
-        armed !== null &&
-        armed.approvals.size === 0 &&
-        [...armed.reviews.values()].some((review) => review.ready && review.digest !== null)
+  /**
+   * Whether the thread stored a ready review that asked for a decision after `request`, with no
+   * decision message since. This is what survives a restart, when the process holds no reviews.
+   */
+  const storedReviewAwaitsDecision = Effect.fn("WorkflowApprovalGate.storedReviewAwaitsDecision")(
+    function* (threadId: ThreadId, request: MessageId) {
+      const records = yield* projections.getThreadRecords(threadId, ["runs", "turnItems"], {
+        turnItemTypes: ["user_message", "workflow_review"],
+      });
+      const runs = new Map(records.runs.map((run) => [run.id, run]));
+      const ordinalOf = (runId: RunId | null) =>
+        runId === null ? 0 : (runs.get(runId)?.ordinal ?? 0);
+      const items = records.turnItems.toSorted(
+        (left, right) =>
+          ordinalOf(left.runId) - ordinalOf(right.runId) || left.ordinal - right.ordinal,
       );
-    });
+      const asked = items.findIndex(
+        (item) => item.type === "user_message" && item.messageId === request,
+      );
+      if (asked < 0) return false;
+      const later = items.slice(asked + 1);
+      const approved = decisionMessageIdPrefix("approved", threadId, request);
+      const dismissed = decisionMessageIdPrefix("dismissed", threadId, request);
+      const decided = later.some(
+        (item) =>
+          item.type === "user_message" &&
+          (item.messageId.startsWith(approved) || item.messageId.startsWith(dismissed)),
+      );
+      return (
+        !decided &&
+        later.some(
+          (item) =>
+            item.type === "workflow_review" &&
+            item.ready &&
+            item.digest !== null &&
+            item.approvalRequired,
+        )
+      );
+    },
+  );
+
+  const awaitsDecision: WorkflowApprovalGate["Service"]["awaitsDecision"] = Effect.fn(
+    "WorkflowApprovalGate.awaitsDecision",
+  )(function* (threadId) {
+    return yield* Effect.gen(function* () {
+      yield* load(threadId);
+      const armed = yield* Effect.sync(() => armedOf(pending.get(threadId)));
+      // Approved in this process, or dismissed (which leaves nothing armed): nothing to decide.
+      if (armed === null || armed.approvals.size > 0) return false;
+      // A review this process just recorded may not be stored yet.
+      if ([...armed.reviews.values()].some((review) => review.ready && review.digest !== null)) {
+        return true;
+      }
+      return yield* storedReviewAwaitsDecision(threadId, armed.request);
+    }).pipe(Effect.orElseSucceed(() => false));
+  });
 
   return WorkflowApprovalGate.of({
     observeTurn,
