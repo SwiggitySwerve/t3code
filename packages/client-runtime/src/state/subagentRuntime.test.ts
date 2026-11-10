@@ -385,6 +385,36 @@ describe("compact workflow presentation", () => {
     ]);
   });
 
+  it("gives a script's unphased workers a bar segment that matches the headline, without checkers", () => {
+    const unphased = (index: number, state: "completed" | "running") =>
+      member({ index, state, phaseIndex: undefined, phaseTitle: undefined });
+    const progress = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          workflow: {
+            phases: [],
+            agents: [
+              unphased(0, "completed"),
+              unphased(1, "completed"),
+              unphased(2, "running"),
+              member({
+                index: 3,
+                state: "completed",
+                phaseIndex: undefined,
+                phaseTitle: undefined,
+                judgmentFor: { agentIndex: 0, attempt: 0 },
+              }),
+            ],
+          },
+        }),
+      ])[0]!,
+    );
+    expect(progress.counts.observed).toBe(3);
+    expect(
+      deriveWorkflowBarSegments(progress.phases).map(({ size, counts }) => [size, counts.done]),
+    ).toEqual([[3, 2]]);
+  });
+
   it("derives failures, active retries and dependency blockers without labelling ordinary queued work", () => {
     const progress = deriveWorkflowProgress(
       groupsOf([

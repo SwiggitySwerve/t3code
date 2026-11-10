@@ -412,14 +412,22 @@ function phaseRunLabel(run: ReadonlyArray<WorkflowPhaseProgress>): string {
     : `${first.title}–${last.title}`;
 }
 
-function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPhaseProgress>) {
+/** A run of phases' planned total (null unless every phase declares one) and its task counts. */
+function phaseRunCounts(run: ReadonlyArray<WorkflowPhaseProgress>) {
   const total = run.every((phase) => phase.counts.total !== null)
     ? run.reduce((sum, phase) => sum + phase.counts.total!, 0)
     : null;
-  const counts = countTasks(
-    run.flatMap((phase) => phase.tasks),
+  return {
     total,
-  );
+    counts: countTasks(
+      run.flatMap((phase) => phase.tasks),
+      total,
+    ),
+  };
+}
+
+function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPhaseProgress>) {
+  const { total, counts } = phaseRunCounts(run);
   const missing = Math.max(0, (total ?? counts.observed) - counts.observed);
   const label = phaseRunLabel(run);
   const summary =
@@ -451,14 +459,22 @@ export interface WorkflowBarSegment {
 }
 
 /**
- * One segment per planned phase (checkers get none), sized by its agents. Past the cap, merge in
- * turn: done runs and queued runs; any runs with no running or failed work; then neighbours
- * evenly, so the cap always holds.
+ * One segment per phase, sized by its agents, counting what the headline counts: checkers get
+ * none, and a script's unphased workers get one segment of their own (a graph's off-plan members
+ * are not counted). Past the cap, merge in turn: done runs and queued runs; any runs with no
+ * running or failed work; then neighbours evenly, so the cap always holds.
  */
 export function deriveWorkflowBarSegments(
   phases: ReadonlyArray<WorkflowPhaseProgress>,
 ): WorkflowBarSegment[] {
-  const planned = phases.filter((phase) => phase.id !== "other");
+  const graph = phases.some((phase) => phase.id.startsWith("wave:"));
+  const planned = phases.flatMap((phase): WorkflowPhaseProgress[] => {
+    if (phase.id !== "other") return [phase];
+    const workers = phase.tasks.filter((task) => task.member?.judgmentFor === undefined);
+    return graph || workers.length === 0
+      ? []
+      : [{ ...phase, tasks: workers, counts: countTasks(workers, null) }];
+  });
   let runs: WorkflowPhaseProgress[][] = planned.map((phase) => [phase]);
   if (runs.length > WORKFLOW_BAR_MAX_SEGMENTS) {
     const merged: Array<{ kind: CollapseKind | null; phases: WorkflowPhaseProgress[] }> = [];
@@ -492,13 +508,7 @@ export function deriveWorkflowBarSegments(
     );
   }
   return runs.map((run) => {
-    const total = run.every((phase) => phase.counts.total !== null)
-      ? run.reduce((sum, phase) => sum + phase.counts.total!, 0)
-      : null;
-    const counts = countTasks(
-      run.flatMap((phase) => phase.tasks),
-      total,
-    );
+    const { total, counts } = phaseRunCounts(run);
     return {
       key: run[0]!.id,
       label: phaseRunLabel(run),
