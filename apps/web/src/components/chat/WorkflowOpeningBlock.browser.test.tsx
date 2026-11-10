@@ -598,19 +598,16 @@ it("shows exact recorded usage, partial usage and budget overshoot honestly", as
     />,
   );
   await expect
-    .element(screen.getByText("At least 120 tokens recorded / 100 token budget", { exact: true }))
+    .element(screen.getByText("At least 120 of 100 tokens", { exact: true }))
     .toBeVisible();
   await expect
     .element(
       screen.getByText(
-        "Budget exceeded. The budget stops new starts. Already-running agents may exceed it. Usage is incomplete.",
+        "Budget exceeded. The budget stops new starts. Already-running agents may exceed it.",
         { exact: true },
       ),
     )
     .toBeVisible();
-  await expect
-    .element(screen.getByRole("progressbar", { name: "Recorded workflow token usage" }))
-    .toHaveAttribute("value", "100");
   await screen.rerender(
     <WorkflowOpeningBlock
       opening={{
@@ -622,9 +619,20 @@ it("shows exact recorded usage, partial usage and budget overshoot honestly", as
     />,
   );
   await expect
-    .element(screen.getByText("Unknown usage / 100 token budget", { exact: true }))
+    .element(screen.getByText("Unknown usage · 100 token budget", { exact: true }))
     .toBeVisible();
-  await expect.element(screen.getByRole("progressbar")).not.toBeInTheDocument();
+  expect(screen.container.textContent).not.toContain("Budget exceeded");
+  await screen.rerender(
+    <WorkflowOpeningBlock
+      opening={{
+        ...opening,
+        budget: { spent: 31_000, limit: null, complete: true, exhausted: false, overshot: false },
+      }}
+      environmentId={EnvironmentId.make("test")}
+      onOpenThread={() => {}}
+    />,
+  );
+  await expect.element(screen.getByText("31K tokens · no budget", { exact: true })).toBeVisible();
 });
 
 function retryGroup(running = false) {

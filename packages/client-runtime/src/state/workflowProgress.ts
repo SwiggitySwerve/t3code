@@ -264,6 +264,7 @@ export function deriveWorkflowProgress(group: SubagentWorkflowGroup) {
     phases.some((phase) => phase.allDone) &&
     phases.every((phase) => phase.allDone || (phase.state === null && phase.tasks.length === 0));
   return {
+    status: group.workflow.status,
     phases,
     attention: tasks
       .filter((task) => task.attention !== undefined)
@@ -400,25 +401,35 @@ function sameMembers(left: ReadonlySet<string>, right: ReadonlySet<string>): boo
   return left.size === right.size && [...left].every((value) => right.has(value));
 }
 
-function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPhaseProgress>) {
+function phaseRunLabel(run: ReadonlyArray<WorkflowPhaseProgress>): string {
   const first = run[0]!;
   const last = run.at(-1)!;
+  if (run.length === 1) return first.title;
+  const numeric = /^Phase (\d+)$/.exec(first.title);
+  const lastNumeric = /^Phase (\d+)$/.exec(last.title);
+  return numeric && lastNumeric
+    ? `Phases ${numeric[1]}–${lastNumeric[1]}`
+    : `${first.title}–${last.title}`;
+}
+
+/** A run of phases' planned total (null unless every phase declares one) and its task counts. */
+function phaseRunCounts(run: ReadonlyArray<WorkflowPhaseProgress>) {
   const total = run.every((phase) => phase.counts.total !== null)
     ? run.reduce((sum, phase) => sum + phase.counts.total!, 0)
     : null;
-  const counts = countTasks(
-    run.flatMap((phase) => phase.tasks),
+  return {
     total,
-  );
+    counts: countTasks(
+      run.flatMap((phase) => phase.tasks),
+      total,
+    ),
+  };
+}
+
+function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPhaseProgress>) {
+  const { total, counts } = phaseRunCounts(run);
   const missing = Math.max(0, (total ?? counts.observed) - counts.observed);
-  const numeric = /^Phase (\d+)$/.exec(first.title);
-  const lastNumeric = /^Phase (\d+)$/.exec(last.title);
-  const label =
-    run.length === 1
-      ? first.title
-      : numeric && lastNumeric
-        ? `Phases ${numeric[1]}–${lastNumeric[1]}`
-        : `${first.title}–${last.title}`;
+  const label = phaseRunLabel(run);
   const summary =
     kind === "queued"
       ? `${total ?? counts.queued} queued${total === null ? " · total unknown" : ""}`
@@ -433,6 +444,78 @@ function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPha
           .filter(Boolean)
           .join(" · ");
   return { phases: run, kind, label, summary };
+}
+
+/** The most segments the workflow bar draws before it merges phases. */
+export const WORKFLOW_BAR_MAX_SEGMENTS = 8;
+
+export interface WorkflowBarSegment {
+  /** The first phase's id, so a segment keeps its DOM while later phases join its run. */
+  readonly key: string;
+  readonly label: string;
+  readonly counts: WorkflowProgressCounts;
+  /** Planned agents, or the agents observed so far when the phase declares no total. */
+  readonly size: number;
+}
+
+/**
+ * One segment per phase, sized by its agents, counting what the headline counts: checkers get
+ * none, and a script's unphased workers get one segment of their own (a graph's off-plan members
+ * are not counted). Past the cap, merge in turn: done runs and queued runs; any runs with no
+ * running or failed work; then neighbours evenly, so the cap always holds.
+ */
+export function deriveWorkflowBarSegments(
+  phases: ReadonlyArray<WorkflowPhaseProgress>,
+): WorkflowBarSegment[] {
+  const graph = phases.some((phase) => phase.id.startsWith("wave:"));
+  const planned = phases.flatMap((phase): WorkflowPhaseProgress[] => {
+    if (phase.id !== "other") return [phase];
+    const workers = phase.tasks.filter((task) => task.member?.judgmentFor === undefined);
+    return graph || workers.length === 0
+      ? []
+      : [{ ...phase, tasks: workers, counts: countTasks(workers, null) }];
+  });
+  let runs: WorkflowPhaseProgress[][] = planned.map((phase) => [phase]);
+  if (runs.length > WORKFLOW_BAR_MAX_SEGMENTS) {
+    const merged: Array<{ kind: CollapseKind | null; phases: WorkflowPhaseProgress[] }> = [];
+    for (const phase of planned) {
+      const kind = phaseCollapseKind(phase);
+      const mergeable = kind === "done" || kind === "queued" ? kind : null;
+      const last = merged.at(-1);
+      if (mergeable !== null && last?.kind === mergeable) last.phases.push(phase);
+      else merged.push({ kind: mergeable, phases: [phase] });
+    }
+    runs = merged.map((run) => run.phases);
+  }
+  if (runs.length > WORKFLOW_BAR_MAX_SEGMENTS) {
+    const quiet = (run: ReadonlyArray<WorkflowPhaseProgress>) =>
+      run.every((phase) => {
+        const status = workflowPhaseStatus(phase);
+        return status !== "running" && status !== "failed";
+      });
+    const merged: WorkflowPhaseProgress[][] = [];
+    for (const run of runs) {
+      const last = merged.at(-1);
+      if (last !== undefined && quiet(last) && quiet(run)) last.push(...run);
+      else merged.push([...run]);
+    }
+    runs = merged;
+  }
+  if (runs.length > WORKFLOW_BAR_MAX_SEGMENTS) {
+    const per = Math.ceil(runs.length / WORKFLOW_BAR_MAX_SEGMENTS);
+    runs = Array.from({ length: Math.ceil(runs.length / per) }, (_, index) =>
+      runs.slice(index * per, (index + 1) * per).flat(),
+    );
+  }
+  return runs.map((run) => {
+    const { total, counts } = phaseRunCounts(run);
+    return {
+      key: run[0]!.id,
+      label: phaseRunLabel(run),
+      counts,
+      size: Math.max(total ?? 0, counts.observed),
+    };
+  });
 }
 
 export function workflowSettledText(counts: WorkflowProgressCounts): string {
