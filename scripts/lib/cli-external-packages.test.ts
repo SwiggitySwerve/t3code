@@ -47,6 +47,18 @@ describe("shouldBundleCliDependency", () => {
     }
   });
 
+  // Bundled, the workflow sandbox looked for emscripten-module.wasm beside the chunk and failed.
+  it("leaves the workflow sandbox's QuickJS and its wasm variants external", () => {
+    for (const id of [
+      "quickjs-emscripten",
+      "quickjs-emscripten-core",
+      "@jitl/quickjs-wasmfile-release-sync",
+      "@jitl/quickjs-ffi-types",
+    ]) {
+      assert.strictEqual(shouldBundleCliDependency(id), false, id);
+    }
+  });
+
   it("treats prefix-matched siblings as external", () => {
     assert.strictEqual(shouldBundleCliDependency("node-gyp-build-optional-packages"), false);
   });
