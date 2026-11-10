@@ -1250,3 +1250,81 @@ export function workflowCallbackLifecycleFixture(state: WorkflowCallbackState): 
     running: row.status === "running",
   };
 }
+
+export interface WorkflowQaPhaseSpec {
+  readonly title: string;
+  /** Agents the phase declares; `null` leaves its total undeclared. */
+  readonly total: number | null;
+  readonly done?: number;
+  readonly running?: number;
+  readonly failed?: number;
+  readonly queued?: number;
+}
+
+/** A script run whose phases have the given sizes and agent states, for the progress bar. */
+export function workflowPhaseSizesFixture(
+  name: string,
+  phases: ReadonlyArray<WorkflowQaPhaseSpec>,
+  status: RunStatus = "running",
+): WorkflowQaFixture {
+  const seed = workflowScaleFixture("script", 4);
+  let index = 0;
+  const agents = phases.flatMap((phase, phaseIndex) => {
+    const states = [
+      ...Array.from({ length: phase.done ?? 0 }, () => "completed" as const),
+      ...Array.from({ length: phase.failed ?? 0 }, () => "failed" as const),
+      ...Array.from({ length: phase.running ?? 0 }, () => "running" as const),
+      ...Array.from({ length: phase.queued ?? 0 }, () => "queued" as const),
+    ];
+    return states.map((state, slot) =>
+      workflowAgent(
+        {
+          index: index++,
+          label: `${phase.title} ${slot + 1}`,
+          phaseIndex,
+          phaseTitle: phase.title,
+        },
+        {
+          state,
+          identity: SCALE_MODELS[phaseIndex % SCALE_MODELS.length]!,
+          ...(state === "failed" ? { result: "The check failed: 2 exports are missing." } : {}),
+        },
+      ),
+    );
+  });
+  const row: WorkflowQaRow = {
+    ...seed.row,
+    title: name,
+    status,
+    progress: status === "running" ? "Comparing exports against the barrel file" : "",
+    result: terminalResult("script", runSpec("running"), status, "running"),
+    completedAt: status === "running" ? null : DateTime.makeUnsafe(WORKFLOW_QA_NOW - 1_000),
+    workflow: {
+      name,
+      agents,
+      phases: phases.map((phase, phaseIndex) => {
+        const started = (phase.done ?? 0) + (phase.failed ?? 0) + (phase.running ?? 0);
+        const state =
+          phase.total !== null && phase.done === phase.total
+            ? ("completed" as const)
+            : started > 0
+              ? ("running" as const)
+              : ("planned" as const);
+        return {
+          index: phaseIndex,
+          title: phase.title,
+          ...(phase.total === null ? {} : { progress: { total: phase.total, state } }),
+        };
+      }),
+    },
+  };
+  const opening = resolveAppWorkflowView(row)!;
+  return {
+    row,
+    opening,
+    group: opening.group!,
+    heading: appWorkflowHeading(row.status),
+    progress: workflowProgressText(row),
+    running: status === "running",
+  };
+}

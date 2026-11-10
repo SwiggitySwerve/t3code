@@ -17,7 +17,6 @@ import { observeResize } from "../../lib/observeResize";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { Collapsible, CollapsiblePanel, CollapsibleTrigger } from "../ui/collapsible";
-import { PROGRESS_CLASS_NAME } from "../ui/progress";
 import { WorkflowDeclaration } from "./WorkflowDeclaration";
 import { WorkflowProgressOverview } from "./WorkflowProgressOverview";
 import { WorkflowWaveCanvas } from "./WorkflowWaveCanvas";
@@ -197,11 +196,6 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           </Button>
         ) : null}
       </header>
-      {opening.budget === undefined ||
-      overview?.terminal ||
-      (overview?.attention.length ?? 0) > 0 ? null : (
-        <WorkflowBudgetMeter budget={opening.budget} />
-      )}
       {overview === null ? null : (
         <WorkflowProgressOverview
           progress={overview}
@@ -209,11 +203,9 @@ function WorkflowOpeningContent(props: WorkflowOpeningProps) {
           onOpenThread={props.onOpenThread}
         />
       )}
-      {opening.budget !== undefined &&
-      !overview?.terminal &&
-      (overview?.attention.length ?? 0) > 0 ? (
-        <WorkflowBudgetMeter budget={opening.budget} />
-      ) : null}
+      {opening.budget === undefined || overview?.terminal ? null : (
+        <WorkflowBudgetFooter budget={opening.budget} />
+      )}
       {terminalResult ? (
         <Collapsible open={resultOpen} onOpenChange={setResultOpen}>
           <CollapsibleTrigger render={<Button size="xs" variant="ghost" />}>
@@ -300,33 +292,31 @@ function WorkflowGraphDetails(props: {
   );
 }
 
-function WorkflowBudgetMeter({
+/** Tokens recorded so far against the budget, under the phases. */
+function WorkflowBudgetFooter({
   budget,
 }: {
   readonly budget: NonNullable<WorkflowOpening["budget"]>;
 }) {
-  const spent =
+  const atLeast = budget.complete ? "" : "At least ";
+  const usage =
     budget.spent === null
-      ? "Unknown usage"
-      : `${budget.complete ? "" : "At least "}${formatTokens(budget.spent)} tokens recorded`;
+      ? `Unknown usage · ${budget.limit === null ? "no token budget" : `${formatTokens(budget.limit)} token budget`}`
+      : budget.limit === null
+        ? `${atLeast}${formatTokens(budget.spent)} tokens · no budget`
+        : `${atLeast}${formatTokens(budget.spent)} of ${formatTokens(budget.limit)} tokens`;
   return (
-    <div className="px-2 text-2xs text-muted-foreground" data-workflow-budget>
-      <p>
-        {spent} / {budget.limit === null ? "no" : formatTokens(budget.limit)} token budget
-      </p>
-      {budget.limit !== null && budget.limit > 0 && budget.spent !== null ? (
-        <progress
-          className={cn("block h-1 w-full", PROGRESS_CLASS_NAME)}
-          aria-label="Recorded workflow token usage"
-          value={Math.min(budget.spent, budget.limit)}
-          max={budget.limit}
-        />
+    <div
+      className="flex flex-col gap-0.5 border-t border-border pt-1.5 text-2xs tabular-nums text-muted-foreground"
+      data-workflow-budget
+    >
+      <p>{usage}</p>
+      {budget.exhausted || budget.overshot ? (
+        <p className="text-warning">
+          {budget.overshot ? "Budget exceeded." : "Budget exhausted."} The budget stops new starts.
+          Already-running agents may exceed it.
+        </p>
       ) : null}
-      <p className={cn("text-xs", budget.exhausted && "text-warning")}>
-        {budget.overshot ? "Budget exceeded. " : budget.exhausted ? "Budget exhausted. " : ""}
-        The budget stops new starts. Already-running agents may exceed it.
-        {budget.complete ? "" : " Usage is incomplete."}
-      </p>
     </div>
   );
 }
