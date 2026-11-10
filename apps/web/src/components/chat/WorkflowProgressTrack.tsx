@@ -115,7 +115,11 @@ export function WorkflowPhaseBar(props: {
       data-workflow-bar={declared ? "declared" : "unknown"}
     >
       <SettledProgress counts={counts} />
-      <div aria-hidden="true" className="absolute inset-0 flex gap-0.5">
+      {/* A pill like the app's other bars: rounded outer ends, square inner joins. */}
+      <div
+        aria-hidden="true"
+        className="absolute inset-0 flex gap-0.5 overflow-hidden rounded-full"
+      >
         {segments.map((segment) => {
           const summary = `${segment.label}: ${workflowCountsText(segment.counts) || "not started"}`;
           return (
@@ -125,7 +129,7 @@ export function WorkflowPhaseBar(props: {
                   <span
                     className={cn(
                       // oxlint-disable-next-line shadcn/no-arbitrary-values -- system colors preserve the bar in forced-colors mode.
-                      "flex h-full min-w-1.5 overflow-hidden rounded-xs bg-border forced-colors:bg-[Canvas] forced-colors:outline forced-colors:outline-[CanvasText]",
+                      "flex h-full min-w-1.5 overflow-hidden bg-muted-foreground/30 dark:bg-muted-foreground/20 forced-colors:bg-[Canvas] forced-colors:outline forced-colors:-outline-offset-1 forced-colors:outline-[CanvasText]",
                     )}
                     // Equal shares when totals are unknown; otherwise each phase's planned agents.
                     style={{ flex: `${declared ? Math.max(segment.size, 1) : 1} 1 0%` }}
