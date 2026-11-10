@@ -3,13 +3,22 @@
  * no filesystem, network, process, clock or randomness. Each run gets its own WASM module.
  * Scripts follow Claude Code's Workflow format: an optional `export const meta`, then a body.
  */
-import {
-  newQuickJSWASMModule,
-  type QuickJSContext,
-  type QuickJSDeferredPromise,
-  type QuickJSHandle,
-  type QuickJSRuntime,
+import * as NodeModule from "node:module";
+
+import type {
+  QuickJSContext,
+  QuickJSDeferredPromise,
+  QuickJSHandle,
+  QuickJSRuntime,
 } from "quickjs-emscripten";
+
+// QuickJS stays external: its variant loads emscripten-module.wasm from disk, and single
+// executables need require to resolve it.
+const requireForQuickJs = NodeModule.createRequire(import.meta.url);
+const newQuickJSWASMModule = () =>
+  (
+    requireForQuickJs("quickjs-emscripten") as typeof import("quickjs-emscripten")
+  ).newQuickJSWASMModule();
 
 export interface WorkflowScriptHost {
   /** Resolves with the agent's result, or null when it failed or produced none. */
