@@ -5,6 +5,9 @@ const CLI_RUNTIME_EXTERNAL_PREFIXES = [
   "@cursor/sdk",
   // Playwright reads package.json and browsers.json beside its runtime modules.
   "playwright-core",
+  // The workflow script sandbox loads emscripten-module.wasm beside its variant module.
+  "quickjs-emscripten",
+  "@jitl/quickjs-",
   "node-pty",
   "ffi-rs",
   "@yuuang/",
