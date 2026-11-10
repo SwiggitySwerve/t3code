@@ -2,9 +2,10 @@ import type { WorkflowTaskProgress } from "@t3tools/client-runtime/state/subagen
 
 type State = WorkflowTaskProgress["state"];
 
+// Matches the sidebar's thread status: Working is info, Done is success.
 export const WORKFLOW_STATE_TEXT = {
-  done: "text-info-foreground",
-  running: "text-success-foreground",
+  done: "text-success-foreground",
+  running: "text-info-foreground",
   failed: "text-destructive-foreground",
   queued: "text-muted-foreground",
   stopped: "text-muted-foreground",

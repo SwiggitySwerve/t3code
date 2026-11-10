@@ -1,10 +1,13 @@
 import {
+  deriveWorkflowBarSegments,
   deriveWorkflowPhaseGroups,
   EMPTY_WORKFLOW_PHASE_GROUP_MEMORY,
   workflowCountEntries,
   workflowCountsText,
+  workflowPhaseStatus,
   workflowSettledText,
   type deriveWorkflowProgress,
+  type WorkflowPhaseGroup,
   type WorkflowProgressCounts,
   type WorkflowPhaseProgress,
   type WorkflowTaskProgress,
@@ -46,13 +49,97 @@ import {
   WORKFLOW_STATE_MARKER,
   WORKFLOW_STATE_TEXT,
 } from "./workflowStatusAppearance";
-import { WorkflowProgressTrack } from "./WorkflowProgressTrack";
+import { WorkflowPhaseBar, type WorkflowUnreachedState } from "./WorkflowProgressTrack";
 
 const PHASE_PAGE_SIZE = 32;
 export const WORKFLOW_AGENT_PITCH = 24;
 
+type WorkflowProgress = ReturnType<typeof deriveWorkflowProgress>;
+
+/** What a settled workflow did with the work it never reached. */
+function unreachedState(progress: WorkflowProgress): WorkflowUnreachedState | undefined {
+  if (!progress.terminal) return undefined;
+  if (progress.status === "failed") return "skipped";
+  if (progress.status === "cancelled" || progress.status === "interrupted") return "stopped";
+  return undefined;
+}
+
+type MarkerState = keyof typeof WORKFLOW_STATE_MARKER;
+
+function phaseMarker(
+  phase: WorkflowPhaseProgress,
+  unreached: WorkflowUnreachedState | undefined,
+): MarkerState {
+  const status = workflowPhaseStatus(phase);
+  return status === "not started" ? (unreached ?? "queued") : status;
+}
+
+function groupMarker(
+  group: WorkflowPhaseGroup,
+  unreached: WorkflowUnreachedState | undefined,
+): MarkerState {
+  switch (group.kind) {
+    case "done":
+      return "done";
+    case "running":
+      return "running";
+    case "settled":
+      return "stopped";
+    case "queued":
+      return unreached ?? "queued";
+    case null:
+      return phaseMarker(group.phases[0]!, unreached);
+  }
+}
+
+function StateMarker({ state }: { readonly state: MarkerState }) {
+  return (
+    <span
+      aria-hidden
+      className={cn(
+        "mt-1 size-2 shrink-0 forced-colors:forced-color-adjust-none",
+        WORKFLOW_STATE_MARKER[state],
+      )}
+      data-workflow-marker={state}
+    />
+  );
+}
+
+/** "182 of 256 agents" with a declared total; otherwise the agents done so far. */
+function headlineText(counts: WorkflowProgressCounts): string {
+  const noun = (count: number) => (count === 1 ? "agent" : "agents");
+  return counts.total === null
+    ? `${counts.done} ${noun(counts.done)} done`
+    : `${counts.done} of ${counts.total} ${noun(counts.total)}`;
+}
+
+/**
+ * The percentage (declared totals only), failures, and which phase runs. Graph waves are
+ * dependency depth rather than sequential steps, so a running phase is named, never numbered.
+ */
+function headlineDetail(progress: WorkflowProgress): string {
+  const { counts } = progress;
+  const running = progress.phases.filter(
+    (phase) => phase.id !== "other" && (phase.counts.running > 0 || phase.state === "running"),
+  );
+  return [
+    counts.total !== null && counts.total > 0
+      ? `${Math.floor((counts.done / counts.total) * 100)}%`
+      : null,
+    counts.failed > 0 ? `${counts.failed} failed` : null,
+    running.length === 1
+      ? `${running[0]!.title} running`
+      : running.length > 1
+        ? `${running.length} phases running`
+        : null,
+    counts.total === null ? `${counts.observed} discovered · total unknown` : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+}
+
 export function WorkflowProgressOverview(props: {
-  readonly progress: ReturnType<typeof deriveWorkflowProgress>;
+  readonly progress: WorkflowProgress;
   readonly environmentId: EnvironmentId;
   readonly onOpenThread: (threadId: string) => void;
 }) {
@@ -61,9 +148,13 @@ export function WorkflowProgressOverview(props: {
   const [phasePage, setPhasePage] = useState(0);
   // Kept per phase, so a disclosure stays open while phases join or leave its run.
   const [expandedPhases, setExpandedPhases] = useState<ReadonlySet<string>>(new Set());
-  const [receiptExpanded, setReceiptExpanded] = useState(false);
+  // Unset until toggled: a clean finish starts folded, a failed or stopped run starts open.
+  const [receiptChoice, setReceiptExpanded] = useState<boolean | null>(null);
+  const receiptExpanded = receiptChoice ?? !progress.successful;
   const [allAttention, setAllAttention] = useState(false);
   const showPhases = !progress.terminal || receiptExpanded;
+  const unreached = unreachedState(progress);
+  const segments = deriveWorkflowBarSegments(progress.phases);
   const [inspection, setInspection] = useState<{
     anchor: HTMLButtonElement;
     touchReady: boolean;
@@ -248,6 +339,8 @@ export function WorkflowProgressOverview(props: {
             {progress.failedPhaseCount > 0
               ? ` · ${progress.failedPhaseCount} ${progress.failedPhaseCount === 1 ? "phase" : "phases"} failed`
               : null}
+            {progress.counts.stopped > 0 ? ` · ${progress.counts.stopped} stopped` : null}
+            {progress.counts.skipped > 0 ? ` · ${progress.counts.skipped} skipped` : null}
           </span>
           {progress.elapsedMs === null ? null : <span>{formatDuration(progress.elapsedMs)}</span>}
           <WorkflowIdentityStack identities={[...identities.values()]} sprite={sprite} />
@@ -268,48 +361,64 @@ export function WorkflowProgressOverview(props: {
           </Button>
         </div>
       ) : null}
-      {showPhases ? (
-        <div className="flex min-w-0 flex-col gap-1 text-2xs tabular-nums text-muted-foreground">
-          <p>{workflowSettledText(progress.counts)}</p>
-          <WorkflowProgressTrack counts={progress.counts} />
-          <CountLabels counts={progress.counts} />
-          {legend.length >= 2 ? (
-            <div
-              aria-label="Agent models"
-              className="flex flex-wrap items-center gap-x-3 gap-y-1"
-              data-workflow-legend
+      {progress.terminal && progress.counts.total === 0 ? null : (
+        <div className="flex min-w-0 flex-col gap-1.5">
+          {progress.terminal ? null : (
+            <p
+              className="flex min-w-0 flex-wrap items-baseline gap-x-2 tabular-nums"
+              data-workflow-headline
             >
-              {legend.slice(0, 4).map(({ identity, count }) => (
-                <span
-                  key={identity.key}
-                  aria-label={`${identity.planned ? "Planned: " : ""}${identity.providerName} · ${identity.modelName}, ${count} agents`}
-                  className="inline-flex min-w-0 items-center gap-1"
-                >
-                  <WorkflowAgentIdentity
-                    member={null}
-                    provider={undefined}
-                    identity={identity}
-                    sprite={sprite}
-                  />
-                  <span className="break-words">
-                    {identity.planned ? "Planned: " : ""}
-                    {identity.displayName} ×{count}
-                  </span>
-                </span>
-              ))}
-              {legend.length > 4 ? (
-                <span data-workflow-legend-overflow>
-                  <span aria-hidden>+{legend.length - 4}</span>
-                  <span className="sr-only">{`${legend.length - 4} more models: ${legend
-                    .slice(4)
-                    .map(
-                      ({ identity, count }) =>
-                        `${identity.planned ? "Planned: " : ""}${identity.providerName} · ${identity.modelName}, ${count} agents`,
-                    )
-                    .join(", ")}`}</span>
-                </span>
-              ) : null}
-            </div>
+              <span className="text-base font-medium text-foreground">
+                {headlineText(progress.counts)}
+              </span>
+              <span className="text-2xs text-muted-foreground">{headlineDetail(progress)}</span>
+            </p>
+          )}
+          {progress.counts.total === 0 ? null : (
+            <WorkflowPhaseBar
+              counts={progress.counts}
+              segments={segments}
+              unreached={unreached}
+              thin={progress.terminal && progress.successful}
+            />
+          )}
+        </div>
+      )}
+      {showPhases && legend.length >= 2 ? (
+        <div
+          aria-label="Agent models"
+          className="flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-2xs tabular-nums text-muted-foreground"
+          data-workflow-legend
+        >
+          {legend.slice(0, 4).map(({ identity, count }) => (
+            <span
+              key={identity.key}
+              aria-label={`${identity.planned ? "Planned: " : ""}${identity.providerName} · ${identity.modelName}, ${count} agents`}
+              className="inline-flex min-w-0 items-center gap-1"
+            >
+              <WorkflowAgentIdentity
+                member={null}
+                provider={undefined}
+                identity={identity}
+                sprite={sprite}
+              />
+              <span className="break-words">
+                {identity.planned ? "Planned: " : ""}
+                {identity.displayName} ×{count}
+              </span>
+            </span>
+          ))}
+          {legend.length > 4 ? (
+            <span data-workflow-legend-overflow>
+              <span aria-hidden>+{legend.length - 4}</span>
+              <span className="sr-only">{`${legend.length - 4} more models: ${legend
+                .slice(4)
+                .map(
+                  ({ identity, count }) =>
+                    `${identity.planned ? "Planned: " : ""}${identity.providerName} · ${identity.modelName}, ${count} agents`,
+                )
+                .join(", ")}`}</span>
+            </span>
           ) : null}
         </div>
       ) : null}
@@ -335,68 +444,80 @@ export function WorkflowProgressOverview(props: {
       ) : null}
 
       {showPhases ? (
-        <div
-          className="grid min-w-0 items-start gap-2"
-          style={{ gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 13rem), 1fr))" }}
-          data-workflow-phases
-        >
-          {visibleGroups.flatMap(({ group, expanded }, index) => {
-            // A disclosure heads its own rows, so the phase after its grids starts a new row.
-            const previous = visibleGroups[index - 1]?.group;
-            const newRow = group.kind === null && previous !== undefined && previous.kind !== null;
+        // Grids are siblings keyed by phase and folded rows by their group key, so a phase moving
+        // between groups keeps its DOM and focus.
+        <div className="flex min-w-0 flex-col" data-workflow-phases>
+          {visibleGroups.flatMap(({ group, expanded }) => {
             const grids = expanded
-              ? group.phases.map((phase, position) => (
+              ? group.phases.map((phase) => (
                   <PhaseAgents
                     key={phase.id}
                     phase={phase}
+                    marker={phaseMarker(phase, unreached)}
+                    nested={group.kind !== null}
                     identities={identities}
                     sprite={sprite}
                     generic={generic}
-                    newRow={newRow && position === 0}
                     onInspect={inspect}
                     readoutId={readoutId}
                     onOpenThread={props.onOpenThread}
                   />
                 ))
               : [];
-            return group.kind === null
-              ? grids
-              : [
-                  <button
-                    key={group.key}
-                    type="button"
-                    aria-expanded={expanded}
-                    data-workflow-phase-disclosure
-                    className="col-span-full flex w-full min-w-0 flex-wrap items-center gap-1 rounded-md border border-border bg-card/30 px-2 py-1.5 text-left text-xs hover:bg-accent/30 focus-visible:outline-2 focus-visible:outline-ring"
-                    onClick={() => {
-                      setInspection(null);
-                      setExpandedPhases((previous) => {
-                        const next = new Set(previous);
-                        for (const phase of group.phases) {
-                          const remembered = `${group.kind}:${phase.id}`;
-                          if (expanded) next.delete(remembered);
-                          else next.add(remembered);
-                        }
-                        return next;
-                      });
-                    }}
-                  >
-                    <ChevronRightIcon
-                      aria-hidden
-                      className={cn("size-3 shrink-0", expanded && "rotate-90")}
-                    />
-                    <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
-                      {group.label} · {group.summary}
-                    </span>
-                    <WorkflowIdentityStack
-                      identities={group.phases.flatMap((phase) =>
-                        phase.tasks.map((task) => identities.get(task.id)!),
-                      )}
-                      sprite={sprite}
-                    />
-                  </button>,
-                  ...grids,
-                ];
+            if (group.kind === null) return grids;
+            const marker = groupMarker(group, unreached);
+            return [
+              <button
+                key={group.key}
+                type="button"
+                aria-expanded={expanded}
+                data-workflow-phase-disclosure
+                className={cn(
+                  "flex w-full min-w-0 items-start gap-2 rounded-sm border-t border-border py-1.5 text-left text-xs first:border-t-0 hover:bg-accent/30 focus-visible:outline-2 focus-visible:outline-ring",
+                  marker === "queued" ? "text-muted-foreground" : "text-foreground",
+                )}
+                onClick={() => {
+                  setInspection(null);
+                  setExpandedPhases((previous) => {
+                    const next = new Set(previous);
+                    for (const phase of group.phases) {
+                      const remembered = `${group.kind}:${phase.id}`;
+                      if (expanded) next.delete(remembered);
+                      else next.add(remembered);
+                    }
+                    return next;
+                  });
+                }}
+              >
+                <StateMarker state={marker} />
+                <span className="min-w-0 flex-1 [overflow-wrap:anywhere]">
+                  {group.label}
+                  <span className="text-muted-foreground">
+                    {" · "}
+                    {group.kind === "queued" && unreached !== undefined
+                      ? `${group.phases.reduce(
+                          (sum, phase) => sum + (phase.counts.total ?? phase.counts.observed),
+                          0,
+                        )} not run`
+                      : group.summary}
+                  </span>
+                </span>
+                <WorkflowIdentityStack
+                  identities={group.phases.flatMap((phase) =>
+                    phase.tasks.map((task) => identities.get(task.id)!),
+                  )}
+                  sprite={sprite}
+                />
+                <ChevronRightIcon
+                  aria-hidden
+                  className={cn(
+                    "mt-0.5 size-3 shrink-0 text-muted-foreground",
+                    expanded && "rotate-90",
+                  )}
+                />
+              </button>,
+              ...grids,
+            ];
           })}
         </div>
       ) : null}
@@ -433,31 +554,47 @@ export function WorkflowProgressOverview(props: {
   );
 }
 
-function CountLabels({ counts }: { readonly counts: WorkflowProgressCounts }) {
-  const entries = workflowCountEntries(counts);
+/** A phase row's second line: what is not done yet, in state colours. */
+function PhaseDetail(props: {
+  readonly counts: WorkflowProgressCounts;
+  readonly notStarted: number;
+}) {
+  const entries = workflowCountEntries(props.counts).filter(({ state }) => state !== "done");
+  if (entries.length === 0 && props.notStarted === 0) return null;
   return (
-    <span className="flex flex-wrap gap-x-1 text-2xs font-normal tabular-nums text-muted-foreground">
-      {entries.length === 0
-        ? "No agents started"
-        : entries.map(({ state, count }, index) => (
-            <span key={state}>
-              {index > 0 ? <span aria-hidden>· </span> : null}
-              <span className={WORKFLOW_STATE_TEXT[state]}>
-                {count} {state}
-              </span>
-            </span>
-          ))}
-      {counts.total === null ? <span>· total unknown</span> : null}
-    </span>
+    <p className="flex flex-wrap gap-x-1 text-2xs tabular-nums text-muted-foreground">
+      {entries.map(({ state, count }, index) => (
+        <span key={state}>
+          {index > 0 ? <span aria-hidden>· </span> : null}
+          <span className={WORKFLOW_STATE_TEXT[state]}>
+            {count} {state}
+          </span>
+        </span>
+      ))}
+      {props.notStarted > 0 ? (
+        <span>
+          {entries.length > 0 ? <span aria-hidden>· </span> : null}
+          {props.notStarted} not started
+        </span>
+      ) : null}
+    </p>
   );
+}
+
+function phaseFraction(counts: WorkflowProgressCounts): string {
+  return counts.total === null
+    ? `${counts.done} done · total unknown`
+    : `${counts.done} of ${counts.total}`;
 }
 
 function PhaseAgents(props: {
   readonly phase: WorkflowPhaseProgress;
+  readonly marker: MarkerState;
+  /** Opened from a folded row, so it sits indented under that row. */
+  readonly nested: boolean;
   readonly identities: ReadonlyMap<string, WorkflowIdentity>;
   readonly sprite: WorkflowIdentitySprite;
   readonly generic: WorkflowIdentity;
-  readonly newRow: boolean;
   readonly readoutId: string;
   readonly onInspect: (anchor: HTMLButtonElement | null) => void;
   readonly onOpenThread: (threadId: string) => void;
@@ -520,29 +657,34 @@ function PhaseAgents(props: {
         .filter(Boolean)
         .join(" · ")}
       className={cn(
-        "min-w-0 rounded-md border border-border bg-card/30 p-2",
-        props.newRow && "col-start-1",
+        "min-w-0 border-t py-1.5 first:border-t-0",
+        props.nested ? "border-border/60 pl-4" : "border-border",
       )}
       data-workflow-phase
     >
-      <header className="mb-1 flex min-w-0 flex-col gap-0.5">
-        <div className="flex min-w-0 flex-wrap items-baseline justify-between gap-x-2 gap-y-0.5">
-          <h4 id={headingId} className="min-w-0 text-xs font-medium [overflow-wrap:anywhere]">
+      <header className="flex min-w-0 items-start gap-2">
+        <StateMarker state={props.marker} />
+        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+          <h4
+            id={headingId}
+            className={cn(
+              "min-w-0 text-xs font-medium [overflow-wrap:anywhere]",
+              props.marker === "queued" && "text-muted-foreground",
+            )}
+          >
             {phase.title}
-            {phase.state === null ? "" : ` · ${phase.state}`}
+            <span className="font-normal text-muted-foreground tabular-nums">
+              {` · ${phaseFraction(phase.counts)}`}
+            </span>
           </h4>
-          <CountLabels counts={phase.counts} />
+          <PhaseDetail counts={phase.counts} notStarted={notStarted} />
         </div>
-        {notStarted > 0 ? (
-          <p className="text-2xs text-muted-foreground">{notStarted} not started</p>
-        ) : null}
-        <WorkflowProgressTrack counts={phase.counts} decorative />
       </header>
       <div
         role="toolbar"
         aria-labelledby={headingId}
         aria-description="Use arrow keys to move between agents. Home and End move to the first and last agent. Enter opens its thread."
-        className="grid min-w-0"
+        className="mt-1 grid min-w-0 pl-4"
         style={{ gridTemplateColumns: "repeat(auto-fill, var(--workflow-agent-pitch))" }}
         onKeyDown={moveFocus}
         onPointerOver={(event) => {

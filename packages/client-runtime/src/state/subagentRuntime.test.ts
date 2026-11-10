@@ -26,6 +26,7 @@ import {
   workflowPhaseStatus,
   deriveWorkflowPhaseGroups,
   workflowMemberModelSelection,
+  deriveWorkflowBarSegments,
 } from "./subagentRuntime.ts";
 import { resolveSubagentMetadata } from "./subagentDisplay.ts";
 import { formatSubagentEffort } from "./threadExecution.ts";
@@ -306,6 +307,115 @@ describe("compact workflow presentation", () => {
       { kind: "settled", summary: "No agents observed · 3 not observed · phase stopped" },
       { kind: "queued", summary: "8 queued" },
     ]);
+  });
+
+  it("sizes one bar segment per planned phase and merges done and queued runs past the cap", () => {
+    const progressOf = (sizes: ReadonlyArray<[number, "completed" | "running" | "planned"]>) =>
+      deriveWorkflowProgress(
+        groupsOf([
+          subagent({
+            workflow: {
+              phases: sizes.map(([total, state], index) => ({
+                index,
+                title: `Phase ${index + 1}`,
+                progress: { total, state },
+              })),
+              agents: sizes.flatMap(([total, state], index) =>
+                state === "planned"
+                  ? []
+                  : Array.from({ length: total }, (_, offset) =>
+                      member({
+                        index: index * 1000 + offset,
+                        phaseIndex: index,
+                        state: state === "completed" || offset === 0 ? "completed" : "running",
+                      }),
+                    ),
+              ),
+            },
+          }),
+        ])[0]!,
+      );
+    const segments = (progress: ReturnType<typeof deriveWorkflowProgress>) =>
+      deriveWorkflowBarSegments(progress.phases).map(({ label, size, counts }) => [
+        label,
+        size,
+        counts.done,
+      ]);
+    expect(
+      segments(
+        progressOf([
+          [2, "completed"],
+          [200, "running"],
+          [2, "planned"],
+        ]),
+      ),
+    ).toEqual([
+      ["Phase 1", 2, 2],
+      ["Phase 2", 200, 1],
+      ["Phase 3", 2, 0],
+    ]);
+    const twelve = progressOf(
+      Array.from({ length: 12 }, (_, index) => [
+        4,
+        index < 5 ? "completed" : index < 7 ? "running" : "planned",
+      ]),
+    );
+    expect(segments(twelve)).toEqual([
+      ["Phases 1–5", 20, 20],
+      ["Phase 6", 4, 1],
+      ["Phase 7", 4, 1],
+      ["Phases 8–12", 20, 0],
+    ]);
+    // Alternating done and stopped phases share no fold, so step 2 merges the quiet stretch.
+    const alternating = progressOf(
+      Array.from({ length: 12 }, (_, index) => [4, index === 11 ? "running" : "completed"]),
+    ).phases.map((phase, index) =>
+      index % 2 === 1 && index < 11 ? { ...phase, state: "stopped" as const } : phase,
+    );
+    expect(deriveWorkflowBarSegments(alternating).map(({ label }) => label)).toEqual([
+      "Phases 1–11",
+      "Phase 12",
+    ]);
+    // Nothing folds when every phase runs, so neighbours merge evenly to stay under the cap.
+    const running = segments(progressOf(Array.from({ length: 12 }, () => [4, "running"])));
+    expect(running.map(([label]) => label)).toEqual([
+      "Phases 1–2",
+      "Phases 3–4",
+      "Phases 5–6",
+      "Phases 7–8",
+      "Phases 9–10",
+      "Phases 11–12",
+    ]);
+  });
+
+  it("gives a script's unphased workers a bar segment that matches the headline, without checkers", () => {
+    const unphased = (index: number, state: "completed" | "running") =>
+      member({ index, state, phaseIndex: undefined, phaseTitle: undefined });
+    const progress = deriveWorkflowProgress(
+      groupsOf([
+        subagent({
+          workflow: {
+            phases: [],
+            agents: [
+              unphased(0, "completed"),
+              unphased(1, "completed"),
+              unphased(2, "running"),
+              member({
+                index: 3,
+                state: "completed",
+                phaseIndex: undefined,
+                phaseTitle: undefined,
+                judgmentFor: { agentIndex: 0, attempt: 0 },
+              }),
+            ],
+          },
+        }),
+      ])[0]!,
+    );
+    expect(progress.counts.observed).toBe(3);
+    expect(
+      deriveWorkflowBarSegments(progress.phases).map(({ size, counts }) => [size, counts.done]),
+    ).toEqual([[3, 2]]);
   });
 
   it("derives failures, active retries and dependency blockers without labelling ordinary queued work", () => {
