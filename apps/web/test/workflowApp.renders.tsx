@@ -172,7 +172,7 @@ const threads = [
   ...workflowThread("workflow-finished", 256, "completed"),
   ...workflowThread("workflow-failed", 256, "failed"),
 ];
-installFakeEnvironment(threads, QA_PROVIDERS, { workflows: true });
+installFakeEnvironment(threads, { providers: QA_PROVIDERS, settings: { workflows: true } });
 
 const views = [
   { name: "01-small-running", thread: "workflow-small", width: 1440 },

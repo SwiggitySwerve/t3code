@@ -64,6 +64,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as ProviderRegistryMock from "../provider/testUtils/providerRegistryMock.ts";
 import * as ScheduledTaskService from "../scheduledTasks/ScheduledTaskService.ts";
 import * as SecretRequests from "../secrets/SecretRequests.ts";
+import * as SecretResolver from "@t3tools/secret-provider-core/server/SecretResolver";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
@@ -210,7 +211,11 @@ export const makeLayerTest = (
       }),
     ),
     Layer.provideMerge(
-      SecretRequests.layer.pipe(Layer.provide(layerSecretStore), Layer.provide(layerOrchestration)),
+      SecretRequests.layer.pipe(
+        Layer.provide(layerSecretStore),
+        Layer.provide(Layer.mock(SecretResolver.SecretResolver)({})),
+        Layer.provide(layerOrchestration),
+      ),
     ),
     // Where the checkers' whole-answer files go: the server's own folder, not this checkout.
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "t3-agent-fanout-test-" })),
