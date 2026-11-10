@@ -34,5 +34,7 @@ it("advertises workflow_start's script description on the wire", () => {
   const schema = advertisedJsonSchema(OrchestratorToolkit.tools.workflow_start) as {
     readonly properties: Readonly<Record<string, { readonly description?: string }>>;
   };
-  expect(schema.properties.script?.description).toContain("{ type: 'judgment', rubric, target? }");
+  expect(schema.properties.script?.description).toContain(
+    "{ type: 'judgment', rubric: [criteria], target? }",
+  );
 });
