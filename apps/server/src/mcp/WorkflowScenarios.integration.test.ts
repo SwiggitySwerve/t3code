@@ -3,20 +3,25 @@
  * format, workers finished with scripted results, and assertions on the runner's invariants and
  * on the stored record and its workflow report. Nothing here reaches a real provider.
  */
+// @effect-diagnostics nodeBuiltinImport:off -- a test writes the file a worker's command would.
+import * as NodeFS from "node:fs";
 import { describe, expect, it } from "@effect/vitest";
 import {
   EnvironmentId,
   type OrchestratorMcpWorkflowReport,
   OrchestratorMcpWorkflowReportResult,
   type OrchestrationV2Subagent,
+  type ThreadId,
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
+import * as Orchestrator from "../orchestration-v2/Orchestrator.ts";
 import type * as McpInvocationContext from "./McpInvocationContext.ts";
 import { formatWorkflowReport } from "./workflowReport.ts";
 import {
   answerWorkflowAgents,
+  awaitCheckers,
   awaitMember,
   awaitWorkflowEnd,
   childTasks,
@@ -34,6 +39,10 @@ import {
   model,
   reviewGraph,
   parentThreadId,
+  setBackgroundWork,
+  stopChild,
+  wakeChild,
+  withScratchDir,
   startParent,
   startWorkflow,
   withServerProcess,
@@ -864,6 +873,275 @@ describe("redo until pass, with seeded outcomes", () => {
       expect(report.loop.endedBy).toBe(
         JSON.parse(ended.result!).stopped === undefined ? "settled" : "budget",
       );
+    }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+describe("a worker settles on its work, not its turn", () => {
+  /** Settles the member's task now, as the orchestrator would after its turn ended. */
+  const taskAfterTurn = (member: OrchestrationV2Subagent) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const run = (yield* orchestrator.getThreadProjection(member.childThreadId!)).runs.at(-1)!;
+      yield* orchestrator.recoverDelegatedTask(member.childThreadId!, run.id);
+      return (yield* membersOf(member.parentNodeId)).find((task) => task.id === member.id)!;
+    });
+
+  const runsOf = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      return (yield* orchestrator.getThreadProjection(threadId)).runs;
+    });
+
+  const command = { taskId: "tests", kind: "command" as const, description: "vp test" };
+
+  it.effect("a turn that ends with its tests still running waits for them, then passes", () =>
+    withScratchDir((dir) =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const out = `${dir}/part.json`;
+        const started = yield* startWorkflow(
+          `return await agent("run the shard", { label: "shard", verify: { type: "process", argv: ["node", "-e", "require('fs').accessSync(process.argv[1])", ${JSON.stringify(out)}] }, report: true })`,
+        );
+        const member = yield* awaitMember(started.workflowId, 1);
+        yield* setBackgroundWork(member.childThreadId!, [command]);
+        yield* completeChild(member.childThreadId!, "The tests run in the background.");
+        // The turn ended, but its command still runs: the attempt is not over.
+        expect((yield* taskAfterTurn(member)).result).toBeNull();
+        NodeFS.writeFileSync(out, "{}");
+        yield* setBackgroundWork(member.childThreadId!, []);
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(JSON.parse(ended.result!)).toMatchObject({
+          ok: true,
+          attempts: 1,
+          verification: { type: "process", outcome: "passed", attempts: 1 },
+        });
+        expect(yield* expectSettled(started.workflowId)).toHaveLength(1);
+      }),
+    ).pipe(Effect.provide(layerTest)),
+  );
+
+  /** Whether the runner asked the child to stop: Stop records its request on the stopped run. */
+  const stopRequested = (threadId: ThreadId) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const child = yield* orchestrator.getThreadProjection(threadId);
+      return child.turnItems.some((item) => item.type === "run_interrupt_request");
+    });
+
+  it.effect(
+    "a command past the deadline fails the attempt, is stopped, then the retry starts",
+    () =>
+      Effect.gen(function* () {
+        yield* startParent;
+        const started = yield* startWorkflow(
+          'return await agent("run the shard", { label: "shard", attemptTimeoutMs: 60000, stallTimeoutMs: 3600000, report: true })',
+        );
+        const first = yield* awaitMember(started.workflowId, 1);
+        yield* setBackgroundWork(first.childThreadId!, [command]);
+        yield* completeChild(first.childThreadId!, "The tests run in the background.");
+        expect((yield* taskAfterTurn(first)).result).toBeNull();
+        yield* adjustBySweeps(4);
+        // Past the deadline the runner stops the attempt, and starts nothing while its command runs.
+        expect(yield* stopRequested(first.childThreadId!)).toBe(true);
+        expect(yield* membersOf(started.workflowId)).toHaveLength(1);
+        // The provider ends the command the stop reached; only then does the retry start.
+        yield* setBackgroundWork(first.childThreadId!, []);
+        const retry = yield* awaitMember(started.workflowId, 2);
+        yield* completeChild(retry.childThreadId!, "finished in time");
+        const ended = yield* awaitWorkflowEnd(started.workflowId);
+        expect(JSON.parse(ended.result!)).toMatchObject({
+          ok: true,
+          result: "finished in time",
+          attempts: 2,
+        });
+        const row = yield* rowOf(started.workflowId);
+        expect(row.workflow?.agents[0]?.attemptHistory?.map((entry) => entry.stoppedBy)).toEqual([
+          "timed_out",
+          undefined,
+        ]);
+      }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a command its stop cannot end fails the agent without starting another", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("run the shard", { label: "shard", attemptTimeoutMs: 60000, stallTimeoutMs: 3600000, report: true })',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      yield* setBackgroundWork(first.childThreadId!, [command]);
+      yield* completeChild(first.childThreadId!, "The tests run in the background.");
+      // The deadline's stop, then the grace a stop gets, pass with the command still running.
+      yield* adjustBySweeps(8);
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      const report = JSON.parse(ended.result!);
+      expect(report).toMatchObject({ ok: false, attempts: 1 });
+      expect(report.reason).toContain("did not stop");
+      expect(yield* membersOf(started.workflowId)).toHaveLength(1);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a member whose command a restart cut is started again on the same rung", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("run the shard", { label: "shard", report: true })',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      // What restart recovery leaves on a turn that ended while its tests ran: the lost command.
+      yield* completeChild(first.childThreadId!, "The tests run in the background.", {
+        status: "completed",
+        restartCancelledBackgroundWork: [{ kind: "shell", label: "vp test", awaited: true }],
+      });
+      const retry = yield* awaitMember(started.workflowId, 2);
+      // A restart is no judgment on the work: the retry gets no repair feedback.
+      expect(retry.prompt).not.toContain("did not pass its");
+      yield* completeChild(retry.childThreadId!, "Every test ran.");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, result: "Every test ran." });
+      const row = yield* rowOf(started.workflowId);
+      expect(row.workflow?.agents[0]?.attemptHistory?.map((entry) => entry.state)).toEqual([
+        "interrupted",
+        "completed",
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a retry starts only after the attempt it replaces has stopped", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        `return await agent("write the summary", { label: "summary", verify: { type: "judgment", rubric: ["The summary is complete."], target: args.judge }, report: true })`,
+        { judge: { providerInstanceId: claudeInstanceId, model: claudeModel } },
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      yield* completeChild(first.childThreadId!, "a short summary");
+      const [checker] = yield* awaitCheckers(started.workflowId, 1);
+      // A command the first attempt left woke it while its result was being judged.
+      yield* wakeChild(first.childThreadId!, "late-shard");
+      const woken = yield* runsOf(first.childThreadId!);
+      expect(woken).toHaveLength(2);
+      yield* completeChild(checker!.childThreadId!, verdict(false, "Section 2 is missing."));
+      const retry = yield* awaitMember(started.workflowId, 3);
+      expect(retry.prompt).toContain("write the summary");
+      // By the time the retry started, every run of the attempt it replaced had ended.
+      const runs = yield* runsOf(first.childThreadId!);
+      expect(
+        runs.filter((run) => run.completedAt === null && run.status !== "interrupted"),
+      ).toEqual([]);
+      expect(runs.at(-1)?.status).toBe("interrupted");
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a replaced attempt's late wake starts no run and wakes no caller", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      yield* answerWorkflowAgents((prompt) => json({ ok: prompt.includes("did not pass its") }));
+      const started = yield* startWorkflow(
+        'return await agent("build the parser", { label: "build", schema: { type: "object", required: ["ok"] }, verify: { type: "structured", equals: { "/ok": true } }, report: true })',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      yield* awaitMember(started.workflowId, 2);
+      const before = yield* runsOf(first.childThreadId!);
+      yield* wakeChild(first.childThreadId!, "late-build");
+      // The replaced attempt starts nothing that could rewrite the node's files.
+      expect(yield* runsOf(first.childThreadId!)).toHaveLength(before.length);
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, attempts: 2 });
+      // Nothing outside the workflow came from the old attempt's thread to wake the caller.
+      expect(
+        (yield* childTasks).filter(
+          (task) =>
+            task.childThreadId === first.childThreadId && task.parentNodeId !== started.workflowId,
+        ),
+      ).toEqual([]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+});
+
+describe("a retry repairs the previous attempt", () => {
+  const script = `return await agent("document the parser", { label: "docs", verify: { type: "judgment", rubric: ["It names the parser.", "It lists every flag."], target: args.judge }, report: true })`;
+  const judge = { judge: { providerInstanceId: claudeInstanceId, model: claudeModel } };
+
+  it.effect("a worker sees its check's criteria before it starts", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(script, judge);
+      const worker = yield* awaitMember(started.workflowId, 1);
+      expect(worker.prompt).toContain(
+        "Your result will be checked against these criteria:\n1. It names the parser.\n2. It lists every flag.",
+      );
+      // The criteria only: nothing says who checks the work.
+      expect(worker.prompt).not.toContain(claudeModel);
+      yield* completeChild(worker.childThreadId!, "The parser takes --x and --y.");
+      const [checker] = yield* awaitCheckers(started.workflowId, 1);
+      yield* completeChild(checker!.childThreadId!, verdict(true, "Both hold."));
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, attempts: 1 });
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a checker whose provider keeps failing runs again and uses no work attempt", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      let checks = 0;
+      yield* answerWorkflowAgents((prompt): WorkerReply => {
+        if (!isChecker(prompt)) return { text: "The parser takes --x and --y." };
+        checks += 1;
+        // The first checker fails on every try its provider faults allow; the next one answers.
+        return checks <= 3 ? { text: "", status: "failed" } : { text: verdict(true, "Both hold.") };
+      });
+      const started = yield* startWorkflow(script, judge);
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({
+        ok: true,
+        attempts: 1,
+        verification: { type: "judgment", outcome: "passed", attempts: 1 },
+      });
+      const members = yield* membersOf(started.workflowId);
+      expect(members.filter((task) => !isChecker(task.prompt))).toHaveLength(1);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a checker that was stopped is not run again", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(script, judge);
+      const worker = yield* awaitMember(started.workflowId, 1);
+      yield* completeChild(worker.childThreadId!, "The parser takes --x and --y.");
+      const [checker] = yield* awaitCheckers(started.workflowId, 1);
+      yield* stopChild(checker!.childThreadId!);
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({
+        ok: false,
+        verification: { type: "judgment", outcome: "error" },
+      });
+      // A stop is no provider fault: no second checker started beside or after it.
+      const members = yield* membersOf(started.workflowId);
+      expect(members.filter((task) => isChecker(task.prompt))).toHaveLength(1);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a rejected attempt's retry repairs it with the unmet criteria and the reasons", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(script, judge);
+      const first = yield* awaitMember(started.workflowId, 1);
+      yield* completeChild(first.childThreadId!, "The parser takes --x.");
+      const [checker] = yield* awaitCheckers(started.workflowId, 1);
+      yield* completeChild(
+        checker!.childThreadId!,
+        json({ outcome: "failed", reasons: "The --y flag is missing.", failedCriteria: [2] }),
+      );
+      const retry = yield* awaitMember(started.workflowId, 3);
+      expect(retry.prompt).toContain("Criteria it did not meet:\n2. It lists every flag.\n");
+      expect(retry.prompt).toContain("<findings>\nThe --y flag is missing.\n</findings>");
+      expect(retry.prompt).toContain(
+        "<previous-result>\nThe parser takes --x.\n</previous-result>",
+      );
+      expect(retry.prompt).toContain("do not start over");
+      expect(retry.prompt).not.toContain("complete the task again");
     }).pipe(Effect.provide(layerTest)),
   );
 });

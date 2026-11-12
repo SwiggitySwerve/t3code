@@ -19,7 +19,7 @@ import type * as Schema from "effect/Schema";
 import {
   CHECKER_RESULT_FILE_BYTES,
   type CheckOutcome,
-  checkFeedback,
+  repairFeedback,
   type FileRef,
   inputProblem,
   JUDGMENT_RESULT_SCHEMA,
@@ -39,9 +39,14 @@ import {
   judgedResultFits,
   taskOutputAt,
 } from "./workflowHandoff.ts";
-import { MAX_AGENT_ATTEMPTS, MAX_INFRA_RETRIES, workAttempts } from "./workflowLimits.ts";
+import {
+  MAX_AGENT_ATTEMPTS,
+  MAX_CHECK_RERUNS,
+  MAX_INFRA_RETRIES,
+  workAttempts,
+} from "./workflowLimits.ts";
 import { attemptTarget, retryMoveText, type RetryTarget } from "./workflowRetries.ts";
-import type { WaitingAgent } from "./workflowSweep.ts";
+import { STOP_GRACE_MS, type WaitingAgent } from "./workflowSweep.ts";
 import type {
   WorkflowAgentOutcome,
   WorkflowAgentStart,
@@ -55,6 +60,17 @@ import type {
  */
 const DEFAULT_STALL_MS = 20 * 60_000;
 const MIN_STALL_MS = 60_000;
+
+const UNSTOPPED = `Its attempt's work did not stop within ${STOP_GRACE_MS / 1000} s of being stopped, so no further attempt started beside it.`;
+
+/**
+ * Agents that failed on provider faults alone, with their last attempt's work confirmed ended.
+ * Only such a judge's failure is check infrastructure, which running the check again may clear.
+ */
+const providerFaulted = new WeakSet<MutableAgent>();
+
+const UNRETIRED =
+  "Its attempt could not be recorded as replaced, so no further attempt started beside it.";
 
 export const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
@@ -108,6 +124,7 @@ export interface AgentAttemptHost {
     | "readWorkspaceFile"
     | "writeCheckerResult"
     | "removeCheckerResult"
+    | "endAttemptWork"
   >;
   /** Aborts when the workflow is stopped or the server detaches the runner. */
   readonly signal: AbortSignal;
@@ -115,6 +132,13 @@ export interface AgentAttemptHost {
   readonly waiting: Map<string, WaitingAgent>;
   /** Why the runner stopped an attempt: this run's sweep, else what an earlier run recorded. */
   stoppedBy(taskId: string): AttemptStopReason | undefined;
+  /**
+   * Marks an attempt replaced on the workflow's row and waits for the write, so a wake its thread
+   * receives from then on starts nothing.
+   */
+  retireAttempt(taskId: string): Promise<void>;
+  /** Whether the workflow can start one more agent under its cap. */
+  hasAgentRoom(): boolean;
   /** Tokens the workflow's agents have recorded so far. */
   spentTokens(): number;
   markBudgetExhausted(): void;
@@ -286,22 +310,52 @@ export async function runAttempts(
     if (attempt > 0) entry.attempt = attempt;
     entry.state = "running";
     host.scheduleUpdate();
+    // The sweep gives up an attempt whose stop did not end its work; that ends this wait.
+    const abandoned = new AbortController();
     host.waiting.set(started.value.taskId, {
       childThreadId: started.value.childThreadId,
       stallMs: Math.max(MIN_STALL_MS, numberOption(options, "stallTimeoutMs") ?? DEFAULT_STALL_MS),
       ...(attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs }),
+      abandon: () => abandoned.abort(),
     });
     const outcome = await Effect.runPromiseExit(
       host.deps.awaitAgent(host.workflow, started.value.taskId, (current) => {
         if (host.signal.aborted) return;
-        if (TERMINAL_TASK_STATUSES.has(current.status)) host.waiting.delete(started.value.taskId);
+        // Settling facts, with the work ended, are no longer under the attempt's deadline.
+        if (TERMINAL_TASK_STATUSES.has(current.status) && current.workLive !== true)
+          host.waiting.delete(started.value.taskId);
         recordAttempt(current);
         host.scheduleUpdate();
       }),
-      { signal: host.signal },
+      { signal: AbortSignal.any([host.signal, abandoned.signal]) },
     );
     host.waiting.delete(started.value.taskId);
     if (host.signal.aborted) return null;
+    if (abandoned.signal.aborted) {
+      entry.outcomeCategory =
+        host.stoppedBy(started.value.taskId) === "timed_out" ? "timed_out" : "provider_error";
+      settle("failed", UNSTOPPED);
+      return null;
+    }
+    // Before another attempt runs, ends anything this one's thread started after it settled.
+    const endPrevious = async () => {
+      // Retired before the drain reads its work, so no wake can start work the drain misses.
+      const retired = await host.retireAttempt(started.value.taskId).then(
+        () => true,
+        () => false,
+      );
+      if (!retired) {
+        settle("failed", UNRETIRED);
+        return false;
+      }
+      const ended = await Effect.runPromise(
+        host.deps
+          .endAttemptWork(host.workflow, started.value.taskId, started.value.childThreadId)
+          .pipe(Effect.orElseSucceed(() => false)),
+      );
+      if (!ended) settle("failed", UNSTOPPED);
+      return ended;
+    };
     if (Exit.isFailure(outcome)) {
       settle("failed", failureMessage(outcome, "The agent's result could not be read."));
       return null;
@@ -316,10 +370,12 @@ export async function runAttempts(
     if (outcome.value.outcomeCategory !== null)
       entry.outcomeCategory = outcome.value.outcomeCategory;
     const stopReason = host.stoppedBy(started.value.taskId);
-    if (status !== "completed" && stopReason === "timed_out") {
+    // A turn that ended while its commands ran past the deadline completed, but its work did not.
+    if (stopReason === "timed_out") {
       const passed = `passed its time budget of ${attemptTimeoutMs} ms and was stopped`;
       workFailures += 1;
       if (workFailures < allowedWork || (await nextAttemptStarted(attempt))) {
+        if (!(await endPrevious())) return null;
         feedback = `\n\nYour previous attempt ${passed}. Work more directly and finish within the budget.`;
         host.setProgress(`agent "${label}" ${passed}; starting it again${onNextTarget()}.`);
         continue;
@@ -328,19 +384,25 @@ export async function runAttempts(
       settle("failed", `Its last work attempt ${passed}.`);
       return null;
     }
-    if (status !== "completed") {
+    if (status !== "completed" || stopReason === "stalled") {
       const fault =
         status === "failed" ||
+        stopReason === "stalled" ||
         ((status === "cancelled" || status === "interrupted") &&
-          (outcome.value.cancelledByServerRestart || stopReason === "stalled"));
+          outcome.value.cancelledByServerRestart);
       if (fault) infraFaults += 1;
       if (
         fault &&
         ((infraFaults <= MAX_INFRA_RETRIES && attempt + 1 < MAX_AGENT_ATTEMPTS) ||
           (await nextAttemptStarted(attempt)))
       ) {
+        if (!(await endPrevious())) return null;
         host.setProgress(`agent "${label}" ended ${status}; starting it again.`);
         continue;
+      }
+      if (fault) {
+        if (!(await endPrevious())) return null;
+        providerFaulted.add(entry);
       }
       settle("failed", summary ?? `The agent ended ${status}.`);
       return null;
@@ -363,28 +425,47 @@ export async function runAttempts(
     }
     if (check !== undefined && (checked === undefined || checked.outcome === "passed")) {
       checkType = check.type;
-      checked = await runCheck(host, {
-        check,
-        judgmentFor: {
-          agentIndex: entry.index,
-          attempt,
-          ...(entry.graphNodeKey === undefined ? {} : { graphNodeKey: entry.graphNodeKey }),
-        },
-        prompt: request.prompt,
-        label,
-        phase,
-        target,
-        taskId: started.value.taskId,
-        childThreadId: started.value.childThreadId,
-        workerSource: entry.targetSource,
-        judgeSource: input.judgeSource,
-        summary,
-        structuredResult,
-        structuredResultError,
-        files,
-        outputs,
-        isolation: options.isolation,
-      });
+      const runAgentCheck = () =>
+        runCheck(host, {
+          check,
+          judgmentFor: {
+            agentIndex: entry.index,
+            attempt,
+            ...(entry.graphNodeKey === undefined ? {} : { graphNodeKey: entry.graphNodeKey }),
+          },
+          prompt: request.prompt,
+          label,
+          phase,
+          target,
+          taskId: started.value.taskId,
+          childThreadId: started.value.childThreadId,
+          workerSource: entry.targetSource,
+          judgeSource: input.judgeSource,
+          summary,
+          structuredResult,
+          structuredResultError,
+          files,
+          outputs,
+          isolation: options.isolation,
+        });
+      checked = await runAgentCheck();
+      // A check whose own machinery failed said nothing about the work: it runs again, and
+      // uses none of the agent's attempts.
+      for (
+        let rerun = 0;
+        checked.outcome === "error" &&
+        checked.infrastructure === true &&
+        rerun < MAX_CHECK_RERUNS &&
+        // A judge runs again as a new agent; at the cap the check keeps the error it had.
+        (check.type !== "judgment" || host.hasAgentRoom()) &&
+        !host.signal.aborted;
+        rerun += 1
+      ) {
+        host.setProgress(`agent "${label}"'s ${check.type} check could not run; running it again.`);
+        host.scheduleUpdate();
+        checked = await runAgentCheck();
+      }
+      if (host.signal.aborted) return null;
     }
     const returned = (result: unknown) =>
       produced === undefined ? result : { result, outputs: produced };
@@ -411,7 +492,15 @@ export async function runAttempts(
       checked.outcome === "failed" &&
       (workFailures < allowedWork || (await nextAttemptStarted(attempt)))
     ) {
-      feedback = checkFeedback(checkType, checked);
+      if (!(await endPrevious())) return null;
+      feedback = repairFeedback({
+        checkType,
+        outcome: checked,
+        rubric: check?.type === "judgment" ? check.rubric : undefined,
+        previousResult:
+          summary ?? (structuredResult === undefined ? null : JSON.stringify(structuredResult)),
+        sharedCheckout: options.isolation !== "worktree",
+      });
       host.setProgress(
         `agent "${label}" failed its ${checkType} check; starting it again${onNextTarget()}.`,
       );
@@ -502,7 +591,11 @@ async function runCheck(
       { signal: host.signal },
     );
     return Exit.isFailure(ran)
-      ? { outcome: "error", detail: failureMessage(ran, "The check could not run.") }
+      ? {
+          outcome: "error",
+          detail: failureMessage(ran, "The check could not run."),
+          infrastructure: true,
+        }
       : ran.value;
   }
   // An agent of its own, so it is independent of the work it judges and shows in the workflow.
@@ -551,7 +644,13 @@ async function runCheck(
   const outcome: CheckOutcome =
     verdict.entry.state === "completed"
       ? judgmentOutcome(verdict.value)
-      : { outcome: "error", detail: verdict.entry.result ?? "The checker did not finish." };
+      : {
+          outcome: "error",
+          detail: verdict.entry.result ?? "The checker did not finish.",
+          // Only provider faults with their work ended; a judge stopped, abandoned or never
+          // started gives no reason to think another run would answer.
+          ...(providerFaulted.has(verdict.entry) ? { infrastructure: true as const } : {}),
+        };
   verdict.entry.judgmentOutcome = outcome.outcome;
   host.scheduleUpdate();
   return outcome;

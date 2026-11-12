@@ -20,12 +20,14 @@ import {
   OrchestratorMcpTaskWaitResult,
   OrchestratorMcpWorkflowResult,
   type ManagedPolicySummary,
+  type OrchestrationV2PendingBackgroundTask,
   type OrchestrationV2Run,
   type ModelSelection,
   type OrchestrationV2Subagent,
   ProjectId,
   ProviderDriverKind,
   ProviderInstanceId,
+  ProviderThreadId,
   ProviderTurnId,
   type ServerProvider,
   type TurnTokenUsage,
@@ -435,6 +437,81 @@ export const completeChild = (
           payload: { ...run, status: "completed", startedAt: now, completedAt: now, ...runPatch },
         },
       ],
+    });
+  });
+
+/** Sets the background work a child's provider reports still running, as its roster would. */
+export const setBackgroundWork = (
+  childThreadId: ThreadId,
+  tasks: ReadonlyArray<OrchestrationV2PendingBackgroundTask>,
+) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    const sink = yield* EventSink.EventSinkV2;
+    const child = yield* orchestrator.getThreadProjection(childThreadId);
+    const run = child.runs.at(-1)!;
+    const now = yield* DateTime.now;
+    // The provider thread the child's turns ran on, which Stop reads.
+    const providerThreadId =
+      child.thread.activeProviderThreadId ??
+      run.providerThreadId ??
+      ProviderThreadId.make(`provider-thread:test-background:${childThreadId}`);
+    const known = child.providerThreads.find((thread) => thread.id === providerThreadId);
+    yield* sink.write({
+      events: [
+        {
+          id: EventId.make(
+            `event:test-background:${childThreadId}:${tasks.length}:${NodeCrypto.randomUUID()}`,
+          ),
+          type: "provider-thread.updated",
+          threadId: childThreadId,
+          runId: run.id,
+          occurredAt: now,
+          payload:
+            known !== undefined
+              ? { ...known, pendingBackgroundTasks: tasks, updatedAt: now }
+              : {
+                  id: providerThreadId,
+                  driver: adapter.driver,
+                  providerInstanceId: instanceId,
+                  providerSessionId: null,
+                  appThreadId: childThreadId,
+                  ownerNodeId: null,
+                  nativeThreadRef: null,
+                  nativeConversationHeadRef: null,
+                  status: "idle",
+                  firstRunOrdinal: null,
+                  lastRunOrdinal: null,
+                  handoffIds: [],
+                  forkedFrom: null,
+                  pendingBackgroundTasks: tasks,
+                  createdAt: now,
+                  updatedAt: now,
+                },
+        },
+      ],
+    });
+  });
+
+/** Wakes a child as its provider does when a background command it started ends. */
+export const wakeChild = (childThreadId: ThreadId, label: string) =>
+  Effect.gen(function* () {
+    const orchestrator = yield* Orchestrator.OrchestratorV2;
+    yield* orchestrator.dispatch({
+      type: "message.dispatch",
+      createdBy: "agent",
+      creationSource: "provider",
+      commandId: CommandId.make(`command:test-wake:${label}`),
+      threadId: childThreadId,
+      messageId: MessageId.make(`message:test-wake:${label}`),
+      text: "Background activity updated",
+      notification: {
+        source: { kind: "command" },
+        outcome: "completed",
+        summary: `Command "${label}" finished`,
+      },
+      attachments: [],
+      dispatchMode: { type: "queue_after_active" },
     });
   });
 

@@ -965,6 +965,8 @@ export const OrchestrationV2WorkflowAgent = Schema.Struct({
         speed: Schema.optional(Schema.Literals(["standard", "fast", "ultrafast"])),
         /** Why the runner stopped it, so a resumed run retries it as the stopping run would. */
         stoppedBy: Schema.optional(Schema.Literals(["stalled", "timed_out"])),
+        /** A later attempt replaced it; from then on its thread's wakes start nothing. */
+        superseded: Schema.optional(Schema.Boolean),
         totalTokens: Schema.optional(NonNegativeInt),
         usageStatus: Schema.Literals(["complete", "partial", "unavailable"]),
         durationMs: Schema.optional(NonNegativeInt),

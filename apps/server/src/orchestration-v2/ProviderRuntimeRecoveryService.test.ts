@@ -24,6 +24,7 @@ import * as IdAllocator from "@t3tools/provider-core/server/IdAllocator";
 import * as ProjectionStore from "./ProjectionStore.ts";
 import * as ProviderRuntimeRecovery from "./ProviderRuntimeRecoveryService.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { runOutcome } from "./RestartBackgroundNote.ts";
 
 it.effect("expires orphaned runtime requests before command readiness", () => {
   const threadId = ThreadId.make("thread_recovery_requests");
@@ -354,6 +355,93 @@ it.effect(
           kinds: entry.restartCancelledBackgroundWork.map((work) => work.kind),
         })),
         [{ runId: claudeRunId, kinds: ["subagent", "task"] }],
+      );
+    }).pipe(Effect.provide(layer));
+  },
+);
+
+it.effect.each([
+  { member: true, outcome: "interrupted" },
+  { member: false, outcome: "completed" },
+] as const)(
+  "counts a lost command as cut-short work only on a workflow member (member=$member)",
+  ({ member, outcome }) => {
+    const threadId = ThreadId.make("thread_workflow_member_restart");
+    const runId = RunId.make("run_workflow_member_restart");
+    const providerThreadId = ProviderThreadId.make("provider_thread_workflow_member_restart");
+    const claude = ProviderInstanceId.make("claude");
+    let committedInput: Parameters<EventSink.EventSinkV2["Service"]["commitCommand"]>[0] | null =
+      null;
+    const projection = {
+      thread: {
+        id: threadId,
+        lineage: member ? { workflowId: NodeId.make("workflow:restart") } : {},
+      },
+      runtimeRequests: [],
+      providerSessions: [],
+      providerThreads: [
+        {
+          id: providerThreadId,
+          ownerNodeId: null,
+          driver: ProviderDriverKind.make("claudeAgent"),
+          providerInstanceId: claude,
+          status: "idle",
+          pendingBackgroundTasks: [{ taskId: "tests", kind: "command", description: "vp test" }],
+        },
+      ],
+      providerTurns: [],
+      runs: [
+        {
+          id: runId,
+          ordinal: 1,
+          status: "completed",
+          providerInstanceId: claude,
+          providerThreadId,
+        },
+      ],
+      attempts: [],
+      nodes: [],
+      subagents: [],
+      messages: [],
+      turnItems: [],
+    } as unknown as OrchestrationV2ThreadProjection;
+    const layer = ProviderRuntimeRecovery.layer.pipe(
+      Layer.provide(ServerSettings.layerTest()),
+      Layer.provide(
+        Layer.mergeAll(
+          Layer.mock(ProjectionStore.ProjectionStoreV2)({
+            getRecoveryThreadIds: () => Effect.succeed([threadId]),
+            getRuntimeRecoveryProjection: () => Effect.succeed(projection),
+          }),
+          Layer.mock(EventSink.EventSinkV2)({
+            commitCommand: (input) => {
+              committedInput = input;
+              return Effect.succeed({ committed: true, cancelledEffectCount: 0 } as never);
+            },
+          }),
+          IdAllocator.layer,
+          Layer.mock(EffectWorker.OrchestrationEffectWorkerV2)({
+            runRecoveryOnce: Effect.succeed(false),
+          }),
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            reconcileAfterProcessLoss: Effect.succeed({ requeued: 0, cancelled: 0 }),
+          }),
+        ),
+      ),
+    );
+    return Effect.gen(function* () {
+      yield* (yield* ProviderRuntimeRecovery.ProviderRuntimeRecoveryService).reconcile("startup");
+      const recorded = (committedInput?.events ?? []).flatMap((event) =>
+        event.type === "run.background-work-cancelled" ? [event.payload] : [],
+      );
+      assert.lengthOf(recorded, 1);
+      // A workflow member's command held its attempt, so losing it cuts that attempt short.
+      assert.strictEqual(
+        runOutcome({
+          status: "completed",
+          restartCancelledBackgroundWork: recorded[0]!.restartCancelledBackgroundWork,
+        }),
+        outcome,
       );
     }).pipe(Effect.provide(layer));
   },
