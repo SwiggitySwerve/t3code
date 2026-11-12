@@ -390,6 +390,7 @@ class WorkflowSession {
       waiting: this.waiting,
       stoppedBy: (taskId) => this.stops.get(taskId) ?? this.earlierStops.get(taskId),
       retireAttempt: (taskId) => this.retireAttempt(taskId),
+      hasAgentRoom: () => this.agents.length < MAX_AGENTS_PER_WORKFLOW,
       spentTokens: () => this.recordedUsage().spent ?? 0,
       markBudgetExhausted: () => {
         this.budgetExhausted = true;

@@ -1235,6 +1235,29 @@ describe("workflow runner", () => {
       expect(worker?.runnerSettledAt).toBeDefined();
     }),
   );
+  it.effect("does not run a provider-faulted judge again at the agent cap", () =>
+    Effect.gen(function* () {
+      // The worker is the 999th agent and its judge the 1000th; every try of the judge fails.
+      const { runner, completed, workflowUpdates } = yield* makeHarness({
+        finish: (spawned) => (spawned >= 1000 ? "failed" : "completed"),
+      });
+      yield* launch(
+        runner,
+        'for (let i = 0; i < 998; i++) await agent("a" + i); return await agent("judged", { verify: { type: "judgment", rubric: ["Correct"] }, report: true })',
+      );
+      const report = JSON.parse(yield* Deferred.await(completed));
+      const agents = workflowUpdates.at(-1)!.agents;
+      // The cap holds, and the check keeps the error its judge ended with, as without re-runs.
+      expect(agents).toHaveLength(1000);
+      expect(agents.filter((agent) => agent.judgmentFor !== undefined)).toHaveLength(1);
+      expect(report).toMatchObject({
+        ok: false,
+        verification: { type: "judgment", outcome: "error", attempts: 1 },
+      });
+      expect(report.verification.detail).not.toContain("reached its limit");
+      expect(agents.at(-2)).toMatchObject({ state: "failed", outcomeCategory: "check_failed" });
+    }),
+  );
   it.effect("refuses the agent past the per-workflow limit of 1000", () =>
     Effect.gen(function* () {
       const { runner, completed, spawned } = yield* makeHarness();

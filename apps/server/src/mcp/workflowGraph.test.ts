@@ -547,10 +547,9 @@ describe("graph review write conflicts", () => {
 describe("graph capacity", () => {
   // A workflow starts at most this many agents (workflowRunner.test.ts pins the runner's side).
   const CAPACITY = 1000;
-  // A judgment check adds a judge for each of the two work attempts at its node, and each judge
-  // can run twice more after provider faults.
-  const JUDGES_PER_ATTEMPT = 3;
-  const JUDGES_PER_NODE = 2 * JUDGES_PER_ATTEMPT;
+  // A judgment check adds a judge agent for each of the two work attempts at its node; a judge's
+  // re-runs are not reserved, since they start only while the workflow has room.
+  const JUDGES_PER_NODE = 2;
   const many = (count: number, make: (index: number) => unknown = () => node()) =>
     Object.fromEntries(Array.from({ length: count }, (_, index) => [`n${index}`, make(index)]));
   const judged = () => node({ verify: { type: "judgment", rubric: ["Correct"] } });
@@ -600,7 +599,7 @@ describe("graph capacity", () => {
     expect(reviewed.layers).toEqual([]);
     // The same count of nodes without judges is well within capacity.
     expect(reviewGraph(graph(many(fits + 1)), {}).blockers).toEqual([]);
-    // Each declared retry target is one more work attempt, and so one more judge and its re-runs.
+    // Each declared retry target is one more work attempt, and so one more judge.
     const laddered = () =>
       node({
         verify: { type: "judgment", rubric: ["Correct"] },
@@ -609,11 +608,22 @@ describe("graph capacity", () => {
           { providerInstanceId: "codex", model: "gpt-5.5" },
         ],
       });
-    const ladderFits = Math.floor(CAPACITY / (perNode + JUDGES_PER_ATTEMPT));
+    const ladderFits = Math.floor(CAPACITY / (perNode + 1));
     expect(reviewGraph(graph(many(ladderFits, laddered)), {}).blockers).toEqual([]);
     expect(reviewGraph(graph(many(ladderFits + 1, laddered)), {}).blockers[0]).toContain(
-      String((ladderFits + 1) * (perNode + JUDGES_PER_ATTEMPT)),
+      String((ladderFits + 1) * (perNode + 1)),
     );
+  });
+
+  it("passes a 256-node graph whose judged nodes each have one retry", () => {
+    const retried = () =>
+      node({
+        verify: { type: "judgment", rubric: ["Correct"] },
+        retries: [{ providerInstanceId: "codex", model: "gpt-5.4" }],
+      });
+    const reviewed = reviewGraph(graph(many(256, retried)), {});
+    expect(reviewed.blockers).toEqual([]);
+    expect(reviewed.digest).not.toBeNull();
   });
 
   it("does not count process or structured checks as extra agents", () => {

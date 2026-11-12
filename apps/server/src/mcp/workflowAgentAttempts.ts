@@ -134,6 +134,8 @@ export interface AgentAttemptHost {
    * receives from then on starts nothing.
    */
   retireAttempt(taskId: string): Promise<void>;
+  /** Whether the workflow can start one more agent under its cap. */
+  hasAgentRoom(): boolean;
   /** Tokens the workflow's agents have recorded so far. */
   spentTokens(): number;
   markBudgetExhausted(): void;
@@ -444,6 +446,8 @@ export async function runAttempts(
         checked.outcome === "error" &&
         checked.infrastructure === true &&
         rerun < MAX_CHECK_RERUNS &&
+        // A judge runs again as a new agent; at the cap the check keeps the error it had.
+        (check.type !== "judgment" || host.hasAgentRoom()) &&
         !host.signal.aborted;
         rerun += 1
       ) {

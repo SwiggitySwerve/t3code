@@ -380,7 +380,7 @@ export function parseGraph(value: unknown): ParseResult {
       ok: false,
       problems: [
         ...problems,
-        `graph can start up to ${agentsNeeded} agents (each node, plus up to three judges for each work attempt of a judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
+        `graph can start up to ${agentsNeeded} agents (each node, plus a judge for each work attempt of a judgment check), but a workflow runs at most ${MAX_AGENTS_PER_WORKFLOW}.`,
       ],
     };
   const paths = new Map<string, string>();
