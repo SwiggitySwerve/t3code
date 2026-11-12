@@ -177,6 +177,12 @@ describe("isWorkflowReviewItem and latestWorkflowReviewItemId", () => {
       ]),
     ).toBe("new");
     expect(latestWorkflowReviewItemId([])).toBe(null);
+    expect(
+      latestWorkflowReviewItemId([
+        reviewItem({ decision: "awaiting" }, "ready", later(0)),
+        reviewItem({ ready: false }, "blocked", later(30)),
+      ]),
+    ).toBe("ready");
   });
 });
 
@@ -210,8 +216,8 @@ describe("runWorkflowReviewDecision", () => {
     await runWorkflowReviewDecision(registry, { key, action: "approve", send });
     await first;
     await runWorkflowReviewDecision(registry, { key, action: "dismiss", send });
-    expect(sent).toBe(1);
-    expect(stateOf(registry)).toEqual({ _tag: "settled", action: "approve" });
+    expect(sent).toBe(2);
+    expect(stateOf(registry)).toEqual({ _tag: "settled", action: "dismiss" });
   });
 
   it("allows another try after a failure that does not say the review is gone", async () => {
@@ -246,6 +252,27 @@ describe("runWorkflowReviewDecision", () => {
     });
     await runWorkflowReviewDecision(registry, { key, action: "dismiss", send });
     expect(sent).toBe(1);
+  });
+
+  it("marks a superseded review as replaced even before the newer record reaches this client", async () => {
+    const registry = AtomRegistry.make();
+    await runWorkflowReviewDecision(registry, {
+      key,
+      action: "approve",
+      send: async () => failure(approvalError("review-superseded")),
+    });
+    const presentation = presentWorkflowReview({
+      review: reviewOf(),
+      decision: stateOf(registry),
+      canDecide: true,
+      superseded: false,
+      local: true,
+    });
+    expect(presentation).toMatchObject({
+      status: "superseded",
+      approve: { visible: false },
+      note: { text: "A newer plan replaced this review. Approve the newer plan." },
+    });
   });
 
   it("refuses Approve again after the server reported blockers, but still lets the person dismiss", async () => {
@@ -314,10 +341,33 @@ describe("presentWorkflowReview", () => {
     });
   });
 
+  it("shows held approval with Dismiss, then restores approval after planning failed", () => {
+    const held = present({ review: reviewOf({ decision: "approved", decisionRevision: 1 }) });
+    expect(held).toMatchObject({
+      status: "approved",
+      note: { text: "Approved. Starts when planning finishes." },
+      approve: { visible: false },
+      dismiss: { visible: true, enabled: true },
+    });
+    const reset = present({
+      review: reviewOf({ decision: "awaiting", decisionRevision: 2, notStartedReason: "failed" }),
+    });
+    expect(reset).toMatchObject({
+      status: "ready",
+      approve: { enabled: true },
+      note: { text: "Planning failed before this started. Approve again to run it." },
+    });
+    expect(
+      workflowReviewDecisionKey(EnvironmentId.make("env"), ThreadId.make("thread"), "review", 1),
+    ).not.toBe(
+      workflowReviewDecisionKey(EnvironmentId.make("env"), ThreadId.make("thread"), "review", 2),
+    );
+  });
+
   it("disables both buttons while a decision is pending, and names it", () => {
     expect(present({ decision: { _tag: "pending", action: "approve" } })).toMatchObject({
       status: "approving",
-      approve: { visible: true, enabled: false, label: "Approving\u2026" },
+      approve: { visible: true, enabled: false, label: "Starting\u2026" },
       dismiss: { visible: true, enabled: false },
     });
     expect(present({ decision: { _tag: "pending", action: "dismiss" } })).toMatchObject({

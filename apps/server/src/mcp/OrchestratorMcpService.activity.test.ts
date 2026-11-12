@@ -1,3 +1,4 @@
+import * as Stream from "effect/Stream";
 import {
   EnvironmentId,
   NodeId,
@@ -159,6 +160,7 @@ it("readThread preserves caller access errors and prefers activity-run status ov
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
           getThreadRecords: (threadId) =>
             callerUnavailable
@@ -260,6 +262,7 @@ it("readThread pages cut-off text without splitting an emoji across pages", asyn
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
           getTimelinePage: () =>
             Effect.succeed({
               items: [row] as unknown as OrchestrationV2ThreadProjection["visibleTurnItems"],
@@ -401,6 +404,7 @@ it("taskStatus returns task.providerInstanceId rather than the driver kind", asy
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
           getTimelinePage: () => Effect.succeed({ items: [], totalItems: 0, hasMore: false }),
           getThreadRecords: (threadId) => {
             if (threadId === parentThreadId) return Effect.succeed(parentProjection);
@@ -506,6 +510,7 @@ it("readThread and sendToThread reach threads in other projects", async () => {
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
           getThreadRecords: (threadId) => {
             if (threadId === parentThreadId) return Effect.succeed(parentProjection);
             if (threadId === foreignThreadId) return Effect.succeed(foreignProjection(threadId));
@@ -710,6 +715,7 @@ it("requestSecret saves a pasted value to a file without opening a card", async 
     Layer.provide(
       Layer.mergeAll(
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
           getThreadRecords: (threadId) =>
             threadId === parentThreadId
               ? Effect.succeed(projection)
@@ -825,6 +831,7 @@ it("requestSecret returns the unsaved note for a declined, cancelled or timed-ou
       Layer.provide(
         Layer.mergeAll(
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            streamWorkflowStarts: Stream.empty,
             getThreadRecords: () => Effect.sync(projection),
             getThreadShell: () =>
               Effect.sync(() => projection().thread as unknown as OrchestrationV2ThreadShell),

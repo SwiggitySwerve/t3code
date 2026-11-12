@@ -156,6 +156,10 @@ function capCheckpointItemFiles(item: OrchestrationV2TurnItem): OrchestrationV2T
 
 export function projectTurnItemForWire(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
+    case "workflow_review": {
+      const { launch: _launch, ...projected } = item;
+      return projected;
+    }
     case "checkpoint":
       return capCheckpointFiles(item);
     case "handoff": {
@@ -243,6 +247,8 @@ function boundToolOutput(output: unknown): unknown {
 
 export function projectTurnItemForDetail(item: OrchestrationV2TurnItem): OrchestrationV2TurnItem {
   switch (item.type) {
+    case "workflow_review":
+      return projectTurnItemForWire(item);
     case "command_execution":
       return {
         ...item,

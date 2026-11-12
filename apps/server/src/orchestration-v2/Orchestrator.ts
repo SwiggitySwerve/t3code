@@ -101,6 +101,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 
 import * as ProjectStore from "./ProjectStore.ts";
+import { makeWorkflowReviewCommands } from "./workflowReviewCommands.ts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -520,6 +521,7 @@ export interface OrchestratorV2Shape {
     threadId: ThreadId,
   ) => Effect.Effect<number, OrchestratorV2Error>;
   readonly streamStoredEvents: Stream.Stream<OrchestrationV2StoredEvent, OrchestratorV2Error>;
+  readonly streamWorkflowStarts: Stream.Stream<OrchestrationV2StoredEvent, OrchestratorV2Error>;
   /** Events arrive projected for the wire and shared by every subscriber; never mutate them. */
   readonly streamStoredEventsFrom: (input?: {
     readonly threadId?: ThreadId;
@@ -673,6 +675,8 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "secret_request.record":
     case "link_request.record":
     case "workflow.review.record":
+    case "workflow.review.decide":
+    case "workflow.review.settle":
     case "workflow.start":
     case "workflow.update":
     case "workflow.complete":
@@ -9242,13 +9246,14 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   const dispatchWorkflowStart = Effect.fn("Orchestrator.dispatchWorkflowStart")(function* (
     command: Extract<WorkflowCommand, { readonly type: "workflow.start" }>,
     events: Ref.Ref<Array<OrchestrationV2DomainEvent>>,
+    reviewedRun = false,
   ) {
     const projection = yield* loadWorkflowProjection(command);
     const run = projection.runs.find((candidate) => candidate.id === command.runId);
-    if (run === undefined || !isActiveRun(run) || run.rootNodeId === null) {
+    if (run === undefined || (!reviewedRun && !isActiveRun(run)) || run.rootNodeId === null) {
       return yield* workflowDispatchError(command, `Run ${command.runId} is not active.`);
     }
-    if (yield* stopReachedRun(command, command.threadId, run.id)) {
+    if (!reviewedRun && (yield* stopReachedRun(command, command.threadId, run.id))) {
       return yield* workflowDispatchError(command, `Run ${command.runId} is stopping.`);
     }
     if (projection.subagents.some((candidate) => candidate.id === command.workflowId)) {
@@ -9337,6 +9342,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* emitEvent({ ...scope, type: "node.updated", occurredAt: now, payload: node });
     yield* emitEvent({ ...scope, type: "subagent.updated", occurredAt: now, payload: task });
     yield* emitEvent({ ...scope, type: "turn-item.updated", occurredAt: now, payload: turnItem });
+  });
+
+  const workflowReviews = makeWorkflowReviewCommands<OrchestratorV2Error>({
+    projections: projectionStore,
+    settings: serverSettings,
+    emit: (command, events, item) =>
+      emit(
+        events,
+        command,
+      )({
+        type: "turn-item.updated",
+        threadId: item.threadId,
+        ...(item.runId === null ? {} : { runId: item.runId }),
+        ...(item.nodeId === null ? {} : { nodeId: item.nodeId }),
+        occurredAt: item.updatedAt,
+        payload: item,
+      }).pipe(Effect.asVoid),
+    start: (command, events) => dispatchWorkflowStart(command, events, true),
   });
 
   const dispatchWorkflowUpdate = Effect.fn("Orchestrator.dispatchWorkflowUpdate")(function* (
@@ -10439,6 +10462,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...command.review,
       };
+      yield* workflowReviews.supersede(command, events, turnItem, projection.turnItems);
       yield* emit(
         events,
         command,
@@ -14979,6 +15003,12 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "workflow.review.record":
         yield* dispatchWorkflowReviewRecord(command, events);
         break;
+      case "workflow.review.decide":
+        yield* workflowReviews.decide(command, events).pipe(mapDispatchError(command));
+        break;
+      case "workflow.review.settle":
+        yield* workflowReviews.settle(command, events).pipe(mapDispatchError(command));
+        break;
       case "workflow.start":
         yield* dispatchWorkflowStart(command, events);
         break;
@@ -14993,6 +15023,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         break;
       default:
         return yield* dispatchUnsupported(command);
+    }
+    if (command.type === "thread.stop" || command.type === "run.interrupt") {
+      yield* workflowReviews.stop(command, events).pipe(mapDispatchError(command));
     }
     return {
       events: yield* Ref.get(events),
@@ -15099,6 +15132,8 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.background-work.settle" ||
           command.type === "thread.interrupt.unresponsive" ||
           command.type === "thread.stop" ||
+          command.type === "workflow.review.decide" ||
+          command.type === "workflow.review.settle" ||
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close" ||
@@ -15469,6 +15504,33 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // while writing child events, so nesting parent inside child would invert the order.
       // The keyed semaphores are neither reentrant nor deadlock-aware.
       if (delegatedTaskTerminalStatus(run.status) !== null) {
+        if (run.delegatedTaskId === undefined) {
+          const { turnItems } = yield* projectionStore.getThreadRecords(threadId, ["turnItems"], {
+            turnItemTypes: ["workflow_review"],
+          });
+          if (
+            turnItems.some(
+              (item) =>
+                item.type === "workflow_review" &&
+                item.decision === "approved" &&
+                item.approvalRunId === run.id,
+            )
+          ) {
+            yield* threadDispatch.withLock(
+              threadId,
+              dispatchWithReceiptEffect({
+                type: "workflow.review.settle",
+                threadId,
+                runId: run.id,
+                commandId: CommandId.make(
+                  `command:workflow-review-settle:${run.id}:${stored.sequence}`,
+                ),
+              }),
+            );
+          }
+        }
+        // Recovery may interrupt planning. Clear its held approval without replaying queue effects.
+        if (String(stored.commandId).startsWith("command:runtime-reconcile:")) return;
         // Before the parent hears of the failure: a pending continuation keeps the task open.
         if (run.status === "failed" && run.restartContinuationOfRunId !== undefined) {
           yield* threadDispatch.withLock(threadId, retryContinuationStart(threadId, run.id)).pipe(
@@ -15544,7 +15606,6 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Stream.filter(
         (stored) =>
           stored.event.type === "run.updated" &&
-          !String(stored.commandId).startsWith("command:runtime-reconcile:") &&
           ((stored.event.payload.delegatedTaskId !== undefined &&
             (stored.event.payload.status === "queued" ||
               stored.event.payload.status === "starting")) ||
@@ -16101,6 +16162,17 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
       ),
     ),
+    streamWorkflowStarts: eventSink
+      .stream({ afterSequence: terminalEventsAfterSequence, eventType: "subagent.updated" })
+      .pipe(
+        Stream.filter(
+          (stored) =>
+            stored.event.type === "subagent.updated" &&
+            stored.event.payload.id.startsWith("workflow:approval:") &&
+            stored.event.payload.status === "running",
+        ),
+        Stream.mapError((cause) => new OrchestratorDomainEventStreamError({ cause })),
+      ),
     streamStoredEventsFrom: (input) =>
       eventSink.stream({ ...input, bounded: true }).pipe(
         Stream.mapError(

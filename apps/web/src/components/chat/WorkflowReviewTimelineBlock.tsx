@@ -46,10 +46,22 @@ export function WorkflowReviewTimelineBlock(props: {
     environmentThreadDetails.threadAtom(scopeThreadRef(environmentId, item.threadId)),
     (thread) => (thread === null ? null : latestWorkflowReviewItemId(thread.projection.turnItems)),
   );
-  const decisionKey = workflowReviewDecisionKey(environmentId, item.threadId, review.reviewId);
+  const decisionKey = workflowReviewDecisionKey(
+    environmentId,
+    item.threadId,
+    review.reviewId,
+    review.decisionRevision,
+  );
   const decision = useAtomValue(workflowReviewDecisionAtom(decisionKey));
   const decide = (action: "approve" | "dismiss") => {
-    const base = { environmentId, threadId: item.threadId, reviewId: review.reviewId };
+    const base = {
+      environmentId,
+      threadId: item.threadId,
+      reviewId: review.reviewId,
+      ...(review.decisionRevision === undefined
+        ? {}
+        : { decisionRevision: review.decisionRevision }),
+    };
     const digest = review.digest;
     if (action === "approve" && digest === null) return;
     void runWorkflowReviewDecision(registry, {

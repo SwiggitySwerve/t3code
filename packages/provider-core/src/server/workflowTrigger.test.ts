@@ -79,7 +79,7 @@ describe("applyTurnTriggers", () => {
   it("plans first and does not tell the agent to start a script", () => {
     const note = workflowTurnNote();
     expect(note).toContain("graph_review");
-    expect(note).toContain("do not call graph_start or workflow_start before that");
+    expect(note).toContain("do not call graph_start or workflow_start");
   });
 
   it("leaves untargeted agents to T3's defaults and asks for a cross-family check", () => {

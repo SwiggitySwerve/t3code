@@ -1,3 +1,4 @@
+import { workflowReviewFixtureRecord } from "@t3tools/shared/testing/workflowReviewFixture";
 import { PullRequestProviderError } from "@t3tools/source-control-core/server/PullRequestProvider";
 import { SourceControlProviderKind } from "@t3tools/contracts";
 import { limitRecoveryCommand } from "./UsageLimitRecoveryWorker.ts";
@@ -10559,6 +10560,28 @@ it.layer(layerWorkflowTurnTest)("workflow approval in the runtime composition", 
       Effect.map((error) => error.reason),
     );
 
+  const recordReview = (threadId: ThreadId, reviewId: string) =>
+    Effect.gen(function* () {
+      const orchestrator = yield* Orchestrator.OrchestratorV2;
+      const run = (yield* orchestrator.getThreadProjection(threadId)).runs.at(-1)!;
+      yield* orchestrator.dispatch({
+        type: "workflow.review.record",
+        commandId: CommandId.make(`${threadId}:${reviewId}:record`),
+        threadId,
+        runId: run.id,
+        nodeId: run.rootNodeId!,
+        turnItemId: TurnItemId.make(`${threadId}:${reviewId}`),
+        review: workflowReviewFixtureRecord({
+          reviewId,
+          digest,
+          approvalRequest: { environmentId, messageId: MessageId.make(`${threadId}:ask`) },
+          decision: "awaiting",
+          decisionRevision: 0,
+          launch: { title: "Plan", script: "return null" },
+        }),
+      });
+    });
+
   it.effect("a workflow request through turn start refuses every consumer of the shared gate", () =>
     Effect.gen(function* () {
       const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
@@ -10589,22 +10612,28 @@ it.layer(layerWorkflowTurnTest)("workflow approval in the runtime composition", 
         }),
         { approvalRequired: true },
       );
+      yield* recordReview(threadId, "review:1");
       yield* approvals.approve({ environmentId, threadId, reviewId: "review:1", digest });
       const orchestrator = yield* Orchestrator.OrchestratorV2;
-      const sent = (yield* orchestrator.getThreadProjection(threadId)).messages.filter(
-        (message) => message.creationSource === "server",
+      const projection = yield* orchestrator.getThreadProjection(threadId);
+      assert.lengthOf(
+        projection.messages.filter((message) => message.creationSource === "server"),
+        0,
       );
-      assert.lengthOf(sent, 1);
-      assert.include(sent[0]!.text, digest);
+      assert.equal(yield* gate.awaitsDecision(threadId), false);
       assert.equal(
-        yield* gate.guardGraphStart({ threadId, digest }, (key) => Effect.succeed(key)),
-        `approval:${threadId}:${MessageId.make(`${threadId}:ask`)}:${digest}`,
+        yield* refusal(gate.guardGraphStart({ threadId, digest }, () => Effect.void)),
+        "needs-approval",
+      );
+      assert.equal(
+        projection.turnItems.find((item) => item.type === "workflow_review")?.type,
+        "workflow_review",
       );
     }),
   );
 
   it.effect.each(["approve", "dismiss"] as const)(
-    "retries a rejected workflow %s notification without duplicating its message",
+    "retries a rejected workflow %s decision without duplicating it",
     (decision) =>
       Effect.gen(function* () {
         const threadId = ThreadId.make(`runtime-layer-workflow-retry-${decision}`);
@@ -10618,6 +10647,7 @@ it.layer(layerWorkflowTurnTest)("workflow approval in the runtime composition", 
           digest,
           ready: true,
         });
+        yield* recordReview(threadId, "review:retry");
         const threads = yield* ThreadManagementService.ThreadManagementService;
         const sink = yield* EventSink.EventSinkV2;
         const orchestrator = yield* Orchestrator.OrchestratorV2;
@@ -10657,7 +10687,13 @@ it.layer(layerWorkflowTurnTest)("workflow approval in the runtime composition", 
             ),
           ),
         );
-        const input = { environmentId, threadId, reviewId: "review:retry", digest };
+        const input = {
+          environmentId,
+          threadId,
+          reviewId: "review:retry",
+          digest,
+          decisionRevision: 0,
+        };
         const click = () =>
           decision === "approve" ? approvals.approve(input) : approvals.dismiss(input);
         const first = yield* click().pipe(Effect.result);
@@ -10667,15 +10703,18 @@ it.layer(layerWorkflowTurnTest)("workflow approval in the runtime composition", 
         yield* click();
         const delivered = yield* orchestrator.getThreadProjection(threadId);
         const sent = delivered.messages.filter((message) => message.creationSource === "server");
-        assert.lengthOf(sent, 1);
+        assert.lengthOf(sent, 0);
         assert.equal(commandIds[0], commandIds[1]);
         assert.equal(commandIds[2], CommandId.make(`${commandIds[0]}:retry:1`));
         // Later clicks walk the same ids and are answered by the accepted receipt.
         yield* Effect.all([click(), click()], { concurrency: "unbounded" });
         const repeated = yield* orchestrator.getThreadProjection(threadId);
         const resent = repeated.messages.filter((message) => message.creationSource === "server");
-        assert.lengthOf(resent, 1);
-        assert.equal(resent[0]!.id, sent[0]!.id);
+        assert.lengthOf(resent, 0);
+        assert.equal(
+          repeated.turnItems.filter((item) => item.type === "workflow_review").length,
+          1,
+        );
         assert.lengthOf(repeated.runs, delivered.runs.length);
         assert.deepEqual(new Set(commandIds), new Set(commandIds.slice(0, 3)));
       }),

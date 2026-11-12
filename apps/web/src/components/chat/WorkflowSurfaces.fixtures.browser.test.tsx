@@ -493,7 +493,7 @@ describe("workflow fixture rows", () => {
       // Approval styling depends on fixture state, not the route.
       router: false,
     });
-    const button = approving.getByRole("button", { name: /^Approving/ }).element();
+    const button = approving.getByRole("button", { name: /^Starting/ }).element();
     // Busy it is outlined, not a filled primary button faded to white on pale blue.
     expect(getComputedStyle(button).backgroundColor).not.toBe(idle);
   });

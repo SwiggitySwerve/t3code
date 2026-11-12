@@ -29,6 +29,7 @@ import { orchestrationEnvironment } from "../../state/orchestration";
 import { serverEnvironment, providersIgnoringCheckedAtAtom } from "../../state/server";
 import { environmentThreadDetails } from "../../state/threads";
 import { MessagesTimeline } from "./MessagesTimeline";
+import { WorkflowReviewTimelineBlock } from "./WorkflowReviewTimelineBlock";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const THREAD_ID = ThreadId.make("thread-review");
@@ -254,6 +255,53 @@ const failure = (error: unknown) => AsyncResult.failure<void, unknown>(Cause.fai
 const approvalError = (reviewId: string, reason: OrchestrationV2WorkflowApprovalError["reason"]) =>
   new OrchestrationV2WorkflowApprovalError({ threadId: THREAD_ID, reviewId, reason });
 
+it("holds approval with Dismiss available, then permits one fresh approval after planning was stopped", async () => {
+  resetApp();
+  const initial = reviewItem("review-held", 3, { decision: "awaiting", decisionRevision: 0 });
+  await using screen = await render(
+    <WorkflowReviewTimelineBlock environmentId={ENVIRONMENT_ID} projectedItem={initial} />,
+  );
+  await click(button(screen.container, "Approve & run"));
+  const held = reviewItem("review-held", 3, { decision: "approved", decisionRevision: 1 });
+  await screen.rerender(
+    <WorkflowReviewTimelineBlock environmentId={ENVIRONMENT_ID} projectedItem={held} />,
+  );
+  await vi.waitFor(() =>
+    expect(screen.container.textContent).toContain("Approved. Starts when planning finishes."),
+  );
+  expect(button(screen.container, "Dismiss").disabled).toBe(false);
+  const reset = reviewItem("review-held", 3, {
+    decision: "awaiting",
+    decisionRevision: 2,
+    notStartedReason: "stopped",
+  });
+  await screen.rerender(
+    <WorkflowReviewTimelineBlock environmentId={ENVIRONMENT_ID} projectedItem={reset} />,
+  );
+  await vi.waitFor(() =>
+    expect(screen.container.textContent).toContain(
+      "Planning was stopped before this started. Approve again to run it.",
+    ),
+  );
+  expect(button(screen.container, "Approve & run").disabled).toBe(false);
+  await click(button(screen.container, "Approve & run"));
+  expect(app.approve).toHaveBeenLastCalledWith(
+    expect.objectContaining({ input: expect.objectContaining({ decisionRevision: 2 }) }),
+  );
+});
+
+it("allows withdrawing a held approval before launch", async () => {
+  resetApp();
+  const held = reviewItem("review-withdraw", 3, { decision: "approved", decisionRevision: 1 });
+  await using screen = await render(
+    <WorkflowReviewTimelineBlock environmentId={ENVIRONMENT_ID} projectedItem={held} />,
+  );
+  await click(button(screen.container, "Dismiss"));
+  expect(app.dismiss).toHaveBeenCalledWith(
+    expect.objectContaining({ input: expect.objectContaining({ decisionRevision: 1 }) }),
+  );
+});
+
 describe("workflow review card in the chat timeline", () => {
   it("keeps an existing chat's workflow approval available after workflows are turned off", async () => {
     resetApp();
@@ -331,13 +379,13 @@ describe("workflow review card in the chat timeline", () => {
       },
     });
     expect(card(screen.container)!.dataset.workflowReviewStatus).toBe("approving");
-    expect(button(screen.container, "Approving").disabled).toBe(true);
+    expect(button(screen.container, "Starting").disabled).toBe(true);
     expect(button(screen.container, "Dismiss").disabled).toBe(true);
     await act(async () => answer(AsyncResult.success<void, unknown>(undefined)));
     await vi.waitFor(() =>
       expect(card(screen.container)!.dataset.workflowReviewStatus).toBe("approved"),
     );
-    expect(card(screen.container)!.textContent).toContain("The agent is starting this workflow.");
+    expect(card(screen.container)!.textContent).toContain("Starting workflow\u2026");
     expect(card(screen.container)!.querySelector("button")).toBeNull();
     expect(app.dismiss).not.toHaveBeenCalled();
   });

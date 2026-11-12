@@ -880,12 +880,6 @@ function canExposeTaskRunResult(run: OrchestrationV2Run | undefined): run is Orc
   );
 }
 
-/**
- * The namespace of command ids for a workflow started on the user's approval. The approval's
- * start key names the start, so the provider session that makes the call does not.
- */
-const APPROVED_START_NAMESPACE = "workflow-approval";
-
 function stablePart(value: string): string {
   return encodeURIComponent(value);
 }
@@ -3602,6 +3596,27 @@ const make = Effect.gen(function* () {
   const resumeWorkflows = Effect.gen(function* () {
     let resumed = 0;
     for (const threadId of yield* threadManagement.getAppWorkflowThreadIds) {
+      const pending = yield* threadManagement.getThreadRecords(threadId, ["runs", "turnItems"], {
+        turnItemTypes: ["workflow_review"],
+      });
+      for (const item of pending.turnItems) {
+        if (
+          item.type !== "workflow_review" ||
+          item.decision !== "approved" ||
+          item.approvalRunId === undefined
+        )
+          continue;
+        const run = pending.runs.find((candidate) => candidate.id === item.approvalRunId);
+        if (run === undefined || ThreadManagementService.isActiveRun(run)) continue;
+        yield* threadManagement.dispatch({
+          type: "workflow.review.settle",
+          threadId,
+          runId: run.id,
+          commandId: CommandId.make(
+            `command:workflow-review-recover:${item.reviewId}:${item.decisionRevision ?? 0}`,
+          ),
+        });
+      }
       const { subagents } = yield* threadManagement.getThreadRecords(threadId, ["subagents"]);
       for (const row of subagents) {
         if (
@@ -3626,6 +3641,21 @@ const make = Effect.gen(function* () {
   // Workflows a stop left running resume once recovery has settled the agents the
   // stop cancelled, so those count as cancelled by the restart.
   const startup = yield* Effect.serviceOption(ServerRuntimeStartup.ServerRuntimeStartup);
+  // Approved reviews commit workflow rows without a provider turn. The existing runner owns
+  // execution and recovery for both those rows and graph_start's rows.
+  yield* threadManagement.streamWorkflowStarts.pipe(
+    Stream.runForEach((stored) => {
+      if (stored.event.type !== "subagent.updated") return Effect.void;
+      const row = stored.event.payload;
+      return workflowRunner.isRunning(row.id)
+        ? Effect.void
+        : resumeWorkflow(row, resumedWorkflowScope(row), stored.sequence).pipe(Effect.asVoid);
+    }),
+    Effect.catchCause((cause) =>
+      Effect.logError("Unable to launch an approved workflow", { cause }),
+    ),
+    Effect.forkScoped,
+  );
   if (startup._tag === "Some") {
     yield* startup.value.awaitCommandReady.pipe(
       Effect.andThen(resumeWorkflows),
@@ -4380,7 +4410,11 @@ const make = Effect.gen(function* () {
         .beginReview(scope.thread.threadId)
         .pipe(Effect.mapError(approvalFailure));
       const parent = yield* loadCallerRecords(scope.thread.threadId, ["runs"]);
-      const { review, graph } = yield* reviewCallerGraph(parent, input.graph, input.workerTarget);
+      const { review, graph, compiled } = yield* reviewCallerGraph(
+        parent,
+        input.graph,
+        input.workerTarget,
+      );
       // The review gets its id here, where it is produced. The client decides about it by this
       // id and the digest; nothing the provider echoes back is read.
       const reviewId = yield* random.uuidV4();
@@ -4393,31 +4427,51 @@ const make = Effect.gen(function* () {
         })
         .pipe(Effect.mapError(approvalFailure));
       const result = graphReviewResult(review, { reviewId, approvalRequired });
-      yield* recordGraphReview(scope, parent, workflowReviewRecord(result, graph));
+      const record = workflowReviewRecord(result, graph);
+      yield* recordGraphReview(scope, parent, {
+        ...record,
+        ...(input.title === undefined ? {} : { name: input.title }),
+        ...(approvalRequired && ticket.requestMessageId !== undefined
+          ? {
+              approvalRequest: {
+                environmentId: scope.environmentId,
+                messageId: ticket.requestMessageId,
+              },
+            }
+          : {}),
+        ...(approvalRequired && compiled !== undefined && ticket.requestMessageId !== undefined
+          ? {
+              decision: "awaiting" as const,
+              decisionRevision: 0,
+              launch: {
+                title: input.title ?? compiled.title,
+                script: storedWorkflowScript(compiled.source, {
+                  args: compiled.args,
+                  plan: compiled.plan,
+                  callerSelection: parent.thread.modelSelection,
+                  ...(input.budgetTokens === undefined ? {} : { budgetTokens: input.budgetTokens }),
+                }),
+              },
+            }
+          : {}),
+      });
       return result;
     }),
     graphStart: Effect.fn("OrchestratorMcpService.graphStart")(function* (callerScope, input) {
       yield* requireCapability(callerScope);
       const scope = yield* requireThreadScope(callerScope, "graph_start");
-      // The gate wraps the whole start: the graph the agent sends back is rebuilt only for a digest
-      // the user approved. An approved start runs under the approval's own key in a namespace of
-      // its own, so a retry finds its workflow even from another provider session.
-      return yield* workflowApprovalGate
-        .guardGraphStart(
-          { threadId: scope.thread.threadId, digest: input.acceptedDigest },
-          (startKey) =>
-            startKey === undefined
-              ? startReviewedGraph(scope, input)
-              : startReviewedGraph(
-                  { ...scope, requestNamespace: APPROVED_START_NAMESPACE },
-                  { ...input, clientRequestId: startKey },
-                ),
-        )
-        .pipe(
-          Effect.catchTags({
-            WorkflowApprovalRequiredError: (error) => Effect.fail(approvalFailure(error)),
+      const ticket = yield* workflowApprovalGate
+        .beginReview(scope.thread.threadId)
+        .pipe(Effect.mapError(approvalFailure));
+      if (ticket.armed !== null) {
+        return yield* approvalFailure(
+          new WorkflowApprovalGate.WorkflowApprovalRequiredError({
+            threadId: scope.thread.threadId,
+            reason: "needs-approval",
           }),
         );
+      }
+      return yield* startReviewedGraph(scope, input);
     }),
     workflowStatus: Effect.fn("OrchestratorMcpService.workflowStatus")(
       function* (callerScope, input) {

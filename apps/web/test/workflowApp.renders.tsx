@@ -5,6 +5,7 @@ import {
   TurnItemId,
   type OrchestrationV2Subagent,
   type OrchestrationV2TurnItem,
+  type OrchestrationV2WorkflowReviewRecord,
 } from "@t3tools/contracts";
 import { DEFAULT_CLIENT_SETTINGS } from "@t3tools/contracts/settings";
 import type * as Context from "effect/Context";
@@ -139,8 +140,11 @@ function workflowThread(name: string, count: 4 | 256, status: "running" | "compl
 }
 
 /** A plan the coordinator reviewed, waiting for the person to approve it before any agent starts. */
-function reviewThread(): FakeThread {
-  const history = threadWithHistory("workflow-review", 1);
+function reviewThread(
+  name = "workflow-review",
+  record: Partial<OrchestrationV2WorkflowReviewRecord> = {},
+): FakeThread {
+  const history = threadWithHistory(name, 1);
   const run = history.runs[0]!;
   return {
     ...history,
@@ -159,7 +163,7 @@ function reviewThread(): FakeThread {
         run.id,
         "workflow-review-item",
         2,
-        workflowReviewFixtureRecord(),
+        workflowReviewFixtureRecord(record),
       ),
     ],
   };
@@ -167,6 +171,13 @@ function reviewThread(): FakeThread {
 
 const threads = [
   reviewThread(),
+  reviewThread("workflow-review-held", { decision: "approved", decisionRevision: 1 }),
+  reviewThread("workflow-review-stopped", {
+    decision: "awaiting",
+    decisionRevision: 2,
+    notStartedReason: "stopped",
+  }),
+  reviewThread("workflow-review-started", { decision: "started", decisionRevision: 2 }),
   ...workflowThread("workflow-small", 4, "running"),
   ...workflowThread("workflow-live", 256, "running"),
   ...workflowThread("workflow-finished", 256, "completed"),
@@ -191,6 +202,9 @@ const views = [
   { name: "15-settings-workflow", thread: "workflow-small", width: 1440 },
   { name: "17-settings-workflow-start", thread: "workflow-small", width: 1440 },
   { name: "18-plan-review", thread: "workflow-review", width: 1440 },
+  { name: "19-plan-approved-held", thread: "workflow-review-held", width: 1440 },
+  { name: "20-plan-stopped", thread: "workflow-review-stopped", width: 1440 },
+  { name: "21-plan-started", thread: "workflow-review-started", width: 1440 },
 ] as const;
 
 async function quiet() {
@@ -228,7 +242,7 @@ it.runIf(import.meta.env.VITE_T3_WORKFLOW_FULL_WINDOW === "1").each(views)(
     container.style.cssText = `height:900px;width:${width}px;`;
     // AppRoot owns the real router.
     await using screen = await render(<AppRoot router={router} />, { container, router: false });
-    if (thread === "workflow-review") {
+    if (thread.startsWith("workflow-review")) {
       await expect
         .element(page.getByRole("region", { name: "Workflow review: Fix the sync bug" }))
         .toBeVisible();

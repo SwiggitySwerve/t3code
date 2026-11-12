@@ -409,9 +409,11 @@ const GRAPH_EXAMPLE = JSON.stringify({
 });
 export const OrchestratorMcpGraphReviewInput = Schema.Struct({
   workerTarget: OrchestratorMcpWorkflowStartInput.fields.workerTarget,
+  budgetTokens: OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
+  title: Schema.optional(OrchestratorMcpTitle),
   graph: Schema.Unknown.annotate({
     description:
-      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, retries?: [target], model?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; retries lists up to 2 more, in order, for the attempts after a failed check or deadline; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; pass expandedGraph and acceptedDigest to graph_start to run exactly the reviewed targets. While the user's request for a workflow waits for their decision, graph_start also needs the user's approval of this review (approvalRequired in the result). Complete valid example: " +
+      "Graph validated server-side: { schemaVersion: 1, name?, nodes: { [nodeId]: { subject, description, dependsOn: [], phase?, target?: { providerInstanceId, model, options }, retries?: [target], model?, role?, schema?, scopes?: { read?, write? }, inputs?: [{ id, kind: 'workspace_snapshot', path, maxBytes? } | { id, kind: 'task_output', nodeId, outputId }], outputs?: [{ id, path, maxBytes? }], verify?, attemptBudget?: 'short' | 'standard' | 'long', longBudgetApproved?, stallTimeoutMs? } } }. Paths are workspace-relative in the caller's shared checkout. dependsOn names predecessor nodes; task_output inputs reference a predecessor's declared output. target selects a provider/model and options from orchestrator_capabilities; retries lists up to 2 more, in order, for the attempts after a failed check or deadline; schema is the agent's JSON Schema. scopes.read and scopes.write list workspace-relative paths. verify uses workflow_start agent checks: { type: 'process', argv, cwd?, timeoutMs?, successExitCodes? } | { type: 'structured', outputId?, requiredPointers?, equals? } | { type: 'judgment', rubric, target? }; a structured check with outputId reads that output file's JSON. Attempt budgets: short = 30 minutes, standard = 2 hours, long = 6 hours and requires longBudgetApproved: true. stallTimeoutMs separately limits inactivity. Review hashes workspace_snapshot inputs and returns a digest, dependency layers, write conflicts and blockers; Approval starts the stored graph with this review's title and budget on the server; end your turn and wait for completion. Without approvalRequired, pass expandedGraph and acceptedDigest to graph_start. Complete valid example: " +
       GRAPH_EXAMPLE,
   }),
 });
@@ -474,7 +476,7 @@ export const OrchestratorMcpGraphReviewResult = Schema.Struct({
   }),
   approvalRequired: Schema.Boolean.annotate({
     description:
-      "true while the user's request for a workflow waits for their approval in T3 Code, blocked reviews included. Follow next: only a ready review with approvalRequired true ends your turn, and T3 Code sends you a message with the approved digest once the user approves it. false and ready: no approval is needed, so start the work now with graph_start, or workflow_start if you were asked to run a script.",
+      "true while the user's request for a workflow waits for their approval in T3 Code, blocked reviews included. Follow next: only a ready review with approvalRequired true ends your turn, and approval starts its stored graph on the server. Wait for the single completion wake. false and ready: no approval is needed, so start the work now with graph_start, or workflow_start if you were asked to run a script.",
   }),
   next: Schema.optional(Schema.String).annotate({
     description: "What to do now with this review.",
@@ -534,7 +536,7 @@ export const graphReviewNext = (
   !review.ready
     ? "Fix the blockers, then call graph_review again."
     : review.approvalRequired
-      ? "End your turn. T3 Code sends you the approved digest once the user approves this review."
+      ? "End your turn. Approval starts this stored graph on the server after planning completes. Wait for its single completion wake."
       : "No approval is needed, and nothing has run yet: call graph_start now with expandedGraph as graph and digest as acceptedDigest, or workflow_start if you were asked to run a script. Do not end your turn before the work starts.";
 
 export const OrchestratorMcpGraphStartInput = Schema.Struct({
@@ -544,7 +546,7 @@ export const OrchestratorMcpGraphStartInput = Schema.Struct({
   }),
   acceptedDigest: OrchestrationV2WorkflowReviewDigest.annotate({
     description:
-      "graph_review's digest for this exact graph and inputs; while a workflow request is pending, only a user-approved digest.",
+      "graph_review's digest for this exact graph and inputs; pending approval requests start on the server instead.",
   }),
   budgetTokens: OrchestratorMcpWorkflowStartInput.fields.budgetTokens,
   title: Schema.optional(OrchestratorMcpTitle),
