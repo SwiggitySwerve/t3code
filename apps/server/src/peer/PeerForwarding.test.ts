@@ -92,6 +92,7 @@ const boxThreads = (seen: Ref.Ref<Seen>, linkSession: Ref.Ref<string>) => {
       Effect.map((thread) => ({ thread, runs: [run("running")], runtimeRequests: [] }) as never),
     );
   return Layer.mock(ThreadManagement.ThreadManagementService)({
+    registerWorkflowReviewValidator: () => Effect.void,
     getThreadShell: shellOf,
     getProjectThreadRecords: (input) => projectionOf(input.threadId),
     getThreadRecords: (threadId) => projectionOf(threadId),
@@ -294,6 +295,7 @@ const makeLaptop = Effect.gen(function* () {
     Layer.provide(NodeCrypto.layer),
     Layer.provideMerge(
       Layer.mock(ThreadManagement.ThreadManagementService)({
+        registerWorkflowReviewValidator: () => Effect.void,
         getThreadShell: (threadId) =>
           Effect.succeed(
             threadId === ThreadId.make("thread:laptop-from-desk")
