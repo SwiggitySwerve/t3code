@@ -24,7 +24,14 @@ export interface WaitingAgent {
    * the next sweep asks again; the attempt counts as timed out either way (see markTimedOut).
    */
   deadlineStopAccepted?: boolean;
+  /** When the runner first asked to stop it; a stop that has not ended it by STOP_GRACE_MS abandons it. */
+  stopRequestedAt?: number;
+  /** Ends the runner's wait for an attempt its stop could not end. */
+  abandon?: () => void;
 }
+
+/** How long a stopped attempt may take to end its work before the runner gives it up. */
+export const STOP_GRACE_MS = 2 * 60_000;
 
 /** The runner state the sweep reads and marks; a mark settles once the row records it. */
 export interface SweptSession {
@@ -44,6 +51,12 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
       .getThreadShell(agent.childThreadId)
       .pipe(Effect.orElseSucceed(() => null));
     if (shell === null) continue;
+    // An attempt holds its node while its work runs, so one its stop cannot end would hold it
+    // forever. The runner gives it up instead of starting another beside it.
+    if (agent.stopRequestedAt !== undefined && now - agent.stopRequestedAt >= STOP_GRACE_MS) {
+      agent.abandon?.();
+      continue;
+    }
     if (agent.deadlineStopAccepted === true) continue;
     // A run still preparing (queued for a running slot, or setting up its checkout) has not
     // started its work: neither its deadline nor its silence counts yet.
@@ -68,6 +81,7 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
         // Marked before the stop: the stop can end the attempt before it returns, and the deadline
         // has passed whether or not the stop is accepted.
         yield* Effect.promise(() => session.markTimedOut(taskId));
+        agent.stopRequestedAt ??= now;
         const accepted = yield* deps
           .stopAgent(workflow, taskId as NodeId, agent.childThreadId, "timed_out")
           .pipe(
@@ -98,6 +112,7 @@ export const stopStalledAgents = Effect.fn("WorkflowRunner.stopStalledAgents")(f
     }
     if (now - agent.seenAt < agent.stallMs) continue;
     yield* Effect.promise(() => session.markStalled(taskId));
+    agent.stopRequestedAt ??= now;
     yield* deps
       .stopAgent(workflow, taskId as NodeId, agent.childThreadId, "stalled")
       .pipe(

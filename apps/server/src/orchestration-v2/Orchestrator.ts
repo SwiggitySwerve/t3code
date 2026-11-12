@@ -2084,6 +2084,54 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     );
   });
 
+  /**
+   * A provider wake for a workflow attempt its runner no longer waits on: a retry replaced it, or
+   * the agent settled. That attempt's work is over, so the wake starts no run that could rewrite
+   * the node's files or answer after its result was taken.
+   */
+  const isRetiredWorkflowAttemptWake = Effect.fn("Orchestrator.isRetiredWorkflowAttemptWake")(
+    function* (
+      projection: Pick<OrchestrationV2ThreadProjection, "thread">,
+      notification: OrchestrationV2ThreadProjection["messages"][number]["notification"],
+    ) {
+      const { thread } = projection;
+      const workflowId = thread.lineage.workflowId;
+      const parentThreadId = thread.lineage.parentThreadId;
+      if (
+        notification === undefined ||
+        workflowId === undefined ||
+        parentThreadId === null ||
+        thread.forkedFrom?.type !== "node"
+      )
+        return false;
+      const taskId = String(thread.forkedFrom.nodeId);
+      const row = (yield* projectionStore
+        .getThreadRecords(parentThreadId, ["subagents"], { subagentIds: [workflowId] })
+        .pipe(
+          Effect.mapError(
+            (cause) => new OrchestratorProjectionError({ threadId: parentThreadId, cause }),
+          ),
+        )).subagents.find((candidate) => candidate.id === workflowId);
+      if (row?.workflow === undefined) return false;
+      if (row.status !== "running") return true;
+      const agent = row.workflow.agents.find(
+        (candidate) =>
+          candidate.agentId === taskId ||
+          (candidate.attemptTaskIds ?? []).some((id) => String(id) === taskId),
+      );
+      // The row records a new attempt a moment after it starts; an attempt it has not recorded yet
+      // is the current one.
+      if (agent === undefined) return false;
+      return (
+        agent.agentId !== taskId ||
+        (agent.state !== "running" && agent.state !== "queued") ||
+        (agent.attemptHistory ?? []).some(
+          (record) => String(record.taskId) === taskId && record.superseded === true,
+        )
+      );
+    },
+  );
+
   const cancelStaleQuestionWakes = Effect.fn("Orchestrator.cancelStaleQuestionWakes")(function* (
     projection: OrchestrationV2ThreadProjection,
   ) {
@@ -6225,7 +6273,10 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     effects: Ref.Ref<Array<PendingOrchestrationEffectV2>>,
   ) {
     let projection = yield* getProjectionWithPendingEvents(command.threadId, events);
-    if (yield* isStaleQuestionWake(projection, command.messageId, command.notification)) {
+    if (
+      (yield* isStaleQuestionWake(projection, command.messageId, command.notification)) ||
+      (yield* isRetiredWorkflowAttemptWake(projection, command.notification))
+    ) {
       yield* emit(
         events,
         command,
@@ -9053,8 +9104,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     const child = yield* projectionStore.getThread(command.threadId);
     const parentThreadId = child.lineage.parentThreadId;
     // A send with no sender thread comes from a client acting for the owner, like a user send.
+    // A workflow member's continuation is its attempt's work: its workflow owns it, and an
+    // unattributed run keeps the attempt open (or is stopped with it) instead of waking the caller.
     if (
       child.lineage.relationshipToParent !== "subagent" ||
+      child.lineage.workflowId !== undefined ||
       parentThreadId === null ||
       (command.notification === undefined &&
         command.createdBy !== "user" &&
@@ -15619,10 +15673,11 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Effect.forkScoped,
     );
 
-  // A child whose run ends while its background tasks or its own subagents still run has no
-  // result yet. When that work settles there is no run update to finalize it, so these events
-  // do it. A background roster counts once it stops holding after it was seen holding.
+  // A child whose background tasks or subagents outlive its run has no result yet; these events
+  // finalize it once that work settles. A roster counts when it stops holding, or, since a
+  // workflow member is held by every task, when it empties. Finalizing settles nothing still held.
   const providerThreadsWithBackgroundWork = new Set<string>();
+  const providerThreadsWithAnyBackgroundWork = new Set<string>();
   const settlesChildWork = (stored: OrchestrationV2StoredEvent) => {
     const { event } = stored;
     if (event.type === "subagent.updated")
@@ -15633,11 +15688,18 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       );
     if (event.type === "runtime-request.updated") return event.payload.status !== "pending";
     if (event.type !== "provider-thread.updated") return false;
-    if (backgroundWorkHoldsCompletion(event.payload.pendingBackgroundTasks ?? [])) {
+    const tasks = event.payload.pendingBackgroundTasks ?? [];
+    if (backgroundWorkHoldsCompletion(tasks)) {
       providerThreadsWithBackgroundWork.add(event.payload.id);
+      providerThreadsWithAnyBackgroundWork.add(event.payload.id);
       return false;
     }
-    return providerThreadsWithBackgroundWork.delete(event.payload.id);
+    const stoppedHolding = providerThreadsWithBackgroundWork.delete(event.payload.id);
+    if (tasks.length > 0) {
+      providerThreadsWithAnyBackgroundWork.add(event.payload.id);
+      return stoppedHolding;
+    }
+    return providerThreadsWithAnyBackgroundWork.delete(event.payload.id) || stoppedHolding;
   };
   yield* Stream.mergeAll(
     [
