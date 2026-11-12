@@ -1929,6 +1929,29 @@ const OrchestrationV2WorkflowReviewFields = {
   taskCount: NonNegativeInt,
   writeConflictCount: NonNegativeInt,
   advice: Schema.optional(OrchestrationV2WorkflowReviewAdvice),
+  approvalRequest: Schema.optional(
+    Schema.Struct({
+      environmentId: EnvironmentId,
+      messageId: MessageId,
+    }),
+  ),
+  /** Server-only launch snapshot; omitted from client projections and detail responses. */
+  launch: Schema.optional(
+    Schema.Struct({
+      script: Schema.String,
+      title: Schema.String,
+    }),
+  ),
+  decision: Schema.optional(
+    Schema.Literals(["awaiting", "approved", "started", "dismissed", "superseded"]),
+  ),
+  decisionRevision: Schema.optional(NonNegativeInt),
+  approvalRunId: Schema.optional(RunId),
+  launchError: Schema.optional(Schema.String),
+  notStartedReason: Schema.optional(
+    Schema.Literals(["stopped", "failed", "cancelled", "interrupted", "rolled_back"]),
+  ),
+  workflowId: Schema.optional(NodeId),
 } as const;
 export const OrchestrationV2WorkflowReviewRecord = Schema.Struct(
   OrchestrationV2WorkflowReviewFields,
@@ -4001,6 +4024,29 @@ const OrchestrationV2InternalCommand = Schema.Union([
     review: OrchestrationV2WorkflowReviewRecord,
   }),
   Schema.Struct({
+    type: Schema.Literal("workflow.review.decide"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    environmentId: EnvironmentId,
+    reviewId: TrimmedNonEmptyString,
+    digest: Schema.NullOr(OrchestrationV2WorkflowReviewDigest),
+    action: Schema.Literals(["approve", "dismiss"]),
+    decisionRevision: NonNegativeInt,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("workflow.review.settle"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    runId: RunId,
+  }),
+  Schema.Struct({
+    type: Schema.Literal("workflow.review.launch"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    reviewId: TrimmedNonEmptyString,
+    decisionRevision: NonNegativeInt,
+  }),
+  Schema.Struct({
     type: Schema.Literal("secret_request.record"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -4494,6 +4540,7 @@ export class OrchestrationV2StopWorkflowError extends Schema.TaggedError<Orchest
  * the connection's grant does.
  */
 const OrchestrationV2WorkflowReviewDecisionFields = {
+  decisionRevision: Schema.optional(NonNegativeInt),
   environmentId: EnvironmentId,
   threadId: ThreadId,
   reviewId: TrimmedNonEmptyString,
@@ -4524,6 +4571,8 @@ export class OrchestrationV2WorkflowApprovalError extends Schema.TaggedError<Orc
       "no-pending-request",
       "review-not-found",
       "review-blocked",
+      "review-superseded",
+      "revision-required",
       "unavailable",
     ]),
     cause: Schema.optional(Schema.Defect()),
@@ -4539,8 +4588,12 @@ export class OrchestrationV2WorkflowApprovalError extends Schema.TaggedError<Orc
         return "This review is out of date. Ask the agent to review the graph again.";
       case "review-blocked":
         return "This review has blockers, so it cannot be approved.";
+      case "review-superseded":
+        return "A newer plan replaced this review. Approve the newer plan.";
+      case "revision-required":
+        return "Refresh this review before approving it.";
       case "unavailable":
-        return "Could not send your decision to the agent.";
+        return "Could not apply your workflow decision. Try again.";
     }
   }
 }

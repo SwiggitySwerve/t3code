@@ -72,6 +72,10 @@ export interface WorkflowReviewAdviceView {
 
 export interface WorkflowReviewView {
   readonly reviewId: string;
+  readonly decisionState: OrchestrationV2WorkflowReviewRecord["decision"];
+  readonly decisionRevision: number | undefined;
+  readonly notStartedReason: OrchestrationV2WorkflowReviewRecord["notStartedReason"];
+  readonly launchError?: string;
   /** Null when the server could not digest the graph. */
   readonly digest: string | null;
   readonly ready: boolean;
@@ -124,6 +128,10 @@ function targetView(
 export function workflowReviewOf(item: OrchestrationV2WorkflowReviewRecord): WorkflowReviewView {
   return {
     reviewId: item.reviewId,
+    decisionState: item.decision,
+    decisionRevision: item.decisionRevision,
+    notStartedReason: item.notStartedReason,
+    ...(item.launchError === undefined ? {} : { launchError: item.launchError }),
     digest: item.digest,
     ready: item.ready,
     approvalRequired: item.approvalRequired,
@@ -160,19 +168,22 @@ export function workflowReviewOf(item: OrchestrationV2WorkflowReviewRecord): Wor
 }
 
 /**
- * The review a person can still decide: the newest review record of the thread. An older one was
- * replaced by it, so only the newest offers buttons.
+ * The newest ready plan, or the newest blocked review when none is ready. A blocked revision
+ * does not replace a runnable plan.
  */
 export function latestWorkflowReviewItemId(
   items: ReadonlyArray<Pick<OrchestrationV2TurnItem, "id" | "type" | "startedAt" | "updatedAt">>,
 ): string | null {
   let latest: { readonly id: string; readonly at: number } | null = null;
+  let latestReady: { readonly id: string; readonly at: number } | null = null;
   for (const item of items) {
     if (!isWorkflowReviewItem(item)) continue;
     const at = DateTime.toEpochMillis(item.startedAt ?? item.updatedAt);
     if (latest === null || at >= latest.at) latest = { id: item.id, at };
+    if (item.ready !== false && (latestReady === null || at >= latestReady.at))
+      latestReady = { id: item.id, at };
   }
-  return latest === null ? null : latest.id;
+  return latestReady?.id ?? latest?.id ?? null;
 }
 
 export type WorkflowReviewAction = "approve" | "dismiss";
@@ -189,7 +200,7 @@ export type WorkflowReviewDecision =
        * "stale": the server no longer has this review waiting, so it refuses both buttons.
        * "blocked": it has blockers, so it refuses Approve. "retry": nothing says it will refuse.
        */
-      readonly kind: "stale" | "blocked" | "retry";
+      readonly kind: "stale" | "blocked" | "retry" | "superseded";
       readonly message: string;
     };
 
@@ -199,8 +210,9 @@ export function workflowReviewDecisionKey(
   environmentId: EnvironmentId,
   threadId: ThreadId,
   reviewId: string,
+  revision?: number,
 ): string {
-  return `${environmentId}:${threadId}:${reviewId}`;
+  return `${environmentId}:${threadId}:${reviewId}${revision === undefined ? "" : `:${revision}`}`;
 }
 
 export const workflowReviewDecisionAtom = Atom.family((_key: string) =>
@@ -215,11 +227,13 @@ function failedDecision(
 ): Extract<WorkflowReviewDecision, { _tag: "failed" }> {
   if (isApprovalError(failure)) {
     const kind =
-      failure.reason === "review-blocked"
-        ? "blocked"
-        : failure.reason === "review-not-found" || failure.reason === "no-pending-request"
-          ? "stale"
-          : "retry";
+      failure.reason === "review-superseded"
+        ? "superseded"
+        : failure.reason === "review-blocked"
+          ? "blocked"
+          : failure.reason === "review-not-found" || failure.reason === "no-pending-request"
+            ? "stale"
+            : "retry";
     return { _tag: "failed", action, kind, message: failure.message };
   }
   return {
@@ -246,8 +260,13 @@ export async function runWorkflowReviewDecision(
 ): Promise<void> {
   const atom = workflowReviewDecisionAtom(input.key);
   const current = registry.get(atom);
-  if (current._tag === "pending" || current._tag === "settled") return;
+  if (
+    current._tag === "pending" ||
+    (current._tag === "settled" && !(current.action === "approve" && input.action === "dismiss"))
+  )
+    return;
   if (current._tag === "failed" && current.kind === "stale") return;
+  if (current._tag === "failed" && current.kind === "superseded") return;
   if (current._tag === "failed" && current.kind === "blocked" && input.action === "approve") return;
   registry.set(atom, { _tag: "pending", action: input.action });
   const result = await input.send();
@@ -310,12 +329,59 @@ export function presentWorkflowReview(input: {
   if (!input.local) {
     return { status: "info", statusLabel: "Reviewed", note: null, ...NO_BUTTONS };
   }
+  if (
+    review.decisionState === "superseded" ||
+    (decision._tag === "failed" && decision.kind === "superseded") ||
+    (input.superseded &&
+      review.ready &&
+      review.decisionState !== "started" &&
+      review.decisionState !== "dismissed")
+  ) {
+    return {
+      status: "superseded",
+      statusLabel: "Replaced",
+      note: { tone: "info", text: "A newer plan replaced this review. Approve the newer plan." },
+      ...NO_BUTTONS,
+    };
+  }
+  if (review.decisionState === "started") {
+    return {
+      status: "approved",
+      statusLabel: "Started",
+      note: { tone: "info", text: "Workflow started." },
+      ...NO_BUTTONS,
+    };
+  }
+  if (review.decisionState === "dismissed") {
+    return {
+      status: "dismissed",
+      statusLabel: "Dismissed",
+      note: { tone: "info", text: "This workflow will not start." },
+      ...NO_BUTTONS,
+    };
+  }
+  if (review.decisionState === "approved" && decision._tag !== "pending") {
+    const failure = decision._tag === "failed" ? decision.message : review.launchError;
+    return {
+      status: "approved",
+      statusLabel: "Approved",
+      note:
+        failure === undefined
+          ? { tone: "info", text: "Approved. Starts when planning finishes." }
+          : { tone: "error", text: failure },
+      approve:
+        failure !== undefined && (decision._tag !== "failed" || decision.action === "approve")
+          ? { visible: true, enabled: input.canDecide, label: "Retry start" }
+          : NO_BUTTONS.approve,
+      dismiss: { visible: true, enabled: input.canDecide, label: "Dismiss" },
+    };
+  }
   if (decision._tag === "settled") {
     return decision.action === "approve"
       ? {
           status: "approved",
           statusLabel: "Approved",
-          note: { tone: "info", text: "Approved. The agent is starting this workflow." },
+          note: { tone: "info", text: "Starting workflow\u2026" },
           ...NO_BUTTONS,
         }
       : {
@@ -340,12 +406,12 @@ export function presentWorkflowReview(input: {
     const approving = decision.action === "approve";
     return {
       status: approving ? "approving" : "dismissing",
-      statusLabel: approving ? "Approving\u2026" : "Dismissing\u2026",
+      statusLabel: approving ? "Starting\u2026" : "Dismissing\u2026",
       note: null,
       approve: {
         visible: true,
         enabled: false,
-        label: approving ? "Approving\u2026" : "Approve & run",
+        label: approving ? "Starting\u2026" : "Approve & run",
       },
       dismiss: { visible: true, enabled: false, label: approving ? "Dismiss" : "Dismissing\u2026" },
     };
@@ -381,7 +447,12 @@ export function presentWorkflowReview(input: {
     note:
       failure ??
       (approvable
-        ? null
+        ? review.notStartedReason === undefined
+          ? null
+          : {
+              tone: "info",
+              text: `Planning ${review.notStartedReason === "failed" ? "failed" : "was stopped"} before this started. Approve again to run it.`,
+            }
         : { tone: "warning", text: "This review has blockers, so it cannot be approved." }),
     approve: { visible: true, enabled: approvable, label: "Approve & run" },
     dismiss: { visible: true, enabled: true, label: "Dismiss" },

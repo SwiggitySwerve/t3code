@@ -138,6 +138,7 @@ export const makeLayerTest = (
   managedPolicy?: ManagedPolicySummary,
   /** The base list price table; empty, as when none is fetched, unless a test prices models. */
   rates?: RateTable,
+  registerToolkit = true,
 ) => {
   const layerAdapters = ProviderAdapterRegistry.layerFromAdapters([
     runtime?.adapter ?? adapter,
@@ -185,7 +186,7 @@ export const makeLayerTest = (
       remove: () => Effect.void,
     }),
   );
-  return McpHttpServer.layerOrchestratorToolkit.pipe(
+  return (registerToolkit ? McpHttpServer.layerOrchestratorToolkit : Layer.empty).pipe(
     // Enough checkout for isolation "worktree": the run preparation itself is not under test.
     Layer.provideMerge(
       Layer.mock(ThreadLaunchService.ThreadLaunchService)({ prepareRun: () => Effect.void }),
@@ -234,7 +235,7 @@ export const makeLayerTest = (
 
 export const layerTest = makeLayerTest();
 
-export const client = McpSchema.McpServerClient.of({
+const client = McpSchema.McpServerClient.of({
   clientId: 1,
   protocolVersion: "2025-06-18",
   clientCapabilities: {},

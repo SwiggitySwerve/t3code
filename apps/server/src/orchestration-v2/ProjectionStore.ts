@@ -4402,6 +4402,12 @@ export const layer: Layer.Layer<ProjectionStoreV2, never, SqlClient.SqlClient> =
                   AND CASE WHEN json_valid(payload_json)
                     THEN json_type(payload_json, '$.workflow') = 'object'
                     ELSE 0 END
+                UNION
+                SELECT thread_id FROM orchestration_v2_projection_turn_items
+                WHERE type = 'workflow_review'
+                  AND CASE WHEN json_valid(payload_json)
+                    THEN json_extract(payload_json, '$.decision') = 'approved'
+                    ELSE 0 END
               `;
             case "subagent-results":
               return sql`

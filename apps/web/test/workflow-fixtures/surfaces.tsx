@@ -429,7 +429,9 @@ export function WorkflowReviewSurface(props: {
 }) {
   const record =
     props.state === "large" ? workflowReviewFixtureLargeRecord(400) : workflowReviewFixtureRecord();
-  const review = workflowReviewOf(record);
+  const review = workflowReviewOf(
+    props.state === "approved" ? { ...record, decision: "started" } : record,
+  );
   return (
     <ChatColumn>
       <WorkflowReviewCard

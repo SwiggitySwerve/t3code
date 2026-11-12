@@ -130,14 +130,14 @@ describe("model-family orchestration instructions", () => {
   });
 
   it.each([
-    ["", "bfa08fa47c1f4c3022a9a67bc491cc630fcbf1b134117aa425d5b8ef9787c5c9", 4310],
+    ["", "2e815632ad2f087c426f7f5c8aaf279b016a0152ed26979df10c059bb8867877", 4353],
     [
       "anthropic/claude-opus-4-6",
-      "c987536d051026171000ec7da2a8523939653e2f090e85260644104d6a4d1fd4",
-      4394,
+      "8bd1823435b143272404f05e42d179e3e7459eaaa88239afa6ac4b7080d88378",
+      4437,
     ],
-    ["openai/gpt-5.4", "bfa08fa47c1f4c3022a9a67bc491cc630fcbf1b134117aa425d5b8ef9787c5c9", 4310],
-    ["unknown-model", "bfa08fa47c1f4c3022a9a67bc491cc630fcbf1b134117aa425d5b8ef9787c5c9", 4310],
+    ["openai/gpt-5.4", "2e815632ad2f087c426f7f5c8aaf279b016a0152ed26979df10c059bb8867877", 4353],
+    ["unknown-model", "2e815632ad2f087c426f7f5c8aaf279b016a0152ed26979df10c059bb8867877", 4353],
   ] as const)("renders the reviewed text for selected model %s", (model, digest, bytes) => {
     const rendered = t3OrchestrationInstructions(true, model);
     expect(NodeCrypto.createHash("sha256").update(rendered).digest("hex")).toBe(digest);

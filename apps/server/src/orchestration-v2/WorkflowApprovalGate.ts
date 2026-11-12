@@ -1,18 +1,9 @@
 /**
  * The approval gate for workflows: graph_start and workflow_start are refused until the person
- * approves the reviewed graph. State is per thread and in memory, so it cannot outlive the server
- * and nothing else can grant it; a restart re-arms from the latest person-typed request and every
- * review and approval is redone. Approved starts share one start key, so a retry finds its workflow.
+ * decides on a plan. Turn start owns the live request identity; durable review commands own
+ * decisions and launch. A restart reconstructs the request and reads its stored decisions.
  */
-import {
-  type EnvironmentId,
-  type MessageId,
-  type OrchestrationV2ApproveWorkflowReviewInput,
-  type OrchestrationV2DismissWorkflowReviewInput,
-  OrchestrationV2WorkflowApprovalError,
-  type RunId,
-  ThreadId,
-} from "@t3tools/contracts";
+import { type EnvironmentId, type MessageId, ThreadId } from "@t3tools/contracts";
 import {
   type WorkflowRequest,
   type WorkflowRequestInput,
@@ -28,6 +19,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ProjectionStore from "./ProjectionStore.ts";
+import { workflowRequestFromHistory } from "./workflowRequestHistory.ts";
 
 export class WorkflowApprovalRequiredError extends Schema.TaggedError<WorkflowApprovalRequiredError>()(
   "WorkflowApprovalRequiredError",
@@ -41,7 +33,7 @@ export class WorkflowApprovalRequiredError extends Schema.TaggedError<WorkflowAp
   override get message(): string {
     switch (this.reason) {
       case "needs-approval":
-        return "The user asked for a workflow and has not approved this graph. End your turn: the user reviews your graph_review result in T3 Code and approves it there, and T3 Code then sends you a message with the approved digest. Start only that digest, after that message.";
+        return "The user asked for a workflow and has not approved this graph. End your turn: the user approves the graph_review plan in T3 Code, and the server starts it after planning completes. Wait for its single completion wake.";
       case "script-not-allowed":
         return "The user asked for a workflow, which starts from a reviewed graph that the user approves in T3 Code. Call graph_review with your plan and end your turn. workflow_start is unavailable while the user's request waits for their decision.";
       case "stale-review":
@@ -53,14 +45,6 @@ export class WorkflowApprovalRequiredError extends Schema.TaggedError<WorkflowAp
 }
 
 const isWorkflowApprovalRequiredError = Schema.is(WorkflowApprovalRequiredError);
-
-type ApprovalRefusal = OrchestrationV2WorkflowApprovalError["reason"];
-
-interface Review {
-  readonly environmentId: EnvironmentId;
-  readonly digest: string | null;
-  readonly ready: boolean;
-}
 
 /**
  * Where a request stands. Only "armed" refuses starts; the other two are settled, and a settled
@@ -75,15 +59,6 @@ type RequestStatus =
 interface PendingRequest {
   readonly request: MessageId;
   status: RequestStatus;
-  /** Every review the agent made for this request, by review id. */
-  readonly reviews: Map<string, Review>;
-  /**
-   * Digests the person approved, each with the id of the decision: the review whose approval
-   * first covered the digest in this process. Repeated clicks, and approvals of other reviews
-   * of the same digest, keep it; a fresh review after a restart brings a new one. It names the
-   * message sent about the decision, not the launch (see `startKeyOf`).
-   */
-  readonly approvals: Map<string, string>;
 }
 
 export interface WorkflowApprovalGateTurn extends WorkflowRequestInput {
@@ -114,6 +89,7 @@ export interface WorkflowApprovalGateSteer {
  */
 export interface WorkflowReviewTicket {
   readonly threadId: ThreadId;
+  readonly requestMessageId?: MessageId;
   /** The request that was armed when the review began, by identity; null when none was. */
   readonly armed: object | null;
 }
@@ -125,16 +101,6 @@ export interface WorkflowApprovalGateReview {
   /** Null when the review could not be digested. */
   readonly digest: string | null;
   readonly ready: boolean;
-}
-
-export interface WorkflowApprovalGateDecision {
-  /** The request the decision settles, for naming the message sent to the agent. */
-  readonly request: MessageId;
-  /**
-   * Names this decision in the process: stable across repeated and concurrent calls for the
-   * same approval or dismissal, new for one made after a restart.
-   */
-  readonly decisionId: string;
 }
 
 export class WorkflowApprovalGate extends Context.Service<
@@ -178,22 +144,13 @@ export class WorkflowApprovalGate extends Context.Service<
       threadId: ThreadId,
     ) => Effect.Effect<void, WorkflowApprovalRequiredError>;
     /**
-     * graph_start, around the whole start. `start` gets the key to use as its clientRequestId, or
-     * undefined to keep the caller's. While a request is armed it runs only for an approved digest
-     * and a success settles it; afterwards an approved digest keeps its key so a retry finds it.
+     * graph_start is available only without a pending approval request. Approval starts the
+     * stored plan through the server's command path instead.
      */
     readonly guardGraphStart: <A, E, R>(
       input: { readonly threadId: ThreadId; readonly digest: string },
       start: (startKey: string | undefined) => Effect.Effect<A, E, R>,
     ) => Effect.Effect<A, E | WorkflowApprovalRequiredError, R>;
-    /** The client approved a ready review of the request that is armed. Idempotent. */
-    readonly approve: (
-      input: OrchestrationV2ApproveWorkflowReviewInput,
-    ) => Effect.Effect<WorkflowApprovalGateDecision, OrchestrationV2WorkflowApprovalError>;
-    /** The client dismissed the request that is armed. Idempotent. */
-    readonly dismiss: (
-      input: OrchestrationV2DismissWorkflowReviewInput,
-    ) => Effect.Effect<WorkflowApprovalGateDecision, OrchestrationV2WorkflowApprovalError>;
     /**
      * Whether the thread's armed request waits for the person to approve a ready review, with
      * none decided yet. A restart does not change the answer: it is read from the thread's stored
@@ -202,23 +159,6 @@ export class WorkflowApprovalGate extends Context.Service<
     readonly awaitsDecision: (threadId: ThreadId) => Effect.Effect<boolean>;
   }
 >()("t3/orchestration-v2/WorkflowApprovalGate") {}
-
-/**
- * The one start key of an approved digest: every start of it, in this process or after a restart,
- * uses it. Thread, request message and digest identify the launch; the decision does not.
- */
-const startKeyOf = (threadId: ThreadId, request: PendingRequest, digest: string) =>
-  `approval:${threadId}:${request.request}:${digest}`;
-
-/**
- * The stored message that tells the agent about a decision on `request`. Both ends use this, so
- * the gate can tell from the thread's items that the person has already decided.
- */
-export const decisionMessageIdPrefix = (
-  decision: "approved" | "dismissed",
-  threadId: ThreadId,
-  request: MessageId,
-) => `message:workflow-${decision}:${threadId}:${request}:`;
 
 const armedOf = (request: PendingRequest | null | undefined): PendingRequest | null =>
   request?.status._tag === "armed" ? request : null;
@@ -238,15 +178,13 @@ const make = Effect.gen(function* () {
   const arm = (request: MessageId): PendingRequest => ({
     request,
     status: { _tag: "armed" },
-    reviews: new Map(),
-    approvals: new Map(),
   });
 
   /**
    * The request a restart made the gate forget: the thread's latest person-typed message that
    * started a turn or steered one, if `workflowRequestOf` says it asked for a workflow. A plain
    * steer is skipped, as at turn start, where it leaves a waiting request armed. A request
-   * dismissed or already started is armed again, and reviews and approvals are redone.
+   * dismissed or already started is reconstructed too; load reads its durable decision.
    */
   const persistedRequest = Effect.fn("WorkflowApprovalGate.persistedRequest")(function* (
     threadId: ThreadId,
@@ -266,34 +204,12 @@ const make = Effect.gen(function* () {
     const delegatedThread = records.thread.lineage.relationshipToParent === "subagent";
     // Project-scoped like at turn start, so both read one message the same way.
     const { workflowStart } = resolveProjectSettings(settings, records.thread.projectId).settings;
-    const runs = new Map(records.runs.map((run) => [run.id, run]));
-    const runOf = (runId: RunId | null) => (runId === null ? undefined : runs.get(runId));
-    const messages = records.turnItems
-      .flatMap((item) => (item.type === "user_message" ? [item] : []))
-      .toSorted(
-        (left, right) =>
-          (runOf(right.runId)?.ordinal ?? 0) - (runOf(left.runId)?.ordinal ?? 0) ||
-          right.ordinal - left.ordinal,
-      );
-    for (const item of messages) {
-      const request = workflowRequestOf({
-        workflows,
-        workflowStart,
-        workflowTriggers: settings.workflowTriggers,
-        typedText: item.text,
-        createdBy: item.createdBy,
-        creationSource: item.creationSource,
-        scheduledTaskId: item.scheduledTaskId,
-        senderThreadId: item.senderThreadId,
-        delegatedThread,
-        resumesEarlierTurn: runOf(item.runId)?.restartContinuationOfRunId !== undefined,
-      });
-      const steered =
-        item.inputIntent === "steer" || item.inputIntent === "promoted_queued_to_steer";
-      if (request === "ignored" || (steered && request === "plain")) continue;
-      return request === "requested" ? item.messageId : null;
-    }
-    return null;
+    return workflowRequestFromHistory(records, {
+      workflows,
+      workflowStart,
+      workflowTriggers: settings.workflowTriggers,
+      delegatedThread,
+    });
   });
 
   /**
@@ -301,7 +217,7 @@ const make = Effect.gen(function* () {
    * from its persisted messages once. Whatever turn start or another caller recorded while that
    * read ran is newer and wins. Callers then read `pending` in a synchronous step.
    */
-  const load = Effect.fn("WorkflowApprovalGate.load")(function* (threadId: ThreadId) {
+  const loadRequest = Effect.fn("WorkflowApprovalGate.loadRequest")(function* (threadId: ThreadId) {
     if (pending.has(threadId)) return;
     const persisted = yield* persistedRequest(threadId).pipe(
       // A thread that does not exist has no request, and is not worth remembering.
@@ -316,6 +232,27 @@ const make = Effect.gen(function* () {
     yield* Effect.sync(() => {
       if (!pending.has(threadId)) pending.set(threadId, persisted === null ? null : arm(persisted));
     });
+  });
+
+  const load = Effect.fn("WorkflowApprovalGate.load")(function* (threadId: ThreadId) {
+    yield* loadRequest(threadId);
+    const request = pending.get(threadId);
+    if (request == null) return;
+    const records = yield* projections
+      .getThreadRecords(threadId, ["turnItems"], { turnItemTypes: ["workflow_review"] })
+      .pipe(
+        Effect.mapError(
+          (cause) => new WorkflowApprovalRequiredError({ threadId, reason: "unverified", cause }),
+        ),
+      );
+    if (pending.get(threadId) !== request) return;
+    for (const item of records.turnItems) {
+      if (item.type !== "workflow_review" || item.approvalRequest?.messageId !== request.request)
+        continue;
+      if (item.decision === "started") request.status = { _tag: "started" };
+      if (item.decision === "dismissed")
+        request.status = { _tag: "dismissed", decisionId: item.reviewId };
+    }
   });
 
   const observeTurn: WorkflowApprovalGate["Service"]["observeTurn"] = Effect.fn(
@@ -369,25 +306,25 @@ const make = Effect.gen(function* () {
     "WorkflowApprovalGate.beginReview",
   )(function* (threadId) {
     yield* load(threadId);
-    return yield* Effect.sync(() => ({ threadId, armed: armedOf(pending.get(threadId)) }));
+    return yield* Effect.sync(() => {
+      const armed = armedOf(pending.get(threadId));
+      return { threadId, armed, ...(armed === null ? {} : { requestMessageId: armed.request }) };
+    });
   });
 
-  const completeReview: WorkflowApprovalGate["Service"]["completeReview"] = (ticket, input) =>
-    Effect.suspend((): ReturnType<WorkflowApprovalGate["Service"]["completeReview"]> => {
-      const armed = armedOf(pending.get(ticket.threadId));
-      if (armed !== ticket.armed) {
-        return Effect.fail(
-          new WorkflowApprovalRequiredError({ threadId: ticket.threadId, reason: "stale-review" }),
-        );
-      }
-      if (armed === null) return Effect.succeed({ approvalRequired: false });
-      armed.reviews.set(input.reviewId, {
-        environmentId: input.environmentId,
-        digest: input.digest,
-        ready: input.ready,
+  const completeReview: WorkflowApprovalGate["Service"]["completeReview"] = Effect.fn(
+    "WorkflowApprovalGate.completeReview",
+  )(function* (ticket, _input) {
+    yield* load(ticket.threadId);
+    const armed = armedOf(pending.get(ticket.threadId));
+    if (armed !== ticket.armed) {
+      return yield* new WorkflowApprovalRequiredError({
+        threadId: ticket.threadId,
+        reason: "stale-review",
       });
-      return Effect.succeed({ approvalRequired: true });
-    });
+    }
+    return { approvalRequired: armed !== null };
+  });
 
   const requireNoRequest: WorkflowApprovalGate["Service"]["requireNoRequest"] = Effect.fn(
     "WorkflowApprovalGate.requireNoRequest",
@@ -406,154 +343,33 @@ const make = Effect.gen(function* () {
     start: (startKey: string | undefined) => Effect.Effect<A, E, R>,
   ) {
     yield* load(input.threadId);
-    // Read the request in the same step that decides, so turn start cannot replace it between.
-    const route = yield* Effect.sync(
-      ():
-        | { readonly refused: "needs-approval" }
-        | { readonly startKey: string | undefined; readonly settles: PendingRequest | null } => {
-        const request = pending.get(input.threadId) ?? null;
-        if (request === null) return { startKey: undefined, settles: null };
-        const startKey = request.approvals.has(input.digest)
-          ? startKeyOf(input.threadId, request, input.digest)
-          : undefined;
-        if (request.status._tag !== "armed") return { startKey, settles: null };
-        if (startKey === undefined) return { refused: "needs-approval" };
-        return { startKey, settles: request };
-      },
-    );
-    if ("refused" in route) {
+    if (armedOf(pending.get(input.threadId)) !== null) {
       return yield* new WorkflowApprovalRequiredError({
         threadId: input.threadId,
-        reason: route.refused,
+        reason: "needs-approval",
       });
     }
-    return yield* start(route.startKey).pipe(
-      Effect.tap(() =>
-        Effect.sync(() => {
-          // Only a success settles. A failure or an interruption leaves the approval and its key
-          // as they were, so the retry is the same start.
-          if (route.settles?.status._tag === "armed") route.settles.status = { _tag: "started" };
-        }),
-      ),
-    );
+    return yield* start(undefined);
   });
-
-  /**
-   * A decision on one review of the thread's latest request: found, checked and applied in one
-   * step, so nothing can replace the request between the check and the change.
-   */
-  const decide = Effect.fn("WorkflowApprovalGate.decide")(function* (
-    input: OrchestrationV2ApproveWorkflowReviewInput | OrchestrationV2DismissWorkflowReviewInput,
-    apply: (
-      request: PendingRequest,
-      review: Review,
-    ) => { readonly refused: ApprovalRefusal } | { readonly decisionId: string },
-  ) {
-    const refuse = (reason: ApprovalRefusal, cause?: unknown) =>
-      new OrchestrationV2WorkflowApprovalError({
-        threadId: input.threadId,
-        reviewId: input.reviewId,
-        reason,
-        ...(cause === undefined ? {} : { cause }),
-      });
-    yield* load(input.threadId).pipe(Effect.mapError((error) => refuse("unavailable", error)));
-    const outcome = yield* Effect.sync(
-      (): { readonly refused: ApprovalRefusal } | WorkflowApprovalGateDecision => {
-        const request = pending.get(input.threadId);
-        if (request === undefined || request === null) return { refused: "no-pending-request" };
-        const review = request.reviews.get(input.reviewId);
-        if (review === undefined) return { refused: "review-not-found" };
-        if (review.environmentId !== input.environmentId)
-          return { refused: "environment-mismatch" };
-        if (review.digest !== input.digest) return { refused: "review-not-found" };
-        const applied = apply(request, review);
-        return "refused" in applied ? applied : { request: request.request, ...applied };
-      },
-    );
-    if ("refused" in outcome) return yield* refuse(outcome.refused);
-    return outcome;
-  });
-
-  const approve: WorkflowApprovalGate["Service"]["approve"] = (input) =>
-    decide(input, (request, review) => {
-      // A dismissed request is over: the card for it is expired.
-      if (request.status._tag === "dismissed") return { refused: "no-pending-request" };
-      if (!review.ready || review.digest === null) return { refused: "review-blocked" };
-      const approved = request.approvals.get(review.digest);
-      // A second click, or another review of the same graph, is the decision already made.
-      if (approved !== undefined) return { decisionId: approved };
-      if (request.status._tag === "started") return { refused: "no-pending-request" };
-      request.approvals.set(review.digest, input.reviewId);
-      return { decisionId: input.reviewId };
-    });
-
-  const dismiss: WorkflowApprovalGate["Service"]["dismiss"] = (input) =>
-    decide(input, (request) => {
-      switch (request.status._tag) {
-        case "dismissed":
-          return { decisionId: request.status.decisionId };
-        case "started":
-          return { refused: "no-pending-request" };
-        case "armed":
-          request.status = { _tag: "dismissed", decisionId: input.reviewId };
-          return { decisionId: input.reviewId };
-      }
-    });
-
-  /**
-   * Whether the thread stored a ready review that asked for a decision after `request`, with no
-   * decision message since. This is what survives a restart, when the process holds no reviews.
-   */
-  const storedReviewAwaitsDecision = Effect.fn("WorkflowApprovalGate.storedReviewAwaitsDecision")(
-    function* (threadId: ThreadId, request: MessageId) {
-      const records = yield* projections.getThreadRecords(threadId, ["runs", "turnItems"], {
-        turnItemTypes: ["user_message", "workflow_review"],
-      });
-      const runs = new Map(records.runs.map((run) => [run.id, run]));
-      const ordinalOf = (runId: RunId | null) =>
-        runId === null ? 0 : (runs.get(runId)?.ordinal ?? 0);
-      const items = records.turnItems.toSorted(
-        (left, right) =>
-          ordinalOf(left.runId) - ordinalOf(right.runId) || left.ordinal - right.ordinal,
-      );
-      const asked = items.findIndex(
-        (item) => item.type === "user_message" && item.messageId === request,
-      );
-      if (asked < 0) return false;
-      const later = items.slice(asked + 1);
-      const approved = decisionMessageIdPrefix("approved", threadId, request);
-      const dismissed = decisionMessageIdPrefix("dismissed", threadId, request);
-      const decided = later.some(
-        (item) =>
-          item.type === "user_message" &&
-          (item.messageId.startsWith(approved) || item.messageId.startsWith(dismissed)),
-      );
-      return (
-        !decided &&
-        later.some(
-          (item) =>
-            item.type === "workflow_review" &&
-            item.ready &&
-            item.digest !== null &&
-            item.approvalRequired,
-        )
-      );
-    },
-  );
 
   const awaitsDecision: WorkflowApprovalGate["Service"]["awaitsDecision"] = Effect.fn(
     "WorkflowApprovalGate.awaitsDecision",
   )(function* (threadId) {
     return yield* Effect.gen(function* () {
       yield* load(threadId);
-      const armed = yield* Effect.sync(() => armedOf(pending.get(threadId)));
-      // Approved in this process, or dismissed (which leaves nothing armed): nothing to decide.
-      if (armed === null || armed.approvals.size > 0) return false;
-      // A review this process just recorded may not be stored yet.
-      if ([...armed.reviews.values()].some((review) => review.ready && review.digest !== null)) {
-        return true;
-      }
-      return yield* storedReviewAwaitsDecision(threadId, armed.request);
+      const request = armedOf(pending.get(threadId));
+      if (request === null) return false;
+      const records = yield* projections.getThreadRecords(threadId, ["turnItems"], {
+        turnItemTypes: ["workflow_review"],
+      });
+      return records.turnItems.some(
+        (item) =>
+          item.type === "workflow_review" &&
+          item.approvalRequest?.messageId === request.request &&
+          item.ready &&
+          item.digest !== null &&
+          (item.decision === "awaiting" || item.decision === undefined),
+      );
     }).pipe(Effect.orElseSucceed(() => false));
   });
 
@@ -564,8 +380,6 @@ const make = Effect.gen(function* () {
     completeReview,
     requireNoRequest,
     guardGraphStart,
-    approve,
-    dismiss,
     awaitsDecision,
   });
 });

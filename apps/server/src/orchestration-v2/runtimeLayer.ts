@@ -292,7 +292,7 @@ const layerManagedProjectFoldersProvided = ManagedProjectFolders.layer.pipe(
   Layer.provide(layerProjectService),
 );
 export const layerWorkflowApprovalService = WorkflowApprovalService.layer.pipe(
-  Layer.provide(Layer.merge(layerWorkflowApprovalGateProvided, layerThreadManagementProvided)),
+  Layer.provide(layerThreadManagementProvided),
 );
 const layerThreadLaunchProvided = ThreadLaunchService.layer.pipe(
   Layer.provide(

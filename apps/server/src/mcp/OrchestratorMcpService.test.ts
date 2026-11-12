@@ -170,6 +170,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) =>
             Effect.sync(() => {
               if (threadId !== parentThreadId) {
@@ -315,6 +317,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) =>
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           delegatedTaskResultPending: () =>
@@ -415,6 +419,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) =>
             Effect.succeed(threadId === parentThreadId ? parentProjection() : childProjection()),
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
@@ -525,6 +531,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) => Effect.succeed(records(threadId)),
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
           getProjectThreadRecords: (input) => Effect.succeed(records(input.threadId)),
@@ -636,6 +644,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) =>
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
@@ -730,6 +740,8 @@ describe("OrchestratorMcpService", () => {
           NodeServices.layer,
           NodeCrypto.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            streamWorkflowStarts: Stream.empty,
+            registerWorkflowReviewValidator: () => Effect.void,
             getThreadRecords: (threadId) =>
               threadId === parentThreadId
                 ? Effect.map(Ref.get(status), parentProjection)
@@ -838,6 +850,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) =>
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
@@ -931,6 +945,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) =>
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
@@ -1028,6 +1044,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId) =>
             Effect.succeed(threadId === parentThreadId ? parentProjection : childProjection),
           getThreadShell: (threadId) => Effect.succeed(liveThreadShell(threadId)),
@@ -1186,6 +1204,8 @@ describe("OrchestratorMcpService", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           getThreadRecords: (threadId, fields, filter) =>
             ((fields as ReadonlyArray<string>).includes("subagents")
               ? Ref.update(subagentReads, (reads) => [...reads, filter])
@@ -1496,6 +1516,8 @@ describe("OrchestratorMcpService provider resolution", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           hasReceipt: () => Effect.succeed(false),
           assertProviderInstanceEnabled: () => Effect.void,
           isProviderInstanceEnabledForProject: () => Effect.succeed(true),
@@ -1638,6 +1660,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           NodeServices.layer,
           NodeCrypto.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            streamWorkflowStarts: Stream.empty,
+            registerWorkflowReviewValidator: () => Effect.void,
             getThreadRecords: () => Effect.succeed(parentProjection([])),
           }),
           ServerSettings.layerTest({
@@ -1843,6 +1867,8 @@ describe("OrchestratorMcpService provider resolution", () => {
                 NodeServices.layer,
                 NodeCrypto.layer,
                 Layer.mock(ThreadManagementService.ThreadManagementService)({
+                  streamWorkflowStarts: Stream.empty,
+                  registerWorkflowReviewValidator: () => Effect.void,
                   getThreadRecords: () =>
                     Effect.succeed(
                       parentProjection([], { instanceId: codexInstanceId, model: "gpt-3" }),
@@ -2019,6 +2045,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           NodeServices.layer,
           NodeCrypto.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            streamWorkflowStarts: Stream.empty,
+            registerWorkflowReviewValidator: () => Effect.void,
             hasReceipt: () => Effect.succeed(false),
             getThreadRecords: (threadId) =>
               Effect.succeed(
@@ -2094,6 +2122,8 @@ describe("OrchestratorMcpService provider resolution", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           hasReceipt: () => Effect.succeed(false),
           getThreadRecords: () => Effect.succeed(parentProjection([])),
         }),
@@ -2171,6 +2201,8 @@ describe("OrchestratorMcpService provider resolution", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           hasReceipt: () => Effect.succeed(false),
           getThreadRecords: (threadId) =>
             Effect.succeed(
@@ -2279,6 +2311,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           NodeServices.layer,
           NodeCrypto.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            streamWorkflowStarts: Stream.empty,
+            registerWorkflowReviewValidator: () => Effect.void,
             getThreadRecords: (threadId) =>
               Ref.get(accepted).pipe(
                 Effect.map((isAccepted) =>
@@ -2797,6 +2831,8 @@ describe("OrchestratorMcpService provider resolution", () => {
             NodeServices.layer,
             NodeCrypto.layer,
             Layer.mock(ThreadManagementService.ThreadManagementService)({
+              streamWorkflowStarts: Stream.empty,
+              registerWorkflowReviewValidator: () => Effect.void,
               hasReceipt: () => Effect.succeed(false),
               assertProviderInstanceEnabled: () => Effect.void,
               isProviderInstanceEnabledForProject: () => Effect.succeed(true),
@@ -3003,6 +3039,8 @@ describe("OrchestratorMcpService provider resolution", () => {
             NodeServices.layer,
             NodeCrypto.layer,
             Layer.mock(ThreadManagementService.ThreadManagementService)({
+              streamWorkflowStarts: Stream.empty,
+              registerWorkflowReviewValidator: () => Effect.void,
               getThreadShell: (threadId) =>
                 Effect.succeed(threadId === boundThreadId ? boundThread : null),
             }),
@@ -3073,6 +3111,8 @@ describe("OrchestratorMcpService provider resolution", () => {
                   NodeServices.layer,
                   NodeCrypto.layer,
                   Layer.mock(ThreadManagementService.ThreadManagementService)({
+                    streamWorkflowStarts: Stream.empty,
+                    registerWorkflowReviewValidator: () => Effect.void,
                     getThreadShell: () => Effect.succeed(null),
                     getThreadRecords: () => Effect.succeed(idleThreadProjection(shell)),
                   }),
@@ -3155,6 +3195,8 @@ describe("OrchestratorMcpService provider resolution", () => {
                   NodeServices.layer,
                   NodeCrypto.layer,
                   Layer.mock(ThreadManagementService.ThreadManagementService)({
+                    streamWorkflowStarts: Stream.empty,
+                    registerWorkflowReviewValidator: () => Effect.void,
                     getThreadShell: (threadId) =>
                       Ref.getAndUpdate(lookups, (count) => count + 1).pipe(
                         Effect.flatMap((count) =>
@@ -3253,6 +3295,8 @@ describe("OrchestratorMcpService provider resolution", () => {
             NodeServices.layer,
             NodeCrypto.layer,
             Layer.mock(ThreadManagementService.ThreadManagementService)({
+              streamWorkflowStarts: Stream.empty,
+              registerWorkflowReviewValidator: () => Effect.void,
               getThreadShell: () => Effect.succeed(null),
             }),
             ServerSettings.layerTest(),
@@ -3531,6 +3575,8 @@ describe("OrchestratorMcpService provider resolution", () => {
           NodeServices.layer,
           NodeCrypto.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            streamWorkflowStarts: Stream.empty,
+            registerWorkflowReviewValidator: () => Effect.void,
             getThreadRecords: (threadId) =>
               Effect.succeed(
                 threadId === parentThreadId
@@ -3667,6 +3713,8 @@ describe("OrchestratorMcpService provider resolution", () => {
             NodeServices.layer,
             NodeCrypto.layer,
             Layer.mock(ThreadManagementService.ThreadManagementService)({
+              streamWorkflowStarts: Stream.empty,
+              registerWorkflowReviewValidator: () => Effect.void,
               hasReceipt: () => Effect.succeed(false),
               assertProviderInstanceEnabled: () => Effect.void,
               getThreadRecords: (threadId) =>
@@ -3778,6 +3826,8 @@ describe("OrchestratorMcpService provider resolution", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           hasReceipt: () => Effect.succeed(false),
           assertProviderInstanceEnabled: () => Effect.void,
           getThreadRecords: (threadId) =>
@@ -3849,6 +3899,8 @@ describe("OrchestratorMcpService provider resolution", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           hasReceipt: () => Effect.succeed(false),
           assertProviderInstanceEnabled: () => Effect.void,
           getThreadRecords: (threadId) =>
@@ -3944,6 +3996,8 @@ describe("OrchestratorMcpService thread lookup", () => {
           NodeServices.layer,
           NodeCrypto.layer,
           Layer.mock(ThreadManagementService.ThreadManagementService)({
+            streamWorkflowStarts: Stream.empty,
+            registerWorkflowReviewValidator: () => Effect.void,
             getThreadShell: (threadId) =>
               Effect.succeed(shells.find((shell) => shell.id === threadId) ?? null),
             sendToThread: () => Ref.update(sent, (count) => count + 1).pipe(Effect.as({} as never)),
@@ -4088,6 +4142,8 @@ describe("OrchestratorMcpService thread list", () => {
         NodeServices.layer,
         NodeCrypto.layer,
         Layer.mock(ThreadManagementService.ThreadManagementService)({
+          streamWorkflowStarts: Stream.empty,
+          registerWorkflowReviewValidator: () => Effect.void,
           listProjectThreads: (input) =>
             Effect.succeed(
               shells.filter(

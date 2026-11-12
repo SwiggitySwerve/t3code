@@ -502,6 +502,8 @@ export interface ThreadManagementServiceShape {
   readonly cancelDelegatedTask: Orchestrator.OrchestratorV2["Service"]["cancelDelegatedTask"];
   readonly delegatedTaskResultPending: Orchestrator.OrchestratorV2["Service"]["delegatedTaskResultPending"];
   readonly streamStoredEvents: Orchestrator.OrchestratorV2["Service"]["streamStoredEvents"];
+  readonly streamWorkflowStarts: Orchestrator.OrchestratorV2["Service"]["streamWorkflowStarts"];
+  readonly registerWorkflowReviewValidator: Orchestrator.OrchestratorV2["Service"]["registerWorkflowReviewValidator"];
   readonly streamStoredEventsFrom: Orchestrator.OrchestratorV2["Service"]["streamStoredEventsFrom"];
   readonly streamDomainEvents: Orchestrator.OrchestratorV2["Service"]["streamDomainEvents"];
 }
@@ -1749,6 +1751,8 @@ const make = Effect.gen(function* () {
     cancelDelegatedTask: orchestrator.cancelDelegatedTask,
     delegatedTaskResultPending: orchestrator.delegatedTaskResultPending,
     streamStoredEvents: orchestrator.streamStoredEvents,
+    streamWorkflowStarts: orchestrator.streamWorkflowStarts,
+    registerWorkflowReviewValidator: orchestrator.registerWorkflowReviewValidator,
     streamStoredEventsFrom: orchestrator.streamStoredEventsFrom,
     streamDomainEvents: orchestrator.streamDomainEvents,
   });

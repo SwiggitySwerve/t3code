@@ -85,7 +85,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(SourceControlRepositoryService)({}),
   Layer.mock(StorageCleanup)({}),
   Layer.mock(ThreadLaunchService)({}),
-  Layer.mock(ThreadManagementService)({}),
+  Layer.mock(ThreadManagementService)({ registerWorkflowReviewValidator: () => Effect.void }),
   Layer.mock(ThreadSearch)({}),
   Layer.mock(VcsStatusBroadcaster)({}),
   Layer.mock(WorkflowApprovalGate)({}),
@@ -188,8 +188,8 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
         workflow_start: "592afbbb464f27e6af4c9264ac777ca2c41f7a1c61d1863d9ede9051d15f68f2",
         workflow_status: "ecc96395ab4a603896377c9b77548913813eab8874f757167f8c79ee8da99e9c",
         workflow_stop: "8370d8ffc7f9aafde23cc4f0a2d294a46c009fd3daaa7e80c20da9793d3fd1ae",
-        graph_review: "2664f37cf89e946645edbab2a90e3c587afe87252c460b41916031fbfd4e305d",
-        graph_start: "ec2b2fb473eea5f66bc4b31149f30b5cd688efe6c387182561ad321d153e7a17",
+        graph_review: "d0f5ed396dc89f882ae133671c4262a0bd042946e99a6baf17002a16995064dc",
+        graph_start: "913ea468203d873936314f578048dd5b9d22d73a7ca753c9badac00a8b30436e",
         create_threads: "1ac22ad0de594beb374692af1f768e2493d3f225a708f4cc40f3aa2c05110ee8",
         t3_worktree_remove: "e3570c6c5ba463201941d89475a278817ddb24af12169c7e42c5376da6e538bd",
       };
@@ -209,8 +209,8 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
     expect(measured).toEqual(
       workflows
         ? {
-            claudeSystemAppendBytes: 6023,
-            codexAdditionalContextBytes: 7669,
+            claudeSystemAppendBytes: 6066,
+            codexAdditionalContextBytes: 7712,
             mcpToolListJsonBytes: budget.workflowMcpToolListJsonBytes,
           }
         : {
