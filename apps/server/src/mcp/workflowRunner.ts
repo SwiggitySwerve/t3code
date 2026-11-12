@@ -417,7 +417,10 @@ class WorkflowSession {
     return this.markStopped(taskId, "timed_out");
   }
 
-  /** Records on the row that a later attempt replaces this one, and waits for the write. */
+  /**
+   * Records on the row that a later attempt replaces this one, and resolves only once that write
+   * commits; a write that fails rejects, so no retry starts while a wake could still be admitted.
+   */
   private async retireAttempt(taskId: string): Promise<void> {
     for (const agent of this.agents) {
       if (!agent.attemptHistory?.some((record) => record.taskId === taskId)) continue;
@@ -425,8 +428,7 @@ class WorkflowSession {
         record.taskId === taskId ? { ...record, superseded: true } : record,
       );
     }
-    this.scheduleUpdate();
-    while (this.updating !== undefined) await this.updating;
+    await this.flush();
   }
 
   /**

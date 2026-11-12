@@ -195,6 +195,35 @@ it("does not continue settled root runs with restart-cancelled background work",
       );
 });
 
+it.each([true, false])(
+  "continues a settled run for a command it left running only on a workflow member (member=%s)",
+  (member) => {
+    const projection = makeProjection();
+    const settled = {
+      ...projection,
+      thread: {
+        ...projection.thread,
+        lineage: {
+          ...projection.thread.lineage,
+          ...(member ? { workflowId: NodeId.make("workflow:restart") } : {}),
+        },
+      },
+      runs: [{ ...projection.runs[0]!, status: "completed" as const, completedAt: now }],
+      providerThreads: [
+        {
+          ...projection.providerThreads[0]!,
+          status: "idle" as const,
+          pendingBackgroundTasks: [
+            { taskId: "tests", kind: "command" as const, description: "vp test" },
+          ],
+        },
+      ],
+      providerTurns: [],
+    } as OrchestrationV2ThreadProjection;
+    assert.equal(restartContinuationRun(settled, now)?.id, member ? runId : undefined);
+  },
+);
+
 it.effect.each(["completed", "waiting", "cancelled"] as const)(
   "wakes a %s run whose awaited monitor the restart cancelled, with the note as its prompt",
   (status) =>

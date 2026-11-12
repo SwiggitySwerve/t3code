@@ -2842,7 +2842,10 @@ const make = Effect.gen(function* () {
             timing,
             status: task.status,
             summary: task.summary,
-            cancelledByServerRestart: lastRun?.cancelledByServerRestart === true,
+            // A turn that finished before the restart cut its awaited work also ended by restart.
+            cancelledByServerRestart:
+              lastRun !== undefined &&
+              (lastRun.cancelledByServerRestart === true || runOutcome(lastRun) !== lastRun.status),
             outcomeCategory: workflowAgentOutcomeCategory({ status: task.status, started: true }),
             usage: aggregateWorkflowUsage(
               providerTurns.length === 0 ? [undefined] : providerTurns.map(workflowTurnUsage),

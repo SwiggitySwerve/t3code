@@ -982,6 +982,32 @@ describe("a worker settles on its work, not its turn", () => {
     }).pipe(Effect.provide(layerTest)),
   );
 
+  it.effect("a member whose command a restart cut is started again on the same rung", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(
+        'return await agent("run the shard", { label: "shard", report: true })',
+      );
+      const first = yield* awaitMember(started.workflowId, 1);
+      // What restart recovery leaves on a turn that ended while its tests ran: the lost command.
+      yield* completeChild(first.childThreadId!, "The tests run in the background.", {
+        status: "completed",
+        restartCancelledBackgroundWork: [{ kind: "shell", label: "vp test", awaited: true }],
+      });
+      const retry = yield* awaitMember(started.workflowId, 2);
+      // A restart is no judgment on the work: the retry gets no repair feedback.
+      expect(retry.prompt).not.toContain("did not pass its");
+      yield* completeChild(retry.childThreadId!, "Every test ran.");
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({ ok: true, result: "Every test ran." });
+      const row = yield* rowOf(started.workflowId);
+      expect(row.workflow?.agents[0]?.attemptHistory?.map((entry) => entry.state)).toEqual([
+        "interrupted",
+        "completed",
+      ]);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
   it.effect("a retry starts only after the attempt it replaces has stopped", () =>
     Effect.gen(function* () {
       yield* startParent;

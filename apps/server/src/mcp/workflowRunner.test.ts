@@ -1675,6 +1675,34 @@ describe("workflow runner", () => {
     }),
   );
 
+  it.effect("starts no retry when the replaced attempt's retirement does not commit", () =>
+    Effect.gen(function* () {
+      let runs = 0;
+      const harness = yield* makeHarness({
+        runCommandCheck: () => {
+          runs += 1;
+          return Effect.succeed(
+            runs === 1
+              ? { outcome: "failed" as const, detail: "wrong" }
+              : { outcome: "passed" as const, detail: "ok" },
+          );
+        },
+        // The row write that would mark the first attempt replaced fails.
+        onWorkflowUpdate: (workflow) =>
+          workflow.agents[0]?.attemptHistory?.[0]?.superseded === true
+            ? Effect.fail({ code: "orchestration_error", message: "The disk is full." } as never)
+            : Effect.void,
+      });
+      yield* launch(
+        harness.runner,
+        'return await agent("x", { verify: { type: "process", argv: ["check"] }, report: true })',
+      );
+      yield* Deferred.await(harness.firstCompletion);
+      expect(harness.spawned()).toBe(1);
+      expect(harness.endedAttempts).toEqual([]);
+    }),
+  );
+
   it("recovers a request key from attempt keys up to the most attempts an agent makes", () => {
     const key = `wf-${"a".repeat(24)}-0`;
     expect([key, `${key}-r1`, `${key}-r4`].map(agentRequestKey)).toEqual([key, key, key]);

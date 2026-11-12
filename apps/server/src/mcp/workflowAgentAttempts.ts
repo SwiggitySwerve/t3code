@@ -69,6 +69,9 @@ const UNSTOPPED = `Its attempt's work did not stop within ${STOP_GRACE_MS / 1000
  */
 const providerFaulted = new WeakSet<MutableAgent>();
 
+const UNRETIRED =
+  "Its attempt could not be recorded as replaced, so no further attempt started beside it.";
+
 export const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 type AttemptRecord = NonNullable<OrchestrationV2WorkflowAgent["attemptHistory"]>[number];
@@ -337,7 +340,14 @@ export async function runAttempts(
     // Before another attempt runs, ends anything this one's thread started after it settled.
     const endPrevious = async () => {
       // Retired before the drain reads its work, so no wake can start work the drain misses.
-      await host.retireAttempt(started.value.taskId);
+      const retired = await host.retireAttempt(started.value.taskId).then(
+        () => true,
+        () => false,
+      );
+      if (!retired) {
+        settle("failed", UNRETIRED);
+        return false;
+      }
       const ended = await Effect.runPromise(
         host.deps
           .endAttemptWork(host.workflow, started.value.taskId, started.value.childThreadId)
