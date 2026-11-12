@@ -547,7 +547,8 @@ describe("graph review write conflicts", () => {
 describe("graph capacity", () => {
   // A workflow starts at most this many agents (workflowRunner.test.ts pins the runner's side).
   const CAPACITY = 1000;
-  // A judgment check adds a judge agent for each of the two work attempts at its node.
+  // A judgment check adds a judge agent for each of the two work attempts at its node; a judge's
+  // re-runs are not reserved, since they start only while the workflow has room.
   const JUDGES_PER_NODE = 2;
   const many = (count: number, make: (index: number) => unknown = () => node()) =>
     Object.fromEntries(Array.from({ length: count }, (_, index) => [`n${index}`, make(index)]));
@@ -612,6 +613,17 @@ describe("graph capacity", () => {
     expect(reviewGraph(graph(many(ladderFits + 1, laddered)), {}).blockers[0]).toContain(
       String((ladderFits + 1) * (perNode + 1)),
     );
+  });
+
+  it("passes a 256-node graph whose judged nodes each have one retry", () => {
+    const retried = () =>
+      node({
+        verify: { type: "judgment", rubric: ["Correct"] },
+        retries: [{ providerInstanceId: "codex", model: "gpt-5.4" }],
+      });
+    const reviewed = reviewGraph(graph(many(256, retried)), {});
+    expect(reviewed.blockers).toEqual([]);
+    expect(reviewed.digest).not.toBeNull();
   });
 
   it("does not count process or structured checks as extra agents", () => {

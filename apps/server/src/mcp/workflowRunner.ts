@@ -45,6 +45,7 @@ import { freshCommandId, isCommandIdSpent } from "../orchestration-v2/WorkflowCo
 import {
   type CheckOutcome,
   type FileRef,
+  criteriaInstructions,
   fileInstructions,
   type ProducedFile,
   type WorkspaceFile,
@@ -389,6 +390,7 @@ class WorkflowSession {
       waiting: this.waiting,
       stoppedBy: (taskId) => this.stops.get(taskId) ?? this.earlierStops.get(taskId),
       retireAttempt: (taskId) => this.retireAttempt(taskId),
+      hasAgentRoom: () => this.agents.length < MAX_AGENTS_PER_WORKFLOW,
       spentTokens: () => this.recordedUsage().spent ?? 0,
       markBudgetExhausted: () => {
         this.budgetExhausted = true;
@@ -900,7 +902,7 @@ class WorkflowSession {
         : "";
     const itemFor = (feedback: string, attemptTarget: unknown) =>
       decodeItem({
-        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${feedback}`,
+        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${criteriaInstructions(runCheck)}${feedback}`,
         title: truncate(label, 500),
         ...(attemptTarget === undefined ? {} : { target: attemptTarget }),
         ...(options.isolation === undefined ? {} : { isolation: options.isolation }),

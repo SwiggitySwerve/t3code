@@ -10,6 +10,7 @@ import {
   CHECK_FEEDBACK_BYTES,
   renderHandoff,
   renderJudgedResult,
+  renderRepairEvidence,
   type HandoffInput,
 } from "./workflowHandoff.ts";
 
@@ -52,6 +53,10 @@ export interface CheckOutcome {
   readonly outcome: "passed" | "failed" | "error";
   /** What the check saw, for the agent's next attempt and for the record. */
   readonly detail: string;
+  /** An error from the check's own machinery (its process did not start, its judge did not answer), which running it again may clear. */
+  readonly infrastructure?: true;
+  /** For a failed judgment, the numbers of the rubric criteria the checker found unmet. */
+  readonly failedCriteria?: ReadonlyArray<number>;
 }
 
 /** A workspace file an agent reads or must write; `sha256` pins an input's exact bytes. */
@@ -430,12 +435,17 @@ export function runStructuredCheck(check: StructuredCheck, result: unknown): Che
     : { outcome: "failed", detail: problems.join("; ") };
 }
 
-/** The answer a judgment agent must give. */
+/**
+ * The answer a judgment agent must give.
+ * Accepted loss: this schema and `judgmentPrompt` are part of a judge's request key, so a
+ * workflow stored before `failedCriteria` resumes with fresh judges rather than its finished ones.
+ */
 export const JUDGMENT_RESULT_SCHEMA = {
   type: "object",
   properties: {
     outcome: { type: "string", enum: ["passed", "failed"] },
     reasons: { type: "string" },
+    failedCriteria: { type: "array", items: { type: "integer" } },
   },
   required: ["outcome", "reasons"],
 } as const;
@@ -461,7 +471,7 @@ export function judgmentPrompt(input: {
       : [
           "The result below was cut. Its marker says which file holds the whole answer: read that file, without changing it, before you judge what the cut part may contain.",
         ]),
-    "Pass only if every criterion holds; otherwise fail and say which criteria do not hold.",
+    "Pass only if every criterion holds; otherwise fail, list the numbers of the criteria that do not hold in failedCriteria, and say why.",
     "",
     "Task:",
     input.task,
@@ -484,19 +494,64 @@ export function judgmentOutcome(verdict: unknown): CheckOutcome {
   ) {
     return { outcome: "error", detail: "The checker gave no usable verdict." };
   }
-  return { outcome: record.outcome, detail: record.reasons };
+  const failedCriteria = Array.isArray(record.failedCriteria)
+    ? [
+        ...new Set(
+          record.failedCriteria.filter(
+            (value): value is number => Number.isInteger(value) && value >= 1,
+          ),
+        ),
+      ]
+    : [];
+  return {
+    outcome: record.outcome,
+    detail: record.reasons,
+    ...(record.outcome === "failed" && failedCriteria.length > 0 ? { failedCriteria } : {}),
+  };
 }
 
-/** Appended to the task for the next attempt after a failed check. */
-export function checkFeedback(
-  checkType: WorkflowCheck["type"] | "outputs",
-  outcome: CheckOutcome,
-): string {
+/** Shows a worker the criteria its judgment check grades, so it can meet them the first time. */
+export function criteriaInstructions(check: WorkflowCheck | undefined): string {
+  if (check?.type !== "judgment") return "";
   return [
     "",
     "",
-    `Your previous attempt did not pass its ${checkType} check (${outcome.outcome}):`,
-    boundText(outcome.detail, CHECK_FEEDBACK_BYTES),
-    "Fix this and complete the task again.",
+    "Your result will be checked against these criteria:",
+    ...check.rubric.map((criterion, index) => `${index + 1}. ${criterion}`),
+  ].join("\n");
+}
+
+/**
+ * Appended to the task for the attempt after a failed check: a repair of the previous attempt's
+ * work, with what the check found and what that attempt answered, rather than the task afresh.
+ */
+export function repairFeedback(input: {
+  readonly checkType: WorkflowCheck["type"] | "outputs";
+  readonly outcome: CheckOutcome;
+  readonly rubric: ReadonlyArray<string> | undefined;
+  readonly previousResult: string | null;
+  /** False when each attempt works in its own checkout, so the last one's files are not here. */
+  readonly sharedCheckout: boolean;
+}): string {
+  const rubric = input.rubric ?? [];
+  // Each unmet criterion once, in rubric order; a number outside the rubric names nothing.
+  const unmet = [...new Set(input.outcome.failedCriteria ?? [])]
+    .filter((number) => Number.isInteger(number) && number >= 1 && number <= rubric.length)
+    .toSorted((left, right) => left - right)
+    .map((number) => `${number}. ${rubric[number - 1]}`);
+  return [
+    "",
+    "",
+    `Your previous attempt did not pass its ${input.checkType} check.`,
+    input.sharedCheckout
+      ? "Its changes are still in the checkout. Repair that work: fix what the check found and keep what already holds; do not start over."
+      : "Repair that work: fix what the check found and keep what already holds; do not start over.",
+    ...(unmet.length === 0
+      ? []
+      : ["Criteria it did not meet:", boundText(unmet.join("\n"), CHECK_FEEDBACK_BYTES)]),
+    renderRepairEvidence({
+      findings: input.outcome.detail,
+      previousResult: input.previousResult ?? "",
+    }),
   ].join("\n");
 }

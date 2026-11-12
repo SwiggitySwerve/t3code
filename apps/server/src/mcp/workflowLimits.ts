@@ -13,6 +13,11 @@ export const MAX_RETRY_TARGETS = MAX_WORK_ATTEMPTS - 1;
  * cancelled it, or the stall sweep stopped it); they do not use a work attempt.
  */
 export const MAX_INFRA_RETRIES = 2;
+/**
+ * Extra runs of a check that could not run (its process did not start, its judge gave no
+ * verdict). They judge the same work again and use no work attempt.
+ */
+export const MAX_CHECK_RERUNS = 2;
 /** The most attempts one agent call can make, which bounds its attempt keys. */
 export const MAX_AGENT_ATTEMPTS = MAX_WORK_ATTEMPTS + MAX_INFRA_RETRIES;
 
@@ -25,6 +30,7 @@ export function workAttempts(retries: ReadonlyArray<unknown> | undefined): numbe
  * The most agents one `agent()` call can add to a workflow: the worker itself, plus for a
  * judgment check one judge for each work attempt, since only a finished attempt is judged.
  * Process and structured checks run without an agent, and an agent's own retries reuse its row.
+ * A judge's re-runs are not reserved: they start only while the workflow has room for them.
  */
 export function maxAgentsPerCall(
   checkType: "process" | "structured" | "judgment" | undefined,

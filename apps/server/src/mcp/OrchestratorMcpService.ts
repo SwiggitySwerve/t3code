@@ -2651,7 +2651,11 @@ const make = Effect.gen(function* () {
               })
               .pipe(Effect.result);
             if (ran._tag === "Failure") {
-              return { outcome: "error", detail: ran.failure.message } satisfies CheckOutcome;
+              return {
+                outcome: "error",
+                detail: ran.failure.message,
+                infrastructure: true,
+              } satisfies CheckOutcome;
             }
             const tail = (label: string, text: string) =>
               text.trim().length === 0 ? [] : [`${label}:\n${text.trimEnd().slice(-2_000)}`];
@@ -2684,6 +2688,7 @@ const make = Effect.gen(function* () {
             Effect.succeed({
               outcome: "error",
               detail: `The check could not run: ${errorMessage(cause)}`,
+              infrastructure: true,
             } satisfies CheckOutcome),
           ),
         );

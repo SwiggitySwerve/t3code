@@ -1235,6 +1235,29 @@ describe("workflow runner", () => {
       expect(worker?.runnerSettledAt).toBeDefined();
     }),
   );
+  it.effect("does not run a provider-faulted judge again at the agent cap", () =>
+    Effect.gen(function* () {
+      // The worker is the 999th agent and its judge the 1000th; every try of the judge fails.
+      const { runner, completed, workflowUpdates } = yield* makeHarness({
+        finish: (spawned) => (spawned >= 1000 ? "failed" : "completed"),
+      });
+      yield* launch(
+        runner,
+        'for (let i = 0; i < 998; i++) await agent("a" + i); return await agent("judged", { verify: { type: "judgment", rubric: ["Correct"] }, report: true })',
+      );
+      const report = JSON.parse(yield* Deferred.await(completed));
+      const agents = workflowUpdates.at(-1)!.agents;
+      // The cap holds, and the check keeps the error its judge ended with, as without re-runs.
+      expect(agents).toHaveLength(1000);
+      expect(agents.filter((agent) => agent.judgmentFor !== undefined)).toHaveLength(1);
+      expect(report).toMatchObject({
+        ok: false,
+        verification: { type: "judgment", outcome: "error", attempts: 1 },
+      });
+      expect(report.verification.detail).not.toContain("reached its limit");
+      expect(agents.at(-2)).toMatchObject({ state: "failed", outcomeCategory: "check_failed" });
+    }),
+  );
   it.effect("refuses the agent past the per-workflow limit of 1000", () =>
     Effect.gen(function* () {
       const { runner, completed, spawned } = yield* makeHarness();
@@ -1596,6 +1619,37 @@ describe("workflow runner", () => {
       }),
     );
   });
+
+  it.effect.each([
+    [
+      "spawn",
+      { outcome: "error" as const, detail: "spawn check ENOENT", infrastructure: true as const },
+    ],
+    ["verdict", { outcome: "failed" as const, detail: "wrong" }],
+  ] as const)(
+    "runs a check that could not start again without using a work attempt (%s)",
+    ([kind, firstRun]) =>
+      Effect.gen(function* () {
+        let runs = 0;
+        const harness = yield* makeHarness({
+          runCommandCheck: () => {
+            runs += 1;
+            return Effect.succeed(
+              runs === 1 ? firstRun : { outcome: "passed" as const, detail: "ok" },
+            );
+          },
+        });
+        yield* launch(
+          harness.runner,
+          'return await agent("x", { verify: { type: "process", argv: ["check"] }, report: true })',
+        );
+        const report = JSON.parse(yield* Deferred.await(harness.completed));
+        expect(report).toMatchObject({ ok: true, attempts: kind === "spawn" ? 1 : 2 });
+        // Only a failed verdict judged the work; a check that did not start judged nothing.
+        expect(harness.spawned()).toBe(kind === "spawn" ? 1 : 2);
+        expect(runs).toBe(2);
+      }),
+  );
 
   it.effect("retires a replaced attempt on the row before ending its work", () =>
     Effect.gen(function* () {
