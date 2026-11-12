@@ -18,6 +18,7 @@ import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
+import * as Fiber from "effect/Fiber";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
@@ -42,6 +43,79 @@ const providerThreadId = ProviderThreadId.make("provider-thread:effect-worker-re
 const providerTurnId = ProviderTurnId.make("provider-turn:effect-worker-restart");
 const attemptId = RunAttemptId.make("run-attempt:effect-worker-restart");
 const runId = RunId.make("run:effect-worker-restart");
+
+it.effect.each([
+  { type: "checkpoint.capture", outcome: "complete" },
+  { type: "checkpoint.capture", outcome: "interrupt" },
+  { type: "provider-turn.start", outcome: "complete" },
+] as const)("drain handles a concurrently claimed $type that will $outcome", ({ type, outcome }) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const executing = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      const events: string[] = [];
+      const claimedEffect: EffectOutbox.OrchestrationEffectV2 = {
+        ...restartEffect(yield* DateTime.now, { type: "detach" }),
+        request:
+          type === "checkpoint.capture"
+            ? { type, runId, scopeId: CheckpointScopeId.make("scope:worker-drain") }
+            : { type, runId },
+      };
+      let claimed = false;
+      const layer = EffectWorker.layer.pipe(
+        Layer.provide(
+          Layer.mock(EffectOutbox.EffectOutboxV2)({
+            claimNext: () =>
+              Effect.suspend(() => {
+                if (!claimed) {
+                  claimed = true;
+                  return Effect.succeedSome(claimedEffect);
+                }
+                return Effect.succeedNone;
+              }),
+            get: () => Effect.succeedSome(claimedEffect),
+            awaitCancellation: () => Effect.never,
+            clearCancellation: () => Effect.void,
+            succeed: () =>
+              Effect.sync(() => {
+                events.push("completed");
+                return true;
+              }),
+          }),
+        ),
+        Layer.provide(
+          Layer.succeed(EffectWorker.OrchestrationEffectExecutorV2, {
+            execute: () =>
+              Deferred.succeed(executing, undefined).pipe(Effect.andThen(Deferred.await(release))),
+          }),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const worker = yield* EffectWorker.OrchestrationEffectWorkerV2;
+        const active = yield* worker.runOnce().pipe(Effect.forkScoped);
+        yield* Deferred.await(executing);
+        const draining = yield* worker.drain().pipe(
+          Effect.tap(() => Effect.sync(() => events.push("drained"))),
+          Effect.forkScoped({ startImmediately: true }),
+        );
+        if (type === "checkpoint.capture") assert.isUndefined(draining.pollUnsafe());
+        else assert.isDefined(draining.pollUnsafe());
+        if (outcome === "interrupt") yield* Fiber.interrupt(active);
+        else yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(draining);
+        if (outcome === "complete") yield* Fiber.join(active);
+        assert.deepEqual(
+          events,
+          outcome === "interrupt"
+            ? ["drained"]
+            : type === "checkpoint.capture"
+              ? ["completed", "drained"]
+              : ["drained", "completed"],
+        );
+      }).pipe(Effect.provide(layer));
+    }),
+  ),
+);
 
 function restartEffect(
   now: DateTime.Utc,
@@ -93,6 +167,7 @@ function layerExecutorFor(input: {
       ProviderTurnControlService.ProviderTurnControlServiceV2.of({
         interrupt: input.interrupt ?? (() => Effect.void),
         steer: () => Effect.void,
+        applyModelSelection: () => Effect.void,
         interruptAndAwaitTerminal: (request) =>
           record(
             request.replacementProviderSessionId === undefined
@@ -376,7 +451,7 @@ it.effect("requeues a claim when a pre-execution worker check fails", () =>
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
-      Effect.flatMap((worker) => worker.runOnce),
+      Effect.flatMap((worker) => worker.runOnce()),
       Effect.provide(layerWorker),
       Effect.exit,
     );
@@ -446,7 +521,7 @@ it.effect("arms cancellation before the durable pre-execution check", () =>
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
-      Effect.flatMap((worker) => worker.runOnce),
+      Effect.flatMap((worker) => worker.runOnce()),
       Effect.provide(layerWorker),
       Effect.exit,
     );
@@ -512,7 +587,7 @@ it.effect("terminalizes a process-bound claim when success settlement fails", ()
     );
 
     const exit = yield* EffectWorker.OrchestrationEffectWorkerV2.pipe(
-      Effect.flatMap((worker) => worker.runOnce),
+      Effect.flatMap((worker) => worker.runOnce()),
       Effect.provide(layerWorker),
       Effect.exit,
     );

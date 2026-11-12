@@ -3,6 +3,10 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./pullRequestAnchor": {
+      "types": "./src/pullRequestAnchor.ts",
+      "import": "./src/pullRequestAnchor.ts"
+    },
     "./workflowUpdate": {
       "types": "./src/workflowUpdate.ts",
       "import": "./src/workflowUpdate.ts"

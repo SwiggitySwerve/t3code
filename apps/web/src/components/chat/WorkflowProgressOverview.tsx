@@ -52,7 +52,7 @@ import {
 import { WorkflowPhaseBar, type WorkflowUnreachedState } from "./WorkflowProgressTrack";
 
 const PHASE_PAGE_SIZE = 32;
-export const WORKFLOW_AGENT_PITCH = 24;
+const WORKFLOW_AGENT_PITCH = 24;
 
 type WorkflowProgress = ReturnType<typeof deriveWorkflowProgress>;
 
