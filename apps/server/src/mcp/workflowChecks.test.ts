@@ -1,10 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
-  checkFeedback,
   fileInstructions,
   judgmentPrompt,
   parseFileRefs,
+  repairFeedback,
 } from "./workflowChecks.ts";
 
 describe("judgmentPrompt", () => {
@@ -17,19 +17,42 @@ describe("judgmentPrompt", () => {
   });
 });
 
-describe("checkFeedback", () => {
+describe("repairFeedback", () => {
+  const repair = (detail: string) =>
+    repairFeedback({
+      checkType: "process",
+      outcome: { outcome: "failed", detail },
+      rubric: undefined,
+      previousResult: null,
+      sharedCheckout: true,
+    });
+
   it("keeps a short detail whole", () => {
-    expect(checkFeedback("process", { outcome: "failed", detail: "exit code 1" })).toContain(
-      "\nexit code 1\n",
-    );
+    expect(repair("exit code 1")).toContain("\nexit code 1\n");
   });
 
   it("cuts a long detail by bytes at a character boundary and says it was cut", () => {
-    const feedback = checkFeedback("process", { outcome: "failed", detail: "é".repeat(5_000) });
-    const detail = feedback.split("\n")[3] ?? "";
+    const detail = repair("é".repeat(5_000)).split("\n")[4] ?? "";
     expect(new TextEncoder().encode(detail).length).toBeLessThanOrEqual(4_000);
     expect(detail).not.toContain("\uFFFD");
     expect(detail).toMatch(/\.\.\.truncated \(\d+ of 10000 bytes\)$/);
+  });
+
+  it("names the unmet criteria and the previous result, and asks for a repair", () => {
+    const feedback = repairFeedback({
+      checkType: "judgment",
+      outcome: { outcome: "failed", detail: "Section 2 is missing.", failedCriteria: [2, 9] },
+      rubric: ["It has a title.", "It has section 2."],
+      previousResult: "A title and section 1.",
+      sharedCheckout: false,
+    });
+    expect(feedback).toContain("Criteria it did not meet:\n2. It has section 2.\n");
+    expect(feedback).not.toContain("It has a title.");
+    expect(feedback).toContain("The checker's reasons:\nSection 2 is missing.");
+    expect(feedback).toContain("A title and section 1.");
+    expect(feedback).toContain("do not start over");
+    expect(feedback).not.toContain("still in the checkout");
+    expect(feedback).not.toContain("complete the task again");
   });
 });
 

@@ -1590,6 +1590,37 @@ describe("workflow runner", () => {
     );
   });
 
+  it.effect.each([
+    [
+      "spawn",
+      { outcome: "error" as const, detail: "spawn check ENOENT", infrastructure: true as const },
+    ],
+    ["verdict", { outcome: "failed" as const, detail: "wrong" }],
+  ] as const)(
+    "runs a check that could not start again without using a work attempt (%s)",
+    ([kind, firstRun]) =>
+      Effect.gen(function* () {
+        let runs = 0;
+        const harness = yield* makeHarness({
+          runCommandCheck: () => {
+            runs += 1;
+            return Effect.succeed(
+              runs === 1 ? firstRun : { outcome: "passed" as const, detail: "ok" },
+            );
+          },
+        });
+        yield* launch(
+          harness.runner,
+          'return await agent("x", { verify: { type: "process", argv: ["check"] }, report: true })',
+        );
+        const report = JSON.parse(yield* Deferred.await(harness.completed));
+        expect(report).toMatchObject({ ok: true, attempts: kind === "spawn" ? 1 : 2 });
+        // Only a failed verdict judged the work; a check that did not start judged nothing.
+        expect(harness.spawned()).toBe(kind === "spawn" ? 1 : 2);
+        expect(runs).toBe(2);
+      }),
+  );
+
   it("recovers a request key from attempt keys up to the most attempts an agent makes", () => {
     const key = `wf-${"a".repeat(24)}-0`;
     expect([key, `${key}-r1`, `${key}-r4`].map(agentRequestKey)).toEqual([key, key, key]);

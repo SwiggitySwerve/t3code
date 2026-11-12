@@ -45,6 +45,7 @@ import { freshCommandId, isCommandIdSpent } from "../orchestration-v2/WorkflowCo
 import {
   type CheckOutcome,
   type FileRef,
+  criteriaInstructions,
   fileInstructions,
   type ProducedFile,
   type WorkspaceFile,
@@ -883,7 +884,7 @@ class WorkflowSession {
         : "";
     const itemFor = (feedback: string, attemptTarget: unknown) =>
       decodeItem({
-        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${feedback}`,
+        task: `${request.prompt}${scopes === undefined ? "" : scopeInstructions(scopes)}${fileInstructions(this.withSummaries(inputs), outputs)}${contract}${criteriaInstructions(runCheck)}${feedback}`,
         title: truncate(label, 500),
         ...(attemptTarget === undefined ? {} : { target: attemptTarget }),
         ...(options.isolation === undefined ? {} : { isolation: options.isolation }),

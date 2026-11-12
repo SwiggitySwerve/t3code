@@ -19,7 +19,7 @@ import type * as Schema from "effect/Schema";
 import {
   CHECKER_RESULT_FILE_BYTES,
   type CheckOutcome,
-  checkFeedback,
+  repairFeedback,
   type FileRef,
   inputProblem,
   JUDGMENT_RESULT_SCHEMA,
@@ -39,7 +39,12 @@ import {
   judgedResultFits,
   taskOutputAt,
 } from "./workflowHandoff.ts";
-import { MAX_AGENT_ATTEMPTS, MAX_INFRA_RETRIES, workAttempts } from "./workflowLimits.ts";
+import {
+  MAX_AGENT_ATTEMPTS,
+  MAX_CHECK_RERUNS,
+  MAX_INFRA_RETRIES,
+  workAttempts,
+} from "./workflowLimits.ts";
 import { attemptTarget, retryMoveText, type RetryTarget } from "./workflowRetries.ts";
 import { STOP_GRACE_MS, type WaitingAgent } from "./workflowSweep.ts";
 import type {
@@ -390,28 +395,45 @@ export async function runAttempts(
     }
     if (check !== undefined && (checked === undefined || checked.outcome === "passed")) {
       checkType = check.type;
-      checked = await runCheck(host, {
-        check,
-        judgmentFor: {
-          agentIndex: entry.index,
-          attempt,
-          ...(entry.graphNodeKey === undefined ? {} : { graphNodeKey: entry.graphNodeKey }),
-        },
-        prompt: request.prompt,
-        label,
-        phase,
-        target,
-        taskId: started.value.taskId,
-        childThreadId: started.value.childThreadId,
-        workerSource: entry.targetSource,
-        judgeSource: input.judgeSource,
-        summary,
-        structuredResult,
-        structuredResultError,
-        files,
-        outputs,
-        isolation: options.isolation,
-      });
+      const runAgentCheck = () =>
+        runCheck(host, {
+          check,
+          judgmentFor: {
+            agentIndex: entry.index,
+            attempt,
+            ...(entry.graphNodeKey === undefined ? {} : { graphNodeKey: entry.graphNodeKey }),
+          },
+          prompt: request.prompt,
+          label,
+          phase,
+          target,
+          taskId: started.value.taskId,
+          childThreadId: started.value.childThreadId,
+          workerSource: entry.targetSource,
+          judgeSource: input.judgeSource,
+          summary,
+          structuredResult,
+          structuredResultError,
+          files,
+          outputs,
+          isolation: options.isolation,
+        });
+      checked = await runAgentCheck();
+      // A check whose own machinery failed said nothing about the work: it runs again, and
+      // uses none of the agent's attempts.
+      for (
+        let rerun = 0;
+        checked.outcome === "error" &&
+        checked.infrastructure === true &&
+        rerun < MAX_CHECK_RERUNS &&
+        !host.signal.aborted;
+        rerun += 1
+      ) {
+        host.setProgress(`agent "${label}"'s ${check.type} check could not run; running it again.`);
+        host.scheduleUpdate();
+        checked = await runAgentCheck();
+      }
+      if (host.signal.aborted) return null;
     }
     const returned = (result: unknown) =>
       produced === undefined ? result : { result, outputs: produced };
@@ -439,7 +461,14 @@ export async function runAttempts(
       (workFailures < allowedWork || (await nextAttemptStarted(attempt)))
     ) {
       if (!(await endPrevious())) return null;
-      feedback = checkFeedback(checkType, checked);
+      feedback = repairFeedback({
+        checkType,
+        outcome: checked,
+        rubric: check?.type === "judgment" ? check.rubric : undefined,
+        previousResult:
+          summary ?? (structuredResult === undefined ? null : JSON.stringify(structuredResult)),
+        sharedCheckout: options.isolation !== "worktree",
+      });
       host.setProgress(
         `agent "${label}" failed its ${checkType} check; starting it again${onNextTarget()}.`,
       );
@@ -530,7 +559,11 @@ async function runCheck(
       { signal: host.signal },
     );
     return Exit.isFailure(ran)
-      ? { outcome: "error", detail: failureMessage(ran, "The check could not run.") }
+      ? {
+          outcome: "error",
+          detail: failureMessage(ran, "The check could not run."),
+          infrastructure: true,
+        }
       : ran.value;
   }
   // An agent of its own, so it is independent of the work it judges and shows in the workflow.
@@ -579,7 +612,12 @@ async function runCheck(
   const outcome: CheckOutcome =
     verdict.entry.state === "completed"
       ? judgmentOutcome(verdict.value)
-      : { outcome: "error", detail: verdict.entry.result ?? "The checker did not finish." };
+      : {
+          outcome: "error",
+          detail: verdict.entry.result ?? "The checker did not finish.",
+          // One that started and then failed hit its provider; one that never started will not.
+          ...(verdict.entry.agentId === undefined ? {} : { infrastructure: true as const }),
+        };
   verdict.entry.judgmentOutcome = outcome.outcome;
   host.scheduleUpdate();
   return outcome;
