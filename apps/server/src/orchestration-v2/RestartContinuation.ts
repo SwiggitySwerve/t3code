@@ -86,9 +86,11 @@ function restartContinuationBlocked(
 
 /** App-owned delegations continue in their own threads and report back. */
 function hasOpenAwaitedWork(
-  projection: Pick<ProjectionRuntimeRecoveryState, "runs" | "turnItems">,
+  projection: Pick<ProjectionRuntimeRecoveryState, "thread" | "runs" | "turnItems">,
   providerThread: ProjectionRuntimeRecoveryState["providerThreads"][number],
 ): boolean {
+  // A workflow member's commands and monitors held its attempt open, whatever it marked.
+  const workflowMember = projection.thread.lineage?.workflowId !== undefined;
   const openItem = projection.turnItems.some((item) => {
     if (item.status !== "pending" && item.status !== "running" && item.status !== "waiting")
       return false;
@@ -97,15 +99,15 @@ function hasOpenAwaitedWork(
     const work = cancelledTurnItemWork(item);
     return (
       work !== undefined &&
-      isAwaitedWork(work) &&
+      (workflowMember || isAwaitedWork(work)) &&
       awaitingProviderThreadId(item, projection.runs) === providerThread.id
     );
   });
   return (
     openItem ||
     (providerThread.ownerNodeId === null &&
-      (providerThread.pendingBackgroundTasks ?? []).some((task) =>
-        isAwaitedWork(cancelledRosterTaskWork(task)),
+      (providerThread.pendingBackgroundTasks ?? []).some(
+        (task) => workflowMember || isAwaitedWork(cancelledRosterTaskWork(task)),
       ))
   );
 }
