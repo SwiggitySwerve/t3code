@@ -9,6 +9,7 @@ import {
 import * as DateTime from "effect/DateTime";
 
 import {
+  delegatedRunOutcome,
   cancelledRosterTaskWork,
   cancelledTurnItemWork,
   isAwaitedWork,
@@ -21,6 +22,18 @@ import {
 const claudeThread = ProviderThreadId.make("provider-thread:claude");
 const codexThread = ProviderThreadId.make("provider-thread:codex");
 const lost = [{ kind: "subagent" as const, label: "Background subagent test" }];
+
+it.each([
+  ["completed", [], "cancelled"],
+  ["completed", lost, "interrupted"],
+  ["cancelled", lost, "interrupted"],
+  ["interrupted", [], "interrupted"],
+] as const)("a Stop preserves the %s outcome with lost work %j", (status, work, expected) => {
+  assert.equal(
+    delegatedRunOutcome({ status, restartCancelledBackgroundWork: work }, true),
+    expected,
+  );
+});
 
 function run(
   ordinal: number,

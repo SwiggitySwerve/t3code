@@ -2,6 +2,7 @@ import { CommandId } from "@t3tools/contracts";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -682,6 +683,11 @@ export const layerWithOptions = (
       const executor = yield* OrchestrationEffectExecutorV2;
       const workerId = options.workerId ?? `orchestration-v2:${process.pid}`;
       const maxAttempts = Math.max(1, options.maxAttempts ?? 5);
+      const inFlight = new Set<Deferred.Deferred<void>>();
+      const settle = (settled: Deferred.Deferred<void>) =>
+        Effect.sync(() => inFlight.delete(settled)).pipe(
+          Effect.andThen(Deferred.succeed(settled, undefined)),
+        );
       const wasCancelled = (effectId: string) =>
         outbox.get(effectId).pipe(
           Effect.map(
@@ -773,8 +779,8 @@ export const layerWithOptions = (
           : terminalizeClaim(effect, cause);
 
       // The worker probes for work repeatedly, including when the outbox is empty.
-      const runOnce = Effect.fnUntraced(
-        function* (filter: ClaimFilter = {}) {
+      const executeNext = Effect.fnUntraced(
+        function* (settled: Deferred.Deferred<void>, filter: ClaimFilter = {}) {
           const claimExit = yield* Effect.exit(outbox.claimNext({ workerId, ...filter }));
           yield* increment(orchestrationEffectClaimsTotal, {
             result: Exit.isFailure(claimExit)
@@ -789,6 +795,8 @@ export const layerWithOptions = (
             return false;
           }
           const effect = claimed.value;
+          // Provider acceptance can wait on external work; draining only joins checkpoint finalization.
+          if (effect.request.type !== "checkpoint.capture") yield* settle(settled);
           // Arm cancellation before rereading durable state to close the read-to-registration race.
           const cancellation = outbox
             .awaitCancellation(effect.id)
@@ -874,7 +882,7 @@ export const layerWithOptions = (
           }
           return true;
         },
-        (effect, _filter?: ClaimFilter) =>
+        (effect, _settled, _filter?: ClaimFilter) =>
           effect.pipe(
             Effect.mapError((cause) =>
               isOrchestrationEffectWorkerError(cause)
@@ -883,6 +891,17 @@ export const layerWithOptions = (
             ),
           ),
       );
+
+      const runOnce = (filter?: ClaimFilter) =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => {
+            const settled = Deferred.makeUnsafe<void>();
+            inFlight.add(settled);
+            return settled;
+          }),
+          (settled) => executeNext(settled, filter),
+          settle,
+        );
 
       return OrchestrationEffectWorkerV2.of({
         awaitWork: outbox.awaitAvailable,
@@ -903,8 +922,18 @@ export const layerWithOptions = (
         ),
         drain: Effect.fn("EffectWorker.drain")(function* (maxEffects = Number.MAX_SAFE_INTEGER) {
           let completed = 0;
-          while (completed < maxEffects && (yield* runOnce())) {
-            completed += 1;
+          while (completed < maxEffects) {
+            if (yield* runOnce()) {
+              completed += 1;
+              continue;
+            }
+            // A daemon can already own the last checkpoint capture or be claiming it.
+            const active = [...inFlight];
+            if (active.length === 0) break;
+            yield* Effect.forEach(active, Deferred.await, {
+              concurrency: "unbounded",
+              discard: true,
+            });
           }
           return completed;
         }),

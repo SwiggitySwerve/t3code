@@ -181,7 +181,8 @@ export function delegatedRunOutcome(
   run: Pick<OrchestrationV2Run, "status" | "restartCancelledBackgroundWork">,
   stopRequested: boolean,
 ): OrchestrationV2Run["status"] {
-  return run.status === "completed" && stopRequested ? "cancelled" : runOutcome(run);
+  const outcome = runOutcome(run);
+  return outcome === "completed" && stopRequested ? "cancelled" : outcome;
 }
 
 /** Unstarted runs have no lost work to continue, except prepared continuations carrying a source run. */
