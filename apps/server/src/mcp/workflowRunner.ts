@@ -292,6 +292,15 @@ export interface WorkflowRunnerDeps {
     childThreadId: ThreadId,
     why: "stalled" | "timed_out",
   ) => Effect.Effect<void, OrchestratorMcpFailure>;
+  /**
+   * Stops what an attempt's thread still runs (a late continuation, its commands) and waits for
+   * it to end, so the next attempt never runs beside it. False when it did not end in time.
+   */
+  readonly endAttemptWork: (
+    workflow: WorkflowContext,
+    taskId: NodeId,
+    childThreadId: ThreadId,
+  ) => Effect.Effect<boolean, OrchestratorMcpFailure>;
 }
 
 const decodeItem = Schema.decodeUnknownExit(OrchestratorMcpDelegateTasksItem);

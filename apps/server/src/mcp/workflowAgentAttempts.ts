@@ -41,7 +41,7 @@ import {
 } from "./workflowHandoff.ts";
 import { MAX_AGENT_ATTEMPTS, MAX_INFRA_RETRIES, workAttempts } from "./workflowLimits.ts";
 import { attemptTarget, retryMoveText, type RetryTarget } from "./workflowRetries.ts";
-import type { WaitingAgent } from "./workflowSweep.ts";
+import { STOP_GRACE_MS, type WaitingAgent } from "./workflowSweep.ts";
 import type {
   WorkflowAgentOutcome,
   WorkflowAgentStart,
@@ -55,6 +55,8 @@ import type {
  */
 const DEFAULT_STALL_MS = 20 * 60_000;
 const MIN_STALL_MS = 60_000;
+
+const UNSTOPPED = `Its attempt's work did not stop within ${STOP_GRACE_MS / 1000} s of being stopped, so no further attempt started beside it.`;
 
 export const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
@@ -108,6 +110,7 @@ export interface AgentAttemptHost {
     | "readWorkspaceFile"
     | "writeCheckerResult"
     | "removeCheckerResult"
+    | "endAttemptWork"
   >;
   /** Aborts when the workflow is stopped or the server detaches the runner. */
   readonly signal: AbortSignal;
@@ -286,22 +289,42 @@ export async function runAttempts(
     if (attempt > 0) entry.attempt = attempt;
     entry.state = "running";
     host.scheduleUpdate();
+    // The sweep gives up an attempt whose stop did not end its work; that ends this wait.
+    const abandoned = new AbortController();
     host.waiting.set(started.value.taskId, {
       childThreadId: started.value.childThreadId,
       stallMs: Math.max(MIN_STALL_MS, numberOption(options, "stallTimeoutMs") ?? DEFAULT_STALL_MS),
       ...(attemptTimeoutMs === undefined ? {} : { attemptTimeoutMs }),
+      abandon: () => abandoned.abort(),
     });
     const outcome = await Effect.runPromiseExit(
       host.deps.awaitAgent(host.workflow, started.value.taskId, (current) => {
         if (host.signal.aborted) return;
+        // Settling facts, with the work ended, are no longer under the attempt's deadline.
         if (TERMINAL_TASK_STATUSES.has(current.status)) host.waiting.delete(started.value.taskId);
         recordAttempt(current);
         host.scheduleUpdate();
       }),
-      { signal: host.signal },
+      { signal: AbortSignal.any([host.signal, abandoned.signal]) },
     );
     host.waiting.delete(started.value.taskId);
     if (host.signal.aborted) return null;
+    if (abandoned.signal.aborted) {
+      entry.outcomeCategory =
+        host.stoppedBy(started.value.taskId) === "timed_out" ? "timed_out" : "provider_error";
+      settle("failed", UNSTOPPED);
+      return null;
+    }
+    // Before another attempt runs, ends anything this one's thread started after it settled.
+    const endPrevious = async () => {
+      const ended = await Effect.runPromise(
+        host.deps
+          .endAttemptWork(host.workflow, started.value.taskId, started.value.childThreadId)
+          .pipe(Effect.orElseSucceed(() => false)),
+      );
+      if (!ended) settle("failed", UNSTOPPED);
+      return ended;
+    };
     if (Exit.isFailure(outcome)) {
       settle("failed", failureMessage(outcome, "The agent's result could not be read."));
       return null;
@@ -316,10 +339,12 @@ export async function runAttempts(
     if (outcome.value.outcomeCategory !== null)
       entry.outcomeCategory = outcome.value.outcomeCategory;
     const stopReason = host.stoppedBy(started.value.taskId);
-    if (status !== "completed" && stopReason === "timed_out") {
+    // A turn that ended while its commands ran past the deadline completed, but its work did not.
+    if (stopReason === "timed_out") {
       const passed = `passed its time budget of ${attemptTimeoutMs} ms and was stopped`;
       workFailures += 1;
       if (workFailures < allowedWork || (await nextAttemptStarted(attempt))) {
+        if (!(await endPrevious())) return null;
         feedback = `\n\nYour previous attempt ${passed}. Work more directly and finish within the budget.`;
         host.setProgress(`agent "${label}" ${passed}; starting it again${onNextTarget()}.`);
         continue;
@@ -328,17 +353,19 @@ export async function runAttempts(
       settle("failed", `Its last work attempt ${passed}.`);
       return null;
     }
-    if (status !== "completed") {
+    if (status !== "completed" || stopReason === "stalled") {
       const fault =
         status === "failed" ||
+        stopReason === "stalled" ||
         ((status === "cancelled" || status === "interrupted") &&
-          (outcome.value.cancelledByServerRestart || stopReason === "stalled"));
+          outcome.value.cancelledByServerRestart);
       if (fault) infraFaults += 1;
       if (
         fault &&
         ((infraFaults <= MAX_INFRA_RETRIES && attempt + 1 < MAX_AGENT_ATTEMPTS) ||
           (await nextAttemptStarted(attempt)))
       ) {
+        if (!(await endPrevious())) return null;
         host.setProgress(`agent "${label}" ended ${status}; starting it again.`);
         continue;
       }
@@ -411,6 +438,7 @@ export async function runAttempts(
       checked.outcome === "failed" &&
       (workFailures < allowedWork || (await nextAttemptStarted(attempt)))
     ) {
+      if (!(await endPrevious())) return null;
       feedback = checkFeedback(checkType, checked);
       host.setProgress(
         `agent "${label}" failed its ${checkType} check; starting it again${onNextTarget()}.`,

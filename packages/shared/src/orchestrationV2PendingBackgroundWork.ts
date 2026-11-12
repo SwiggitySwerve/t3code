@@ -87,11 +87,19 @@ export function deriveBlockedOnThreadWait(input: {
   return hasWait;
 }
 
+/**
+ * A workflow member's work is all held: its check reads what its commands write, and it has no
+ * tool to mark one awaited, so a command left running is still the attempt's work.
+ */
 export function backgroundWorkHoldsCompletion(
   tasks: ReadonlyArray<Pick<PendingBackgroundWorkTask, "kind" | "awaited">>,
+  options?: { readonly workflowMember?: boolean },
 ): boolean {
   return tasks.some(
-    (task) => task.awaited === true || backgroundWorkKindHoldsCompletion(task.kind),
+    (task) =>
+      options?.workflowMember === true ||
+      task.awaited === true ||
+      backgroundWorkKindHoldsCompletion(task.kind),
   );
 }
 

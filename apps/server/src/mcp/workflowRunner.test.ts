@@ -108,6 +108,8 @@ interface HarnessOptions {
   readonly failStop?: (attempt: number) => boolean;
   /** Whether an accepted stop leaves the agent running, as a provider that finalizes later does. */
   readonly stopLeavesRunning?: boolean;
+  /** Whether ending an attempt's work before a retry succeeds; true unless it says otherwise. */
+  readonly endAttemptWork?: (taskId: string) => boolean;
   /**
    * How the nth workflow.complete dispatch (1-based, counting replays of a stored rejection)
    * fails: "transient", a storage error before any receipt exists, or "decide", a failure while
@@ -167,6 +169,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const workflowUpdates: Array<OrchestrationV2SubagentWorkflow> = [];
     const workflowCommands: Array<unknown> = [];
     const stopRequests: Array<string> = [];
+    const endedAttempts: Array<string> = [];
     const completions: Array<{ readonly commandId: string; readonly result: string }> = [];
     const receipts = new Map<string, "accepted" | "rejected" | "conflict">();
     for (const id of options.rejectedCommandIds ?? []) receipts.set(id, "rejected");
@@ -432,6 +435,11 @@ const makeHarness = (options: HarnessOptions = {}) =>
           stops.push(`${taskId}:${why}`);
           if (options.stopLeavesRunning !== true) yield* update(taskId, "cancelled");
         }),
+      endAttemptWork: (_workflow, taskId) =>
+        Effect.sync(() => {
+          endedAttempts.push(taskId);
+          return options.endAttemptWork?.(taskId) ?? true;
+        }),
     };
     return {
       runner: makeWorkflowRunner(deps),
@@ -441,6 +449,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
       stops,
       /** Every stop the runner asked for, accepted or not. */
       stopRequests,
+      /** Attempts whose work the runner ended before starting another, in order. */
+      endedAttempts,
       /** Every workflow.complete the runner dispatched, accepted or not. */
       completions,
       /** The command ids of the completions the dispatcher committed. */

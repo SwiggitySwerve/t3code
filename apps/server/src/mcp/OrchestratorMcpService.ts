@@ -674,6 +674,28 @@ function workflowTaskRecords(
   };
 }
 
+/**
+ * Whether an attempt's thread still runs anything: a run (a continuation its commands woke) or a
+ * background task. Its attempt is not over until both end.
+ */
+function attemptWorkLive(
+  taskId: NodeId,
+  child: Pick<OrchestrationV2ThreadProjection, "runs" | "providerThreads">,
+): boolean {
+  return (
+    child.runs.some(
+      (run) =>
+        (run.delegatedTaskId === undefined || run.delegatedTaskId === taskId) &&
+        run.completedAt === null &&
+        !ThreadManagementService.isTerminalRunStatus(run.status) &&
+        !(run.status === "queued" && run.queueHeld === true),
+    ) || child.providerThreads.some((thread) => (thread.pendingBackgroundTasks?.length ?? 0) > 0)
+  );
+}
+
+/** How long ending a replaced attempt's work may take before the runner gives the agent up. */
+const END_ATTEMPT_WORK_MS = 2 * 60_000;
+
 function hasPendingChildRuns(
   childProjection: Pick<OrchestrationV2ThreadProjection, "runs">,
   delegatedRun: OrchestrationV2Run | undefined,
@@ -2731,6 +2753,47 @@ const make = Effect.gen(function* () {
         ).pipe(Effect.mapError(threadManagementFailure));
       },
     ),
+    endAttemptWork: Effect.fn("OrchestratorMcpService.endWorkflowAttemptWork")(
+      function* (_workflow, taskId, childThreadId) {
+        const afterSequence = yield* threadManagement
+          .getThreadEventSequence(childThreadId)
+          .pipe(Effect.mapError(threadManagementFailure));
+        const live = threadManagement
+          .getThreadRecords(childThreadId, ["runs", "providerThreads"])
+          .pipe(
+            Effect.map((child) => attemptWorkLive(taskId, child)),
+            Effect.mapError(threadManagementFailure),
+          );
+        if (!(yield* live)) return true;
+        const reason = "Its workflow started another attempt, so it stopped this one first.";
+        yield* sendWithFreshId(CommandId.make(`command:workflow-retire:${taskId}`), (commandId) =>
+          threadManagement
+            .dispatch({ type: "thread.stop", commandId, threadId: childThreadId, reason })
+            .pipe(
+              Effect.andThen(
+                threadManagement.stopDelegatedTasks({ threadId: childThreadId, commandId, reason }),
+              ),
+            ),
+        ).pipe(Effect.mapError(threadManagementFailure));
+        const ended = yield* Stream.mergeAll(
+          (["run.updated", "provider-thread.updated"] as const).map((eventType) =>
+            threadManagement.streamStoredEventsFrom({
+              threadId: childThreadId,
+              afterSequence,
+              eventType,
+            }),
+          ),
+          { concurrency: "unbounded" },
+        ).pipe(
+          Stream.mapError(threadManagementFailure),
+          Stream.mapEffect(() => live),
+          Stream.filter((stillLive) => !stillLive),
+          Stream.runHead,
+          Effect.timeoutOption(Duration.millis(END_ATTEMPT_WORK_MS)),
+        );
+        return Option.isSome(ended) && Option.isSome(ended.value);
+      },
+    ),
     awaitAgent: Effect.fn("OrchestratorMcpService.awaitWorkflowAgent")(
       function* (workflow, taskId, onUpdate) {
         const scope = workflowScopes.get(workflow.workflowId);
@@ -2745,7 +2808,12 @@ const make = Effect.gen(function* () {
           const task = yield* readTask(scope, taskId);
           const childThreadId = yield* localChildOf(task);
           const child = yield* threadManagement
-            .getThreadRecords(childThreadId, ["runs", "attempts", "providerTurns"])
+            .getThreadRecords(childThreadId, [
+              "runs",
+              "attempts",
+              "providerTurns",
+              "providerThreads",
+            ])
             .pipe(Effect.mapError(threadManagementFailure));
           const { runs, providerTurns } = workflowTaskRecords(taskId, child);
           const lastRun = runs.toSorted((a, b) => b.ordinal - a.ordinal)[0];
@@ -2793,7 +2861,9 @@ const make = Effect.gen(function* () {
                   run.completedAt !== null ||
                   (ThreadManagementService.isTerminalRunStatus(run.status) &&
                     run.startedAt === null),
-              ),
+              ) &&
+              // A continuation can start after the task settled; it is still this attempt's work.
+              !attemptWorkLive(taskId, child),
           };
         });
         const initial = yield* read();
@@ -2814,12 +2884,13 @@ const make = Effect.gen(function* () {
                     stored.event.type === "subagent.updated" && stored.event.payload.id === taskId,
                 ),
               ),
-            ...(["run.updated", "provider-turn.updated"] as const).map((eventType) =>
-              threadManagement.streamStoredEventsFrom({
-                threadId: childThreadId,
-                afterSequence,
-                eventType,
-              }),
+            ...(["run.updated", "provider-turn.updated", "provider-thread.updated"] as const).map(
+              (eventType) =>
+                threadManagement.streamStoredEventsFrom({
+                  threadId: childThreadId,
+                  afterSequence,
+                  eventType,
+                }),
             ),
           ],
           { concurrency: "unbounded" },
