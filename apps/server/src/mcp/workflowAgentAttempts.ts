@@ -63,6 +63,12 @@ const MIN_STALL_MS = 60_000;
 
 const UNSTOPPED = `Its attempt's work did not stop within ${STOP_GRACE_MS / 1000} s of being stopped, so no further attempt started beside it.`;
 
+/**
+ * Agents that failed on provider faults alone, with their last attempt's work confirmed ended.
+ * Only such a judge's failure is check infrastructure, which running the check again may clear.
+ */
+const providerFaulted = new WeakSet<MutableAgent>();
+
 export const TERMINAL_TASK_STATUSES = new Set(["completed", "failed", "cancelled", "interrupted"]);
 
 type AttemptRecord = NonNullable<OrchestrationV2WorkflowAgent["attemptHistory"]>[number];
@@ -382,6 +388,10 @@ export async function runAttempts(
         host.setProgress(`agent "${label}" ended ${status}; starting it again.`);
         continue;
       }
+      if (fault) {
+        if (!(await endPrevious())) return null;
+        providerFaulted.add(entry);
+      }
       settle("failed", summary ?? `The agent ended ${status}.`);
       return null;
     }
@@ -623,8 +633,9 @@ async function runCheck(
       : {
           outcome: "error",
           detail: verdict.entry.result ?? "The checker did not finish.",
-          // One that started and then failed hit its provider; one that never started will not.
-          ...(verdict.entry.agentId === undefined ? {} : { infrastructure: true as const }),
+          // Only provider faults with their work ended; a judge stopped, abandoned or never
+          // started gives no reason to think another run would answer.
+          ...(providerFaulted.has(verdict.entry) ? { infrastructure: true as const } : {}),
         };
   verdict.entry.judgmentOutcome = outcome.outcome;
   host.scheduleUpdate();

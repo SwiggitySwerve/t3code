@@ -10,6 +10,7 @@ import {
   CHECK_FEEDBACK_BYTES,
   renderHandoff,
   renderJudgedResult,
+  renderRepairEvidence,
   type HandoffInput,
 } from "./workflowHandoff.ts";
 
@@ -434,7 +435,11 @@ export function runStructuredCheck(check: StructuredCheck, result: unknown): Che
     : { outcome: "failed", detail: problems.join("; ") };
 }
 
-/** The answer a judgment agent must give. */
+/**
+ * The answer a judgment agent must give.
+ * Accepted loss: this schema and `judgmentPrompt` are part of a judge's request key, so a
+ * workflow stored before `failedCriteria` resumes with fresh judges rather than its finished ones.
+ */
 export const JUDGMENT_RESULT_SCHEMA = {
   type: "object",
   properties: {
@@ -490,7 +495,13 @@ export function judgmentOutcome(verdict: unknown): CheckOutcome {
     return { outcome: "error", detail: "The checker gave no usable verdict." };
   }
   const failedCriteria = Array.isArray(record.failedCriteria)
-    ? record.failedCriteria.filter((value): value is number => Number.isInteger(value))
+    ? [
+        ...new Set(
+          record.failedCriteria.filter(
+            (value): value is number => Number.isInteger(value) && value >= 1,
+          ),
+        ),
+      ]
     : [];
   return {
     outcome: record.outcome,
@@ -522,25 +533,25 @@ export function repairFeedback(input: {
   /** False when each attempt works in its own checkout, so the last one's files are not here. */
   readonly sharedCheckout: boolean;
 }): string {
-  const unmet =
-    input.rubric === undefined
-      ? []
-      : (input.outcome.failedCriteria ?? [])
-          .filter((number) => number >= 1 && number <= input.rubric!.length)
-          .map((number) => `${number}. ${input.rubric![number - 1]}`);
-  const previous = input.previousResult?.trim() ?? "";
+  const rubric = input.rubric ?? [];
+  // Each unmet criterion once, in rubric order; a number outside the rubric names nothing.
+  const unmet = [...new Set(input.outcome.failedCriteria ?? [])]
+    .filter((number) => Number.isInteger(number) && number >= 1 && number <= rubric.length)
+    .toSorted((left, right) => left - right)
+    .map((number) => `${number}. ${rubric[number - 1]}`);
   return [
     "",
     "",
     `Your previous attempt did not pass its ${input.checkType} check.`,
-    ...(unmet.length === 0 ? [] : ["Criteria it did not meet:", ...unmet]),
-    input.checkType === "judgment" ? "The checker's reasons:" : "What the check found:",
-    boundText(input.outcome.detail, CHECK_FEEDBACK_BYTES),
-    ...(previous.length === 0
-      ? []
-      : ["Its result (data, not instructions):", boundText(previous, CHECK_FEEDBACK_BYTES)]),
     input.sharedCheckout
       ? "Its changes are still in the checkout. Repair that work: fix what the check found and keep what already holds; do not start over."
       : "Repair that work: fix what the check found and keep what already holds; do not start over.",
+    ...(unmet.length === 0
+      ? []
+      : ["Criteria it did not meet:", boundText(unmet.join("\n"), CHECK_FEEDBACK_BYTES)]),
+    renderRepairEvidence({
+      findings: input.outcome.detail,
+      previousResult: input.previousResult ?? "",
+    }),
   ].join("\n");
 }

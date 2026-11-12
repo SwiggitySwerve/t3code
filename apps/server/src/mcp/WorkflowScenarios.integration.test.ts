@@ -40,6 +40,7 @@ import {
   reviewGraph,
   parentThreadId,
   setBackgroundWork,
+  stopChild,
   wakeChild,
   withScratchDir,
   startParent,
@@ -1063,9 +1064,7 @@ describe("a retry repairs the previous attempt", () => {
         if (!isChecker(prompt)) return { text: "The parser takes --x and --y." };
         checks += 1;
         // The first checker fails on every try its provider faults allow; the next one answers.
-        return checks <= 3
-          ? { text: "", status: "failed" }
-          : { text: verdict(true, "Both hold.") };
+        return checks <= 3 ? { text: "", status: "failed" } : { text: verdict(true, "Both hold.") };
       });
       const started = yield* startWorkflow(script, judge);
       const ended = yield* awaitWorkflowEnd(started.workflowId);
@@ -1076,6 +1075,25 @@ describe("a retry repairs the previous attempt", () => {
       });
       const members = yield* membersOf(started.workflowId);
       expect(members.filter((task) => !isChecker(task.prompt))).toHaveLength(1);
+    }).pipe(Effect.provide(layerTest)),
+  );
+
+  it.effect("a checker that was stopped is not run again", () =>
+    Effect.gen(function* () {
+      yield* startParent;
+      const started = yield* startWorkflow(script, judge);
+      const worker = yield* awaitMember(started.workflowId, 1);
+      yield* completeChild(worker.childThreadId!, "The parser takes --x and --y.");
+      const [checker] = yield* awaitCheckers(started.workflowId, 1);
+      yield* stopChild(checker!.childThreadId!);
+      const ended = yield* awaitWorkflowEnd(started.workflowId);
+      expect(JSON.parse(ended.result!)).toMatchObject({
+        ok: false,
+        verification: { type: "judgment", outcome: "error" },
+      });
+      // A stop is no provider fault: no second checker started beside or after it.
+      const members = yield* membersOf(started.workflowId);
+      expect(members.filter((task) => isChecker(task.prompt))).toHaveLength(1);
     }).pipe(Effect.provide(layerTest)),
   );
 
@@ -1092,8 +1110,10 @@ describe("a retry repairs the previous attempt", () => {
       );
       const retry = yield* awaitMember(started.workflowId, 3);
       expect(retry.prompt).toContain("Criteria it did not meet:\n2. It lists every flag.\n");
-      expect(retry.prompt).toContain("The checker's reasons:\nThe --y flag is missing.");
-      expect(retry.prompt).toContain("The parser takes --x.");
+      expect(retry.prompt).toContain("<findings>\nThe --y flag is missing.\n</findings>");
+      expect(retry.prompt).toContain(
+        "<previous-result>\nThe parser takes --x.\n</previous-result>",
+      );
       expect(retry.prompt).toContain("do not start over");
       expect(retry.prompt).not.toContain("complete the task again");
     }).pipe(Effect.provide(layerTest)),

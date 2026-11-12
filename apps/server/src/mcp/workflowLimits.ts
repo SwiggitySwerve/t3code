@@ -28,12 +28,13 @@ export function workAttempts(retries: ReadonlyArray<unknown> | undefined): numbe
 
 /**
  * The most agents one `agent()` call can add to a workflow: the worker itself, plus for a
- * judgment check one judge for each work attempt, since only a finished attempt is judged.
- * Process and structured checks run without an agent, and an agent's own retries reuse its row.
+ * judgment check a judge for each work attempt, run again up to `MAX_CHECK_RERUNS` times when it
+ * fails on its provider. Process and structured checks run without an agent, and an agent's own
+ * retries reuse its row.
  */
 export function maxAgentsPerCall(
   checkType: "process" | "structured" | "judgment" | undefined,
   retries?: ReadonlyArray<unknown>,
 ) {
-  return checkType === "judgment" ? 1 + workAttempts(retries) : 1;
+  return checkType === "judgment" ? 1 + workAttempts(retries) * (1 + MAX_CHECK_RERUNS) : 1;
 }
