@@ -313,9 +313,14 @@ export const make = Effect.gen(function* () {
         work: OrchestrationV2RestartCancelledBackgroundWork,
       ) => {
         if (providerThreadId == null) return;
+        // A workflow member's commands held its attempt open, so losing one cuts the attempt short.
+        const lost =
+          projection.thread.lineage?.workflowId === undefined || work.awaited === true
+            ? work
+            : { ...work, awaited: true as const };
         const existing = cancelledBackgroundWork.get(providerThreadId);
-        if (existing === undefined) cancelledBackgroundWork.set(providerThreadId, [work]);
-        else existing.push(work);
+        if (existing === undefined) cancelledBackgroundWork.set(providerThreadId, [lost]);
+        else existing.push(lost);
       };
       const recordCancelledBackgroundItem = (
         item: OrchestrationV2ThreadProjection["turnItems"][number],
