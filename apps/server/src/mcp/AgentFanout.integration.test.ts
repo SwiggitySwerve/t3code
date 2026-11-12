@@ -4963,7 +4963,6 @@ describe("workflow approval", () => {
             if (
               spent ||
               threadId !== parentThreadId ||
-              !fields.includes("contextTransfers") ||
               !matches(("subagents" in (records as object) ? records : { subagents: [] }) as never)
             ) {
               return Effect.succeed(records);
