@@ -189,6 +189,8 @@ export interface WorkflowAgentOutcome {
   readonly cancelledByServerRestart: boolean;
   readonly outcomeCategory: WorkflowAgentOutcomeCategory | null;
   readonly usage: OrchestratorMcpWorkflowUsage;
+  /** The attempt's thread still runs a continuation or a background task, whatever its task says. */
+  readonly workLive?: boolean;
 }
 
 /** Terminal task facts shared by live reads and persisted status after restart.
@@ -386,6 +388,7 @@ class WorkflowSession {
       signal: this.abort.signal,
       waiting: this.waiting,
       stoppedBy: (taskId) => this.stops.get(taskId) ?? this.earlierStops.get(taskId),
+      retireAttempt: (taskId) => this.retireAttempt(taskId),
       spentTokens: () => this.recordedUsage().spent ?? 0,
       markBudgetExhausted: () => {
         this.budgetExhausted = true;
@@ -410,6 +413,18 @@ class WorkflowSession {
 
   markTimedOut(taskId: string): Promise<void> {
     return this.markStopped(taskId, "timed_out");
+  }
+
+  /** Records on the row that a later attempt replaces this one, and waits for the write. */
+  private async retireAttempt(taskId: string): Promise<void> {
+    for (const agent of this.agents) {
+      if (!agent.attemptHistory?.some((record) => record.taskId === taskId)) continue;
+      agent.attemptHistory = agent.attemptHistory.map((record) =>
+        record.taskId === taskId ? { ...record, superseded: true } : record,
+      );
+    }
+    this.scheduleUpdate();
+    while (this.updating !== undefined) await this.updating;
   }
 
   /**

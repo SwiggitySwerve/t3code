@@ -118,6 +118,11 @@ export interface AgentAttemptHost {
   readonly waiting: Map<string, WaitingAgent>;
   /** Why the runner stopped an attempt: this run's sweep, else what an earlier run recorded. */
   stoppedBy(taskId: string): AttemptStopReason | undefined;
+  /**
+   * Marks an attempt replaced on the workflow's row and waits for the write, so a wake its thread
+   * receives from then on starts nothing.
+   */
+  retireAttempt(taskId: string): Promise<void>;
   /** Tokens the workflow's agents have recorded so far. */
   spentTokens(): number;
   markBudgetExhausted(): void;
@@ -301,7 +306,8 @@ export async function runAttempts(
       host.deps.awaitAgent(host.workflow, started.value.taskId, (current) => {
         if (host.signal.aborted) return;
         // Settling facts, with the work ended, are no longer under the attempt's deadline.
-        if (TERMINAL_TASK_STATUSES.has(current.status)) host.waiting.delete(started.value.taskId);
+        if (TERMINAL_TASK_STATUSES.has(current.status) && current.workLive !== true)
+          host.waiting.delete(started.value.taskId);
         recordAttempt(current);
         host.scheduleUpdate();
       }),
@@ -317,6 +323,8 @@ export async function runAttempts(
     }
     // Before another attempt runs, ends anything this one's thread started after it settled.
     const endPrevious = async () => {
+      // Retired before the drain reads its work, so no wake can start work the drain misses.
+      await host.retireAttempt(started.value.taskId);
       const ended = await Effect.runPromise(
         host.deps
           .endAttemptWork(host.workflow, started.value.taskId, started.value.childThreadId)

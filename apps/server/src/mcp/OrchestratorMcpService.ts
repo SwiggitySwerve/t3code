@@ -2764,7 +2764,8 @@ const make = Effect.gen(function* () {
             Effect.map((child) => attemptWorkLive(taskId, child)),
             Effect.mapError(threadManagementFailure),
           );
-        if (!(yield* live)) return true;
+        // Stopped even when idle: Stop takes the thread's dispatch lock, so a wake admitted before
+        // the attempt retired has started its run by then, and this stop ends it.
         const reason = "Its workflow started another attempt, so it stopped this one first.";
         yield* sendWithFreshId(CommandId.make(`command:workflow-retire:${taskId}`), (commandId) =>
           threadManagement
@@ -2775,6 +2776,7 @@ const make = Effect.gen(function* () {
               ),
             ),
         ).pipe(Effect.mapError(threadManagementFailure));
+        if (!(yield* live)) return true;
         const ended = yield* Stream.mergeAll(
           (["run.updated", "provider-thread.updated"] as const).map((eventType) =>
             threadManagement.streamStoredEventsFrom({
@@ -2846,6 +2848,7 @@ const make = Effect.gen(function* () {
             ...(task.structuredResultError === undefined
               ? {}
               : { structuredResultError: task.structuredResultError }),
+            workLive: attemptWorkLive(taskId, child),
           };
           return {
             outcome,
@@ -2863,7 +2866,7 @@ const make = Effect.gen(function* () {
                     run.startedAt === null),
               ) &&
               // A continuation can start after the task settled; it is still this attempt's work.
-              !attemptWorkLive(taskId, child),
+              !outcome.workLive,
           };
         });
         const initial = yield* read();

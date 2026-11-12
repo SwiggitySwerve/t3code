@@ -108,6 +108,8 @@ interface HarnessOptions {
   readonly failStop?: (attempt: number) => boolean;
   /** Whether an accepted stop leaves the agent running, as a provider that finalizes later does. */
   readonly stopLeavesRunning?: boolean;
+  /** Whether the attempt's thread still runs work after its task reads as settled. */
+  readonly workLive?: boolean;
   /** Whether ending an attempt's work before a retry succeeds; true unless it says otherwise. */
   readonly endAttemptWork?: (taskId: string) => boolean;
   /**
@@ -170,6 +172,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const workflowCommands: Array<unknown> = [];
     const stopRequests: Array<string> = [];
     const endedAttempts: Array<string> = [];
+    const rowsAtEnd: Array<OrchestrationV2SubagentWorkflow | undefined> = [];
     const completions: Array<{ readonly commandId: string; readonly result: string }> = [];
     const receipts = new Map<string, "accepted" | "rejected" | "conflict">();
     for (const id of options.rejectedCommandIds ?? []) receipts.set(id, "rejected");
@@ -339,6 +342,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
           const read = (): WorkflowAgentOutcome => ({
             status: statuses.get(taskId) ?? "running",
             summary: options.summary?.(Number(taskId.split("-").at(-1))) ?? "ok",
+            ...(options.workLive === undefined ? {} : { workLive: options.workLive }),
             cancelledByServerRestart: false,
             outcomeCategory: statuses.get(taskId) === "completed" ? "completed" : "cancelled",
             usage: options.usage?.(Number(taskId.split("-").at(-1))) ?? aggregateWorkflowUsage([]),
@@ -438,6 +442,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
       endAttemptWork: (_workflow, taskId) =>
         Effect.sync(() => {
           endedAttempts.push(taskId);
+          rowsAtEnd.push(workflowUpdates.at(-1));
           return options.endAttemptWork?.(taskId) ?? true;
         }),
     };
@@ -451,6 +456,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
       stopRequests,
       /** Attempts whose work the runner ended before starting another, in order. */
       endedAttempts,
+      /** The last row update the runner sent before each of those ends. */
+      rowsAtEnd,
       /** Every workflow.complete the runner dispatched, accepted or not. */
       completions,
       /** The command ids of the completions the dispatcher committed. */
@@ -1590,6 +1597,30 @@ describe("workflow runner", () => {
     );
   });
 
+  it.effect("retires a replaced attempt on the row before ending its work", () =>
+    Effect.gen(function* () {
+      let runs = 0;
+      const harness = yield* makeHarness({
+        runCommandCheck: () => {
+          runs += 1;
+          return Effect.succeed(
+            runs === 1
+              ? { outcome: "failed" as const, detail: "wrong" }
+              : { outcome: "passed" as const, detail: "ok" },
+          );
+        },
+      });
+      yield* launch(
+        harness.runner,
+        'return await agent("x", { verify: { type: "process", argv: ["check"] }, report: true })',
+      );
+      expect(JSON.parse(yield* Deferred.await(harness.completed))).toMatchObject({ attempts: 2 });
+      expect(harness.endedAttempts).toHaveLength(1);
+      // The row already said so when the drain read the thread, so no wake could slip in after it.
+      expect(harness.rowsAtEnd[0]?.agents[0]?.attemptHistory?.[0]?.superseded).toBe(true);
+    }),
+  );
+
   it("recovers a request key from attempt keys up to the most attempts an agent makes", () => {
     const key = `wf-${"a".repeat(24)}-0`;
     expect([key, `${key}-r1`, `${key}-r4`].map(agentRequestKey)).toEqual([key, key, key]);
@@ -2362,6 +2393,28 @@ describe("workflow runner", () => {
         expect(worker?.attemptHistory).toHaveLength(1);
       }),
     );
+    it.effect("keeps the deadline on a settled task whose thread still runs work", () =>
+      Effect.gen(function* () {
+        const finalization = yield* Deferred.make<void>();
+        const observed = yield* Deferred.make<void>();
+        const harness = yield* makeHarness({
+          finish: () => "hang",
+          workLive: true,
+          finalization: Deferred.await(finalization),
+          onWorkflowUpdate: (workflow) =>
+            workflow.agents[0]?.attemptHistory?.[0]?.state === "completed"
+              ? Deferred.succeed(observed, undefined)
+              : Effect.void,
+        });
+        yield* launch(harness.runner, 'return await agent("active", { attemptTimeoutMs: 60000 })');
+        yield* Deferred.await(harness.firstSpawn);
+        yield* harness.updateAgent("node:agent-1", "completed");
+        yield* Deferred.await(observed);
+        yield* TestClock.adjust("2 minutes");
+        expect(harness.stops).toEqual(["node:agent-1:timed_out"]);
+        yield* Deferred.succeed(finalization, undefined);
+      }),
+    );
     it.effect("does not apply execution deadlines while terminal facts are finalizing", () =>
       Effect.gen(function* () {
         const finalization = yield* Deferred.make<void>();
@@ -2478,6 +2531,7 @@ describe("workflow runner", () => {
               effort: "low",
               options: { reasoningEffort: "low" },
               state: "completed",
+              superseded: true,
               usageStatus: "complete",
               totalTokens: 10,
               startedAt: 10000,

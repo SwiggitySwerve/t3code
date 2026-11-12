@@ -2122,7 +2122,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       // The row records a new attempt a moment after it starts; an attempt it has not recorded yet
       // is the current one.
       if (agent === undefined) return false;
-      return agent.agentId !== taskId || (agent.state !== "running" && agent.state !== "queued");
+      return (
+        agent.agentId !== taskId ||
+        (agent.state !== "running" && agent.state !== "queued") ||
+        (agent.attemptHistory ?? []).some(
+          (record) => String(record.taskId) === taskId && record.superseded === true,
+        )
+      );
     },
   );
 
