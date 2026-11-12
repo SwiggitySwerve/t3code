@@ -266,6 +266,7 @@ const makeTestRelay = Effect.fnUntraced(function* (
     delegatedTaskResultPending: unused,
     streamStoredEvents: Stream.empty,
     streamWorkflowStarts: Stream.empty,
+    registerWorkflowReviewValidator: () => Effect.void,
     streamStoredEventsFrom: () => Stream.empty,
     streamDomainEvents: options.domainEvents ?? Stream.empty,
   });

@@ -341,6 +341,24 @@ describe("presentWorkflowReview", () => {
     });
   });
 
+  it("shows failed Dismiss on a held approval with an enabled retry", () => {
+    expect(
+      present({
+        review: reviewOf({ decision: "approved", decisionRevision: 1 }),
+        decision: {
+          _tag: "failed",
+          action: "dismiss",
+          kind: "retry",
+          message: "Could not dismiss. Try again.",
+        },
+      }),
+    ).toMatchObject({
+      status: "approved",
+      note: { tone: "error", text: "Could not dismiss. Try again." },
+      approve: { visible: false },
+      dismiss: { visible: true, enabled: true },
+    });
+  });
   it("shows held approval with Dismiss, then restores approval after planning failed", () => {
     const held = present({ review: reviewOf({ decision: "approved", decisionRevision: 1 }) });
     expect(held).toMatchObject({

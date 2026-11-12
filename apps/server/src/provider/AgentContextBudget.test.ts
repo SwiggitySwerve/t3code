@@ -85,7 +85,7 @@ const toolHandlerServices = Layer.mergeAll(
   Layer.mock(SourceControlRepositoryService)({}),
   Layer.mock(StorageCleanup)({}),
   Layer.mock(ThreadLaunchService)({}),
-  Layer.mock(ThreadManagementService)({}),
+  Layer.mock(ThreadManagementService)({ registerWorkflowReviewValidator: () => Effect.void }),
   Layer.mock(ThreadSearch)({}),
   Layer.mock(VcsStatusBroadcaster)({}),
   Layer.mock(WorkflowApprovalGate)({}),

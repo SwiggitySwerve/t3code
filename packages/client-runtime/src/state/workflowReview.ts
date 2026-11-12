@@ -75,6 +75,7 @@ export interface WorkflowReviewView {
   readonly decisionState: OrchestrationV2WorkflowReviewRecord["decision"];
   readonly decisionRevision: number | undefined;
   readonly notStartedReason: OrchestrationV2WorkflowReviewRecord["notStartedReason"];
+  readonly launchError?: string;
   /** Null when the server could not digest the graph. */
   readonly digest: string | null;
   readonly ready: boolean;
@@ -130,6 +131,7 @@ export function workflowReviewOf(item: OrchestrationV2WorkflowReviewRecord): Wor
     decisionState: item.decision,
     decisionRevision: item.decisionRevision,
     notStartedReason: item.notStartedReason,
+    ...(item.launchError === undefined ? {} : { launchError: item.launchError }),
     digest: item.digest,
     ready: item.ready,
     approvalRequired: item.approvalRequired,
@@ -359,11 +361,18 @@ export function presentWorkflowReview(input: {
     };
   }
   if (review.decisionState === "approved" && decision._tag !== "pending") {
+    const failure = decision._tag === "failed" ? decision.message : review.launchError;
     return {
       status: "approved",
       statusLabel: "Approved",
-      note: { tone: "info", text: "Approved. Starts when planning finishes." },
-      approve: NO_BUTTONS.approve,
+      note:
+        failure === undefined
+          ? { tone: "info", text: "Approved. Starts when planning finishes." }
+          : { tone: "error", text: failure },
+      approve:
+        failure !== undefined && (decision._tag !== "failed" || decision.action === "approve")
+          ? { visible: true, enabled: input.canDecide, label: "Retry start" }
+          : NO_BUTTONS.approve,
       dismiss: { visible: true, enabled: input.canDecide, label: "Dismiss" },
     };
   }

@@ -312,17 +312,19 @@ const make = Effect.gen(function* () {
     });
   });
 
-  const completeReview: WorkflowApprovalGate["Service"]["completeReview"] = (ticket, _input) =>
-    Effect.suspend((): ReturnType<WorkflowApprovalGate["Service"]["completeReview"]> => {
-      const armed = armedOf(pending.get(ticket.threadId));
-      if (armed !== ticket.armed) {
-        return Effect.fail(
-          new WorkflowApprovalRequiredError({ threadId: ticket.threadId, reason: "stale-review" }),
-        );
-      }
-      if (armed === null) return Effect.succeed({ approvalRequired: false });
-      return Effect.succeed({ approvalRequired: true });
-    });
+  const completeReview: WorkflowApprovalGate["Service"]["completeReview"] = Effect.fn(
+    "WorkflowApprovalGate.completeReview",
+  )(function* (ticket, _input) {
+    yield* load(ticket.threadId);
+    const armed = armedOf(pending.get(ticket.threadId));
+    if (armed !== ticket.armed) {
+      return yield* new WorkflowApprovalRequiredError({
+        threadId: ticket.threadId,
+        reason: "stale-review",
+      });
+    }
+    return { approvalRequired: armed !== null };
+  });
 
   const requireNoRequest: WorkflowApprovalGate["Service"]["requireNoRequest"] = Effect.fn(
     "WorkflowApprovalGate.requireNoRequest",

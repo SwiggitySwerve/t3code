@@ -1945,6 +1945,7 @@ const OrchestrationV2WorkflowReviewFields = {
   ),
   decisionRevision: Schema.optional(NonNegativeInt),
   approvalRunId: Schema.optional(RunId),
+  launchError: Schema.optional(Schema.String),
   notStartedReason: Schema.optional(
     Schema.Literals(["stopped", "failed", "cancelled", "interrupted", "rolled_back"]),
   ),
@@ -4037,6 +4038,13 @@ const OrchestrationV2InternalCommand = Schema.Union([
     runId: RunId,
   }),
   Schema.Struct({
+    type: Schema.Literal("workflow.review.launch"),
+    commandId: CommandId,
+    threadId: ThreadId,
+    reviewId: TrimmedNonEmptyString,
+    decisionRevision: NonNegativeInt,
+  }),
+  Schema.Struct({
     type: Schema.Literal("secret_request.record"),
     commandId: CommandId,
     threadId: ThreadId,
@@ -4562,6 +4570,7 @@ export class OrchestrationV2WorkflowApprovalError extends Schema.TaggedError<Orc
       "review-not-found",
       "review-blocked",
       "review-superseded",
+      "revision-required",
       "unavailable",
     ]),
     cause: Schema.optional(Schema.Defect()),
@@ -4579,6 +4588,8 @@ export class OrchestrationV2WorkflowApprovalError extends Schema.TaggedError<Orc
         return "This review has blockers, so it cannot be approved.";
       case "review-superseded":
         return "A newer plan replaced this review. Approve the newer plan.";
+      case "revision-required":
+        return "Refresh this review before approving it.";
       case "unavailable":
         return "Could not apply your workflow decision. Try again.";
     }

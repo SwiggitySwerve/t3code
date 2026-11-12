@@ -4427,7 +4427,7 @@ describe("graphs", () => {
           graph,
           acceptedDigest: `sha256:${"0".repeat(64)}`,
         });
-        expect(errorText(wrong)).toContain("Review not found");
+        expect(errorText(wrong)).toContain("Cached input-comparison metadata is unavailable");
         NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "edited");
         const stale = yield* invoke("graph_start", { graph, acceptedDigest: reviewed.digest });
         expect(stale.isError).toBe(true);
@@ -4551,24 +4551,29 @@ describe("graphs", () => {
     ),
   );
 
-  it.effect("graph_start says the review is gone when a restart dropped it", () =>
-    withScratchDir((dir) =>
-      Effect.gen(function* () {
-        yield* startParent;
-        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
-        const graph = serialGraph(dir);
-        const reviewed = yield* withServerProcess((service) =>
-          service.graphReview(invocation, { graph }),
-        );
-        NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "edited");
-        const refused = yield* withServerProcess((service) =>
-          Effect.flip(service.graphStart(invocation, { graph, acceptedDigest: reviewed.digest! })),
-        );
-        expect(refused.message).toContain("Review not found");
-        expect(refused.message).toContain("Run graph_review again.");
-        expect(refused.message).not.toContain("digest mismatch");
-      }).pipe(Effect.provide(layerTest)),
-    ),
+  it.effect(
+    "graph_start distinguishes missing comparison cache from persisted reviews after restart",
+    () =>
+      withScratchDir((dir) =>
+        Effect.gen(function* () {
+          yield* startParent;
+          NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "source");
+          const graph = serialGraph(dir);
+          const reviewed = yield* withServerProcess((service) =>
+            service.graphReview(invocation, { graph }),
+          );
+          NodeFS.writeFileSync(NodePath.join(dir, "in.txt"), "edited");
+          const refused = yield* withServerProcess((service) =>
+            Effect.flip(
+              service.graphStart(invocation, { graph, acceptedDigest: reviewed.digest! }),
+            ),
+          );
+          expect(refused.message).toContain("Cached input-comparison metadata is unavailable");
+          expect(refused.message).not.toContain("reviews do not survive");
+          expect(refused.message).toContain("Run graph_review again.");
+          expect(refused.message).not.toContain("digest mismatch");
+        }).pipe(Effect.provide(layerTest)),
+      ),
   );
 
   it.effect("fails a resumed workflow whose stored plan is unreadable", () =>
@@ -4996,6 +5001,7 @@ describe("workflow approval", () => {
           threadId: parentThreadId,
           reviewId: record!.reviewId,
           digest: record!.digest!,
+          decisionRevision: record!.decisionRevision ?? 0,
         });
         expect(yield* cannedMessages).toHaveLength(0);
       }).pipe(Effect.provide(layerTest)),

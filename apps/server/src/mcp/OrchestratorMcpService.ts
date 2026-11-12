@@ -1259,6 +1259,8 @@ function timelineItem(input: {
   };
 }
 
+const decodeStoredReviewArgs = Schema.decodeUnknownEffect(Schema.Struct({ graph: Schema.Unknown }));
+
 const make = Effect.gen(function* () {
   const random = yield* SecureRandom.SecureRandom;
   const threadManagement = yield* ThreadManagementService.ThreadManagementService;
@@ -3272,11 +3274,10 @@ const make = Effect.gen(function* () {
    * The start of a reviewed graph, past the approval gate: the graph the caller sends is reviewed
    * again and must still match the digest the caller accepted.
    */
-  const startReviewedGraph = Effect.fn("OrchestratorMcpService.startReviewedGraph")(function* (
-    scope: McpThreadInvocationScope,
+  const compileReviewedGraph = Effect.fn("OrchestratorMcpService.compileReviewedGraph")(function* (
+    parent: CallerProjection,
     input: OrchestratorMcpGraphStartInput,
   ) {
-    const parent = yield* loadCallerRecords(scope.thread.threadId, ["runs"]);
     const { review, compiled } = yield* reviewCallerGraph(
       parent,
       input.graph,
@@ -3294,13 +3295,21 @@ const make = Effect.gen(function* () {
       return yield* failure(
         "invalid_request",
         changed === undefined
-          ? // Reviews live in memory, so a restart forgets them; the digest alone cannot say what changed.
-            "Review not found: no review with that digest is on record (reviews do not survive a server restart), and the graph or its input files no longer match it. Run graph_review again."
+          ? // Only the input-comparison cache is lost; approval records and launch snapshots persist.
+            "The graph or its input files no longer match the reviewed digest. Cached input-comparison metadata is unavailable after a restart or eviction, so changed files cannot be listed. Run graph_review again."
           : changed.length > 0
             ? `Input files changed since review: ${changed.join(", ")}. Review the graph again.`
             : "The graph changed since review (digest mismatch); review it again.",
       );
     }
+    return compiled;
+  });
+  const startReviewedGraph = Effect.fn("OrchestratorMcpService.startReviewedGraph")(function* (
+    scope: McpThreadInvocationScope,
+    input: OrchestratorMcpGraphStartInput,
+  ) {
+    const parent = yield* loadCallerRecords(scope.thread.threadId, ["runs"]);
+    const compiled = yield* compileReviewedGraph(parent, input);
     return yield* startWorkflow(
       scope,
       parent,
@@ -3593,6 +3602,24 @@ const make = Effect.gen(function* () {
     return true;
   });
 
+  // Commands retain the thread lock while using this preflight. Reuse graph_start's complete
+  // validation; per-node runner checks alone would allow unrelated nodes to start first.
+  yield* threadManagement.registerWorkflowReviewValidator((threadId, review) =>
+    Effect.gen(function* () {
+      if (review.launch === undefined || review.digest === null) {
+        return yield* failure("invalid_request", "This review has no stored launch snapshot.");
+      }
+      const stored = yield* Effect.try({
+        try: () => parseStoredWorkflowScript(review.launch!.script),
+        catch: () => failure("invalid_request", "The stored review is unreadable."),
+      });
+      const args = yield* decodeStoredReviewArgs(stored.args).pipe(
+        Effect.mapError(() => failure("invalid_request", "The stored graph is unreadable.")),
+      );
+      const parent = yield* loadThreadRecords(threadId, ["runs"]);
+      yield* compileReviewedGraph(parent, { graph: args.graph, acceptedDigest: review.digest });
+    }),
+  );
   const resumeWorkflows = Effect.gen(function* () {
     let resumed = 0;
     for (const threadId of yield* threadManagement.getAppWorkflowThreadIds) {
@@ -3600,12 +3627,23 @@ const make = Effect.gen(function* () {
         turnItemTypes: ["workflow_review"],
       });
       for (const item of pending.turnItems) {
-        if (
-          item.type !== "workflow_review" ||
-          item.decision !== "approved" ||
-          item.approvalRunId === undefined
-        )
+        if (item.type !== "workflow_review" || item.decision !== "approved") continue;
+        if (item.approvalRunId === undefined) {
+          yield* sendWithFreshId(
+            CommandId.make(
+              `command:workflow-review-launch-recover:${item.reviewId}:${item.decisionRevision ?? 0}`,
+            ),
+            (commandId) =>
+              threadManagement.dispatch({
+                type: "workflow.review.launch",
+                commandId,
+                threadId,
+                reviewId: item.reviewId,
+                decisionRevision: item.decisionRevision ?? 0,
+              }),
+          );
           continue;
+        }
         const run = pending.runs.find((candidate) => candidate.id === item.approvalRunId);
         if (run === undefined || ThreadManagementService.isActiveRun(run)) continue;
         yield* threadManagement.dispatch({

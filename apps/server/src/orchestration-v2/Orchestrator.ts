@@ -99,9 +99,14 @@ import * as Result from "effect/Result";
 import * as Semaphore from "effect/Semaphore";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
+import type * as Scope from "effect/Scope";
 
 import * as ProjectStore from "./ProjectStore.ts";
 import { makeWorkflowReviewCommands } from "./workflowReviewCommands.ts";
+import {
+  OrchestratorMcpFailure,
+  type OrchestrationV2WorkflowReviewRecord,
+} from "@t3tools/contracts";
 import {
   isCheckpointRestoreIsolated,
   SHARED_WORKSPACE_RESTORE_MESSAGE,
@@ -522,6 +527,13 @@ export interface OrchestratorV2Shape {
   ) => Effect.Effect<number, OrchestratorV2Error>;
   readonly streamStoredEvents: Stream.Stream<OrchestrationV2StoredEvent, OrchestratorV2Error>;
   readonly streamWorkflowStarts: Stream.Stream<OrchestrationV2StoredEvent, OrchestratorV2Error>;
+  /** The workflow service installs the same preflight used by graph_start. No service means no launch. */
+  readonly registerWorkflowReviewValidator: (
+    validate: (
+      threadId: ThreadId,
+      review: OrchestrationV2WorkflowReviewRecord,
+    ) => Effect.Effect<void, OrchestratorMcpFailure>,
+  ) => Effect.Effect<void, never, Scope.Scope>;
   /** Events arrive projected for the wire and shared by every subscriber; never mutate them. */
   readonly streamStoredEventsFrom: (input?: {
     readonly threadId?: ThreadId;
@@ -677,6 +689,7 @@ function commandThreadId(command: OrchestrationV2ServerCommand): ThreadId {
     case "workflow.review.record":
     case "workflow.review.decide":
     case "workflow.review.settle":
+    case "workflow.review.launch":
     case "workflow.start":
     case "workflow.update":
     case "workflow.complete":
@@ -9250,6 +9263,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
   ) {
     const projection = yield* loadWorkflowProjection(command);
     const run = projection.runs.find((candidate) => candidate.id === command.runId);
+    if (projection.thread.archivedAt !== null || projection.thread.deletedAt !== null) {
+      return yield* workflowDispatchError(command, `Thread ${command.threadId} is unavailable.`);
+    }
     if (run === undefined || (!reviewedRun && !isActiveRun(run)) || run.rootNodeId === null) {
       return yield* workflowDispatchError(command, `Run ${command.runId} is not active.`);
     }
@@ -9344,6 +9360,24 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     yield* emitEvent({ ...scope, type: "turn-item.updated", occurredAt: now, payload: turnItem });
   });
 
+  let reviewValidator:
+    | ((
+        threadId: ThreadId,
+        review: OrchestrationV2WorkflowReviewRecord,
+      ) => Effect.Effect<void, OrchestratorMcpFailure>)
+    | undefined;
+  const registerWorkflowReviewValidator: OrchestratorV2Shape["registerWorkflowReviewValidator"] = (
+    validate,
+  ) =>
+    Effect.acquireRelease(
+      Effect.sync(() => {
+        reviewValidator = validate;
+      }),
+      () =>
+        Effect.sync(() => {
+          if (reviewValidator === validate) reviewValidator = undefined;
+        }),
+    ).pipe(Effect.asVoid);
   const workflowReviews = makeWorkflowReviewCommands<OrchestratorV2Error>({
     projections: projectionStore,
     settings: serverSettings,
@@ -9360,6 +9394,15 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         payload: item,
       }).pipe(Effect.asVoid),
     start: (command, events) => dispatchWorkflowStart(command, events, true),
+    validate: (review) =>
+      reviewValidator === undefined
+        ? Effect.fail(
+            new OrchestratorMcpFailure({
+              code: "orchestration_error",
+              message: "Workflow validation is unavailable. Try again.",
+            }),
+          )
+        : reviewValidator(review.threadId, review),
   });
 
   const dispatchWorkflowUpdate = Effect.fn("Orchestrator.dispatchWorkflowUpdate")(function* (
@@ -10462,6 +10505,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
         updatedAt: now,
         ...command.review,
       };
+      yield* workflowReviews.validateRecord(turnItem).pipe(mapDispatchError(command));
       yield* workflowReviews.supersede(command, events, turnItem, projection.turnItems);
       yield* emit(
         events,
@@ -14718,8 +14762,13 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
             }),
           )),
         ];
+        for (const threadId of [command.threadId, ...sideChatIds]) {
+          yield* workflowReviews
+            .invalidate({ ...command, threadId }, events)
+            .pipe(mapDispatchError(command));
+        }
         return {
-          events: plans.flatMap((plan) => plan.events),
+          events: [...(yield* Ref.get(events)), ...plans.flatMap((plan) => plan.events)],
           effects: plans.flatMap((plan) => plan.effects),
         };
       }
@@ -15009,6 +15058,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       case "workflow.review.settle":
         yield* workflowReviews.settle(command, events).pipe(mapDispatchError(command));
         break;
+      case "workflow.review.launch":
+        yield* workflowReviews.launch(command, events).pipe(mapDispatchError(command));
+        break;
       case "workflow.start":
         yield* dispatchWorkflowStart(command, events);
         break;
@@ -15026,6 +15078,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
     }
     if (command.type === "thread.stop" || command.type === "run.interrupt") {
       yield* workflowReviews.stop(command, events).pipe(mapDispatchError(command));
+    }
+    if (command.type === "thread.archive") {
+      yield* workflowReviews.invalidate(command, events).pipe(mapDispatchError(command));
     }
     return {
       events: yield* Ref.get(events),
@@ -15134,6 +15189,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           command.type === "thread.stop" ||
           command.type === "workflow.review.decide" ||
           command.type === "workflow.review.settle" ||
+          command.type === "workflow.review.launch" ||
           command.type === "subagent.stop" ||
           // Closing a share again, or after it ended, is not an error.
           command.type === "thread.guest-share.close" ||
@@ -16162,6 +16218,7 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
           }),
       ),
     ),
+    registerWorkflowReviewValidator,
     streamWorkflowStarts: eventSink
       .stream({ afterSequence: terminalEventsAfterSequence, eventType: "subagent.updated" })
       .pipe(

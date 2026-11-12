@@ -11,7 +11,8 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 
 import * as ThreadManagementService from "./ThreadManagementService.ts";
-import { sendWithNextId } from "./WorkflowCommandRetry.ts";
+import { sendWithNextId, sendWithFreshId } from "./WorkflowCommandRetry.ts";
+import { reviewDecisionRefusal } from "./workflowReviewCommands.ts";
 
 export class WorkflowApprovalService extends Context.Service<
   WorkflowApprovalService,
@@ -40,9 +41,28 @@ const make = Effect.gen(function* () {
       const review = records.turnItems.find(
         (item) => item.type === "workflow_review" && item.reviewId === input.reviewId,
       );
-      const decisionRevision =
-        input.decisionRevision ??
-        (review?.type === "workflow_review" ? (review.decisionRevision ?? 0) : 0);
+      // A successful receipt must not hide that a later decision invalidated the card.
+      if (review?.type === "workflow_review") {
+        const reason = reviewDecisionRefusal(review, { ...input, action });
+        if (reason !== undefined)
+          return yield* new OrchestrationV2WorkflowApprovalError({
+            threadId: input.threadId,
+            reviewId: input.reviewId,
+            reason,
+          });
+      }
+      if (
+        review?.type === "workflow_review" &&
+        review.launch !== undefined &&
+        input.decisionRevision === undefined
+      ) {
+        return yield* new OrchestrationV2WorkflowApprovalError({
+          threadId: input.threadId,
+          reviewId: input.reviewId,
+          reason: "revision-required",
+        });
+      }
+      const decisionRevision = input.decisionRevision ?? 0;
       yield* sendWithNextId(
         CommandId.make(
           `server:workflow-${action}:${input.threadId}:${input.reviewId}:${decisionRevision}`,
@@ -59,9 +79,54 @@ const make = Effect.gen(function* () {
             decisionRevision,
           }),
       );
+      if (action !== "approve") return;
+      const latest = yield* threads.getThreadRecords(input.threadId, ["turnItems", "runs"], {
+        turnItemTypes: ["workflow_review"],
+      });
+      const approved = latest.turnItems.find(
+        (item) => item.type === "workflow_review" && item.reviewId === input.reviewId,
+      );
+      if (
+        approved?.type !== "workflow_review" ||
+        approved.decision !== "approved" ||
+        (approved.decisionRevision !== decisionRevision &&
+          approved.decisionRevision !== decisionRevision + 1)
+      )
+        return;
+      if (approved.approvalRunId !== undefined) {
+        const run = latest.runs.find((run) => run.id === approved.approvalRunId);
+        if (run === undefined || ThreadManagementService.isActiveRun(run)) return;
+        yield* sendWithFreshId(
+          CommandId.make(
+            `server:workflow-settle:${input.reviewId}:${approved.decisionRevision}:${run.status}`,
+          ),
+          (commandId) =>
+            threads.dispatch({
+              type: "workflow.review.settle",
+              commandId,
+              threadId: input.threadId,
+              runId: run.id,
+            }),
+        );
+        return;
+      }
+      yield* sendWithNextId(
+        CommandId.make(
+          `server:workflow-launch:${input.threadId}:${input.reviewId}:${approved.decisionRevision}`,
+        ),
+        (commandId) =>
+          threads.dispatch({
+            type: "workflow.review.launch",
+            commandId,
+            threadId: input.threadId,
+            reviewId: input.reviewId,
+            decisionRevision: approved.decisionRevision!,
+          }),
+      );
     }).pipe(
       Effect.asVoid,
       Effect.mapError((cause) => {
+        if (isApprovalError(cause)) return cause;
         const detail = "cause" in cause ? cause.cause : undefined;
         if (isApprovalError(detail)) return detail;
         return new OrchestrationV2WorkflowApprovalError({

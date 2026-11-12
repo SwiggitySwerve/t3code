@@ -306,6 +306,29 @@ describe("turn start", () => {
 });
 
 describe("a review that is still running", () => {
+  it.effect.each(["lifted", "dismissed", "started"] as const)(
+    "is not recorded once the request was lifted or settled while it ran (%s)",
+    (ending) => {
+      const items = [start(1, "Plan this as a workflow")];
+      return Effect.gen(function* () {
+        const gate = yield* WorkflowApprovalGate.WorkflowApprovalGate;
+        yield* gate.observeTurn(turn("message:1", "Plan this as a workflow"));
+        const meanwhile =
+          ending === "lifted"
+            ? gate.observeTurn(turn("message:2", "Thanks, that is enough"))
+            : Effect.sync(() => {
+                items.push({
+                  type: "workflow_review",
+                  approvalRequest: { environmentId, messageId: MessageId.make("message:1") },
+                  decision: ending,
+                });
+              });
+        assert.deepEqual(yield* reviewAcross(gate, "late-review", digestA, meanwhile), {
+          refused: "stale-review",
+        });
+      }).pipe(Effect.provide(makeLayer(() => Effect.succeed({ runs: runs(1), items }))));
+    },
+  );
   it.effect("is recorded when its request is still armed", () =>
     withGate((gate) =>
       Effect.gen(function* () {

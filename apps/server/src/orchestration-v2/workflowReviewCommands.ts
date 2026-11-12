@@ -2,11 +2,14 @@
 import {
   CommandId,
   NodeId,
+  type MessageId,
+  type ThreadId,
   OrchestrationV2WorkflowApprovalError,
   type OrchestrationV2DomainEvent,
   type OrchestrationV2InternalCommand,
   type OrchestrationV2ServerCommand,
   type OrchestrationV2TurnItem,
+  type OrchestratorMcpFailure,
 } from "@t3tools/contracts";
 import { resolveProjectSettings } from "@t3tools/shared/projectSettings";
 import * as DateTime from "effect/DateTime";
@@ -20,8 +23,29 @@ import { workflowRequestFromHistory } from "./workflowRequestHistory.ts";
 type Review = Extract<OrchestrationV2TurnItem, { readonly type: "workflow_review" }>;
 type Decide = Extract<OrchestrationV2InternalCommand, { readonly type: "workflow.review.decide" }>;
 type Settle = Extract<OrchestrationV2InternalCommand, { readonly type: "workflow.review.settle" }>;
+type Launch = Extract<OrchestrationV2InternalCommand, { readonly type: "workflow.review.launch" }>;
 type Events = Ref.Ref<Array<OrchestrationV2DomainEvent>>;
 type Start = Extract<OrchestrationV2InternalCommand, { readonly type: "workflow.start" }>;
+
+/** Review ids can change; consent to one request and digest still identifies one workflow. */
+export const approvalWorkflowId = (threadId: ThreadId, request: MessageId, digest: string) =>
+  NodeId.make(`workflow:approval:${[threadId, request, digest].map(encodeURIComponent).join(":")}`);
+
+/** Also applied before receipt replay, which otherwise bypasses current card state. */
+export function reviewDecisionRefusal(
+  review: Pick<Review, "digest" | "approvalRequest" | "decision">,
+  input: Pick<Decide, "digest" | "environmentId" | "action">,
+): OrchestrationV2WorkflowApprovalError["reason"] | undefined {
+  if (review.digest !== input.digest) return "review-not-found";
+  if (review.approvalRequest === undefined) return "no-pending-request";
+  if (review.approvalRequest.environmentId !== input.environmentId) return "environment-mismatch";
+  if (review.decision === "superseded") return "review-superseded";
+  if (
+    (review.decision === "dismissed" && input.action === "approve") ||
+    (review.decision === "started" && input.action === "dismiss")
+  )
+    return "no-pending-request";
+}
 
 export function makeWorkflowReviewCommands<E>(dependencies: {
   readonly projections: ProjectionStore.ProjectionStoreV2["Service"];
@@ -32,6 +56,7 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
     item: Review,
   ) => Effect.Effect<void, E>;
   readonly start: (command: Start, events: Events) => Effect.Effect<void, E>;
+  readonly validate: (review: Review) => Effect.Effect<void, OrchestratorMcpFailure>;
 }) {
   const { projections, settings, emit, start } = dependencies;
   const load = (threadId: Review["threadId"]) =>
@@ -55,12 +80,13 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
     events: Events,
     review: Review,
     patch: Pick<Review, "decision"> &
-      Partial<Pick<Review, "approvalRunId" | "notStartedReason" | "workflowId">>,
+      Partial<Pick<Review, "approvalRunId" | "notStartedReason" | "workflowId" | "launchError">>,
   ) {
     const {
       approvalRunId: _run,
       notStartedReason: _reason,
       workflowId: _workflow,
+      launchError: _launchError,
       ...rest
     } = review;
     yield* emit(command, events, {
@@ -81,9 +107,19 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
       review.runId === null
     )
       return;
-    const workflowId = NodeId.make(
-      `workflow:approval:${review.threadId}:${review.approvalRequest.messageId}:${review.digest}`,
+    const workflowId = approvalWorkflowId(
+      review.threadId,
+      review.approvalRequest.messageId,
+      review.digest!,
     );
+
+    const problem = yield* dependencies
+      .validate(review)
+      .pipe(Effect.match({ onSuccess: () => undefined, onFailure: (error) => error.message }));
+    if (problem !== undefined) {
+      yield* update(command, events, review, { decision: "approved", launchError: problem });
+      return;
+    }
     yield* start(
       {
         type: "workflow.start",
@@ -102,6 +138,42 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
   });
 
   return {
+    invalidate: Effect.fn("workflowReview.invalidate")(function* (
+      command: OrchestrationV2ServerCommand & { readonly threadId: Review["threadId"] },
+      events: Events,
+    ) {
+      const records = yield* load(command.threadId);
+      for (const item of records.turnItems) {
+        if (
+          item.type === "workflow_review" &&
+          (item.decision === "awaiting" || item.decision === "approved")
+        ) {
+          yield* update(command, events, item, { decision: "superseded" });
+        }
+      }
+    }),
+    validateRecord: Effect.fn("workflowReview.validateRecord")(function* (review: Review) {
+      const records = yield* load(review.threadId);
+      const request = yield* currentRequest(records);
+      const settled = records.turnItems.some(
+        (item) =>
+          item.type === "workflow_review" &&
+          item.approvalRequest?.messageId === request &&
+          (item.decision === "started" || item.decision === "dismissed"),
+      );
+      const armed = settled ? null : request;
+      if (
+        records.thread.archivedAt !== null ||
+        records.thread.deletedAt !== null ||
+        (review.approvalRequest?.messageId ?? null) !== armed
+      ) {
+        return yield* new OrchestrationV2WorkflowApprovalError({
+          threadId: review.threadId,
+          reviewId: review.reviewId,
+          reason: "no-pending-request",
+        });
+      }
+    }),
     stop: Effect.fn("workflowReview.stop")(function* (
       command: OrchestrationV2ServerCommand & { readonly threadId: Review["threadId"] },
       events: Events,
@@ -151,11 +223,14 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
           reviewId: command.reviewId,
           reason,
         });
-      if (review === undefined || review.digest !== command.digest)
-        return yield* refuse("review-not-found");
+      if (review === undefined) return yield* refuse("review-not-found");
+      const refusal = reviewDecisionRefusal(review, command);
+      if (refusal !== undefined) return yield* refuse(refusal);
       if (review.approvalRequest === undefined) return yield* refuse("no-pending-request");
-      if (review.approvalRequest.environmentId !== command.environmentId)
-        return yield* refuse("environment-mismatch");
+      if (records.thread.archivedAt !== null || records.thread.deletedAt !== null)
+        return yield* refuse("no-pending-request");
+      if (review.approvalRequest.messageId !== (yield* currentRequest(records)))
+        return yield* refuse("no-pending-request");
       if (review.decision === "superseded") return yield* refuse("review-superseded");
       if (review.decision === "started") {
         if (command.action === "approve") return;
@@ -175,8 +250,6 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
       ) {
         return yield* refuse("no-pending-request");
       }
-      if (review.approvalRequest.messageId !== (yield* currentRequest(records)))
-        return yield* refuse("no-pending-request");
       // A delayed click from before Stop or a newer decision cannot grant fresh authority.
       if ((review.decisionRevision ?? 0) !== command.decisionRevision) return;
       if (command.action === "dismiss") {
@@ -198,8 +271,33 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
       if (active !== undefined) {
         yield* update(command, events, review, { decision: "approved", approvalRunId: active.id });
       } else {
-        yield* launch(command, events, review);
+        yield* update(command, events, review, { decision: "approved" });
       }
+    }),
+    launch: Effect.fn("workflowReview.launchApproved")(function* (command: Launch, events: Events) {
+      const records = yield* load(command.threadId);
+      const review = records.turnItems.find(
+        (item): item is Review =>
+          item.type === "workflow_review" && item.reviewId === command.reviewId,
+      );
+      if (
+        review === undefined ||
+        review.decision !== "approved" ||
+        review.decisionRevision !== command.decisionRevision
+      )
+        return;
+      if (
+        records.thread.archivedAt !== null ||
+        records.thread.deletedAt !== null ||
+        review.approvalRequest?.messageId !== (yield* currentRequest(records))
+      ) {
+        yield* update(command, events, review, { decision: "superseded" });
+        return;
+      }
+      if (records.runs.some(isActiveRun)) return;
+      // A held approval is released only by successful planning settlement.
+      if (review.approvalRunId !== undefined) return;
+      yield* launch(command, events, review);
     }),
     settle: Effect.fn("workflowReview.settle")(function* (command: Settle, events: Events) {
       const records = yield* load(command.threadId);
@@ -216,7 +314,11 @@ export function makeWorkflowReviewCommands<E>(dependencies: {
           item.approvalRunId !== run.id
         )
           continue;
-        if (item.approvalRequest?.messageId !== request) {
+        if (
+          records.thread.archivedAt !== null ||
+          records.thread.deletedAt !== null ||
+          item.approvalRequest?.messageId !== request
+        ) {
           yield* update(command, events, item, { decision: "superseded" });
         } else if (run.status === "completed" && !stopped) {
           yield* launch(command, events, item);

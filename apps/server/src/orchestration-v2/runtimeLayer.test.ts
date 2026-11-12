@@ -10613,7 +10613,13 @@ it.layer(layerWorkflowTurnTest)("workflow approval in the runtime composition", 
         { approvalRequired: true },
       );
       yield* recordReview(threadId, "review:1");
-      yield* approvals.approve({ environmentId, threadId, reviewId: "review:1", digest });
+      yield* approvals.approve({
+        environmentId,
+        threadId,
+        reviewId: "review:1",
+        digest,
+        decisionRevision: 0,
+      });
       const orchestrator = yield* Orchestrator.OrchestratorV2;
       const projection = yield* orchestrator.getThreadProjection(threadId);
       assert.lengthOf(
