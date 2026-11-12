@@ -246,11 +246,11 @@ describe("ThreadWorkflowReview", () => {
       },
     });
     // Pending: the label names it, and both buttons are held.
-    expect(text()).toContain("Approving\u2026");
-    expect(button("Approving").disabled).toBe(true);
+    expect(text()).toContain("Starting\u2026");
+    expect(button("Starting").disabled).toBe(true);
     expect(button("Dismiss").disabled).toBe(true);
     await act(async () => answer(ok()));
-    expect(text()).toContain("Approved. The agent is starting this workflow.");
+    expect(text()).toContain("Starting workflow\u2026");
     expect(container.querySelector("button")).toBeNull();
   });
 

@@ -232,7 +232,7 @@ export const makeLayerTest = (
 
 export const layerTest = makeLayerTest();
 
-export const client = McpSchema.McpServerClient.of({
+const client = McpSchema.McpServerClient.of({
   clientId: 1,
   protocolVersion: "2025-06-18",
   clientCapabilities: {},
