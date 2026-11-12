@@ -15667,11 +15667,9 @@ const makeOrchestrator = Effect.fn("orchestrationV2.Orchestrator.layer")(functio
       Effect.forkScoped,
     );
 
-  // A child whose run ends while its background tasks or its own subagents still run has no
-  // result yet. When that work settles there is no run update to finalize it, so these events
-  // do it. A background roster counts once it stops holding after it was seen holding. A
-  // workflow member is held by every task, which this event cannot tell, so a roster that empties
-  // counts too; finalizing reads the child and settles nothing that is still held.
+  // A child whose background tasks or subagents outlive its run has no result yet; these events
+  // finalize it once that work settles. A roster counts when it stops holding, or, since a
+  // workflow member is held by every task, when it empties. Finalizing settles nothing still held.
   const providerThreadsWithBackgroundWork = new Set<string>();
   const providerThreadsWithAnyBackgroundWork = new Set<string>();
   const settlesChildWork = (stored: OrchestrationV2StoredEvent) => {
