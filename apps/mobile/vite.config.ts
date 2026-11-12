@@ -31,6 +31,7 @@ const reactTests = [
   "src/features/threads/ThreadMarkdownImage.test.tsx",
   "src/components/ui/FilePreviewSession.test.tsx",
   "src/features/threads/UsageLimitRecoveryCard.test.tsx",
+  "src/features/threads/PendingUserInputCard.test.tsx",
   "src/features/threads/NewTaskDraftRouteScreen.test.tsx",
   "src/features/threads/ThreadAgentsSheet.test.tsx",
   "src/features/threads/thread-subagent-group.test.tsx",

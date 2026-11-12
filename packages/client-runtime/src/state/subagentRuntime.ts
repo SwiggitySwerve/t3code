@@ -53,7 +53,6 @@ export {
   deriveWorkflowPhaseGroups,
   EMPTY_WORKFLOW_PHASE_GROUP_MEMORY,
   deriveWorkflowBarSegments,
-  WORKFLOW_BAR_MAX_SEGMENTS,
   type WorkflowBarSegment,
 } from "./workflowProgress.ts";
 

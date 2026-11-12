@@ -149,7 +149,7 @@ export function selectWorkflowTarget(
  * with the stored default preset applying only without a workerTarget. It resolves only from a
  * legacy snapshot; without one the agent fails. Undefined when no preset applies.
  */
-export function legacyPresetSelection(
+function legacyPresetSelection(
   preset: unknown,
   workerTarget: unknown,
   legacy: LegacyPresetSnapshots | undefined,

@@ -209,8 +209,8 @@ it.effect.each([false, true])("agent context matches its budget when workflows=%
     expect(measured).toEqual(
       workflows
         ? {
-            claudeSystemAppendBytes: 5972,
-            codexAdditionalContextBytes: 7618,
+            claudeSystemAppendBytes: 6023,
+            codexAdditionalContextBytes: 7669,
             mcpToolListJsonBytes: budget.workflowMcpToolListJsonBytes,
           }
         : {

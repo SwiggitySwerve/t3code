@@ -447,7 +447,7 @@ function describeGroup(kind: CollapseKind | null, run: ReadonlyArray<WorkflowPha
 }
 
 /** The most segments the workflow bar draws before it merges phases. */
-export const WORKFLOW_BAR_MAX_SEGMENTS = 8;
+const WORKFLOW_BAR_MAX_SEGMENTS = 8;
 
 export interface WorkflowBarSegment {
   /** The first phase's id, so a segment keeps its DOM while later phases join its run. */
