@@ -263,10 +263,10 @@ export function delegatedTaskProgress(projection: {
   >;
   /** A workflow member's thread holds its result on every command it left running. */
   readonly thread?: {
-    readonly lineage: Pick<OrchestrationV2ThreadProjection["thread"]["lineage"], "workflowId">;
+    readonly lineage?: Pick<OrchestrationV2ThreadProjection["thread"]["lineage"], "workflowId">;
   };
 }) {
-  const workflowMember = projection.thread?.lineage.workflowId !== undefined;
+  const workflowMember = projection.thread?.lineage?.workflowId !== undefined;
   const terminal = (status: string) =>
     ["completed", "failed", "cancelled", "interrupted", "rolled_back"].includes(status);
   const monitorRuns = new Set(
